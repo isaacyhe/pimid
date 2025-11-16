@@ -25,16 +25,21 @@ dram:
   banks_per_group: 4     # Total banks = bank_groups × banks_per_group = 16
   subarrays_per_bank: 16
 
-  # Interface widths and timing come from Ramulator's DRAMArchitectureV2
-  # For DDR4-2400:
-  #   - rank_databus: 64-bit (JEDEC verified)
-  #   - bank_serialization: 8-bit (estimated from bandwidth limits)
-  #   - GSA: 256-bit (from DAS-MICRO15 paper)
-  # For HBM2:
-  #   - rank_databus: 128-bit (JEDEC verified)
-  #   - bank_serialization: 64-bit (wider due to TSV)
-  #   - GSA: 512-bit
-  # To customize, modify pimid/memory/dram_architecture_v2.h
+  # Interface widths (bits) - OPTIONAL overrides for Ramulator defaults
+  # By default (commented out or -1), uses Ramulator's verified values:
+  #   DDR4-2400: rank=64, bank_io=8, gsa=256 (JEDEC + papers)
+  #   HBM2:      rank=128, bank_io=64, gsa=512 (JEDEC + TSV)
+  #
+  # Uncomment to override for custom DRAM designs or device types:
+  # rank_interface_width: 64.0    # External rank interface (64 for DDR4, 128 for HBM2)
+  # bank_io_width: 16.0           # Internal bank I/O (8 for x8, 16 for x16 devices)
+  # gsa_width: 256.0              # Global Sense Amplifier width (256 for DDR4)
+  #
+  # Example: Simulate x16 DDR4 device (2× bank bandwidth):
+  # bank_io_width: 16.0
+  #
+  # Example: Simulate wider HBM bank paths:
+  # bank_io_width: 128.0
 
   # Latency overheads (nanoseconds) - SYSTEM-LEVEL parameters
   # These represent system-level overhead (cache, coherence, distance), not DRAM timing

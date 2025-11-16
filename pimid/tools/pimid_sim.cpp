@@ -54,6 +54,12 @@ struct DRAMConfig {
     int banks_per_group;
     int subarrays_per_bank;
 
+    // Interface widths (bits) - optional overrides for Ramulator defaults
+    // If -1, use Ramulator's verified values
+    double rank_interface_width;    // Default: -1 (use Ramulator: 64 for DDR4, 128 for HBM2)
+    double bank_io_width;           // Default: -1 (use Ramulator: 8 for DDR4, 64 for HBM2)
+    double gsa_width;               // Default: -1 (use Ramulator: 256 for DDR4, 512 for HBM2)
+
     // Latency overheads (nanoseconds) - added on top of base DRAM latency
     // These are SYSTEM-LEVEL overheads (cache, coherence, distance), not DRAM-specific
     // DRAM-specific parameters come from Ramulator's DRAMArchitectureV2
@@ -523,6 +529,23 @@ private:
         dram_arch_->organization.banks_per_bank_group = config_.dram.banks_per_group;
         dram_arch_->organization.bank_groups_per_chip = config_.dram.bank_groups;
         dram_arch_->organization.ranks_per_channel = config_.dram.ranks_per_channel;
+
+        // Override interface widths if specified in config (not -1)
+        if (config_.dram.rank_interface_width >= 0) {
+            dram_arch_->datapath.rank_databus_bits.value_bits = config_.dram.rank_interface_width;
+            dram_arch_->datapath.rank_databus_bits.status = VerificationStatus::ESTIMATED;
+            dram_arch_->datapath.rank_databus_bits.source = "User override from config file";
+        }
+        if (config_.dram.bank_io_width >= 0) {
+            dram_arch_->datapath.bank_serialization_bits.value_bits = config_.dram.bank_io_width;
+            dram_arch_->datapath.bank_serialization_bits.status = VerificationStatus::ESTIMATED;
+            dram_arch_->datapath.bank_serialization_bits.source = "User override from config file";
+        }
+        if (config_.dram.gsa_width >= 0) {
+            dram_arch_->datapath.gsa_datapath_bits.value_bits = config_.dram.gsa_width;
+            dram_arch_->datapath.gsa_datapath_bits.status = VerificationStatus::ESTIMATED;
+            dram_arch_->datapath.gsa_datapath_bits.source = "User override from config file";
+        }
     }
 
     double getBandwidthForGranularity(PIMGranularity granularity) const {
@@ -700,6 +723,12 @@ int main(int argc, char* argv[]) {
     config.dram.bank_groups = parser.getInt("dram.bank_groups", 4);
     config.dram.banks_per_group = parser.getInt("dram.banks_per_group", 4);
     config.dram.subarrays_per_bank = parser.getInt("dram.subarrays_per_bank", 16);
+
+    // Interface widths (bits) - optional overrides for Ramulator defaults
+    // -1 means use Ramulator's verified values for the selected DRAM type
+    config.dram.rank_interface_width = parser.getDouble("dram.rank_interface_width", -1.0);
+    config.dram.bank_io_width = parser.getDouble("dram.bank_io_width", -1.0);
+    config.dram.gsa_width = parser.getDouble("dram.gsa_width", -1.0);
 
     // Latency overheads (nanoseconds) - SYSTEM-LEVEL, not DRAM-specific
     // DRAM-specific parameters (interface widths, timing) come from Ramulator
