@@ -53,6 +53,20 @@ struct DRAMConfig {
     int bank_groups;
     int banks_per_group;
     int subarrays_per_bank;
+
+    // Interface widths (bits)
+    double rank_interface_width;  // Default: 64-bit
+    double bank_io_width;         // Default: 8-bit (x8 device), 16-bit (x16 device)
+
+    // Latency overheads (nanoseconds) - added on top of base DRAM latency
+    struct LatencyOverheads {
+        double host_cpu;      // Default: 150ns (cache + coherence + distance)
+        double mc_pim;        // Default: 40ns  (MC logic delay)
+        double rank_pim;      // Default: 15ns  (minimal MC overhead)
+        double chip_pim;      // Default: 7ns   (close to banks)
+        double bg_pim;        // Default: 3ns   (very close to data)
+        double bank_pim;      // Default: 0ns   (at the data)
+    } latency_overheads;
 };
 
 struct PIMConfig {
@@ -214,7 +228,8 @@ const char* granularityToString(PIMGranularity granularity) {
  */
 double getAccessLatencyOverhead(
     PIMGranularity granularity,
-    std::shared_ptr<DRAMArchitectureV2> dram_arch) {
+    std::shared_ptr<DRAMArchitectureV2> dram_arch,
+    const DRAMConfig::LatencyOverheads& overheads) {
 
     // Base DRAM access latency (tRCD + tCAS)
     double base_dram_latency_ns = dram_arch->timing.tRCD_ns + dram_arch->timing.tCAS_ns;
@@ -222,28 +237,28 @@ double getAccessLatencyOverhead(
     switch (granularity) {
         case PIMGranularity::CPU:
             // Host CPU: Cache hierarchy + coherence + OS overhead + distance from MC
-            return base_dram_latency_ns + 150.0;  // ~180ns total
+            return base_dram_latency_ns + overheads.host_cpu;
 
         case PIMGranularity::MEMORY_CONTROLLER:
             // MC-PIM: At memory controller, no cache/coherence overhead, but MC logic delay
-            return base_dram_latency_ns + 40.0;   // ~70ns total
+            return base_dram_latency_ns + overheads.mc_pim;
 
         case PIMGranularity::RANK:
             // Rank-PIM: Even closer to DRAM, minimal MC overhead
-            return base_dram_latency_ns + 15.0;   // ~42ns total
+            return base_dram_latency_ns + overheads.rank_pim;
 
         case PIMGranularity::CHIP:
             // Chip-PIM: Close to banks
-            return base_dram_latency_ns + 7.0;    // ~34ns total
+            return base_dram_latency_ns + overheads.chip_pim;
 
         case PIMGranularity::BANK_GROUP:
             // BG-PIM: Very close to data
-            return base_dram_latency_ns + 3.0;    // ~30ns total
+            return base_dram_latency_ns + overheads.bg_pim;
 
         case PIMGranularity::BANK:
         case PIMGranularity::SUBARRAY:
             // Bank/Subarray-PIM: Directly at the data, minimal overhead
-            return base_dram_latency_ns;          // ~27ns total
+            return base_dram_latency_ns + overheads.bank_pim;
 
         default:
             return base_dram_latency_ns;
@@ -381,7 +396,7 @@ public:
         double local_bw_time_us = (result.local_data_bytes / local_bw_GBs) / 1e3;  // GB/(GB/s) = s, /1e3 = us
 
         // Calculate access latency overhead
-        double access_latency_ns = getAccessLatencyOverhead(granularity, dram_arch_);
+        double access_latency_ns = getAccessLatencyOverhead(granularity, dram_arch_, config_.dram.latency_overheads);
         uint64_t num_local_accesses = (result.local_data_bytes + workload.cache_line_size - 1) / workload.cache_line_size;
         double local_latency_time_us = (num_local_accesses * access_latency_ns) / 1e3;
 
@@ -525,20 +540,13 @@ private:
 
         // Configuration
         int num_channels = config_.dram.channels;
-
-        // Bank I/O width depends on device type (x4, x8, x16)
-        // DDR4 x8 device: 8-bit per bank
-        // DDR4 x16 device: 16-bit per bank
-        // This is the internal per-bank I/O width
-        double bank_io_width = 8.0;  // Default: x8 device (8-bit per bank)
-
-        // Rank interface width: typically 64-bit (8 chips × 8-bit each for x8 devices)
-        double rank_interface_width = 64.0;
+        double bank_io_width = config_.dram.bank_io_width;
+        double rank_interface_width = config_.dram.rank_interface_width;
 
         // Bandwidth Hierarchy (for LOCAL data):
-        // - Host/MC: External interface, 64-bit per channel × num_channels
-        // - Rank: External rank interface, 64-bit
-        // - Chip/BG/Bank: Internal bank I/O, same width (8-bit or 16-bit per bank)
+        // - Host/MC: External interface, rank_interface_width per channel × num_channels
+        // - Rank: External rank interface, rank_interface_width
+        // - Chip/BG/Bank: Internal bank I/O, same width (bank_io_width per bank)
         //
         // Key: Chip/BG/Bank all use the SAME internal bank I/O interface!
 
@@ -546,18 +554,18 @@ private:
             case PIMGranularity::CPU:
                 // Host CPU: Can access all channels in parallel
                 // Ranks share the same channel bus (time-multiplexed), only channels add bandwidth
-                // Interface BW = 64-bit per channel × num channels
+                // Interface BW = rank_interface_width per channel × num channels
                 return (rank_interface_width / 8.0) * num_channels * freq_GHz;
 
             case PIMGranularity::MEMORY_CONTROLLER:
                 // MC-PIM: At memory controller, can access ALL channels in parallel!
                 // This is the HIGHEST aggregate interface bandwidth
                 // Ranks are time-multiplexed on each channel, only channels add parallel bandwidth
-                // Interface BW = 64-bit per channel × num channels
+                // Interface BW = rank_interface_width per channel × num channels
                 return (rank_interface_width / 8.0) * num_channels * freq_GHz;
 
             case PIMGranularity::RANK:
-                // Rank-PIM: Uses external rank interface (64-bit)
+                // Rank-PIM: Uses external rank interface
                 // For accessing data across banks within the rank
                 return (rank_interface_width / 8.0) * freq_GHz;
 
@@ -565,9 +573,9 @@ private:
             case PIMGranularity::BANK_GROUP:
             case PIMGranularity::BANK:
                 // Chip/BG/Bank-PIM: All use internal bank I/O interface
-                // Same bandwidth = bank I/O width (8-bit for x8, 16-bit for x16)
+                // Same bandwidth = bank I/O width (configurable: 8-bit for x8, 16-bit for x16)
                 // These are INSIDE the chip, accessing local data through bank I/O
-                // CRITICAL BOTTLENECK: 8-bit per bank serialization!
+                // CRITICAL BOTTLENECK: bank I/O serialization!
                 return (bank_io_width / 8.0) * freq_GHz;
 
             case PIMGranularity::SUBARRAY:
@@ -701,6 +709,18 @@ int main(int argc, char* argv[]) {
     config.dram.bank_groups = parser.getInt("dram.bank_groups", 4);
     config.dram.banks_per_group = parser.getInt("dram.banks_per_group", 4);
     config.dram.subarrays_per_bank = parser.getInt("dram.subarrays_per_bank", 16);
+
+    // Interface widths (bits)
+    config.dram.rank_interface_width = parser.getDouble("dram.rank_interface_width", 64.0);
+    config.dram.bank_io_width = parser.getDouble("dram.bank_io_width", 8.0);
+
+    // Latency overheads (nanoseconds)
+    config.dram.latency_overheads.host_cpu = parser.getDouble("dram.latency_overhead_host_cpu", 150.0);
+    config.dram.latency_overheads.mc_pim = parser.getDouble("dram.latency_overhead_mc_pim", 40.0);
+    config.dram.latency_overheads.rank_pim = parser.getDouble("dram.latency_overhead_rank_pim", 15.0);
+    config.dram.latency_overheads.chip_pim = parser.getDouble("dram.latency_overhead_chip_pim", 7.0);
+    config.dram.latency_overheads.bg_pim = parser.getDouble("dram.latency_overhead_bg_pim", 3.0);
+    config.dram.latency_overheads.bank_pim = parser.getDouble("dram.latency_overhead_bank_pim", 0.0);
 
     // PIM config
     config.pim.granularity = parser.getString("pim.granularity", "BANK");

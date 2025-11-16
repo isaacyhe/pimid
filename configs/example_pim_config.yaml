@@ -25,6 +25,19 @@ dram:
   banks_per_group: 4     # Total banks = bank_groups × banks_per_group = 16
   subarrays_per_bank: 16
 
+  # Interface widths (bits)
+  rank_interface_width: 64.0    # External rank interface (default: 64-bit)
+  bank_io_width: 8.0            # Internal bank I/O (8-bit for x8, 16-bit for x16 devices)
+
+  # Latency overheads (nanoseconds) - added on top of base DRAM latency (tRCD + tCAS)
+  # These represent the overhead from proximity to data and system complexity
+  latency_overhead_host_cpu: 150.0   # Host: cache + coherence + distance (~180ns total)
+  latency_overhead_mc_pim: 40.0      # MC-PIM: MC logic delay (~70ns total)
+  latency_overhead_rank_pim: 15.0    # Rank-PIM: minimal MC overhead (~42ns total)
+  latency_overhead_chip_pim: 7.0     # Chip-PIM: close to banks (~34ns total)
+  latency_overhead_bg_pim: 3.0       # BG-PIM: very close to data (~30ns total)
+  latency_overhead_bank_pim: 0.0     # Bank-PIM: at the data (~27ns total)
+
   # Optional: Override default timing (use defaults if not specified)
   # timing:
   #   tRCD_ns: 13.32
