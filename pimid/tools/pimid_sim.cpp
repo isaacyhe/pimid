@@ -47,7 +47,7 @@ struct SimulationConfig {
 };
 
 struct DRAMConfig {
-    std::string type;  // DDR4-2400, DDR4-3200, HBM2, HBM3
+    std::string type;  // DDR4-2400, DDR4-3200, HBM2, HBM3, or "CUSTOM"
     int channels;
     int ranks_per_channel;
     int bank_groups;
@@ -60,9 +60,18 @@ struct DRAMConfig {
     double bank_io_width;           // Default: -1 (use Ramulator: 8 for DDR4, 64 for HBM2)
     double gsa_width;               // Default: -1 (use Ramulator: 256 for DDR4, 512 for HBM2)
 
+    // Timing parameters - optional overrides for Ramulator defaults
+    // If -1, use Ramulator's verified values for the DRAM type
+    struct TimingOverrides {
+        double clock_freq_mhz;   // Default: -1 (use Ramulator: 1200 for DDR4-2400, 1000 for HBM2)
+        double tRCD_ns;          // Default: -1 (use Ramulator: 13.32 for DDR4-2400)
+        double tCAS_ns;          // Default: -1 (use Ramulator: 13.32 for DDR4-2400)
+        double tRP_ns;           // Default: -1 (use Ramulator: 13.32 for DDR4-2400)
+        double tRAS_ns;          // Default: -1 (use Ramulator)
+    } timing_overrides;
+
     // Latency overheads (nanoseconds) - added on top of base DRAM latency
     // These are SYSTEM-LEVEL overheads (cache, coherence, distance), not DRAM-specific
-    // DRAM-specific parameters come from Ramulator's DRAMArchitectureV2
     struct LatencyOverheads {
         double host_cpu;      // Default: 150ns (cache + coherence + distance)
         double mc_pim;        // Default: 40ns  (MC logic delay)
@@ -513,7 +522,11 @@ private:
     void setupDRAMArchitecture() {
         // Use Ramulator's factory functions to get fully initialized DRAM models
         // These include VERIFIED timing, datapath widths, and bandwidth limits
-        if (config_.dram.type.find("DDR4-2400") != std::string::npos) {
+        // For CUSTOM type, start with DDR4-2400 defaults and override everything
+        if (config_.dram.type == "CUSTOM" || config_.dram.type == "custom") {
+            std::cout << "Using CUSTOM DRAM configuration (all parameters from config file)\n";
+            dram_arch_ = createDDR4_2400_Verified();
+        } else if (config_.dram.type.find("DDR4-2400") != std::string::npos) {
             dram_arch_ = createDDR4_2400_Verified();
         } else if (config_.dram.type.find("HBM2") != std::string::npos) {
             dram_arch_ = createHBM2_Verified();
@@ -545,6 +558,24 @@ private:
             dram_arch_->datapath.gsa_datapath_bits.value_bits = config_.dram.gsa_width;
             dram_arch_->datapath.gsa_datapath_bits.status = VerificationStatus::ESTIMATED;
             dram_arch_->datapath.gsa_datapath_bits.source = "User override from config file";
+        }
+
+        // Override timing parameters if specified in config (not -1)
+        if (config_.dram.timing_overrides.clock_freq_mhz >= 0) {
+            dram_arch_->timing.clock_freq_mhz = config_.dram.timing_overrides.clock_freq_mhz;
+            dram_arch_->timing.data_rate_mtps = config_.dram.timing_overrides.clock_freq_mhz * 2;  // DDR
+        }
+        if (config_.dram.timing_overrides.tRCD_ns >= 0) {
+            dram_arch_->timing.tRCD_ns = config_.dram.timing_overrides.tRCD_ns;
+        }
+        if (config_.dram.timing_overrides.tCAS_ns >= 0) {
+            dram_arch_->timing.tCAS_ns = config_.dram.timing_overrides.tCAS_ns;
+        }
+        if (config_.dram.timing_overrides.tRP_ns >= 0) {
+            dram_arch_->timing.tRP_ns = config_.dram.timing_overrides.tRP_ns;
+        }
+        if (config_.dram.timing_overrides.tRAS_ns >= 0) {
+            dram_arch_->timing.tRAS_ns = config_.dram.timing_overrides.tRAS_ns;
         }
     }
 
@@ -729,6 +760,14 @@ int main(int argc, char* argv[]) {
     config.dram.rank_interface_width = parser.getDouble("dram.rank_interface_width", -1.0);
     config.dram.bank_io_width = parser.getDouble("dram.bank_io_width", -1.0);
     config.dram.gsa_width = parser.getDouble("dram.gsa_width", -1.0);
+
+    // Timing parameters - optional overrides for Ramulator defaults
+    // -1 means use Ramulator's verified values for the selected DRAM type
+    config.dram.timing_overrides.clock_freq_mhz = parser.getDouble("dram.clock_freq_mhz", -1.0);
+    config.dram.timing_overrides.tRCD_ns = parser.getDouble("dram.tRCD_ns", -1.0);
+    config.dram.timing_overrides.tCAS_ns = parser.getDouble("dram.tCAS_ns", -1.0);
+    config.dram.timing_overrides.tRP_ns = parser.getDouble("dram.tRP_ns", -1.0);
+    config.dram.timing_overrides.tRAS_ns = parser.getDouble("dram.tRAS_ns", -1.0);
 
     // Latency overheads (nanoseconds) - SYSTEM-LEVEL, not DRAM-specific
     // DRAM-specific parameters (interface widths, timing) come from Ramulator
