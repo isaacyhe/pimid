@@ -1,4 +1,5 @@
 #include "sram_model.h"
+#include "cacti_wrapper.h"
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -11,7 +12,7 @@ namespace pimid {
 
 SRAMModel::SRAMModel(const std::string& config_path)
     : MemoryModel(MemoryTechnology::SRAM, config_path)
-    , cacti_instance_(nullptr)
+    , cacti_wrapper_(nullptr)
     , total_reads_(0)
     , total_writes_(0)
     , total_accesses_(0)
@@ -36,26 +37,57 @@ SRAMModel::SRAMModel(const std::string& config_path)
 }
 
 void SRAMModel::initialize() {
-    std::cout << "[SRAMModel] Initializing SRAM model..." << std::endl;
+    std::cout << "[SRAMModel] Initializing SRAM model with CACTI..." << std::endl;
     loadConfig(config_path_);
 
     // Calculate derived parameters
     capacity_ = sram_config_.capacity;
     bandwidth_ = capacity_ * 2; // Simplified: 2x capacity per second
 
-    // TODO: Initialize CACTI instance when integrated
-    // cacti_instance_ = new CACTIWrapper(sram_config_);
-    // After CACTI runs, it will populate:
-    // - read_energy_
-    // - write_energy_
-    // - leakage_power_
-    // - area_mm2_
+#ifdef HAVE_CACTI
+    try {
+        // Create CACTI configuration
+        CACTIWrapper::SRAMConfig cacti_config;
+        cacti_config.capacity_bytes = sram_config_.capacity;
+        cacti_config.line_size = sram_config_.line_size;
+        cacti_config.associativity = sram_config_.associativity;
+        cacti_config.banks = sram_config_.banks;
+        cacti_config.read_write_ports = sram_config_.read_write_ports;
+        cacti_config.read_ports = sram_config_.read_ports;
+        cacti_config.write_ports = sram_config_.write_ports;
+        cacti_config.tech_node_nm = sram_config_.tech_node_nm;
+        cacti_config.is_cache = true;
 
-    // Default energy values (typical for 22nm SRAM)
-    read_energy_ = 0.5;    // nJ per access
-    write_energy_ = 0.8;   // nJ per access
-    leakage_power_ = 0.05; // W
-    area_mm2_ = 2.5;       // mm^2
+        // Create and initialize CACTI wrapper
+        cacti_wrapper_ = std::make_unique<CACTIWrapper>(cacti_config);
+        cacti_wrapper_->initialize();
+
+        // Extract CACTI results
+        if (cacti_wrapper_->isValid()) {
+            read_energy_ = cacti_wrapper_->getDynamicReadEnergy();
+            write_energy_ = cacti_wrapper_->getDynamicWriteEnergy();
+            leakage_power_ = cacti_wrapper_->getLeakagePower() / 1000.0; // Convert mW to W
+            area_mm2_ = cacti_wrapper_->getArea();
+
+            // Update access time from CACTI (assuming 1 GHz clock)
+            double freq_hz = 1e9;
+            sram_config_.access_time = cacti_wrapper_->getAccessLatencyCycles(freq_hz);
+
+            std::cout << "[SRAMModel] Using CACTI-generated parameters" << std::endl;
+        } else {
+            std::cerr << "[SRAMModel] CACTI failed: " << cacti_wrapper_->getErrorMessage() << std::endl;
+            std::cerr << "[SRAMModel] Falling back to default values" << std::endl;
+            useFallbackValues();
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[SRAMModel] CACTI exception: " << e.what() << std::endl;
+        std::cerr << "[SRAMModel] Falling back to default values" << std::endl;
+        useFallbackValues();
+    }
+#else
+    std::cout << "[SRAMModel] CACTI not available, using default values" << std::endl;
+    useFallbackValues();
+#endif
 
     std::cout << "[SRAMModel] Configuration:" << std::endl;
     std::cout << "  Capacity: " << (sram_config_.capacity / 1024) << " KB" << std::endl;
@@ -183,6 +215,14 @@ void SRAMModel::resetStats() {
     total_writes_ = 0;
     total_accesses_ = 0;
     current_cycle_ = 0;
+}
+
+void SRAMModel::useFallbackValues() {
+    // Default energy values (typical for 22nm SRAM)
+    read_energy_ = 0.5;    // nJ per access
+    write_energy_ = 0.8;   // nJ per access
+    leakage_power_ = 0.05; // W
+    area_mm2_ = 2.5;       // mm^2
 }
 
 } // namespace pimid

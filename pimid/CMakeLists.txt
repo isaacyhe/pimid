@@ -59,6 +59,14 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/external/ramulator/CMakeLists.txt")
     set(HAVE_RAMULATOR ON)
 endif()
 
+# CACTI for SRAM/cache modeling
+if(EXISTS "${PROJECT_SOURCE_DIR}/external/cacti/CMakeLists.txt")
+    message(STATUS "  - CACTI SRAM/cache analyzer")
+    add_subdirectory(external/cacti)
+    add_definitions(-DHAVE_CACTI)
+    set(HAVE_CACTI ON)
+endif()
+
 # Options
 option(BUILD_PLUGINS "Build plugin system" ON)
 option(BUILD_TOOLS "Build configuration tools" ON)
@@ -87,6 +95,7 @@ set(PIMID_SOURCES
     memory_models/src/sram_model.cpp
     memory_models/src/nvm_model.cpp
     memory_models/src/ramulator_wrapper.cpp
+    memory_models/src/cacti_wrapper.cpp
 
     # Network (includes GARNET integration)
     network_models/src/network_model.cpp
@@ -141,6 +150,10 @@ endif()
 # Link external models
 if(HAVE_RAMULATOR)
     target_link_libraries(pimid_lib ramulator)
+endif()
+
+if(HAVE_CACTI)
+    target_link_libraries(pimid_lib cacti)
 endif()
 
 # Plugin system library

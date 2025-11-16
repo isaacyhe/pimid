@@ -2,7 +2,9 @@
 #define PIMID_SRAM_MODEL_H
 
 #include "memory_model.h"
+#include "cacti_wrapper.h"
 #include <queue>
+#include <memory>
 
 namespace pimid {
 
@@ -57,8 +59,8 @@ private:
 
     SRAMConfig sram_config_;
 
-    // CACTI interface (placeholder - will integrate actual CACTI)
-    void* cacti_instance_;
+    // CACTI wrapper instance
+    std::unique_ptr<CACTIWrapper> cacti_wrapper_;
 
     // Request queue
     std::queue<MemoryRequest> pending_requests_;
@@ -67,6 +69,9 @@ private:
     uint64_t total_reads_;
     uint64_t total_writes_;
     uint64_t total_accesses_;
+
+    // Helper functions
+    void useFallbackValues();
 
     // Energy and area from CACTI
     double read_energy_;
