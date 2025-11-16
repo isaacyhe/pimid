@@ -10,6 +10,9 @@ cmake-build-*/
 *.out
 *.exe
 
+# Log files
+*.log
+
 # CMake
 CMakeCache.txt
 CMakeFiles/
