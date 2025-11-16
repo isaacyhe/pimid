@@ -70,6 +70,58 @@ void printHeader(const std::string& title) {
     std::cout << "╚══════════════════════════════════════════════════════════════════╝\n\n";
 }
 
+/**
+ * @brief Get access latency overhead for each PIM granularity
+ *
+ * Host CPU has HIGHEST latency (cache hierarchy, coherence, OS overhead)
+ * MC-PIM has LOWER latency (at memory controller, no cache overhead)
+ * Rank-PIM has EVEN LOWER latency (closer to DRAM)
+ * Fine-grained PIM has LOWEST latency (directly at data)
+ */
+double getAccessLatencyOverhead(
+    PIMGranularity granularity,
+    std::shared_ptr<DRAMArchitectureV2> dram_arch) {
+
+    // Base DRAM access latency (tRCD + tCAS)
+    double base_dram_latency_ns = dram_arch->timing.tRCD_ns + dram_arch->timing.tCAS_ns;
+
+    switch (granularity) {
+        case PIMGranularity::CPU:
+            // Host CPU: Cache hierarchy + coherence + OS + distance from MC
+            // Additional overhead: ~100-200ns
+            return base_dram_latency_ns + 150.0;
+
+        case PIMGranularity::MEMORY_CONTROLLER:
+            // MC-PIM: At memory controller, no cache/coherence overhead
+            // But still has MC logic overhead: ~30-50ns
+            return base_dram_latency_ns + 40.0;
+
+        case PIMGranularity::RANK:
+            // Rank-PIM: Even closer to DRAM, minimal MC overhead
+            // Very low overhead: ~10-20ns
+            return base_dram_latency_ns + 15.0;
+
+        case PIMGranularity::CHIP:
+            // Chip-PIM: At chip level, very close to banks
+            // Minimal overhead: ~5-10ns
+            return base_dram_latency_ns + 7.0;
+
+        case PIMGranularity::BANK_GROUP:
+            // BG-PIM: At bank group, very close to data
+            // Tiny overhead: ~2-5ns
+            return base_dram_latency_ns + 3.0;
+
+        case PIMGranularity::BANK:
+        case PIMGranularity::SUBARRAY:
+            // Bank/Subarray-PIM: Directly at the data
+            // Minimal overhead: just DRAM access
+            return base_dram_latency_ns;
+
+        default:
+            return base_dram_latency_ns;
+    }
+}
+
 LocalityResult simulateWithLocality(
     const std::string& config_name,
     PIMGranularity granularity,
@@ -97,7 +149,16 @@ LocalityResult simulateWithLocality(
     // Compute time (same for all)
     result.compute_time_us = (workload.compute_ops / compute_gflops) / 1e3; // us
 
-    // Local data access time
+    // Calculate access latency overhead for this granularity
+    double access_latency_ns = getAccessLatencyOverhead(granularity, dram_arch);
+
+    // Calculate number of accesses (assume cache line size = 64 bytes)
+    const uint64_t CACHE_LINE_SIZE = 64;
+    uint64_t num_local_accesses = (result.local_data_bytes + CACHE_LINE_SIZE - 1) / CACHE_LINE_SIZE;
+
+    // Local data access time = latency overhead × num_accesses + bandwidth time
+    double local_latency_time_us = (num_local_accesses * access_latency_ns) / 1e3; // us
+
     double local_bw_GBs;
     if (granularity == PIMGranularity::CPU ||
         granularity == PIMGranularity::MEMORY_CONTROLLER ||
@@ -114,16 +175,23 @@ LocalityResult simulateWithLocality(
         }
     }
 
-    result.local_access_time_us = (result.local_data_bytes / local_bw_GBs) / 1e3; // us
+    double local_bw_time_us = (result.local_data_bytes / local_bw_GBs) / 1e3; // us
+
+    // Total local access time = MAX(latency-limited, bandwidth-limited)
+    result.local_access_time_us = std::max(local_latency_time_us, local_bw_time_us);
 
     // Remote data access time (if any)
     if (result.remote_data_bytes > 0) {
+        uint64_t num_remote_accesses = (result.remote_data_bytes + CACHE_LINE_SIZE - 1) / CACHE_LINE_SIZE;
+        double remote_latency_time_us = (num_remote_accesses * access_latency_ns) / 1e3; // us
+
         // Remote data needs network transfer
         if (granularity == PIMGranularity::CPU ||
             granularity == PIMGranularity::MEMORY_CONTROLLER ||
             granularity == PIMGranularity::RANK) {
             // Can access all data via rank interface, no internal network needed
-            result.remote_access_time_us = (result.remote_data_bytes / local_bw_GBs) / 1e3;
+            double remote_bw_time_us = (result.remote_data_bytes / local_bw_GBs) / 1e3;
+            result.remote_access_time_us = std::max(remote_latency_time_us, remote_bw_time_us);
             result.network_time_us = 0.0;
         } else {
             // Need internal network for remote data
@@ -145,7 +213,8 @@ LocalityResult simulateWithLocality(
             // Remote access also limited by network bandwidth
             NetworkLevel level = NetworkLevel::BANK_NETWORK;
             double network_bw = network->getAvailableBandwidth(level);
-            result.remote_access_time_us = (result.remote_data_bytes / network_bw) / 1e3;
+            double remote_bw_time_us = (result.remote_data_bytes / network_bw) / 1e3;
+            result.remote_access_time_us = std::max(remote_latency_time_us, remote_bw_time_us);
         }
     } else {
         result.remote_access_time_us = 0.0;
@@ -274,19 +343,30 @@ void compareLocalVsGlobalWorkloads(
 }
 
 void analyzeDataReach() {
-    printHeader("Data Reach Analysis");
+    printHeader("Data Reach and Latency Analysis");
 
-    std::cout << "PIM Granularity      Local Capacity    Can Access Without Network\n";
-    std::cout << "────────────────────────────────────────────────────────────────────\n";
-    std::cout << "CPU                  ALL               Entire system memory\n";
-    std::cout << "MC-PIM/Rank-PIM      ~16 GB            Entire rank/DIMM\n";
-    std::cout << "Chip-PIM             ~1 GB             Single chip (1/8 of rank)\n";
-    std::cout << "Bank Group-PIM       ~2 GB             Single BG (4 banks)\n";
-    std::cout << "Bank-PIM             ~512 MB           Single bank (1/16 of rank)\n";
-    std::cout << "Subarray-PIM         ~32 MB            Single subarray (1/256 of rank)\n\n";
+    std::cout << "PIM Granularity      Local Capacity    Access Latency    Can Access Without Network\n";
+    std::cout << "──────────────────────────────────────────────────────────────────────────────────\n";
+    std::cout << "CPU                  ALL               HIGHEST (~180ns)  Entire system memory\n";
+    std::cout << "MC-PIM               ~16 GB            LOWER (~70ns)     Entire rank/DIMM\n";
+    std::cout << "Rank-PIM             ~16 GB            EVEN LOWER (~42ns) Entire rank/DIMM\n";
+    std::cout << "Chip-PIM             ~1 GB             LOW (~34ns)       Single chip (1/8 of rank)\n";
+    std::cout << "Bank Group-PIM       ~2 GB             VERY LOW (~30ns)  Single BG (4 banks)\n";
+    std::cout << "Bank-PIM             ~512 MB           LOWEST (~27ns)    Single bank (1/16 of rank)\n";
+    std::cout << "Subarray-PIM         ~32 MB            LOWEST (~27ns)    Single subarray\n\n";
 
-    std::cout << "CRITICAL INSIGHT:\n";
+    std::cout << "LATENCY HIERARCHY:\n";
     std::cout << "─────────────────\n";
+    std::cout << "Host CPU      > MC-PIM > Rank-PIM > Chip-PIM > BG-PIM > Bank-PIM (LOWEST)\n";
+    std::cout << "~180ns          ~70ns     ~42ns      ~34ns      ~30ns     ~27ns\n\n";
+    std::cout << "WHY:\n";
+    std::cout << "  - Host CPU: Cache hierarchy + coherence + OS overhead + distance from MC\n";
+    std::cout << "  - MC-PIM: At memory controller, no cache overhead, but MC logic delay\n";
+    std::cout << "  - Rank-PIM: Closer to DRAM, minimal MC overhead\n";
+    std::cout << "  - Fine-grained PIM: Directly at the data, minimal overhead\n\n";
+
+    std::cout << "DATA REACH vs NETWORK:\n";
+    std::cout << "──────────────────────\n";
     std::cout << "When PIM unit needs data beyond its local capacity:\n";
     std::cout << "  1. Must use internal DRAM network\n";
     std::cout << "  2. Network has LIMITED bandwidth (8-16 bits for DDR4 bank network)\n";
