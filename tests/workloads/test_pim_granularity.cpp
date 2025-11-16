@@ -93,21 +93,22 @@ namespace DDR4 {
     const double MC_ENERGY_pJ = 15.0;                               // + memory controller
     const double CPU_ENERGY_pJ = 20.0;                              // + system bus + LLC
 
-    // Port Bitwidth Constraints (critical architectural limitation!)
-    // These limit the maximum data transfer rate through each level
-    const int BANK_PORT_BITS = 128;                                 // 128-bit bank port (16 bytes)
-    const int BANK_GROUP_PORT_BITS = 512;                           // 4 banks × 128 bits
-    const int CHIP_IO_BITS = 8;                                     // x8 device (1 byte per cycle)
-    const int RANK_DATA_BITS = 64;                                  // 8 chips × 8 bits
-    const int MC_DATA_BITS = 128;                                   // 2 ranks × 64 bits
+    // Port Bitwidth Constraints (CRITICAL CORRECTION!)
+    // INSIDE DRAM: Banks and bank groups have NARROW 8-16 bit ports!
+    // Only at RANK/DIMM level do we get wide 64-bit interfaces!
+    const int BANK_PORT_BITS = 8;                                   // 8-bit bank port (typical DDR4 internal)
+    const int BANK_GROUP_PORT_BITS = 16;                            // ~16-bit bank group (limited by internal routing)
+    const int CHIP_IO_BITS = 8;                                     // x8 device external I/O (1 byte per cycle)
+    const int RANK_DATA_BITS = 64;                                  // 8 chips × 8 bits = 64-bit rank interface
+    const int MC_DATA_BITS = 64;                                    // 64-bit memory controller (single channel)
 
-    // Port bandwidth at DDR4-2400 (2.4 GT/s effective, 1.2 GHz clock)
+    // Port bandwidth at DDR4-2400 (2.4 GT/s effective, 1.2 GHz DDR clock)
     const double CLOCK_GHz = 1.2;
-    const double BANK_PORT_BW_GBs = (BANK_PORT_BITS / 8.0) * CLOCK_GHz;         // 19.2 GB/s per bank
-    const double BANK_GROUP_PORT_BW_GBs = (BANK_GROUP_PORT_BITS / 8.0) * CLOCK_GHz;  // 76.8 GB/s
-    const double CHIP_IO_BW_GBs = (CHIP_IO_BITS / 8.0) * CLOCK_GHz;            // 1.2 GB/s per chip
-    const double RANK_BW_GBs_PORT = (RANK_DATA_BITS / 8.0) * CLOCK_GHz;        // 9.6 GB/s per rank
-    const double MC_BW_GBs_PORT = (MC_DATA_BITS / 8.0) * CLOCK_GHz;            // 19.2 GB/s for MC
+    const double BANK_PORT_BW_GBs = (BANK_PORT_BITS / 8.0) * CLOCK_GHz;         // 1.2 GB/s per bank (NARROW!)
+    const double BANK_GROUP_PORT_BW_GBs = (BANK_GROUP_PORT_BITS / 8.0) * CLOCK_GHz;  // 2.4 GB/s per bank group
+    const double CHIP_IO_BW_GBs = (CHIP_IO_BITS / 8.0) * CLOCK_GHz;            // 1.2 GB/s per chip (x8)
+    const double RANK_BW_GBs_PORT = (RANK_DATA_BITS / 8.0) * CLOCK_GHz;        // 9.6 GB/s per rank (WIDE!)
+    const double MC_BW_GBs_PORT = (MC_DATA_BITS / 8.0) * CLOCK_GHz;            // 9.6 GB/s for MC
 }
 
 //=============================================================================
@@ -150,43 +151,43 @@ std::vector<PIMArchitecture> createArchitectures() {
     const double COMPUTE_POWER_PER_UNIT = 2.0;  // 2 GFLOPS per unit
 
     // 1. Subarray-level PIM
-    // 4 subarrays per bank SHARE the bank's 128-bit port → CONTENTION!
+    // 4 subarrays per bank SHARE the bank's 8-bit port (1.2 GB/s) → SEVERE CONTENTION!
     archs.push_back({
         "Subarray-PIM",
         "Compute at each subarray (finest granularity)",
         TOTAL_COMPUTE_UNITS / 64,  // 1 unit per subarray
         COMPUTE_POWER_PER_UNIT,
         DDR4::SUBARRAY_LATENCY_ns,
-        DDR4::SUBARRAY_BW_GBs * 64,  // 64 subarrays in parallel (IDEAL)
+        DDR4::SUBARRAY_BW_GBs * 64,  // 64 subarrays in parallel (IDEAL, if no port limits)
         DDR4::SUBARRAY_ENERGY_pJ,
         64,  // 64 subarrays in system
         DDR4::SUBARRAY_SIZE_KB,
         4,   // 4 subarrays share 1 bank port (CRITICAL!)
-        DDR4::BANK_PORT_BW_GBs,  // 19.2 GB/s shared by 4 subarrays
-        DDR4::BANK_PORT_BW_GBs / 4,  // 4.8 GB/s effective per subarray
+        DDR4::BANK_PORT_BW_GBs,  // 1.2 GB/s shared by 4 subarrays
+        DDR4::BANK_PORT_BW_GBs / 4,  // 0.3 GB/s effective per subarray (TINY!)
         CYAN
     });
 
     // 2. Bank-level PIM (Multiple PEs per bank)
-    // 4 PEs per bank share the port, but BANK-level BW is still 19.2 GB/s
+    // Each bank has 8-bit port (1.2 GB/s) - NARROW internal port!
     archs.push_back({
         "Bank-PIM",
         "Compute at each bank (4 PEs per bank)",
         TOTAL_COMPUTE_UNITS / 16,  // 4 units per bank
         COMPUTE_POWER_PER_UNIT,
         DDR4::BANK_LATENCY_ns,
-        DDR4::BANK_BW_GBs * 16,    // 16 banks in parallel
+        DDR4::BANK_BW_GBs * 16,    // 16 banks in parallel (IDEAL if no port limits)
         DDR4::BANK_ENERGY_pJ,
         16,  // 16 banks total
         DDR4::BANK_SIZE_MB * 1024,
-        1,   // Each bank has dedicated port (no inter-bank contention)
-        DDR4::BANK_PORT_BW_GBs,  // 19.2 GB/s per bank
-        DDR4::BANK_PORT_BW_GBs,  // 19.2 GB/s effective (intra-bank sharing doesn't limit bank-level transfer)
+        1,   // Each bank has dedicated 8-bit port (no inter-bank contention)
+        DDR4::BANK_PORT_BW_GBs,  // 1.2 GB/s per bank (NARROW!)
+        DDR4::BANK_PORT_BW_GBs,  // 1.2 GB/s effective per bank
         BLUE
     });
 
     // 3. Bank Group-level PIM
-    // 4 banks per group share the bank group's internal paths
+    // Each bank group has ~16-bit internal port (2.4 GB/s) - still narrow!
     archs.push_back({
         "BankGroup-PIM",
         "Compute at each bank group",
@@ -197,9 +198,9 @@ std::vector<PIMArchitecture> createArchitectures() {
         DDR4::BANK_GROUP_ENERGY_pJ,
         4,   // 4 bank groups total
         DDR4::BANK_SIZE_MB * 4 * 1024,
-        4,   // 4 banks share bank group port
-        DDR4::BANK_GROUP_PORT_BW_GBs,  // 76.8 GB/s per bank group
-        DDR4::BANK_GROUP_PORT_BW_GBs / 4,  // 19.2 GB/s effective per bank (divided among 4)
+        1,   // Each bank group has dedicated ~16-bit port
+        DDR4::BANK_GROUP_PORT_BW_GBs,  // 2.4 GB/s per bank group (still narrow!)
+        DDR4::BANK_GROUP_PORT_BW_GBs,  // 2.4 GB/s effective
         MAGENTA
     });
 
@@ -240,7 +241,7 @@ std::vector<PIMArchitecture> createArchitectures() {
     });
 
     // 6. MC-wide PIM
-    // 2 ranks share MC interface (128-bit = 19.2 GB/s)
+    // MC has 64-bit interface (9.6 GB/s) - FIRST wide interface!
     archs.push_back({
         "MC-PIM",
         "Compute at memory controller",
@@ -251,14 +252,14 @@ std::vector<PIMArchitecture> createArchitectures() {
         DDR4::MC_ENERGY_pJ,
         1,   // 1 memory controller
         DDR4::DIMM_SIZE_GB * 2 * 1024 * 1024,
-        2,   // 2 ranks share MC
-        DDR4::MC_BW_GBs_PORT,  // 19.2 GB/s MC bandwidth
-        DDR4::MC_BW_GBs_PORT,  // 19.2 GB/s total
+        1,   // MC has dedicated 64-bit port
+        DDR4::MC_BW_GBs_PORT,  // 9.6 GB/s MC bandwidth (64-bit)
+        DDR4::MC_BW_GBs_PORT,  // 9.6 GB/s total
         BLUE
     });
 
     // 7. Traditional CPU (for comparison)
-    // CPU accesses memory through MC
+    // CPU accesses memory through MC (64-bit interface)
     archs.push_back({
         "CPU",
         "Traditional CPU with remote memory",
@@ -270,8 +271,8 @@ std::vector<PIMArchitecture> createArchitectures() {
         1,   // 1 CPU socket
         32 * 1024,  // 32MB LLC
         1,   // Single CPU → MC path
-        DDR4::MC_BW_GBs_PORT,  // 19.2 GB/s
-        DDR4::MC_BW_GBs_PORT,  // 19.2 GB/s
+        DDR4::MC_BW_GBs_PORT,  // 9.6 GB/s (64-bit MC interface)
+        DDR4::MC_BW_GBs_PORT,  // 9.6 GB/s
         RED
     });
 
