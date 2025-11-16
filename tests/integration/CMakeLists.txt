@@ -24,6 +24,24 @@ add_executable(test_pim_full_system test_pim_full_system.cpp)
 target_compile_options(test_pim_full_system PRIVATE -std=c++17)
 add_test(NAME PIMFullSystemIntegration COMMAND test_pim_full_system)
 
+# PIM-Ramulator integration verification test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_pim_ramulator_integration.cpp)
+    add_executable(test_pim_ramulator_integration test_pim_ramulator_integration.cpp)
+    target_compile_options(test_pim_ramulator_integration PRIVATE -std=c++17)
+    # Note: This test needs pimid_lib which includes Ramulator wrapper + PIM extensions
+    # target_link_libraries(test_pim_ramulator_integration pimid_lib ramulator)
+    add_test(NAME PIMRamulatorIntegration COMMAND test_pim_ramulator_integration)
+endif()
+
+# PIM components simple validation (standalone - no Ramulator required)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_pim_simple_validation.cpp)
+    add_executable(test_pim_simple_validation test_pim_simple_validation.cpp)
+    target_compile_options(test_pim_simple_validation PRIVATE -std=c++17)
+    # Note: This test needs only PIM components, not full Ramulator
+    # target_link_libraries(test_pim_simple_validation pimid_lib)
+    add_test(NAME PIMSimpleValidation COMMAND test_pim_simple_validation)
+endif()
+
 # TODO: Link with actual PIMID libraries when available
 # target_link_libraries(test_pim_full_system
 #     pimid_lib
