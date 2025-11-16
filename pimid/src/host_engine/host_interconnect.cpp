@@ -1,6 +1,7 @@
 #include "host_engine/host_interconnect.h"
 #include <iostream>
 #include <cstring>
+#include <cmath>
 
 namespace pimid {
 

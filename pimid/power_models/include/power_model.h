@@ -175,10 +175,19 @@ private:
     std::map<PowerComponent, CacheConfig> cache_configs_;
 
     // Helper functions
+    void initializeDefaultConfigs();
     void generateMcPATInput(PowerComponent component,
                             const ActivityStats& stats);
     PowerMetrics parseMcPATOutput();
     double calculateComponentEnergy(PowerComponent component, Cycle cycles);
+
+    PowerMetrics estimateCorePower(const ActivityStats& stats);
+    PowerMetrics estimateCachePower(PowerComponent component,
+                                     const ActivityStats& stats);
+    PowerMetrics estimateMemoryControllerPower(const ActivityStats& stats);
+    PowerMetrics estimatePEPower(const ActivityStats& stats);
+
+    std::string componentToString(PowerComponent component) const;
 };
 
 /**

@@ -1,4 +1,4 @@
-#include "network/network_model.h"
+#include "network_model.h"
 #include <iostream>
 
 namespace pimid {

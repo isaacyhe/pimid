@@ -1,5 +1,9 @@
-#include "memory_models/memory_model.h"
+#include "memory_model.h"
+#include "dram_model.h"
+#include "sram_model.h"
+#include "nvm_model.h"
 #include <iostream>
+#include <stdexcept>
 
 namespace pimid {
 
@@ -15,25 +19,27 @@ std::shared_ptr<MemoryModel> MemoryModelFactory::createMemoryModel(
               << static_cast<int>(tech) << std::endl;
     std::cout << "Configuration path: " << config_path << std::endl;
 
-    switch (tech) {
-        case MemoryTechnology::DRAM:
-            // TODO: Return actual DRAMModel when implemented
-            std::cout << "  Creating DRAM model (Ramulator)" << std::endl;
-            return nullptr;
+    try {
+        switch (tech) {
+            case MemoryTechnology::DRAM:
+                std::cout << "  Creating DRAM model (Ramulator)" << std::endl;
+                return std::make_shared<DRAMModel>(config_path);
 
-        case MemoryTechnology::SRAM:
-            // TODO: Return actual SRAMModel when implemented
-            std::cout << "  Creating SRAM model (CACTI)" << std::endl;
-            return nullptr;
+            case MemoryTechnology::SRAM:
+                std::cout << "  Creating SRAM model (CACTI)" << std::endl;
+                return std::make_shared<SRAMModel>(config_path);
 
-        case MemoryTechnology::STT_MRAM:
-            // TODO: Return actual NVMModel when implemented
-            std::cout << "  Creating STT-MRAM model (NVSim)" << std::endl;
-            return nullptr;
+            case MemoryTechnology::STT_MRAM:
+                std::cout << "  Creating STT-MRAM model (NVSim)" << std::endl;
+                return std::make_shared<NVMModel>(config_path);
 
-        default:
-            std::cerr << "Unknown memory technology: " << static_cast<int>(tech) << std::endl;
-            return nullptr;
+            default:
+                throw std::runtime_error("Unknown memory technology: " +
+                                       std::to_string(static_cast<int>(tech)));
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Error creating memory model: " << e.what() << std::endl;
+        throw;
     }
 }
 

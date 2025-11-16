@@ -1,7 +1,7 @@
 #ifndef PIMID_DRAM_MODEL_H
 #define PIMID_DRAM_MODEL_H
 
-#include "memory_models/memory_model.h"
+#include "memory_model.h"
 #include <queue>
 #include <map>
 
@@ -80,6 +80,8 @@ private:
 
     // Current state
     Cycle current_cycle_;
+    uint64_t capacity_;
+    uint64_t bandwidth_;
 
     // Helper functions
     Cycle calculateLatency(const MemoryRequest& req);

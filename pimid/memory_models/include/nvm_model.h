@@ -1,7 +1,7 @@
 #ifndef PIMID_NVM_MODEL_H
 #define PIMID_NVM_MODEL_H
 
-#include "memory_models/memory_model.h"
+#include "memory_model.h"
 #include <queue>
 
 namespace pimid {

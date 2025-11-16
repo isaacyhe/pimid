@@ -27,7 +27,12 @@ include_directories(
 
 # Find required packages
 find_package(Threads REQUIRED)
-find_package(Boost REQUIRED COMPONENTS system filesystem)
+
+# Optional: Boost for enhanced functionality
+find_package(Boost COMPONENTS system filesystem)
+if(Boost_FOUND)
+    add_definitions(-DHAVE_BOOST)
+endif()
 
 # Optional: yaml-cpp for configuration parsing
 find_package(yaml-cpp)
@@ -102,10 +107,12 @@ set(PIMID_CONFIG_SOURCES
 add_library(pimid_lib STATIC ${PIMID_SOURCES})
 target_link_libraries(pimid_lib
     Threads::Threads
-    Boost::system
-    Boost::filesystem
     ${CMAKE_DL_LIBS}
 )
+
+if(Boost_FOUND)
+    target_link_libraries(pimid_lib Boost::system Boost::filesystem)
+endif()
 
 if(yaml-cpp_FOUND)
     target_link_libraries(pimid_lib yaml-cpp)
@@ -121,7 +128,7 @@ if(BUILD_PLUGINS)
 endif()
 
 # Configuration system library
-if(BUILD_PLUGINS)
+if(BUILD_PLUGINS AND yaml-cpp_FOUND)
     add_library(pimid_config SHARED ${PIMID_CONFIG_SOURCES})
     target_link_libraries(pimid_config
         pimid_lib
@@ -134,21 +141,30 @@ endif()
 add_executable(pimid_host src/host_main.cpp)
 target_link_libraries(pimid_host pimid_lib)
 if(BUILD_PLUGINS)
-    target_link_libraries(pimid_host pimid_plugin pimid_config)
+    target_link_libraries(pimid_host pimid_plugin)
+    if(yaml-cpp_FOUND)
+        target_link_libraries(pimid_host pimid_config)
+    endif()
 endif()
 
 # Device simulator executable
 add_executable(pimid_device src/device_main.cpp)
 target_link_libraries(pimid_device pimid_lib)
 if(BUILD_PLUGINS)
-    target_link_libraries(pimid_device pimid_plugin pimid_config)
+    target_link_libraries(pimid_device pimid_plugin)
+    if(yaml-cpp_FOUND)
+        target_link_libraries(pimid_device pimid_config)
+    endif()
 endif()
 
 # Standalone simulator (single-process mode for debugging)
 add_executable(pimid_standalone src/standalone_main.cpp)
 target_link_libraries(pimid_standalone pimid_lib)
 if(BUILD_PLUGINS)
-    target_link_libraries(pimid_standalone pimid_plugin pimid_config)
+    target_link_libraries(pimid_standalone pimid_plugin)
+    if(yaml-cpp_FOUND)
+        target_link_libraries(pimid_standalone pimid_config)
+    endif()
 endif()
 
 # Install targets

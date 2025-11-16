@@ -6,6 +6,7 @@
 #include "address_translation/pe_placement.h"
 #include "address_translation/address_translator.h"
 #include "scheduler/scheduler.h"
+#include "network_model.h"
 #include <memory>
 #include <vector>
 

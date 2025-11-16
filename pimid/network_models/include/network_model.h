@@ -5,6 +5,7 @@
 #include <string>
 #include <queue>
 #include <vector>
+#include <map>
 #include <functional>
 
 namespace pimid {
