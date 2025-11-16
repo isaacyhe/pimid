@@ -56,7 +56,7 @@ This directory contains all external simulators and modeling tools integrated in
 | CACTI | ✅ Added | Ready | For SRAM modeling |
 | NVSim | ✅ Added | Ready | For STT-MRAM and other NVM |
 | McPAT | ✅ Added | Ready | System-wide power modeling |
-| ZSim | ✅ Added + Upgraded | Ready | **Pin 3.x compatible** |
+| ZSim | ✅ Added + Upgraded | Ready | **Pin 3.x compatible (Ubuntu 24.04 ready)** |
 | gem5/GARNET | ✅ Added | Ready | Network-on-chip simulation |
 
 ## Build Instructions
@@ -72,8 +72,8 @@ Each simulator has its own build requirements. Common dependencies:
 ### ZSim Special Requirements
 
 ZSim requires Intel Pin:
-- **Pin 2.x**: Download Pin 2.14 from Intel (compatible with zsim out of box)
-- **Pin 3.x**: Download Pin 3.28 or later (requires our compatibility patch - **already applied**)
+- **Pin 2.x**: Download Pin 2.14 from Intel (legacy support for Ubuntu 18.04)
+- **Pin 3.x**: Download Pin 3.28 or later (**RECOMMENDED for Ubuntu 20.04+**, compatibility patch applied)
 
 Set the `PINPATH` environment variable:
 ```bash
