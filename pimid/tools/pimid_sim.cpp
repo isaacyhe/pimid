@@ -54,6 +54,10 @@ struct DRAMConfig {
     int banks_per_group;
     int subarrays_per_bank;
 
+    // Scaling factors for hypothetical studies (applied AFTER base parameters)
+    int bandwidth_scale_factor;     // Default: 1 (positive integer: 2 = 2× BW, 4 = 4× BW)
+    double latency_scale_factor;    // Default: 1.0 (range: (0.0, 1.0], 0.5 = half latency)
+
     // Interface widths (bits) - optional overrides for Ramulator defaults
     // If -1, use Ramulator's verified values
     double rank_interface_width;    // Default: -1 (use Ramulator: 64 for DDR4, 128 for HBM2)
@@ -577,6 +581,37 @@ private:
         if (config_.dram.timing_overrides.tRAS_ns >= 0) {
             dram_arch_->timing.tRAS_ns = config_.dram.timing_overrides.tRAS_ns;
         }
+
+        // Apply scaling factors for hypothetical studies
+        // These are applied AFTER all other overrides to scale the final DRAM parameters
+
+        // Bandwidth scaling: multiply interface widths by integer factor
+        // Example: bandwidth_scale_factor=2 doubles all bandwidths (2× future technology)
+        if (config_.dram.bandwidth_scale_factor > 1) {
+            std::cout << "Applying bandwidth scale factor: " << config_.dram.bandwidth_scale_factor << "×\n";
+            dram_arch_->datapath.rank_databus_bits.value_bits *= config_.dram.bandwidth_scale_factor;
+            dram_arch_->datapath.bank_serialization_bits.value_bits *= config_.dram.bandwidth_scale_factor;
+            dram_arch_->datapath.gsa_datapath_bits.value_bits *= config_.dram.bandwidth_scale_factor;
+
+            // Mark as estimated since this is hypothetical
+            dram_arch_->datapath.rank_databus_bits.status = VerificationStatus::ESTIMATED;
+            dram_arch_->datapath.bank_serialization_bits.status = VerificationStatus::ESTIMATED;
+            dram_arch_->datapath.gsa_datapath_bits.status = VerificationStatus::ESTIMATED;
+            dram_arch_->datapath.rank_databus_bits.source = "Scaled by bandwidth_scale_factor from config";
+            dram_arch_->datapath.bank_serialization_bits.source = "Scaled by bandwidth_scale_factor from config";
+            dram_arch_->datapath.gsa_datapath_bits.source = "Scaled by bandwidth_scale_factor from config";
+        }
+
+        // Latency scaling: multiply timing parameters by fractional factor
+        // Example: latency_scale_factor=0.5 halves all latencies (faster future technology)
+        // Valid range: (0.0, 1.0], where 1.0 = no change, 0.5 = half latency
+        if (config_.dram.latency_scale_factor > 0 && config_.dram.latency_scale_factor != 1.0) {
+            std::cout << "Applying latency scale factor: " << config_.dram.latency_scale_factor << "×\n";
+            dram_arch_->timing.tRCD_ns *= config_.dram.latency_scale_factor;
+            dram_arch_->timing.tCAS_ns *= config_.dram.latency_scale_factor;
+            dram_arch_->timing.tRP_ns *= config_.dram.latency_scale_factor;
+            dram_arch_->timing.tRAS_ns *= config_.dram.latency_scale_factor;
+        }
     }
 
     double getBandwidthForGranularity(PIMGranularity granularity) const {
@@ -768,6 +803,12 @@ int main(int argc, char* argv[]) {
     config.dram.timing_overrides.tCAS_ns = parser.getDouble("dram.tCAS_ns", -1.0);
     config.dram.timing_overrides.tRP_ns = parser.getDouble("dram.tRP_ns", -1.0);
     config.dram.timing_overrides.tRAS_ns = parser.getDouble("dram.tRAS_ns", -1.0);
+
+    // Scaling factors for hypothetical studies
+    // bandwidth_scale_factor: positive integer (1 = default, 2 = 2× BW, 4 = 4× BW)
+    // latency_scale_factor: (0.0, 1.0] (1.0 = default, 0.5 = half latency, 0.25 = quarter latency)
+    config.dram.bandwidth_scale_factor = parser.getInt("dram.bandwidth_scale_factor", 1);
+    config.dram.latency_scale_factor = parser.getDouble("dram.latency_scale_factor", 1.0);
 
     // Latency overheads (nanoseconds) - SYSTEM-LEVEL, not DRAM-specific
     // DRAM-specific parameters (interface widths, timing) come from Ramulator

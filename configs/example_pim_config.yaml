@@ -55,6 +55,27 @@ dram:
   # tRAS_ns: 32.0                 # Row Access Strobe
 
   # ========================================================================
+  # SCALING FACTORS FOR HYPOTHETICAL STUDIES
+  # ========================================================================
+  # These factors provide an easy way to model future or hypothetical DRAM
+  # without manually setting all individual parameters. They scale the final
+  # DRAM parameters (after Ramulator defaults and any user overrides).
+  #
+  # bandwidth_scale_factor: Positive integer (default: 1)
+  #   - Multiplies ALL interface widths (rank, bank_io, gsa)
+  #   - Example: 2 = 2× bandwidth everywhere (future technology)
+  #   - Example: 4 = 4× bandwidth everywhere (aggressive future)
+  #
+  # latency_scale_factor: Fractional value in range (0.0, 1.0] (default: 1.0)
+  #   - Multiplies ALL timing parameters (tRCD, tCAS, tRP, tRAS)
+  #   - Example: 1.0 = no change (default)
+  #   - Example: 0.5 = half latency (faster future technology)
+  #   - Example: 0.25 = quarter latency (aggressive future)
+  #
+  # bandwidth_scale_factor: 1     # Default: no scaling
+  # latency_scale_factor: 1.0     # Default: no scaling
+
+  # ========================================================================
   # EXAMPLE CUSTOM CONFIGURATIONS
   # ========================================================================
   #
@@ -81,6 +102,25 @@ dram:
   #   type: CUSTOM
   #   bank_io_width: 64.0
   #   clock_freq_mhz: 1000.0
+  #
+  # Example 5: Future DRAM with 2× bandwidth (using scaling factor):
+  #   bandwidth_scale_factor: 2
+  #   # This doubles ALL interface widths: rank (128-bit), bank_io (16-bit), gsa (512-bit)
+  #
+  # Example 6: Future DRAM with half latency (using scaling factor):
+  #   latency_scale_factor: 0.5
+  #   # This halves ALL timing: tRCD (6.66ns), tCAS (6.66ns), tRP (6.66ns)
+  #
+  # Example 7: Aggressive future DRAM (4× BW, quarter latency):
+  #   bandwidth_scale_factor: 4
+  #   latency_scale_factor: 0.25
+  #   # Combines scaling factors for dramatic performance improvement
+  #
+  # Example 8: Mixed approach (custom base + scaling):
+  #   type: CUSTOM
+  #   bank_io_width: 16.0           # Start with x16 device
+  #   bandwidth_scale_factor: 2     # Then double it (32-bit bank I/O)
+  #   latency_scale_factor: 0.5     # And halve latency
   # ========================================================================
 
   # Latency overheads (nanoseconds) - SYSTEM-LEVEL parameters
