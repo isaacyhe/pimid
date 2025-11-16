@@ -523,21 +523,46 @@ private:
     double getBandwidthForGranularity(PIMGranularity granularity) const {
         double freq_GHz = dram_arch_->timing.clock_freq_mhz / 1000.0;
 
+        // Typical configuration: 4 bank groups × 4 banks/group = 16 banks per rank
+        int banks_per_rank = config_.dram.bank_groups * config_.dram.banks_per_group;
+        int banks_per_bg = config_.dram.banks_per_group;
+
         switch (granularity) {
-            case PIMGranularity::SUBARRAY:
-                return (256.0 / 8.0) * freq_GHz;  // 256-bit GSA
-            case PIMGranularity::BANK:
-                return (8.0 / 8.0) * freq_GHz;    // 8-bit bank serialization (CRITICAL BOTTLENECK!)
-            case PIMGranularity::BANK_GROUP:
-                return (16.0 / 8.0) * freq_GHz;   // ~16-bit BG aggregation
-            case PIMGranularity::CHIP:
-                return (8.0 / 8.0) * freq_GHz;    // 8-bit chip I/O (x8 device)
-            case PIMGranularity::RANK:
-            case PIMGranularity::MEMORY_CONTROLLER:
-                return (64.0 / 8.0) * freq_GHz;   // 64-bit rank interface
             case PIMGranularity::CPU:
+                // Host CPU: Limited to rank interface (64-bit)
+                return (64.0 / 8.0) * freq_GHz;
+
+            case PIMGranularity::MEMORY_CONTROLLER:
+                // MC-PIM: At memory controller, OUTSIDE rank
+                // Limited to rank interface bandwidth (64-bit)
+                return (64.0 / 8.0) * freq_GHz;
+
+            case PIMGranularity::RANK:
+                // Rank-PIM: INSIDE rank, can access all banks in parallel!
+                // Each bank has 8-bit internal bandwidth, aggregate across all banks
+                // 16 banks × 8-bit each = 128-bit aggregate bandwidth
+                return (banks_per_rank * 8.0 / 8.0) * freq_GHz;
+
+            case PIMGranularity::CHIP:
+                // Chip-PIM: Similar to rank (all banks accessible)
+                return (banks_per_rank * 8.0 / 8.0) * freq_GHz;
+
+            case PIMGranularity::BANK_GROUP:
+                // BG-PIM: Can access all banks within bank group in parallel
+                // 4 banks × 8-bit each = 32-bit aggregate
+                return (banks_per_bg * 8.0 / 8.0) * freq_GHz;
+
+            case PIMGranularity::BANK:
+                // Bank-PIM: Limited to single bank's internal bandwidth
+                // 8-bit serialization is the CRITICAL BOTTLENECK at bank level!
+                return (8.0 / 8.0) * freq_GHz;
+
+            case PIMGranularity::SUBARRAY:
+                // Subarray-PIM: Can access full row buffer width (256-bit GSA)
+                return (256.0 / 8.0) * freq_GHz;
+
             default:
-                return (64.0 / 8.0) * freq_GHz;   // CPU via rank interface
+                return (64.0 / 8.0) * freq_GHz;
         }
     }
 };
