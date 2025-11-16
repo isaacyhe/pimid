@@ -305,4 +305,148 @@ void PIMBandwidthTracker::resetStats() {
     window_start_cycle_ = current_cycle_;
 }
 
+uint64_t PIMBandwidthTracker::calculateLocalCapacity(PIMGranularity granularity, int pe_id) const {
+    // Calculate based on DRAM hierarchy and configuration
+    switch (granularity) {
+        case PIMGranularity::SUBARRAY: {
+            // Each subarray: total_rank_capacity / (num_banks * num_subarrays_per_bank)
+            // Typical: 8 GB / (16 banks * 16 subarrays) = 32 MB
+            uint64_t rank_capacity = 8ULL * 1024 * 1024 * 1024; // Assume 8 GB rank
+            return rank_capacity / (num_banks_ * num_subarrays_);
+        }
+        case PIMGranularity::BANK: {
+            // Each bank: total_rank_capacity / num_banks
+            // Typical: 8 GB / 16 banks = 512 MB
+            uint64_t rank_capacity = 8ULL * 1024 * 1024 * 1024;
+            return rank_capacity / num_banks_;
+        }
+        case PIMGranularity::BANK_GROUP: {
+            // Each bank group: total_rank_capacity / num_bank_groups
+            // Typical: 8 GB / 4 BGs = 2 GB
+            uint64_t rank_capacity = 8ULL * 1024 * 1024 * 1024;
+            return rank_capacity / num_bank_groups_;
+        }
+        case PIMGranularity::CHIP: {
+            // Each chip: total_rank_capacity / num_chips
+            // Typical: 8 GB / 8 chips = 1 GB
+            uint64_t rank_capacity = 8ULL * 1024 * 1024 * 1024;
+            int num_chips = 8; // Typical DDR4
+            return rank_capacity / num_chips;
+        }
+        case PIMGranularity::RANK:
+        case PIMGranularity::MEMORY_CONTROLLER: {
+            // Can access entire rank
+            return 8ULL * 1024 * 1024 * 1024; // 8 GB
+        }
+        case PIMGranularity::CPU:
+        default:
+            // CPU can access all memory through MC
+            return UINT64_MAX;
+    }
+}
+
+DataLocality PIMBandwidthTracker::determineDataLocality(
+    const PIMRequestPayload& payload,
+    int data_bank, int data_bg, int data_chip) const {
+
+    int pe_bank = getPELocalBank(payload.granularity, payload.pe_id);
+    int pe_bg = getPEBankGroup(payload.pe_id);
+    int pe_chip = getPEChip(payload.pe_id);
+
+    return PIMRequestPayload::calculateLocality(
+        payload.granularity,
+        pe_bank, pe_bg, pe_chip,
+        data_bank, data_bg, data_chip);
+}
+
+void PIMBandwidthTracker::calculateDataReach(
+    const PIMRequestPayload& payload,
+    uint64_t total_data_bytes,
+    const std::map<int, uint64_t>& data_distribution,
+    uint64_t& local_bytes,
+    uint64_t& remote_bytes) const {
+
+    local_bytes = 0;
+    remote_bytes = 0;
+
+    int pe_bank = getPELocalBank(payload.granularity, payload.pe_id);
+    int pe_bg = getPEBankGroup(payload.pe_id);
+    int pe_chip = getPEChip(payload.pe_id);
+
+    for (const auto& [bank_id, bytes] : data_distribution) {
+        // Determine bank's BG and chip
+        int data_bg = bank_id / (num_banks_ / num_bank_groups_);
+        int data_chip = bank_id / (num_banks_ / 8); // Assume 8 chips
+
+        DataLocality locality = PIMRequestPayload::calculateLocality(
+            payload.granularity,
+            pe_bank, pe_bg, pe_chip,
+            bank_id, data_bg, data_chip);
+
+        // Determine what's "local" based on granularity
+        bool is_local = false;
+        switch (payload.granularity) {
+            case PIMGranularity::BANK:
+            case PIMGranularity::SUBARRAY:
+                // Only same bank is local
+                is_local = (locality == DataLocality::LOCAL);
+                break;
+            case PIMGranularity::BANK_GROUP:
+                // Same BG is local
+                is_local = (locality == DataLocality::LOCAL ||
+                          locality == DataLocality::REMOTE_SAME_BG);
+                break;
+            case PIMGranularity::CHIP:
+                // Same chip is local
+                is_local = (locality != DataLocality::REMOTE_SAME_RANK &&
+                          locality != DataLocality::REMOTE_EXTERNAL);
+                break;
+            case PIMGranularity::RANK:
+            case PIMGranularity::MEMORY_CONTROLLER:
+                // Entire rank is local
+                is_local = (locality != DataLocality::REMOTE_EXTERNAL);
+                break;
+            case PIMGranularity::CPU:
+                // All data accessible (though may be slow)
+                is_local = true;
+                break;
+        }
+
+        if (is_local) {
+            local_bytes += bytes;
+        } else {
+            remote_bytes += bytes;
+        }
+    }
+}
+
+int PIMBandwidthTracker::getPELocalBank(PIMGranularity granularity, int pe_id) const {
+    // Find which bank this PE is registered to
+    for (const auto& [key, pe_list] : pe_registry_) {
+        if (key.first == granularity) {
+            for (int id : pe_list) {
+                if (id == pe_id) {
+                    return key.second; // target_id is the bank
+                }
+            }
+        }
+    }
+    // Default: distribute PEs across banks
+    return pe_id % num_banks_;
+}
+
+int PIMBandwidthTracker::getPEBankGroup(int pe_id) const {
+    int pe_bank = getPELocalBank(PIMGranularity::BANK, pe_id);
+    // Assuming banks_per_BG = num_banks / num_bank_groups
+    int banks_per_bg = num_banks_ / num_bank_groups_;
+    return pe_bank / banks_per_bg;
+}
+
+int PIMBandwidthTracker::getPEChip(int pe_id) const {
+    int pe_bank = getPELocalBank(PIMGranularity::BANK, pe_id);
+    // Assuming 8 chips, banks distributed evenly
+    int banks_per_chip = num_banks_ / 8;
+    return pe_bank / banks_per_chip;
+}
+
 } // namespace pimid

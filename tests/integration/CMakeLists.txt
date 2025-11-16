@@ -60,6 +60,15 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_pim_with_latency.cpp)
     add_test(NAME PIMWithLatency COMMAND test_pim_with_latency)
 endif()
 
+# Comprehensive test of data locality and reach for different PIM granularities
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_pim_data_locality.cpp)
+    add_executable(test_pim_data_locality test_pim_data_locality.cpp)
+    target_compile_options(test_pim_data_locality PRIVATE -std=c++17)
+    # Note: This test demonstrates the critical importance of data locality in PIM
+    # target_link_libraries(test_pim_data_locality pimid_lib)
+    add_test(NAME PIMDataLocality COMMAND test_pim_data_locality)
+endif()
+
 # TODO: Link with actual PIMID libraries when available
 # target_link_libraries(test_pim_full_system
 #     pimid_lib

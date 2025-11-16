@@ -397,6 +397,166 @@ void InternalDRAMNetwork::resetStats() {
     inflight_packets_.clear();
 }
 
+uint64_t InternalDRAMNetwork::calculateNetworkRequirements(
+    int pe_bank, int pe_bg, int pe_chip,
+    const std::map<int, uint64_t>& data_distribution,
+    std::vector<InternalDRAMTransfer>& transfers) {
+
+    uint64_t total_latency = 0;
+    transfers.clear();
+
+    for (const auto& [bank_id, bytes] : data_distribution) {
+        if (bank_id == pe_bank) {
+            // Local access - no network needed
+            continue;
+        }
+
+        // Remote access - need network transfer
+        InternalDRAMTransfer transfer;
+        transfer.source_bank = bank_id;
+        transfer.dest_bank = pe_bank;
+        transfer.source_subarray = -1; // Not specified
+        transfer.dest_subarray = -1;
+        transfer.source_bank_group = bank_id / num_banks_per_bg_;
+        transfer.dest_bank_group = pe_bg;
+        transfer.source_chip = bank_id / (num_banks_per_bg_ * num_bg_per_chip_);
+        transfer.dest_chip = pe_chip;
+        transfer.transfer_bytes = bytes;
+        transfer.requires_network = true;
+
+        // Determine network level and calculate latency
+        NetworkLevel level;
+        if (transfer.source_bank_group == transfer.dest_bank_group) {
+            level = NetworkLevel::BANK_NETWORK;
+        } else if (transfer.source_chip == transfer.dest_chip) {
+            level = NetworkLevel::BANK_GROUP_NETWORK;
+        } else {
+            level = NetworkLevel::CHIP_NETWORK;
+        }
+
+        uint64_t latency = getTransferLatency(level, bank_id, pe_bank, bytes);
+        transfer.network_latency = latency;
+        total_latency += latency;
+
+        // Determine locality
+        if (transfer.source_bank_group == transfer.dest_bank_group) {
+            transfer.locality = DataLocality::REMOTE_SAME_BG;
+        } else if (transfer.source_chip == transfer.dest_chip) {
+            transfer.locality = DataLocality::REMOTE_SAME_CHIP;
+        } else {
+            transfer.locality = DataLocality::REMOTE_SAME_RANK;
+        }
+
+        transfers.push_back(transfer);
+    }
+
+    return total_latency;
+}
+
+uint64_t InternalDRAMNetwork::executeGather(
+    int pe_bank,
+    const std::vector<int>& source_banks,
+    uint64_t bytes_per_bank) {
+
+    uint64_t total_latency = 0;
+
+    // Create map of data distribution
+    std::map<int, uint64_t> data_dist;
+    for (int bank : source_banks) {
+        data_dist[bank] = bytes_per_bank;
+    }
+
+    // Calculate network requirements
+    std::vector<InternalDRAMTransfer> transfers;
+    int pe_bg = pe_bank / num_banks_per_bg_;
+    int pe_chip = pe_bank / (num_banks_per_bg_ * num_bg_per_chip_);
+
+    total_latency = calculateNetworkRequirements(
+        pe_bank, pe_bg, pe_chip, data_dist, transfers);
+
+    return total_latency;
+}
+
+uint64_t InternalDRAMNetwork::executeScatter(
+    int pe_bank,
+    const std::vector<int>& dest_banks,
+    uint64_t bytes_per_bank) {
+
+    uint64_t total_latency = 0;
+
+    for (int dest_bank : dest_banks) {
+        if (dest_bank == pe_bank) continue; // No transfer needed
+
+        NetworkLevel level;
+        int pe_bg = pe_bank / num_banks_per_bg_;
+        int dest_bg = dest_bank / num_banks_per_bg_;
+
+        if (pe_bg == dest_bg) {
+            level = NetworkLevel::BANK_NETWORK;
+        } else {
+            level = NetworkLevel::BANK_GROUP_NETWORK;
+        }
+
+        uint64_t latency = getTransferLatency(level, pe_bank, dest_bank, bytes_per_bank);
+        total_latency += latency;
+    }
+
+    return total_latency;
+}
+
+uint64_t InternalDRAMNetwork::executeReduce(
+    const std::vector<int>& source_banks,
+    int dest_bank,
+    uint64_t bytes_per_bank) {
+
+    // Similar to gather, but with reduction operation overhead
+    uint64_t gather_latency = executeGather(dest_bank, source_banks, bytes_per_bank);
+
+    // Add reduction computation overhead (simplified model)
+    uint64_t reduction_overhead = source_banks.size() * 10; // 10 cycles per source
+
+    return gather_latency + reduction_overhead;
+}
+
+uint64_t InternalDRAMNetwork::executeBroadcast(
+    int source_bank,
+    const std::vector<int>& dest_banks,
+    uint64_t total_bytes) {
+
+    // Broadcast can potentially use multicast if network supports it
+    // For now, model as series of point-to-point transfers
+    uint64_t bytes_per_dest = total_bytes; // Full copy to each destination
+
+    return executeScatter(source_bank, dest_banks, bytes_per_dest);
+}
+
+double InternalDRAMNetwork::getAvailableBandwidth(NetworkLevel level) const {
+    switch (level) {
+        case NetworkLevel::SUBARRAY_NETWORK:
+            return subarray_network_config_.bandwidth_GBs;
+        case NetworkLevel::BANK_NETWORK:
+            return bank_network_config_.bandwidth_GBs;
+        case NetworkLevel::BANK_GROUP_NETWORK:
+            return bg_network_config_.bandwidth_GBs;
+        case NetworkLevel::CHIP_NETWORK:
+            return chip_network_config_.bandwidth_GBs;
+        default:
+            return 0.0;
+    }
+}
+
+bool InternalDRAMNetwork::inSameBankGroup(int bank1, int bank2) const {
+    int bg1 = bank1 / num_banks_per_bg_;
+    int bg2 = bank2 / num_banks_per_bg_;
+    return bg1 == bg2;
+}
+
+bool InternalDRAMNetwork::inSameChip(int bank1, int bank2) const {
+    int chip1 = bank1 / (num_banks_per_bg_ * num_bg_per_chip_);
+    int chip2 = bank2 / (num_banks_per_bg_ * num_bg_per_chip_);
+    return chip1 == chip2;
+}
+
 std::shared_ptr<InternalDRAMNetwork> createInternalDRAMNetwork(
     const std::string& dram_type,
     int num_subarrays_per_bank,

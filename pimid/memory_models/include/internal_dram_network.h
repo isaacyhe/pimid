@@ -142,6 +142,85 @@ public:
      */
     void resetStats();
 
+    /**
+     * @brief Calculate network requirements for a data access pattern
+     * @param pe_bank PE's local bank
+     * @param pe_bg PE's local bank group
+     * @param pe_chip PE's local chip
+     * @param data_distribution Map of (bank_id -> bytes) showing data location
+     * @param[out] transfers Vector of required network transfers
+     * @return Total network latency in cycles
+     */
+    uint64_t calculateNetworkRequirements(
+        int pe_bank, int pe_bg, int pe_chip,
+        const std::map<int, uint64_t>& data_distribution,
+        std::vector<InternalDRAMTransfer>& transfers);
+
+    /**
+     * @brief Execute a gather operation (collect data from multiple banks)
+     * @param pe_bank PE's local bank (destination)
+     * @param source_banks Vector of source bank IDs
+     * @param bytes_per_bank Bytes to gather from each bank
+     * @return Total network latency in cycles
+     */
+    uint64_t executeGather(
+        int pe_bank,
+        const std::vector<int>& source_banks,
+        uint64_t bytes_per_bank);
+
+    /**
+     * @brief Execute a scatter operation (distribute data to multiple banks)
+     * @param pe_bank PE's local bank (source)
+     * @param dest_banks Vector of destination bank IDs
+     * @param bytes_per_bank Bytes to scatter to each bank
+     * @return Total network latency in cycles
+     */
+    uint64_t executeScatter(
+        int pe_bank,
+        const std::vector<int>& dest_banks,
+        uint64_t bytes_per_bank);
+
+    /**
+     * @brief Execute a reduction operation (reduce across banks)
+     * @param source_banks Vector of source bank IDs
+     * @param dest_bank Destination bank for reduced result
+     * @param bytes_per_bank Bytes from each bank
+     * @return Total network latency in cycles
+     */
+    uint64_t executeReduce(
+        const std::vector<int>& source_banks,
+        int dest_bank,
+        uint64_t bytes_per_bank);
+
+    /**
+     * @brief Execute a broadcast operation (send to all banks)
+     * @param source_bank Source bank
+     * @param dest_banks Vector of destination banks
+     * @param total_bytes Total bytes to broadcast
+     * @return Total network latency in cycles
+     */
+    uint64_t executeBroadcast(
+        int source_bank,
+        const std::vector<int>& dest_banks,
+        uint64_t total_bytes);
+
+    /**
+     * @brief Get available network bandwidth at a level
+     * @param level Network level
+     * @return Available bandwidth in GB/s
+     */
+    double getAvailableBandwidth(NetworkLevel level) const;
+
+    /**
+     * @brief Check if two banks are in same bank group
+     */
+    bool inSameBankGroup(int bank1, int bank2) const;
+
+    /**
+     * @brief Check if two banks are in same chip
+     */
+    bool inSameChip(int bank1, int bank2) const;
+
 private:
     // DRAM configuration
     std::string dram_type_;

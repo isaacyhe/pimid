@@ -51,6 +51,19 @@ enum class PIMOperationType {
 };
 
 /**
+ * @brief Data Locality Classification
+ *
+ * Classifies whether data is local to the PIM unit or requires network access
+ */
+enum class DataLocality {
+    LOCAL,              // Data is in PE's local memory (no network needed)
+    REMOTE_SAME_BG,     // Data in same bank group, different bank (needs bank network)
+    REMOTE_SAME_CHIP,   // Data in same chip, different BG (needs BG network)
+    REMOTE_SAME_RANK,   // Data in same rank, different chip (needs chip network)
+    REMOTE_EXTERNAL     // Data outside rank (needs rank interface)
+};
+
+/**
  * @brief Internal DRAM Network Transfer
  *
  * When PIM operations need to move data INSIDE the DRAM chip,
@@ -61,8 +74,13 @@ struct InternalDRAMTransfer {
     int dest_bank;             // Destination bank ID (-1 if external)
     int source_subarray;       // Source subarray ID
     int dest_subarray;         // Destination subarray ID
+    int source_bank_group;     // Source bank group ID
+    int dest_bank_group;       // Destination bank group ID
+    int source_chip;           // Source chip ID
+    int dest_chip;             // Destination chip ID
     uint64_t transfer_bytes;   // Amount of data to transfer
     uint64_t network_latency;  // Network latency (cycles)
+    DataLocality locality;     // Type of data access
     bool requires_network;     // Does this need internal network?
 };
 
@@ -88,6 +106,22 @@ struct PIMRequestPayload {
     int target_bank;           // Which bank this accesses
     int target_subarray;       // Which subarray this accesses
     int target_bank_group;     // Which bank group this accesses
+    int target_chip;           // Which chip this accesses
+
+    // Data Locality and Reach
+    uint64_t local_data_bytes;     // Data within PE's local reach (no network)
+    uint64_t remote_data_bytes;    // Data requiring network transfers
+    double local_data_fraction;    // Fraction of data that is local (0.0 - 1.0)
+    DataLocality primary_locality; // Primary data locality classification
+
+    // Data Reach at Each Granularity (in bytes):
+    // - Subarray PIM: Can only access ~8-64 MB per subarray locally
+    // - Bank PIM: Can access ~128-512 MB per bank locally
+    // - BG PIM: Can access ~512 MB - 2 GB per bank group locally
+    // - Chip PIM: Can access ~2-8 GB per chip locally
+    // - Rank PIM: Can access entire rank (8-64 GB) locally
+    // - MC PIM: Can access all ranks through MC
+    uint64_t local_capacity_bytes; // How much data this PE can access locally
 
     // Internal Network Transfers
     std::vector<InternalDRAMTransfer> internal_transfers;
@@ -118,6 +152,12 @@ struct PIMRequestPayload {
           target_bank(-1),
           target_subarray(-1),
           target_bank_group(-1),
+          target_chip(-1),
+          local_data_bytes(0),
+          remote_data_bytes(0),
+          local_data_fraction(1.0),
+          primary_locality(DataLocality::LOCAL),
+          local_capacity_bytes(0),
           port_bitwidth(64),
           effective_bw_GBs(0.0),
           compute_cycles(0),
@@ -166,6 +206,85 @@ struct PIMRequestPayload {
             case PIMOperationType::PIM_BROADCAST: return "PIMBroadcast";
             default: return "Unknown";
         }
+    }
+
+    /**
+     * @brief Get human-readable locality name
+     */
+    const char* getLocalityName() const {
+        switch (primary_locality) {
+            case DataLocality::LOCAL: return "Local";
+            case DataLocality::REMOTE_SAME_BG: return "Remote-SameBG";
+            case DataLocality::REMOTE_SAME_CHIP: return "Remote-SameChip";
+            case DataLocality::REMOTE_SAME_RANK: return "Remote-SameRank";
+            case DataLocality::REMOTE_EXTERNAL: return "Remote-External";
+            default: return "Unknown";
+        }
+    }
+
+    /**
+     * @brief Calculate data locality based on source/dest locations
+     */
+    static DataLocality calculateLocality(
+        PIMGranularity granularity,
+        int pe_bank, int pe_bg, int pe_chip,
+        int data_bank, int data_bg, int data_chip) {
+
+        // Same location = local
+        if (data_bank == pe_bank && data_bg == pe_bg && data_chip == pe_chip) {
+            return DataLocality::LOCAL;
+        }
+
+        // Different bank, same BG
+        if (data_bg == pe_bg && data_chip == pe_chip) {
+            return DataLocality::REMOTE_SAME_BG;
+        }
+
+        // Different BG, same chip
+        if (data_chip == pe_chip) {
+            return DataLocality::REMOTE_SAME_CHIP;
+        }
+
+        // Different chip, same rank
+        return DataLocality::REMOTE_SAME_RANK;
+    }
+
+    /**
+     * @brief Get typical local capacity for each PIM granularity
+     *
+     * This represents how much data a PE can access locally without
+     * needing the internal network. Based on typical DRAM configurations:
+     * - DDR4: 16 banks, 4 bank groups, 8 chips per rank
+     * - Subarray: ~32 MB (16 subarrays per bank, 512 MB / 16)
+     * - Bank: ~512 MB (8 GB rank / 16 banks)
+     * - Bank Group: ~2 GB (8 GB rank / 4 BGs)
+     * - Chip: ~1 GB (8 GB rank / 8 chips)
+     * - Rank: ~8-16 GB (entire rank)
+     */
+    static uint64_t getTypicalLocalCapacity(PIMGranularity granularity) {
+        switch (granularity) {
+            case PIMGranularity::SUBARRAY:
+                return 32ULL * 1024 * 1024;  // 32 MB per subarray
+            case PIMGranularity::BANK:
+                return 512ULL * 1024 * 1024; // 512 MB per bank
+            case PIMGranularity::BANK_GROUP:
+                return 2ULL * 1024 * 1024 * 1024; // 2 GB per bank group
+            case PIMGranularity::CHIP:
+                return 1ULL * 1024 * 1024 * 1024; // 1 GB per chip
+            case PIMGranularity::RANK:
+            case PIMGranularity::MEMORY_CONTROLLER:
+                return 16ULL * 1024 * 1024 * 1024; // 16 GB (full rank)
+            case PIMGranularity::CPU:
+            default:
+                return UINT64_MAX; // CPU can access all memory through cache hierarchy
+        }
+    }
+
+    /**
+     * @brief Calculate network requirement based on access pattern
+     */
+    bool needsNetwork() const {
+        return remote_data_bytes > 0 || requiresInternalNetwork();
     }
 };
 

@@ -138,6 +138,63 @@ public:
      */
     void resetStats();
 
+    /**
+     * @brief Calculate local capacity for a PE at given granularity
+     * @param granularity PIM granularity level
+     * @param pe_id PE identifier
+     * @return Local capacity in bytes
+     */
+    uint64_t calculateLocalCapacity(PIMGranularity granularity, int pe_id) const;
+
+    /**
+     * @brief Determine if data access is local or requires network
+     * @param payload PIM request with PE location
+     * @param data_bank Bank where data resides
+     * @param data_bg Bank group where data resides
+     * @param data_chip Chip where data resides
+     * @return Data locality classification
+     */
+    DataLocality determineDataLocality(
+        const PIMRequestPayload& payload,
+        int data_bank, int data_bg, int data_chip) const;
+
+    /**
+     * @brief Calculate data reach breakdown (local vs remote)
+     * @param payload PIM request
+     * @param total_data_bytes Total data needed
+     * @param data_distribution Map of (bank_id -> bytes) showing where data lives
+     * @param[out] local_bytes Output: bytes that are local
+     * @param[out] remote_bytes Output: bytes requiring network
+     */
+    void calculateDataReach(
+        const PIMRequestPayload& payload,
+        uint64_t total_data_bytes,
+        const std::map<int, uint64_t>& data_distribution,
+        uint64_t& local_bytes,
+        uint64_t& remote_bytes) const;
+
+    /**
+     * @brief Get the bank ID where a PE's local data resides
+     * @param granularity PIM granularity
+     * @param pe_id PE identifier
+     * @return Bank ID for PE's local data
+     */
+    int getPELocalBank(PIMGranularity granularity, int pe_id) const;
+
+    /**
+     * @brief Get the bank group ID for a PE
+     * @param pe_id PE identifier
+     * @return Bank group ID
+     */
+    int getPEBankGroup(int pe_id) const;
+
+    /**
+     * @brief Get the chip ID for a PE
+     * @param pe_id PE identifier
+     * @return Chip ID
+     */
+    int getPEChip(int pe_id) const;
+
 private:
     // DRAM architecture specifications
     std::shared_ptr<pimid::memory::DRAMArchitectureV2> dram_arch_;
