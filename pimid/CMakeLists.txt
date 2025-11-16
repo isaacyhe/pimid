@@ -67,6 +67,26 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/external/cacti/CMakeLists.txt")
     set(HAVE_CACTI ON)
 endif()
 
+# NVSim for NVM modeling
+# NOTE: Temporarily disabled due to C++17 compatibility issues
+# See EXTERNAL_TOOLS_INTEGRATION.md for details
+#if(EXISTS "${PROJECT_SOURCE_DIR}/external/nvsim/CMakeLists.txt")
+#    message(STATUS "  - NVSim NVM analyzer")
+#    add_subdirectory(external/nvsim)
+#    add_definitions(-DHAVE_NVSIM)
+#    set(HAVE_NVSIM ON)
+#endif()
+
+# McPAT for power modeling
+# NOTE: Temporarily disabled due to build errors
+# See EXTERNAL_TOOLS_INTEGRATION.md for details
+#if(EXISTS "${PROJECT_SOURCE_DIR}/external/mcpat/CMakeLists.txt")
+#    message(STATUS "  - McPAT power analyzer")
+#    add_subdirectory(external/mcpat)
+#    add_definitions(-DHAVE_MCPAT)
+#    set(HAVE_MCPAT ON)
+#endif()
+
 # Options
 option(BUILD_PLUGINS "Build plugin system" ON)
 option(BUILD_TOOLS "Build configuration tools" ON)
@@ -96,6 +116,7 @@ set(PIMID_SOURCES
     memory_models/src/nvm_model.cpp
     memory_models/src/ramulator_wrapper.cpp
     memory_models/src/cacti_wrapper.cpp
+    # memory_models/src/nvsim_wrapper.cpp  # Disabled - build issues
 
     # Network (includes GARNET integration)
     network_models/src/network_model.cpp
@@ -103,6 +124,7 @@ set(PIMID_SOURCES
     # Power
     power_models/src/power_model.cpp
     power_models/src/mcpat_model.cpp
+    # power_models/src/mcpat_wrapper.cpp  # Disabled - build issues
 
     # Address translation
     src/address_translation/pe_placement.cpp
@@ -154,6 +176,14 @@ endif()
 
 if(HAVE_CACTI)
     target_link_libraries(pimid_lib cacti)
+endif()
+
+if(HAVE_NVSIM)
+    target_link_libraries(pimid_lib nvsim)
+endif()
+
+if(HAVE_MCPAT)
+    target_link_libraries(pimid_lib mcpat)
 endif()
 
 # Plugin system library
