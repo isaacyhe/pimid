@@ -52,6 +52,7 @@
 #include "mem_ctrls.h"
 #include "network.h"
 #include "null_core.h"
+#include "alu_core.h"
 #include "ooo_core.h"
 #include "part_repl_policies.h"
 #include "pin_cmd.h"
@@ -632,6 +633,7 @@ static void InitSystem(Config& config) {
                 TimingCore* timingCores;
                 OOOCore* oooCores;
                 NullCore* nullCores;
+                ALUCore* aluCores;
             };
             if (type == "Simple") {
                 simpleCores = gm_memalign<SimpleCore>(CACHE_LINE_BYTES, cores);
@@ -642,11 +644,13 @@ static void InitSystem(Config& config) {
                 zinfo->oooDecode = true; //enable uop decoding, this is false by default, must be true if even one OOO cpu is in the system
             } else if (type == "Null") {
                 nullCores = gm_memalign<NullCore>(CACHE_LINE_BYTES, cores);
+            } else if (type == "ALU") {
+                aluCores = gm_memalign<ALUCore>(CACHE_LINE_BYTES, cores);
             } else {
                 panic("%s: Invalid core type %s", group, type.c_str());
             }
 
-            if (type != "Null") {
+            if (type != "Null" && type != "ALU") {
                 string icache = config.get<const char*>(prefix + "icache");
                 string dcache = config.get<const char*>(prefix + "dcache");
 
@@ -699,13 +703,23 @@ static void InitSystem(Config& config) {
                     coreMap[group].push_back(core);
                     coreIdx++;
                 }
-            } else {
-                assert(type == "Null");
+            } else if (type == "Null") {
                 for (uint32_t j = 0; j < cores; j++) {
                     stringstream ss;
                     ss << group << "-" << j;
                     g_string name(ss.str().c_str());
                     Core* core = new (&nullCores[j]) NullCore(name);
+                    coreMap[group].push_back(core);
+                    coreIdx++;
+                }
+            } else {
+                assert(type == "ALU");
+                uint32_t aluLatency = config.get<uint32_t>(prefix + "aluLatency", 1);
+                for (uint32_t j = 0; j < cores; j++) {
+                    stringstream ss;
+                    ss << group << "-" << j;
+                    g_string name(ss.str().c_str());
+                    Core* core = new (&aluCores[j]) ALUCore(name, aluLatency);
                     coreMap[group].push_back(core);
                     coreIdx++;
                 }
