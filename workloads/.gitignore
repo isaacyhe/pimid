@@ -1,0 +1,14 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+
+# Executables
+bfs_pim
+bfs_baseline
+
+# Other build files
+*.out
+*.exe
+*.dSYM/
