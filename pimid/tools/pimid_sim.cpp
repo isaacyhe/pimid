@@ -534,15 +534,17 @@ private:
 
         switch (granularity) {
             case PIMGranularity::CPU:
-                // Host CPU: Can access all channels and ranks in parallel
-                // Interface BW = 64-bit per rank × ranks per channel × num channels
-                return (64.0 / 8.0) * num_channels * ranks_per_channel * freq_GHz;
+                // Host CPU: Can access all channels in parallel
+                // Ranks share the same channel bus (time-multiplexed), only channels add bandwidth
+                // Interface BW = 64-bit per channel × num channels
+                return (64.0 / 8.0) * num_channels * freq_GHz;
 
             case PIMGranularity::MEMORY_CONTROLLER:
-                // MC-PIM: At memory controller, can access ALL channels and ranks!
+                // MC-PIM: At memory controller, can access ALL channels in parallel!
                 // This is the HIGHEST aggregate interface bandwidth
-                // Interface BW = 64-bit per rank × ranks per channel × num channels
-                return (64.0 / 8.0) * num_channels * ranks_per_channel * freq_GHz;
+                // Ranks are time-multiplexed on each channel, only channels add parallel bandwidth
+                // Interface BW = 64-bit per channel × num channels
+                return (64.0 / 8.0) * num_channels * freq_GHz;
 
             case PIMGranularity::RANK:
                 // Rank-PIM: Limited by single rank interface (64-bit)
