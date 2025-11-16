@@ -524,46 +524,51 @@ private:
         double freq_GHz = dram_arch_->timing.clock_freq_mhz / 1000.0;
 
         // Configuration
-        int banks_per_rank = config_.dram.bank_groups * config_.dram.banks_per_group;
-        int banks_per_bg = config_.dram.banks_per_group;
         int num_channels = config_.dram.channels;
-        int ranks_per_channel = config_.dram.ranks_per_channel;
 
-        // Bandwidth is determined by the INTERFACE at each level, not internal parallelism
-        // Internal parallelism affects latency, but interface limits throughput
+        // Bank I/O width depends on device type (x4, x8, x16)
+        // DDR4 x8 device: 8-bit per bank
+        // DDR4 x16 device: 16-bit per bank
+        // This is the internal per-bank I/O width
+        double bank_io_width = 8.0;  // Default: x8 device (8-bit per bank)
+
+        // Rank interface width: typically 64-bit (8 chips × 8-bit each for x8 devices)
+        double rank_interface_width = 64.0;
+
+        // Bandwidth Hierarchy (for LOCAL data):
+        // - Host/MC: External interface, 64-bit per channel × num_channels
+        // - Rank: External rank interface, 64-bit
+        // - Chip/BG/Bank: Internal bank I/O, same width (8-bit or 16-bit per bank)
+        //
+        // Key: Chip/BG/Bank all use the SAME internal bank I/O interface!
 
         switch (granularity) {
             case PIMGranularity::CPU:
                 // Host CPU: Can access all channels in parallel
                 // Ranks share the same channel bus (time-multiplexed), only channels add bandwidth
                 // Interface BW = 64-bit per channel × num channels
-                return (64.0 / 8.0) * num_channels * freq_GHz;
+                return (rank_interface_width / 8.0) * num_channels * freq_GHz;
 
             case PIMGranularity::MEMORY_CONTROLLER:
                 // MC-PIM: At memory controller, can access ALL channels in parallel!
                 // This is the HIGHEST aggregate interface bandwidth
                 // Ranks are time-multiplexed on each channel, only channels add parallel bandwidth
                 // Interface BW = 64-bit per channel × num channels
-                return (64.0 / 8.0) * num_channels * freq_GHz;
+                return (rank_interface_width / 8.0) * num_channels * freq_GHz;
 
             case PIMGranularity::RANK:
-                // Rank-PIM: Limited by single rank interface (64-bit)
-                // Even though it can access all banks internally, data goes through rank interface
-                return (64.0 / 8.0) * freq_GHz;
+                // Rank-PIM: Uses external rank interface (64-bit)
+                // For accessing data across banks within the rank
+                return (rank_interface_width / 8.0) * freq_GHz;
 
             case PIMGranularity::CHIP:
-                // Chip-PIM: Similar to rank, limited by rank interface
-                return (64.0 / 8.0) * freq_GHz;
-
             case PIMGranularity::BANK_GROUP:
-                // BG-PIM: Limited by bank group interface width
-                // Typically narrower than rank interface
-                return (32.0 / 8.0) * freq_GHz;
-
             case PIMGranularity::BANK:
-                // Bank-PIM: Limited to single bank's I/O interface
-                // 8-bit serialization is the CRITICAL BOTTLENECK at bank level!
-                return (8.0 / 8.0) * freq_GHz;
+                // Chip/BG/Bank-PIM: All use internal bank I/O interface
+                // Same bandwidth = bank I/O width (8-bit for x8, 16-bit for x16)
+                // These are INSIDE the chip, accessing local data through bank I/O
+                // CRITICAL BOTTLENECK: 8-bit per bank serialization!
+                return (bank_io_width / 8.0) * freq_GHz;
 
             case PIMGranularity::SUBARRAY:
                 // Subarray-PIM: Can access full row buffer width (256-bit GSA)
@@ -571,7 +576,7 @@ private:
                 return (256.0 / 8.0) * freq_GHz;
 
             default:
-                return (64.0 / 8.0) * freq_GHz;
+                return (rank_interface_width / 8.0) * freq_GHz;
         }
     }
 };
