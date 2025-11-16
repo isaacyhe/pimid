@@ -28,7 +28,13 @@ RamulatorWrapper::RamulatorWrapper(const std::string& config_path)
       cached_write_energy_(0.0),
       cached_leakage_power_(0.0),
       last_energy_update_(0),
-      current_cycle_(0) {
+      current_cycle_(0),
+      pim_enabled_(false),
+      dram_type_("DDR4"),
+      dram_arch_(nullptr),
+      bandwidth_tracker_(nullptr),
+      internal_network_(nullptr),
+      pim_plugin_(nullptr) {
 }
 
 RamulatorWrapper::~RamulatorWrapper() {
@@ -187,6 +193,11 @@ void RamulatorWrapper::tick() {
     if (ramulator_memory_system_) {
         ramulator_memory_system_->tick();
     }
+
+    // Tick PIM components
+    if (pim_enabled_ && pim_plugin_) {
+        pim_plugin_->tick();
+    }
 }
 
 Ramulator::Request RamulatorWrapper::createRamulatorRequest(
@@ -312,6 +323,201 @@ void RamulatorWrapper::resetStats() {
     cached_leakage_power_ = 0.0;
     last_energy_update_ = 0;
     pending_requests_.clear();
+
+    // Reset PIM stats
+    if (pim_enabled_ && pim_plugin_) {
+        pim_plugin_->resetStats();
+    }
+}
+
+// ============================================================================
+// PIM-Specific Methods
+// ============================================================================
+
+void RamulatorWrapper::enablePIMSupport(const std::string& dram_type) {
+    if (pim_enabled_) {
+        std::cout << "PIM support already enabled!\n";
+        return;
+    }
+
+    dram_type_ = dram_type;
+    pim_enabled_ = true;
+
+    std::cout << "Enabling PIM support for " << dram_type_ << "...\n";
+
+    // Create DRAM architecture based on type
+    if (dram_type_ == "DDR4") {
+        dram_arch_ = pimid::memory::createDDR4_2400_Verified();
+    } else if (dram_type_ == "DDR5") {
+        // TODO: Add DDR5 verified specs
+        std::cerr << "DDR5 specs not yet implemented, using DDR4\n";
+        dram_arch_ = pimid::memory::createDDR4_2400_Verified();
+    } else if (dram_type_ == "HBM2") {
+        dram_arch_ = pimid::memory::createHBM2_Verified();
+    } else if (dram_type_ == "HBM3") {
+        // TODO: Add HBM3 verified specs
+        std::cerr << "HBM3 specs not yet implemented, using HBM2\n";
+        dram_arch_ = pimid::memory::createHBM2_Verified();
+    } else {
+        std::cerr << "Unknown DRAM type: " << dram_type_ << ", using DDR4\n";
+        dram_arch_ = pimid::memory::createDDR4_2400_Verified();
+    }
+
+    // Initialize PIM components
+    initializePIMComponents();
+
+    std::cout << "PIM support enabled!\n";
+}
+
+void RamulatorWrapper::initializePIMComponents() {
+    if (!dram_arch_) {
+        std::cerr << "ERROR: DRAM architecture not initialized!\n";
+        return;
+    }
+
+    // Create bandwidth tracker
+    bandwidth_tracker_ = std::make_shared<PIMBandwidthTracker>(dram_arch_);
+
+    // Create PIM controller plugin
+    pim_plugin_ = std::make_shared<PIMControllerPlugin>(dram_arch_, dram_type_);
+
+    // Initialize with DRAM organization
+    // Use organization from Ramulator if available, otherwise use defaults
+    int num_subarrays = 16;  // Typical
+    int num_bank_groups = dram_arch_->organization.bank_groups_per_rank;
+    int num_banks = dram_arch_->organization.banks_per_bank_group * num_bank_groups;
+
+    bandwidth_tracker_->initialize(
+        channels_,
+        ranks_per_channel_,
+        num_bank_groups,
+        num_banks,
+        num_subarrays
+    );
+
+    pim_plugin_->initialize(
+        channels_,
+        ranks_per_channel_,
+        num_bank_groups,
+        num_banks,
+        num_subarrays
+    );
+
+    // Create internal network
+    internal_network_ = createInternalDRAMNetwork(
+        dram_type_,
+        num_subarrays,
+        dram_arch_->organization.banks_per_bank_group,
+        num_bank_groups,
+        8  // chips per rank (typical)
+    );
+
+    std::cout << "PIM components initialized:\n";
+    std::cout << "  Channels: " << channels_ << "\n";
+    std::cout << "  Ranks: " << ranks_per_channel_ << "\n";
+    std::cout << "  Bank Groups: " << num_bank_groups << "\n";
+    std::cout << "  Banks: " << num_banks << "\n";
+    std::cout << "  Subarrays: " << num_subarrays << "\n";
+}
+
+bool RamulatorWrapper::sendPIM(Address addr, MemoryRequestType type,
+                              PIMRequestPayload* pim_payload,
+                              std::function<void(Address)> callback) {
+    if (!pim_enabled_) {
+        std::cerr << "ERROR: PIM support not enabled! Call enablePIMSupport() first.\n";
+        return false;
+    }
+
+    if (!pim_payload) {
+        std::cerr << "ERROR: PIM payload is null!\n";
+        return false;
+    }
+
+    // Create Ramulator request with PIM payload
+    Ramulator::Request req = createPIMRequest(addr, type, pim_payload);
+
+    // Set up callback
+    req.callback = [this, addr, callback, pim_payload](Ramulator::Request& completed_req) {
+        handleRequestCompletion(completed_req);
+
+        // Calculate total latency including PIM-specific components
+        uint64_t total_latency = completed_req.depart - completed_req.arrive;
+        total_latency += pim_payload->data_movement_cycles;
+        total_latency += pim_payload->network_cycles;
+
+        // Call user callback
+        if (callback) {
+            callback(addr);
+        }
+
+        // Call PIM completion callback
+        if (pim_payload->pim_completion_callback) {
+            pim_payload->pim_completion_callback();
+        }
+    };
+
+    // Send to Ramulator
+    if (ramulator_memory_system_) {
+        bool accepted = ramulator_memory_system_->send(req);
+        if (accepted && callback) {
+            pending_requests_.push_back({addr, type, current_cycle_, callback});
+        }
+        return accepted;
+    }
+
+    // Fallback
+    if (callback) {
+        callback(addr);
+    }
+    return true;
+}
+
+Ramulator::Request RamulatorWrapper::createPIMRequest(
+    Address addr, MemoryRequestType type, PIMRequestPayload* pim_payload) {
+
+    int req_type = (type == MemoryRequestType::READ) ?
+                   Ramulator::Request::Type::Read :
+                   Ramulator::Request::Type::Write;
+
+    Ramulator::Request req(static_cast<Ramulator::Addr_t>(addr), req_type);
+
+    // Attach PIM payload
+    req.m_payload = static_cast<void*>(pim_payload);
+
+    return req;
+}
+
+void RamulatorWrapper::registerPE(PIMGranularity granularity, int pe_id, int target_bank) {
+    if (!pim_enabled_) {
+        std::cerr << "WARNING: PIM support not enabled!\n";
+        return;
+    }
+
+    if (pim_plugin_) {
+        pim_plugin_->registerPE(granularity, pe_id, target_bank);
+    }
+}
+
+double RamulatorWrapper::getBandwidthLimit(PIMGranularity granularity) const {
+    if (pim_enabled_ && pim_plugin_) {
+        return pim_plugin_->getBandwidthLimit(granularity);
+    }
+    return 0.0;
+}
+
+int RamulatorWrapper::getPortBitwidth(PIMGranularity granularity) const {
+    if (pim_enabled_ && pim_plugin_) {
+        return pim_plugin_->getPortBitwidth(granularity);
+    }
+    return 0;
+}
+
+double RamulatorWrapper::getEffectiveBandwidthPerPE(PIMGranularity granularity,
+                                                   int target_id) const {
+    if (pim_enabled_ && pim_plugin_) {
+        return pim_plugin_->getEffectiveBandwidthPerPE(granularity, target_id);
+    }
+    return 0.0;
 }
 
 } // namespace pimid

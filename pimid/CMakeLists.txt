@@ -22,6 +22,7 @@ include_directories(
     ${PROJECT_SOURCE_DIR}/memory_models/include
     ${PROJECT_SOURCE_DIR}/network_models/include
     ${PROJECT_SOURCE_DIR}/power_models/include
+    ${PROJECT_SOURCE_DIR}/pimid  # For pimid/memory/dram_architecture_v2.h
     ${PROJECT_SOURCE_DIR}/external
     ${PROJECT_SOURCE_DIR}/external/ramulator/src
     ${PROJECT_SOURCE_DIR}/external/cacti
@@ -113,6 +114,14 @@ set(PIMID_SOURCES
     memory_models/src/ramulator_wrapper.cpp
     memory_models/src/cacti_wrapper.cpp
     memory_models/src/nvsim_wrapper.cpp
+
+    # PIM extensions for Ramulator
+    memory_models/src/pim_bandwidth_tracker.cpp
+    memory_models/src/internal_dram_network.cpp
+    memory_models/src/pim_controller_plugin.cpp
+
+    # DRAM architecture specifications
+    pimid/memory/dram_architecture.cpp
 
     # Network (includes GARNET integration)
     network_models/src/network_model.cpp
