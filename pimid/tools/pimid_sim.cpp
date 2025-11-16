@@ -54,11 +54,9 @@ struct DRAMConfig {
     int banks_per_group;
     int subarrays_per_bank;
 
-    // Interface widths (bits)
-    double rank_interface_width;  // Default: 64-bit
-    double bank_io_width;         // Default: 8-bit (x8 device), 16-bit (x16 device)
-
     // Latency overheads (nanoseconds) - added on top of base DRAM latency
+    // These are SYSTEM-LEVEL overheads (cache, coherence, distance), not DRAM-specific
+    // DRAM-specific parameters come from Ramulator's DRAMArchitectureV2
     struct LatencyOverheads {
         double host_cpu;      // Default: 150ns (cache + coherence + distance)
         double mc_pim;        // Default: 40ns  (MC logic delay)
@@ -507,28 +505,20 @@ private:
     std::shared_ptr<DRAMArchitectureV2> dram_arch_;
 
     void setupDRAMArchitecture() {
-        // Create DRAM architecture based on config
-        dram_arch_ = std::make_shared<DRAMArchitectureV2>(config_.dram.type, "DDR4");
-
-        // Set up based on DRAM type
+        // Use Ramulator's factory functions to get fully initialized DRAM models
+        // These include VERIFIED timing, datapath widths, and bandwidth limits
         if (config_.dram.type.find("DDR4-2400") != std::string::npos) {
-            dram_arch_->timing.clock_freq_mhz = 1200;  // DDR4-2400 = 1200 MHz
-            dram_arch_->timing.tRCD_ns = 13.32;
-            dram_arch_->timing.tCAS_ns = 13.32;
-            dram_arch_->timing.tRP_ns = 13.32;
-        } else if (config_.dram.type.find("DDR4-3200") != std::string::npos) {
-            dram_arch_->timing.clock_freq_mhz = 1600;  // DDR4-3200 = 1600 MHz
-            dram_arch_->timing.tRCD_ns = 13.75;
-            dram_arch_->timing.tCAS_ns = 13.75;
-            dram_arch_->timing.tRP_ns = 13.75;
+            dram_arch_ = createDDR4_2400_Verified();
         } else if (config_.dram.type.find("HBM2") != std::string::npos) {
-            dram_arch_->timing.clock_freq_mhz = 1000;  // HBM2 = 1 GHz
-            dram_arch_->timing.tRCD_ns = 14.0;
-            dram_arch_->timing.tCAS_ns = 14.0;
-            dram_arch_->timing.tRP_ns = 14.0;
+            dram_arch_ = createHBM2_Verified();
+        } else {
+            // Default to DDR4-2400
+            std::cerr << "Warning: Unknown DRAM type '" << config_.dram.type
+                      << "', using DDR4-2400 as default\n";
+            dram_arch_ = createDDR4_2400_Verified();
         }
 
-        // Set organization
+        // Override organization if specified in config
         dram_arch_->organization.subarrays_per_bank = config_.dram.subarrays_per_bank;
         dram_arch_->organization.banks_per_bank_group = config_.dram.banks_per_group;
         dram_arch_->organization.bank_groups_per_chip = config_.dram.bank_groups;
@@ -538,53 +528,54 @@ private:
     double getBandwidthForGranularity(PIMGranularity granularity) const {
         double freq_GHz = dram_arch_->timing.clock_freq_mhz / 1000.0;
 
-        // Configuration
+        // Get interface widths from Ramulator's DRAM architecture
+        // These are VERIFIED from JEDEC specs and academic papers
+        double rank_interface_bits = dram_arch_->datapath.rank_databus_bits.value_bits;
+        double bank_io_bits = dram_arch_->datapath.bank_serialization_bits.value_bits;
+        double gsa_bits = dram_arch_->datapath.gsa_datapath_bits.value_bits;
         int num_channels = config_.dram.channels;
-        double bank_io_width = config_.dram.bank_io_width;
-        double rank_interface_width = config_.dram.rank_interface_width;
 
-        // Bandwidth Hierarchy (for LOCAL data):
-        // - Host/MC: External interface, rank_interface_width per channel × num_channels
-        // - Rank: External rank interface, rank_interface_width
-        // - Chip/BG/Bank: Internal bank I/O, same width (bank_io_width per bank)
-        //
-        // Key: Chip/BG/Bank all use the SAME internal bank I/O interface!
+        // Bandwidth Hierarchy (from Ramulator's verified DRAM model):
+        // - Host/MC: External interface, rank_interface_bits per channel × num_channels
+        // - Rank: External rank interface, rank_interface_bits
+        // - Chip/BG/Bank: Internal bank I/O, bank_io_bits (CRITICAL BOTTLENECK!)
+        // - Subarray: GSA width (widest internal path)
 
         switch (granularity) {
             case PIMGranularity::CPU:
                 // Host CPU: Can access all channels in parallel
                 // Ranks share the same channel bus (time-multiplexed), only channels add bandwidth
-                // Interface BW = rank_interface_width per channel × num channels
-                return (rank_interface_width / 8.0) * num_channels * freq_GHz;
+                // From Ramulator: rank_databus_bits = 64 (DDR4) or 128 (HBM2)
+                return (rank_interface_bits / 8.0) * num_channels * freq_GHz;
 
             case PIMGranularity::MEMORY_CONTROLLER:
                 // MC-PIM: At memory controller, can access ALL channels in parallel!
                 // This is the HIGHEST aggregate interface bandwidth
                 // Ranks are time-multiplexed on each channel, only channels add parallel bandwidth
-                // Interface BW = rank_interface_width per channel × num channels
-                return (rank_interface_width / 8.0) * num_channels * freq_GHz;
+                return (rank_interface_bits / 8.0) * num_channels * freq_GHz;
 
             case PIMGranularity::RANK:
                 // Rank-PIM: Uses external rank interface
-                // For accessing data across banks within the rank
-                return (rank_interface_width / 8.0) * freq_GHz;
+                // From Ramulator: 64-bit (DDR4), 128-bit (HBM2)
+                return (rank_interface_bits / 8.0) * freq_GHz;
 
             case PIMGranularity::CHIP:
             case PIMGranularity::BANK_GROUP:
             case PIMGranularity::BANK:
-                // Chip/BG/Bank-PIM: All use internal bank I/O interface
-                // Same bandwidth = bank I/O width (configurable: 8-bit for x8, 16-bit for x16)
-                // These are INSIDE the chip, accessing local data through bank I/O
-                // CRITICAL BOTTLENECK: bank I/O serialization!
-                return (bank_io_width / 8.0) * freq_GHz;
+                // Chip/BG/Bank-PIM: All use internal bank serialization path
+                // From Ramulator: 8-bit (DDR4), 64-bit (HBM2)
+                // CRITICAL BOTTLENECK: bank_serialization_bits
+                // This is THE limiting factor for bank-level PIM!
+                return (bank_io_bits / 8.0) * freq_GHz;
 
             case PIMGranularity::SUBARRAY:
-                // Subarray-PIM: Can access full row buffer width (256-bit GSA)
-                // Internal bandwidth, highest for compute-in-place
-                return (256.0 / 8.0) * freq_GHz;
+                // Subarray-PIM: Can access Global Sense Amplifier width
+                // From Ramulator: 256-bit (DDR4), 512-bit (HBM2)
+                // Highest internal bandwidth for compute-in-place
+                return (gsa_bits / 8.0) * freq_GHz;
 
             default:
-                return (rank_interface_width / 8.0) * freq_GHz;
+                return (rank_interface_bits / 8.0) * freq_GHz;
         }
     }
 };
@@ -710,11 +701,8 @@ int main(int argc, char* argv[]) {
     config.dram.banks_per_group = parser.getInt("dram.banks_per_group", 4);
     config.dram.subarrays_per_bank = parser.getInt("dram.subarrays_per_bank", 16);
 
-    // Interface widths (bits)
-    config.dram.rank_interface_width = parser.getDouble("dram.rank_interface_width", 64.0);
-    config.dram.bank_io_width = parser.getDouble("dram.bank_io_width", 8.0);
-
-    // Latency overheads (nanoseconds)
+    // Latency overheads (nanoseconds) - SYSTEM-LEVEL, not DRAM-specific
+    // DRAM-specific parameters (interface widths, timing) come from Ramulator
     config.dram.latency_overheads.host_cpu = parser.getDouble("dram.latency_overhead_host_cpu", 150.0);
     config.dram.latency_overheads.mc_pim = parser.getDouble("dram.latency_overhead_mc_pim", 40.0);
     config.dram.latency_overheads.rank_pim = parser.getDouble("dram.latency_overhead_rank_pim", 15.0);

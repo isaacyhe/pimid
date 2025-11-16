@@ -25,12 +25,21 @@ dram:
   banks_per_group: 4     # Total banks = bank_groups × banks_per_group = 16
   subarrays_per_bank: 16
 
-  # Interface widths (bits)
-  rank_interface_width: 64.0    # External rank interface (default: 64-bit)
-  bank_io_width: 8.0            # Internal bank I/O (8-bit for x8, 16-bit for x16 devices)
+  # Interface widths and timing come from Ramulator's DRAMArchitectureV2
+  # For DDR4-2400:
+  #   - rank_databus: 64-bit (JEDEC verified)
+  #   - bank_serialization: 8-bit (estimated from bandwidth limits)
+  #   - GSA: 256-bit (from DAS-MICRO15 paper)
+  # For HBM2:
+  #   - rank_databus: 128-bit (JEDEC verified)
+  #   - bank_serialization: 64-bit (wider due to TSV)
+  #   - GSA: 512-bit
+  # To customize, modify pimid/memory/dram_architecture_v2.h
 
-  # Latency overheads (nanoseconds) - added on top of base DRAM latency (tRCD + tCAS)
-  # These represent the overhead from proximity to data and system complexity
+  # Latency overheads (nanoseconds) - SYSTEM-LEVEL parameters
+  # These represent system-level overhead (cache, coherence, distance), not DRAM timing
+  # DRAM timing (tRCD, tCAS, etc.) comes from Ramulator's DRAMArchitectureV2
+  # Added on top of base DRAM latency (tRCD + tCAS ~27ns for DDR4-2400)
   latency_overhead_host_cpu: 150.0   # Host: cache + coherence + distance (~180ns total)
   latency_overhead_mc_pim: 40.0      # MC-PIM: MC logic delay (~70ns total)
   latency_overhead_rank_pim: 15.0    # Rank-PIM: minimal MC overhead (~42ns total)
