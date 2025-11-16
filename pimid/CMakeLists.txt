@@ -46,6 +46,7 @@ set(PIMID_SOURCES
 
     # Host engine
     src/host_engine/host_engine.cpp
+    src/host_engine/host_interconnect.cpp
 
     # Device engine
     src/device_engine/device_engine.cpp
@@ -59,9 +60,8 @@ set(PIMID_SOURCES
     src/memory_models/sram_model.cpp
     src/memory_models/nvm_model.cpp
 
-    # Network
+    # Network (includes GARNET integration)
     src/network/network_model.cpp
-    src/network/garnet_model.cpp
 
     # Power
     src/power/power_model.cpp
