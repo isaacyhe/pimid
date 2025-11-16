@@ -157,10 +157,10 @@ void NVSimWrapper::createNVSimInput() {
 
     // Design target
     if (config_.is_cache) {
-        nvsim_input_->designTarget = cache_;
+        nvsim_input_->designTarget = cache;
         nvsim_input_->associativity = config_.associativity;
     } else {
-        nvsim_input_->designTarget = RAM_;
+        nvsim_input_->designTarget = RAM_chip;
         nvsim_input_->associativity = 1;
     }
 
@@ -211,19 +211,25 @@ void NVSimWrapper::loadCellParameters() {
     // For now, we use defaults based on NVM type
     switch (config_.nvm_type) {
         case NVMType::STTRAM:
-            nvsim_cell_->memCellType = STTRAM;
+            nvsim_cell_->memCellType = MRAM;  // STT-RAM is a type of MRAM
             break;
         case NVMType::PCRAM:
             nvsim_cell_->memCellType = PCRAM;
             break;
         case NVMType::RERAM:
-            nvsim_cell_->memCellType = RRAM;
+            nvsim_cell_->memCellType = memristor;  // ReRAM/memristor
             break;
         case NVMType::SLCNAND:
             nvsim_cell_->memCellType = SLCNAND;
             break;
+        case NVMType::MLCNAND:
+            nvsim_cell_->memCellType = MLCNAND;
+            break;
+        case NVMType::FBDRAM:
+            nvsim_cell_->memCellType = FBRAM;
+            break;
         default:
-            nvsim_cell_->memCellType = STTRAM;
+            nvsim_cell_->memCellType = MRAM;
     }
 }
 

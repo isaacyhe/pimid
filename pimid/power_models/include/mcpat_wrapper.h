@@ -129,9 +129,7 @@ public:
     double getCorePower() const;           // Total power for all cores
     double getCachePower() const;          // Total cache hierarchy power
     double getMemoryControllerPower() const;
-    double getNoCP
-
-ower() const;
+    double getNoCPower() const;
 
     // Area queries
     double getComponentArea(ComponentType component) const;  // mm^2
