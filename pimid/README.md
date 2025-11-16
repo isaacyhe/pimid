@@ -80,10 +80,10 @@ PIMID is a comprehensive full-system simulator for Processing-in-Memory (PIM) ar
 - **CMake**: Version ≥ 3.15
 - **Boost**: System and filesystem libraries
 - **yaml-cpp**: For configuration parsing (optional but recommended)
-- **Intel Pin**: For ZSim (Pin 2.14 or Pin 3.x supported - see external/zsim/PIN3_UPGRADE.md)
+- **Intel Pin**: For ZSim (Pin 3.28+ recommended for Ubuntu 24.04, Pin 2.14 for Ubuntu 18.04 - see external/zsim/PIN3_UPGRADE.md)
 
 #### External Simulators (✅ Included as Git Submodules)
-- **ZSim**: For CPU simulation (**Pin 3.x compatible!**)
+- **ZSim**: For CPU simulation (**Pin 3.x compatible - works on Ubuntu 24.04!**)
 - **Ramulator2**: For DRAM modeling (DDR4/5, LPDDR4/5, HBM2/3, GDDR6)
 - **CACTI**: For SRAM modeling
 - **NVSim**: For NVM modeling (STT-RAM, PCM, ReRAM)
