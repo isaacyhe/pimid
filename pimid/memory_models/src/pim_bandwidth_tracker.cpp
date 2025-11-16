@@ -54,7 +54,7 @@ void PIMBandwidthTracker::initializeBandwidthLimits() {
     }
 
     // Get clock frequency
-    clock_freq_GHz_ = dram_arch_->timing.frequency_MHz / 1000.0;
+    clock_freq_GHz_ = dram_arch_->timing.clock_freq_mhz / 1000.0;
 
     // CRITICAL: Use our verified internal port bitwidths!
 
@@ -65,7 +65,7 @@ void PIMBandwidthTracker::initializeBandwidthLimits() {
     bank_port_bits_ = dram_arch_->datapath.bank_serialization_bits.value_bits;
 
     // Rank: Standard wide interface (64 bits DDR4, 128 bits HBM2)
-    rank_port_bits_ = dram_arch_->datapath.rank_data_bus_bits.value_bits;
+    rank_port_bits_ = dram_arch_->datapath.rank_databus_bits.value_bits;
 
     // Chip: External I/O (8 bits for x8 DDR4, 1024 bits for HBM2)
     chip_port_bits_ = dram_arch_->datapath.chip_io_bits.value_bits;
@@ -90,7 +90,7 @@ void PIMBandwidthTracker::initializeBandwidthLimits() {
     std::cout << "  Bank (serialization):  " << bank_port_bits_
               << " bits (" << dram_arch_->datapath.bank_serialization_bits.source << ")\n";
     std::cout << "  Rank (interface):      " << rank_port_bits_
-              << " bits (" << dram_arch_->datapath.rank_data_bus_bits.source << ")\n";
+              << " bits (" << dram_arch_->datapath.rank_databus_bits.source << ")\n";
 }
 
 uint64_t PIMBandwidthTracker::requestBandwidth(const PIMRequestPayload& payload,

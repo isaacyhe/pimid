@@ -51,6 +51,15 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_pim_compute_comparison.cpp)
     add_test(NAME PIMComputeComparison COMMAND test_pim_compute_comparison)
 endif()
 
+# Host vs MC-PIM vs Bank-PIM with latency modeling
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_pim_with_latency.cpp)
+    add_executable(test_pim_with_latency test_pim_with_latency.cpp)
+    target_compile_options(test_pim_with_latency PRIVATE -std=c++17)
+    # Note: This test adds DRAM latency, row buffer hits, and network latency
+    # target_link_libraries(test_pim_with_latency pimid_lib)
+    add_test(NAME PIMWithLatency COMMAND test_pim_with_latency)
+endif()
+
 # TODO: Link with actual PIMID libraries when available
 # target_link_libraries(test_pim_full_system
 #     pimid_lib
