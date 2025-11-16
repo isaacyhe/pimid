@@ -198,10 +198,28 @@ InputParameter* CACTIWrapper::createCACTIInput(const SRAMConfig& config) {
     input->is_3d_mem = false;
     input->print_detail_debug = false;
 
+    // Main memory parameters (set defaults even for cache)
+    input->page_sz_bits = 8192;
+    input->burst_len = 8;
+    input->int_prefetch_w = 8;
+
+    // Repeater parameters
+    input->rpters_in_htree = true;
+    input->ver_htree_wires_over_array = 0;
+    input->broadcast_addr_din_over_ver_htrees = 0;
+
     // Other flags
     input->force_cache_config = false;
     input->print_input_args = false;
-    input->rpters_in_htree = true;
+    input->nsets = 0;  // Let CACTI calculate
+    input->block_sz = config.line_size;
+    input->tag_assoc = 1;
+    input->data_assoc = 1;
+    input->is_seq_acc = false;
+    input->fully_assoc = false;
+
+    // Additional parameters
+    input->add_ecc_b_ = false;
 
     return input;
 }
