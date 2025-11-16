@@ -167,11 +167,11 @@ std::vector<PIMArchitecture> createArchitectures() {
         CYAN
     });
 
-    // 2. Bank-level PIM
-    // Each bank has dedicated port → NO CONTENTION within bank
+    // 2. Bank-level PIM (Multiple PEs per bank)
+    // 4 PEs per bank share the port, but BANK-level BW is still 19.2 GB/s
     archs.push_back({
         "Bank-PIM",
-        "Compute at each bank",
+        "Compute at each bank (4 PEs per bank)",
         TOTAL_COMPUTE_UNITS / 16,  // 4 units per bank
         COMPUTE_POWER_PER_UNIT,
         DDR4::BANK_LATENCY_ns,
@@ -179,9 +179,9 @@ std::vector<PIMArchitecture> createArchitectures() {
         DDR4::BANK_ENERGY_pJ,
         16,  // 16 banks total
         DDR4::BANK_SIZE_MB * 1024,
-        1,   // Each bank has dedicated port (NO contention)
+        1,   // Each bank has dedicated port (no inter-bank contention)
         DDR4::BANK_PORT_BW_GBs,  // 19.2 GB/s per bank
-        DDR4::BANK_PORT_BW_GBs,  // Full bandwidth available
+        DDR4::BANK_PORT_BW_GBs,  // 19.2 GB/s effective (intra-bank sharing doesn't limit bank-level transfer)
         BLUE
     });
 
@@ -296,11 +296,12 @@ WorkloadResult simulateVectorAdd(const PIMArchitecture& arch, size_t vector_size
     const size_t element_size = 8;  // 8 bytes (double precision)
     const size_t total_data_bytes = vector_size_elements * element_size * 3;  // Read A, B, write C
 
-    // Compute time (same for all architectures!)
+    // Compute time - calculated PER UNIT (partition)
     const double ops_per_element = 1;  // One addition
     const double total_ops = vector_size_elements * ops_per_element;
-    const double total_compute_gflops = arch.num_compute_units * arch.compute_power_gflops;
-    result.compute_time_us = (total_ops / (total_compute_gflops * 1e9)) * 1e6;  // ops / (GFLOPS * 1e9 ops/s) * 1e6 us/s
+    const double ops_per_unit = total_ops / arch.total_units;  // Each partition processes its share
+    const double total_compute_gflops = arch.num_compute_units * arch.compute_power_gflops;  // Compute power per partition
+    result.compute_time_us = (ops_per_unit / (total_compute_gflops * 1e9)) * 1e6;  // Time for one partition
 
     // Data movement time (DIFFERS by architecture!)
     result.data_transferred_bytes = total_data_bytes;
