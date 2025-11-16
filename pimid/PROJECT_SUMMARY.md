@@ -144,12 +144,12 @@ pimid/
 ├── scripts/                    # Utility scripts
 │
 └── external/                   # External dependencies
-    ├── zsim/                  # (to be added)
-    ├── ramulator/             # (to be added)
-    ├── cacti/                 # (to be added)
-    ├── nvsim/                 # (to be added)
-    ├── garnet/                # (to be added)
-    └── mcpat/                 # (to be added)
+    ├── zsim/                  # ✅ Added (Pin 3.x compatible!)
+    ├── ramulator/             # ✅ Added (Ramulator2)
+    ├── cacti/                 # ✅ Added
+    ├── nvsim/                 # ✅ Added
+    ├── gem5/                  # ✅ Added (for GARNET)
+    └── mcpat/                 # ✅ Added
 ```
 
 ## Key Features Implemented

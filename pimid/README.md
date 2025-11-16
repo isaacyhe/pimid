@@ -80,12 +80,17 @@ PIMID is a comprehensive full-system simulator for Processing-in-Memory (PIM) ar
 - **CMake**: Version ≥ 3.15
 - **Boost**: System and filesystem libraries
 - **yaml-cpp**: For configuration parsing (optional but recommended)
-- **ZSim**: For CPU simulation (included in external/)
-- **Ramulator**: For DRAM modeling (included in external/)
-- **CACTI**: For SRAM modeling (included in external/)
-- **NVSim**: For NVM modeling (included in external/)
-- **GARNET**: For network modeling (gem5 component, included in external/)
-- **McPAT**: For power modeling (included in external/)
+- **Intel Pin**: For ZSim (Pin 2.14 or Pin 3.x supported - see external/zsim/PIN3_UPGRADE.md)
+
+#### External Simulators (✅ Included as Git Submodules)
+- **ZSim**: For CPU simulation (**Pin 3.x compatible!**)
+- **Ramulator2**: For DRAM modeling (DDR4/5, LPDDR4/5, HBM2/3, GDDR6)
+- **CACTI**: For SRAM modeling
+- **NVSim**: For NVM modeling (STT-RAM, PCM, ReRAM)
+- **GARNET**: For network modeling (from gem5)
+- **McPAT**: For power modeling
+
+See [external/README.md](external/README.md) for detailed information on each simulator.
 
 ### Build Instructions
 
@@ -93,6 +98,12 @@ PIMID is a comprehensive full-system simulator for Processing-in-Memory (PIM) ar
 # Clone the repository
 git clone https://github.com/yourusername/pimid.git
 cd pimid
+
+# Initialize and update submodules (required for external simulators)
+git submodule update --init --recursive
+
+# Build external dependencies (optional, can be done separately)
+# See external/README.md for details
 
 # Create build directory
 mkdir build && cd build
@@ -109,6 +120,8 @@ sudo make install
 # Run tests
 make test
 ```
+
+**Note**: The external simulators are included as git submodules. Make sure to run `git submodule update --init --recursive` after cloning.
 
 ### Build Options
 
