@@ -1,13 +1,8 @@
 # PIMID Test Suite
 
-# Unit tests
-add_subdirectory(unit)
-
-# Integration tests
-add_subdirectory(integration)
-
-# Benchmark tests
-add_subdirectory(benchmarks)
+# Enable testing
+include(CTest)
+enable_testing()
 
 # Test utilities
 set(TEST_UTILS
@@ -17,17 +12,25 @@ set(TEST_UTILS
 add_library(test_utils STATIC ${TEST_UTILS})
 target_link_libraries(test_utils pimid_lib)
 
-# Add test discovery
-include(CTest)
+# Unit tests
+add_subdirectory(unit)
 
-# Example unit test
-add_executable(test_memory_model unit/test_memory_model.cpp)
-target_link_libraries(test_memory_model pimid_lib test_utils)
-add_test(NAME MemoryModelTest COMMAND test_memory_model)
+# Integration tests
+add_subdirectory(integration)
 
-# Example integration test
-add_executable(test_host_device_comm integration/test_host_device_comm.cpp)
-target_link_libraries(test_host_device_comm pimid_lib test_utils)
-add_test(NAME HostDeviceCommTest COMMAND test_host_device_comm)
+# Benchmark tests
+add_subdirectory(benchmarks)
 
-# Add more tests as they are implemented
+# Example unit test (if not in subdirectory)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/unit/test_memory_model.cpp)
+    add_executable(test_memory_model unit/test_memory_model.cpp)
+    target_link_libraries(test_memory_model pimid_lib test_utils)
+    add_test(NAME MemoryModelTest COMMAND test_memory_model)
+endif()
+
+# Example integration test (if not in subdirectory)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_host_device_comm.cpp)
+    add_executable(test_host_device_comm integration/test_host_device_comm.cpp)
+    target_link_libraries(test_host_device_comm pimid_lib test_utils)
+    add_test(NAME HostDeviceCommTest COMMAND test_host_device_comm)
+endif()
