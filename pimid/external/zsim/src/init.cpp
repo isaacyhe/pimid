@@ -966,6 +966,14 @@ void SimInit(const char* configFile, const char* outputDir, uint32_t shmid) {
     zinfo->lineSize = config.get<uint32_t>("sys.lineSize", 64);
     assert(zinfo->lineSize > 0);
 
+    // SIMD width configuration (128, 256, 512 bits)
+    zinfo->simdWidth = config.get<uint32_t>("sys.simdWidth", 128);
+    if (zinfo->simdWidth != 128 && zinfo->simdWidth != 256 && zinfo->simdWidth != 512) {
+        warn("Invalid SIMD width %d, using default 128 bits (SSE)", zinfo->simdWidth);
+        zinfo->simdWidth = 128;
+    }
+    info("SIMD width: %d bits", zinfo->simdWidth);
+
     //Port virtualization
     for (uint32_t i = 0; i < MAX_PORT_DOMAINS; i++) zinfo->portVirt[i] = new PortVirtualizer();
 

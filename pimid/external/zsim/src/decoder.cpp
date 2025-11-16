@@ -34,6 +34,7 @@
 #include "core.h"
 #include "locks.h"
 #include "log.h"
+#include "zsim.h"  // For zinfo->simdWidth
 
 extern "C" {
 #include "xed-interface.h"
@@ -945,6 +946,15 @@ bool Decoder::decodeInstr(INS ins, DynUopVec& uops) {
                     default:
                         inaccurate = true;
                 }
+
+                // Apply SIMD width scaling to latencies
+                // 128-bit (SSE): 1×, 256-bit (AVX): 2×, 512-bit (AVX-512): 4×
+                uint32_t simdScale = (zinfo->simdWidth == 512) ? 4 : (zinfo->simdWidth == 256) ? 2 : 1;
+                if (simdScale > 1) {
+                    lat *= simdScale;
+                    extraSlots = (extraSlots > 0) ? (extraSlots * simdScale) : 0;
+                }
+
                 emitBasicOp(instr, uops, lat, ports, extraSlots);
             }
             break;
