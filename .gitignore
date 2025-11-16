@@ -29,3 +29,19 @@ Makefile
 # OS
 .DS_Store
 Thumbs.db
+# Build artifacts - MPICH workloads
+workloads/mpich_examples/vector_dotproduct
+workloads/mpich_examples/matrix_multiply
+workloads/mpich_examples/graph_pagerank
+
+# Compiled executables
+*.o
+*.exe
+*.out
+*.app
+
+# Temporary files
+*.swp
+*.swo
+*~
+.DS_Store
