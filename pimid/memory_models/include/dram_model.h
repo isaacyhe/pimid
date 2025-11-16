@@ -4,8 +4,12 @@
 #include "memory_model.h"
 #include <queue>
 #include <map>
+#include <memory>
 
 namespace pimid {
+
+// Forward declaration
+class RamulatorWrapper;
 
 /**
  * DRAM memory model using Ramulator
@@ -14,7 +18,7 @@ namespace pimid {
 class DRAMModel : public MemoryModel {
 public:
     explicit DRAMModel(const std::string& config_path);
-    ~DRAMModel() override = default;
+    ~DRAMModel() override;  // Defined in .cpp for unique_ptr<RamulatorWrapper>
 
     // MemoryModel interface implementation
     void initialize() override;
@@ -57,8 +61,8 @@ private:
 
     DRAMConfig dram_config_;
 
-    // Ramulator interface (placeholder - will integrate actual Ramulator)
-    void* ramulator_instance_;  // Pointer to Ramulator wrapper
+    // Ramulator interface
+    std::unique_ptr<RamulatorWrapper> ramulator_instance_;
 
     // Request queue
     std::queue<MemoryRequest> pending_requests_;

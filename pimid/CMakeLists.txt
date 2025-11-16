@@ -23,6 +23,10 @@ include_directories(
     ${PROJECT_SOURCE_DIR}/network_models/include
     ${PROJECT_SOURCE_DIR}/power_models/include
     ${PROJECT_SOURCE_DIR}/external
+    ${PROJECT_SOURCE_DIR}/external/ramulator/src
+    ${PROJECT_SOURCE_DIR}/external/cacti
+    ${PROJECT_SOURCE_DIR}/external/nvsim
+    ${PROJECT_SOURCE_DIR}/external/mcpat
 )
 
 # Find required packages
@@ -38,6 +42,21 @@ endif()
 find_package(yaml-cpp)
 if(yaml-cpp_FOUND)
     add_definitions(-DHAVE_YAML_CPP)
+endif()
+
+# Build external models
+message(STATUS "Building external models...")
+
+# Ramulator2 for DRAM modeling
+if(EXISTS "${PROJECT_SOURCE_DIR}/external/ramulator/CMakeLists.txt")
+    message(STATUS "  - Ramulator2 DRAM simulator")
+    # Ramulator requires C++20
+    set(OLD_CXX_STANDARD ${CMAKE_CXX_STANDARD})
+    set(CMAKE_CXX_STANDARD 20)
+    add_subdirectory(external/ramulator)
+    set(CMAKE_CXX_STANDARD ${OLD_CXX_STANDARD})
+    add_definitions(-DHAVE_RAMULATOR)
+    set(HAVE_RAMULATOR ON)
 endif()
 
 # Options
@@ -67,6 +86,7 @@ set(PIMID_SOURCES
     memory_models/src/dram_model.cpp
     memory_models/src/sram_model.cpp
     memory_models/src/nvm_model.cpp
+    memory_models/src/ramulator_wrapper.cpp
 
     # Network (includes GARNET integration)
     network_models/src/network_model.cpp
@@ -116,6 +136,11 @@ endif()
 
 if(yaml-cpp_FOUND)
     target_link_libraries(pimid_lib yaml-cpp)
+endif()
+
+# Link external models
+if(HAVE_RAMULATOR)
+    target_link_libraries(pimid_lib ramulator)
 endif()
 
 # Plugin system library

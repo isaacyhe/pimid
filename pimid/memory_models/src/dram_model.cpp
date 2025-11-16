@@ -1,4 +1,5 @@
 #include "dram_model.h"
+#include "ramulator_wrapper.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -13,7 +14,6 @@ namespace pimid {
 
 DRAMModel::DRAMModel(const std::string& config_path)
     : MemoryModel(MemoryTechnology::DRAM, config_path)
-    , ramulator_instance_(nullptr)
     , total_reads_(0)
     , total_writes_(0)
     , row_hits_(0)
@@ -40,14 +40,26 @@ DRAMModel::DRAMModel(const std::string& config_path)
     dram_config_.tRCD = 17;  // RAS to CAS delay
     dram_config_.tRP = 17;   // Row precharge time
     dram_config_.tRAS = 39;  // Row active time
+
+    // Create Ramulator wrapper instance
+    ramulator_instance_ = std::make_unique<RamulatorWrapper>(config_path);
+}
+
+DRAMModel::~DRAMModel() {
+    // Destructor defined here where RamulatorWrapper is complete
 }
 
 void DRAMModel::initialize() {
-    std::cout << "[DRAMModel] Initializing DRAM model..." << std::endl;
+    std::cout << "[DRAMModel] Initializing DRAM model with Ramulator2..." << std::endl;
     loadConfig(config_path_);
 
-    // TODO: Initialize Ramulator instance when integrated
-    // ramulator_instance_ = new RamulatorWrapper(dram_config_);
+    // Initialize Ramulator wrapper
+    if (ramulator_instance_) {
+        ramulator_instance_->initialize();
+        capacity_ = ramulator_instance_->getCapacity();
+        bandwidth_ = ramulator_instance_->getBandwidth();
+        std::cout << "[DRAMModel] Using Ramulator2 for cycle-accurate DRAM simulation" << std::endl;
+    }
 
     std::cout << "[DRAMModel] Configuration:" << std::endl;
     std::cout << "  Standard: " << dram_config_.standard << std::endl;
@@ -77,7 +89,22 @@ void DRAMModel::loadConfig(const std::string& config_path) {
 }
 
 Cycle DRAMModel::access(const MemoryRequest& req) {
-    // Calculate access latency
+    // If Ramulator is available, send request to it
+    if (ramulator_instance_) {
+        // Send request to Ramulator
+        bool accepted = ramulator_instance_->send(req.addr, req.type);
+
+        if (!accepted) {
+            // Request queue is full, return high latency penalty
+            return 1000;
+        }
+
+        // Ramulator will track the request
+        // Return estimated latency
+        return ramulator_instance_->getAverageLatency();
+    }
+
+    // Fallback: Calculate access latency
     Cycle latency = calculateLatency(req);
 
     // Update statistics
@@ -105,7 +132,12 @@ Cycle DRAMModel::access(const MemoryRequest& req) {
 }
 
 bool DRAMModel::canAccept(const MemoryRequest& req) {
-    // Check if request queue has space
+    // If Ramulator is available, use its queue status
+    if (ramulator_instance_) {
+        return ramulator_instance_->canAccept();
+    }
+
+    // Fallback: Check if request queue has space
     const size_t MAX_PENDING_REQUESTS = 64;
     return pending_requests_.size() < MAX_PENDING_REQUESTS;
 }
@@ -113,16 +145,30 @@ bool DRAMModel::canAccept(const MemoryRequest& req) {
 void DRAMModel::tick() {
     current_cycle_++;
 
-    // TODO: When Ramulator is integrated, call ramulator->tick()
+    // Tick Ramulator if available
+    if (ramulator_instance_) {
+        ramulator_instance_->tick();
 
-    // Process pending requests
-    if (!pending_requests_.empty()) {
-        // Simple model: process one request per tick if ready
-        pending_requests_.pop();
+        // Update statistics from Ramulator
+        total_reads_ = ramulator_instance_->getTotalReads();
+        total_writes_ = ramulator_instance_->getTotalWrites();
+        row_hits_ = ramulator_instance_->getRowHits();
+        row_misses_ = ramulator_instance_->getRowMisses();
+        row_conflicts_ = ramulator_instance_->getRowConflicts();
+
+        // Update energy metrics
+        read_energy_ = ramulator_instance_->getReadEnergy();
+        write_energy_ = ramulator_instance_->getWriteEnergy();
+        leakage_power_ = ramulator_instance_->getLeakagePower();
+        activation_energy_ = ramulator_instance_->getActivationEnergy();
+        precharge_energy_ = ramulator_instance_->getPrechargeEnergy();
+    } else {
+        // Fallback: simple model
+        if (!pending_requests_.empty()) {
+            pending_requests_.pop();
+        }
+        leakage_power_ = 1.5; // W (typical DDR4 idle power)
     }
-
-    // Accumulate leakage energy
-    leakage_power_ = 1.5; // W (typical DDR4 idle power)
 }
 
 Cycle DRAMModel::getLatency(MemoryRequestType type) const {
