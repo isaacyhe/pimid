@@ -18,6 +18,9 @@ enable_testing()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Memory architecture tests
+add_subdirectory(memory)
+
 # Functional tests (component-level)
 add_subdirectory(functional)
 
