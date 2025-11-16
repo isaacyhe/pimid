@@ -19,6 +19,9 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 # Include directories
 include_directories(
     ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/memory_models/include
+    ${PROJECT_SOURCE_DIR}/network_models/include
+    ${PROJECT_SOURCE_DIR}/power_models/include
     ${PROJECT_SOURCE_DIR}/external
 )
 
@@ -55,17 +58,17 @@ set(PIMID_SOURCES
     src/communication/socket_comm.cpp
 
     # Memory models
-    src/memory_models/memory_model.cpp
-    src/memory_models/dram_model.cpp
-    src/memory_models/sram_model.cpp
-    src/memory_models/nvm_model.cpp
+    memory_models/src/memory_model.cpp
+    memory_models/src/dram_model.cpp
+    memory_models/src/sram_model.cpp
+    memory_models/src/nvm_model.cpp
 
     # Network (includes GARNET integration)
-    src/network/network_model.cpp
+    network_models/src/network_model.cpp
 
     # Power
-    src/power/power_model.cpp
-    src/power/mcpat_model.cpp
+    power_models/src/power_model.cpp
+    power_models/src/mcpat_model.cpp
 
     # Address translation
     src/address_translation/pe_placement.cpp
