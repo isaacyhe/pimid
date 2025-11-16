@@ -32,6 +32,11 @@ if(yaml-cpp_FOUND)
     add_definitions(-DHAVE_YAML_CPP)
 endif()
 
+# Options
+option(BUILD_PLUGINS "Build plugin system" ON)
+option(BUILD_TOOLS "Build configuration tools" ON)
+option(BUILD_EXAMPLES "Build example plugins" ON)
+
 # Source files
 set(PIMID_SOURCES
     # Common
@@ -76,29 +81,72 @@ set(PIMID_SOURCES
     src/pimid.cpp
 )
 
-# PIMID library
+# Plugin system sources
+set(PIMID_PLUGIN_SOURCES
+    src/plugin/plugin_interface.cpp
+    src/plugin/memory_model_plugin.cpp
+    src/plugin/scheduler_plugin.cpp
+)
+
+# Configuration system sources
+set(PIMID_CONFIG_SOURCES
+    src/config/config_schema.cpp
+    src/config/config_validator.cpp
+    src/config/config_manager.cpp
+)
+
+# PIMID core library
 add_library(pimid_lib STATIC ${PIMID_SOURCES})
 target_link_libraries(pimid_lib
     Threads::Threads
     Boost::system
     Boost::filesystem
+    ${CMAKE_DL_LIBS}
 )
 
 if(yaml-cpp_FOUND)
     target_link_libraries(pimid_lib yaml-cpp)
 endif()
 
+# Plugin system library
+if(BUILD_PLUGINS)
+    add_library(pimid_plugin SHARED ${PIMID_PLUGIN_SOURCES})
+    target_link_libraries(pimid_plugin
+        pimid_lib
+        ${CMAKE_DL_LIBS}
+    )
+endif()
+
+# Configuration system library
+if(BUILD_PLUGINS)
+    add_library(pimid_config SHARED ${PIMID_CONFIG_SOURCES})
+    target_link_libraries(pimid_config
+        pimid_lib
+        pimid_plugin
+        yaml-cpp
+    )
+endif()
+
 # Host simulator executable
 add_executable(pimid_host src/host_main.cpp)
 target_link_libraries(pimid_host pimid_lib)
+if(BUILD_PLUGINS)
+    target_link_libraries(pimid_host pimid_plugin pimid_config)
+endif()
 
 # Device simulator executable
 add_executable(pimid_device src/device_main.cpp)
 target_link_libraries(pimid_device pimid_lib)
+if(BUILD_PLUGINS)
+    target_link_libraries(pimid_device pimid_plugin pimid_config)
+endif()
 
 # Standalone simulator (single-process mode for debugging)
 add_executable(pimid_standalone src/standalone_main.cpp)
 target_link_libraries(pimid_standalone pimid_lib)
+if(BUILD_PLUGINS)
+    target_link_libraries(pimid_standalone pimid_plugin pimid_config)
+endif()
 
 # Install targets
 install(TARGETS pimid_lib pimid_host pimid_device pimid_standalone
