@@ -42,6 +42,15 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_pim_simple_validation.cpp)
     add_test(NAME PIMSimpleValidation COMMAND test_pim_simple_validation)
 endif()
 
+# Host vs MC-PIM vs Bank-PIM compute comparison (with equal compute power)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_pim_compute_comparison.cpp)
+    add_executable(test_pim_compute_comparison test_pim_compute_comparison.cpp)
+    target_compile_options(test_pim_compute_comparison PRIVATE -std=c++17)
+    # Note: This test demonstrates the new PIM bandwidth modeling features
+    # target_link_libraries(test_pim_compute_comparison pimid_lib)
+    add_test(NAME PIMComputeComparison COMMAND test_pim_compute_comparison)
+endif()
+
 # TODO: Link with actual PIMID libraries when available
 # target_link_libraries(test_pim_full_system
 #     pimid_lib
