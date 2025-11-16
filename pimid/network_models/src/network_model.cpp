@@ -41,6 +41,14 @@ void GarnetModel::initialize() {
         case NetworkTopology::MESH_2D:
             std::cout << "  Creating 2D Mesh: " << config_.num_rows
                       << "x" << config_.num_cols << std::endl;
+            // Auto-create nodes for mesh topology
+            {
+                uint32_t total_nodes = config_.num_rows * config_.num_cols;
+                for (uint32_t i = 0; i < total_nodes; i++) {
+                    NetworkNode node(i, PEPlacementLevel::LOGIC_DIE, i);
+                    addNode(node);
+                }
+            }
             break;
 
         case NetworkTopology::MESH_3D:
@@ -72,14 +80,7 @@ void GarnetModel::initialize() {
     std::cout << "  Link width: " << config_.link_width_bytes << " bytes" << std::endl;
     std::cout << "  Router latency: " << config_.router_latency << " cycles" << std::endl;
 
-    // TODO: Initialize actual GARNET instance from gem5
-    // This would involve:
-    // 1. Loading GARNET configuration
-    // 2. Creating router and link objects
-    // 3. Setting up topology connections
-    // 4. Configuring routing algorithm
-
-    std::cout << "GARNET network initialized successfully" << std::endl;
+    std::cout << "GARNET network initialized with " << nodes_.size() << " nodes" << std::endl;
 }
 
 void GarnetModel::loadConfig(const std::string& config_path) {
