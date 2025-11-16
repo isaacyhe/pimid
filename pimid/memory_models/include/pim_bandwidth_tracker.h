@@ -29,7 +29,7 @@
 #include <memory>
 #include <string>
 #include "pim_request_payload.h"
-#include "pimid/memory/dram_architecture_v2.h"
+#include "memory/dram_architecture_v2.h"
 
 namespace pimid {
 

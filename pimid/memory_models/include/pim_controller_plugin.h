@@ -11,7 +11,7 @@
 #include "pim_request_payload.h"
 #include "pim_bandwidth_tracker.h"
 #include "internal_dram_network.h"
-#include "pimid/memory/dram_architecture_v2.h"
+#include "memory/dram_architecture_v2.h"
 
 // Ramulator includes
 #include "base/request.h"

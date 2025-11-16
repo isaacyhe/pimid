@@ -11,7 +11,7 @@
 #include "pim_bandwidth_tracker.h"
 #include "pim_controller_plugin.h"
 #include "internal_dram_network.h"
-#include "pimid/memory/dram_architecture_v2.h"
+#include "memory/dram_architecture_v2.h"
 
 // Forward declarations for Ramulator types
 namespace Ramulator {
