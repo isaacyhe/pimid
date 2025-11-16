@@ -1,0 +1,139 @@
+# Unified PIM Simulator Configuration File
+# All parameters in one place for easy experimentation
+
+# ============================================================================
+# Simulation Metadata
+# ============================================================================
+simulation:
+  name: "Bank-PIM Performance Analysis"
+  description: "Compare Bank-PIM vs MC-PIM with 50% local data"
+  output_format: csv      # Options: csv, json, text, all
+  output_directory: ./results
+  detailed_stats: true
+  compare_configs: true   # Compare multiple PIM granularities
+
+# ============================================================================
+# DRAM Configuration
+# ============================================================================
+dram:
+  type: DDR4-2400        # Options: DDR4-2400, DDR4-3200, HBM2, HBM3
+
+  # DRAM organization
+  channels: 1
+  ranks_per_channel: 1
+  bank_groups: 4
+  banks_per_group: 4     # Total banks = bank_groups × banks_per_group = 16
+  subarrays_per_bank: 16
+
+  # Optional: Override default timing (use defaults if not specified)
+  # timing:
+  #   tRCD_ns: 13.32
+  #   tCAS_ns: 13.32
+  #   tRP_ns: 13.32
+  #   frequency_mhz: 1200
+
+# ============================================================================
+# PIM Configuration
+# ============================================================================
+pim:
+  # PIM Granularity
+  # Options: CPU, MEMORY_CONTROLLER, RANK, CHIP, BANK_GROUP, BANK, SUBARRAY
+  granularity: BANK
+
+  # Number of Processing Elements
+  num_pes: 64
+
+  # Compute capability (GFLOPS per PE or total)
+  compute_gflops: 128.0
+  compute_per_pe: false   # If true, compute_gflops is per-PE; if false, total
+
+  # Optional: PE placement strategy
+  # placement: uniform    # Options: uniform, custom
+  # custom_placement:     # Only if placement == custom
+  #   - pe_id: 0
+  #     bank: 0
+  #   - pe_id: 1
+  #     bank: 1
+
+# ============================================================================
+# Workload Configuration
+# ============================================================================
+workload:
+  # Data size (in bytes, or use suffixes: KB, MB, GB)
+  total_data_bytes: 1GB   # Will be parsed as 1073741824 bytes
+
+  # Compute operations (FLOPs)
+  total_compute_ops: 128GFLOP  # Will be parsed as 137438953472
+
+  # Data locality (fraction of data that's local to PIM unit)
+  local_data_fraction: 0.5  # 0.0 = all remote, 1.0 = all local
+
+  # Access pattern
+  access_pattern: random    # Options: sequential, random, custom
+  cache_line_size: 64       # bytes
+
+  # Optional: Custom data distribution
+  # data_distribution:
+  #   - bank: 0
+  #     bytes: 536870912  # 512 MB
+  #   - bank: 5
+  #     bytes: 536870912  # 512 MB
+
+# ============================================================================
+# Comparison Mode (optional)
+# If enabled, will simulate multiple configurations and compare
+# ============================================================================
+comparison:
+  enabled: true
+
+  # Which granularities to compare
+  granularities:
+    - CPU
+    - MEMORY_CONTROLLER
+    - RANK
+    - CHIP
+    - BANK_GROUP
+    - BANK
+
+  # Which workload patterns to test
+  workload_patterns:
+    - name: "LOCAL"
+      description: "All data fits locally"
+      total_data_bytes: 64MB
+      local_data_fraction: 1.0
+
+    - name: "GLOBAL"
+      description: "Data spread across all banks"
+      total_data_bytes: 1GB
+      local_data_fraction: 0.0625  # 1/16 banks
+
+    - name: "PARTIAL"
+      description: "50% local, 50% remote"
+      total_data_bytes: 512MB
+      local_data_fraction: 0.5
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+output:
+  # Output file prefix
+  prefix: "pim_sim"
+
+  # CSV columns to include
+  csv_columns:
+    - config_name
+    - granularity
+    - num_pes
+    - local_data_bytes
+    - remote_data_bytes
+    - local_fraction
+    - compute_time_us
+    - data_movement_time_us
+    - network_time_us
+    - total_time_us
+    - speedup
+    - bottleneck
+
+  # Generate plots (requires matplotlib/gnuplot)
+  generate_plots: false
+  plot_type: png         # png, pdf, svg

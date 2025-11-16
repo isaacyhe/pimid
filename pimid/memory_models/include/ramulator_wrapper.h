@@ -6,6 +6,13 @@
 #include <memory>
 #include <functional>
 
+// PIMID PIM extensions
+#include "pim_request_payload.h"
+#include "pim_bandwidth_tracker.h"
+#include "pim_controller_plugin.h"
+#include "internal_dram_network.h"
+#include "memory/dram_architecture_v2.h"
+
 // Forward declarations for Ramulator types
 namespace Ramulator {
     class IMemorySystem;
@@ -30,6 +37,12 @@ public:
     // Request handling
     bool send(Address addr, MemoryRequestType type,
               std::function<void(Address)> callback = nullptr);
+
+    // PIM-aware request handling
+    bool sendPIM(Address addr, MemoryRequestType type,
+                PIMRequestPayload* pim_payload,
+                std::function<void(Address)> callback = nullptr);
+
     bool canAccept() const;
     void tick();
 
@@ -59,6 +72,24 @@ public:
 
     void printStats() const;
     void resetStats();
+
+    // PIM-specific configuration and queries
+    void enablePIMSupport(const std::string& dram_type = "DDR4");
+    void registerPE(PIMGranularity granularity, int pe_id, int target_bank);
+    double getBandwidthLimit(PIMGranularity granularity) const;
+    int getPortBitwidth(PIMGranularity granularity) const;
+    double getEffectiveBandwidthPerPE(PIMGranularity granularity, int target_id) const;
+
+    // Get PIM components
+    std::shared_ptr<PIMBandwidthTracker> getBandwidthTracker() const {
+        return bandwidth_tracker_;
+    }
+    std::shared_ptr<InternalDRAMNetwork> getInternalNetwork() const {
+        return internal_network_;
+    }
+    std::shared_ptr<PIMControllerPlugin> getPIMPlugin() const {
+        return pim_plugin_;
+    }
 
 private:
     // Ramulator memory system instance
@@ -100,12 +131,23 @@ private:
     };
     std::vector<PendingRequest> pending_requests_;
 
+    // PIM Support Components
+    bool pim_enabled_;
+    std::string dram_type_;
+    std::shared_ptr<pimid::memory::DRAMArchitectureV2> dram_arch_;
+    std::shared_ptr<PIMBandwidthTracker> bandwidth_tracker_;
+    std::shared_ptr<InternalDRAMNetwork> internal_network_;
+    std::shared_ptr<PIMControllerPlugin> pim_plugin_;
+
     // Helper functions
     void parseConfiguration();
     void createRamulatorInstance();
     Ramulator::Request createRamulatorRequest(Address addr, MemoryRequestType type);
+    Ramulator::Request createPIMRequest(Address addr, MemoryRequestType type,
+                                       PIMRequestPayload* pim_payload);
     void handleRequestCompletion(Ramulator::Request& req);
     void updateEnergyMetrics() const;
+    void initializePIMComponents();
 };
 
 } // namespace pimid

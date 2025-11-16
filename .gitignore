@@ -45,3 +45,9 @@ workloads/mpich_examples/graph_pagerank
 *.swo
 *~
 .DS_Store
+
+# Test executables
+tests/test_*
+!tests/test_*.cpp
+!tests/test_*.sh
+!tests/test_*.py

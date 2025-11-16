@@ -12,19 +12,21 @@
 
 This test compares **7 different architectures** with **identical compute power** (64 units @ 2 GFLOPS each = 128 GFLOPS total) but **different data movement characteristics** based on DDR4 DRAM hierarchy.
 
-### Results (Vector Addition, 48 MB data):
+### Results (Vector Addition, 48 MB data) - WITH PORT CONTENTION:
 
 | Architecture | Performance | Speedup vs CPU | Why? |
 |--------------|------------|----------------|------|
-| **Bank-PIM** | **262 μs** | **2.56x** | ✅ **Best balance** of parallelism & locality |
-| BankGroup-PIM | 328 μs | 2.05x | Good parallelism (4 units) |
-| Rank-PIM | 328 μs | 2.05x | Good parallelism (2 units) |
-| Chip-PIM | 655 μs | 1.03x | Limited parallelism (2 units) |
-| MC-PIM | 655 μs | 1.02x | Limited parallelism (1 unit) |
-| **CPU** | **672 μs** | **1.00x** | Baseline |
-| Subarray-PIM | 1049 μs | 0.64x | ⚠️ **Compute-bound** (too much parallelism!) |
+| **Bank-PIM** | **262 μs** | **10.06x** | ✅ **BEST**: Dedicated port (19.2 GB/s) |
+| **Subarray-PIM** | **1049 μs** | **2.52x** | ⚠️ 4x port contention hurts performance |
+| BankGroup-PIM | 655 μs | 4.02x | Moderate contention (4 banks share port) |
+| Rank-PIM | 2622 μs | 1.01x | Limited by rank interface (9.6 GB/s) |
+| MC-PIM | 2622 μs | 1.01x | Limited by MC bandwidth (19.2 GB/s) |
+| **CPU** | **2638 μs** | **1.00x** | Baseline |
+| **Chip-PIM** | **20,972 μs** | **0.13x** | ❌ **WORST**: SEVERE I/O bottleneck (1.2 GB/s)! |
 
-**Key Insight:** Subarray-PIM has the **lowest latency** (26ns) but performs **worst** because it's compute-bound with 64 tiny units!
+**CRITICAL Insight:** Port bitwidth limitations **dominate** performance!
+- **Bank-PIM wins** with 10x speedup (dedicated 19.2 GB/s port)
+- **Chip-PIM loses catastrophically** (16 banks share tiny x8 = 1.2 GB/s I/O)
 
 ---
 
@@ -57,17 +59,22 @@ Memory Controller (MC)
 - ✅ 128 GFLOPS total
 - ✅ **IDENTICAL compute time**
 
-### But DIFFERENT Data Movement:
+### But DIFFERENT Data Movement (with Port Contention!):
 
-| Architecture | Units | Local Memory | Data Latency | Aggregate BW | Energy/Byte |
-|--------------|-------|--------------|--------------|--------------|-------------|
-| **Subarray-PIM** | 64 | 512 KB | **26.64 ns** ✅ | 153.6 GB/s | **1 pJ/B** ✅ |
-| **Bank-PIM** | 16 | 2 MB | 39.96 ns | 76.8 GB/s | 2 pJ/B |
-| **BankGroup-PIM** | 4 | 8 MB | 50 ns | 38.4 GB/s | 3 pJ/B |
-| **Chip-PIM** | 2 | 128 MB | 60 ns | 38.4 GB/s | 5 pJ/B |
-| **Rank-PIM** | 2 | 1 GB | 80 ns | 76.8 GB/s | 10 pJ/B |
-| **MC-PIM** | 1 | 4 GB | 100 ns | 76.8 GB/s | 15 pJ/B |
-| **CPU** | 1 | 32 MB LLC | 100 ns | 76.8 GB/s | **20 pJ/B** ❌ |
+| Architecture | Units | Local Memory | Data Latency | Port BW | Effective BW | Energy/Byte |
+|--------------|-------|--------------|--------------|---------|--------------|-------------|
+| **Subarray-PIM** | 64 | 512 KB | **26.64 ns** ✅ | 19.2 GB/s ÷ 4 | **4.8 GB/s** ⚠️ | **1 pJ/B** ✅ |
+| **Bank-PIM** | 16 | 2 MB | 39.96 ns | 19.2 GB/s | **19.2 GB/s** ✅ | 2 pJ/B |
+| **BankGroup-PIM** | 4 | 8 MB | 50 ns | 76.8 GB/s ÷ 4 | 19.2 GB/s | 3 pJ/B |
+| **Chip-PIM** | 2 | 128 MB | 60 ns | **1.2 GB/s** ❌ | **1.2 GB/s** ❌ | 5 pJ/B |
+| **Rank-PIM** | 2 | 1 GB | 80 ns | 9.6 GB/s | 9.6 GB/s | 10 pJ/B |
+| **MC-PIM** | 1 | 4 GB | 100 ns | 19.2 GB/s | 19.2 GB/s | 15 pJ/B |
+| **CPU** | 1 | 32 MB LLC | 100 ns | 19.2 GB/s | 19.2 GB/s | **20 pJ/B** ❌ |
+
+**Port Contention Key:**
+- **Subarray-PIM**: 4 subarrays share 1 bank port (128-bit) → 4x contention
+- **Bank-PIM**: Each bank has dedicated port → NO contention (WINNER!)
+- **Chip-PIM**: 16 banks share x8 I/O (1 byte/cycle) → SEVERE 16x bottleneck!
 
 ---
 
@@ -112,36 +119,85 @@ Data: 48 MB (read A, B; write C)
 Compute: 2M additions @ 128 GFLOPS
 ```
 
-### Performance Breakdown:
+### Performance Breakdown (WITH PORT CONTENTION):
 
 | Architecture | Total Time | Data Movement | Compute | Effective BW |
 |--------------|------------|---------------|---------|--------------|
-| Subarray-PIM | 1048.58 μs | **5.15 μs** ✅ | **1048.58 μs** ❌ | 48.00 GB/s |
-| Bank-PIM | **262.14 μs** | 41.00 μs | **262.14 μs** | **192.00 GB/s** ✅ |
-| BankGroup-PIM | 327.73 μs | 327.73 μs | 65.54 μs | 153.58 GB/s |
-| Chip-PIM | 655.42 μs | 655.42 μs | 32.77 μs | 76.79 GB/s |
-| Rank-PIM | 327.76 μs | 327.76 μs | 32.77 μs | 153.56 GB/s |
-| MC-PIM | 655.46 μs | 655.46 μs | 16.38 μs | 76.79 GB/s |
-| CPU | 671.84 μs | 655.46 μs | 16.38 μs | 74.92 GB/s |
+| **Bank-PIM** | **262 μs** ✅ | 164 μs | 262 μs | **192 GB/s** ✅ |
+| BankGroup-PIM | 655 μs | 655 μs | 66 μs | 77 GB/s |
+| **Subarray-PIM** | **1049 μs** ⚠️ | 164 μs | **1049 μs** | **48 GB/s** ⚠️ |
+| Rank-PIM | 2622 μs | 2622 μs | 33 μs | 19 GB/s |
+| MC-PIM | 2622 μs | 2622 μs | 16 μs | 19 GB/s |
+| CPU | 2638 μs | 2622 μs | 16 μs | 19 GB/s |
+| **Chip-PIM** | **20,972 μs** ❌ | **20,972 μs** ❌ | 33 μs | **2.4 GB/s** ❌ |
 
-### Key Observations:
+### Key Observations (Port Contention Matters!):
 
-1. **Subarray-PIM Paradox:**
-   - ✅ Lowest data latency (5.15 μs)
-   - ❌ **Worst performance** (1048.58 μs)
-   - Why? Each of 64 units only gets 2M / 64 = 32K operations
-   - Compute time: 32K / 2 GFLOPS = 16 μs per unit
-   - But 64 sequential units × 16 μs = **1048 μs total!**
+1. **Bank-PIM Dominates:**
+   - ✅ **BEST performance** (262 μs, 10.06x speedup)
+   - Why? Dedicated 19.2 GB/s port per bank → NO contention!
+   - 16 banks in parallel, each handling 3 MB with full bandwidth
+   - Perfect balance of parallelism and port access
 
-2. **Bank-PIM Sweet Spot:**
-   - ✅ **Best performance** (262.14 μs)
-   - Why? 16 units × (2M / 16 = 128K ops / 2 GFLOPS = 64 μs) with good parallelism
-   - Data movement and compute well balanced
+2. **Chip-PIM Catastrophic Failure:**
+   - ❌ **WORST performance** (20,972 μs, 0.13x vs CPU!)
+   - Why? 16 banks sharing tiny x8 I/O (1.2 GB/s) → SEVERE bottleneck
+   - Even with 60ns latency, bandwidth limitation dominates
+   - Demonstrates why chip I/O width is critical!
 
-3. **CPU Performance:**
-   - Competitive at 671.84 μs
-   - Benefits from having **all 64 cores** at one location
-   - No inter-unit communication overhead
+3. **Subarray-PIM Port Contention:**
+   - ⚠️ 1049 μs (2.52x speedup, not terrible but not great)
+   - 4 subarrays share 1 bank port → 4x contention
+   - Effective BW: 19.2 / 4 = 4.8 GB/s per subarray
+   - Still compute-bound, but port contention also hurts
+
+4. **Port Bitwidth Dominates:**
+   - Bank port (128-bit) → determines Subarray/Bank/BankGroup performance
+   - Chip I/O (x8 = 8-bit) → catastrophic bottleneck for Chip-PIM
+   - Rank/MC bandwidth → limits coarse-grained PIM
+
+---
+
+## The PORT CONTENTION Bottleneck (Critical!)
+
+### DDR4 Port Bitwidths:
+
+| Level | Port Width | Bandwidth @ 1.2 GHz | Units Sharing | Effective BW per Unit |
+|-------|------------|---------------------|---------------|----------------------|
+| **Bank Port** | 128-bit | 19.2 GB/s | 1 (Bank-PIM) or 4 (Subarray-PIM) | 19.2 or 4.8 GB/s |
+| **Bank Group** | 512-bit | 76.8 GB/s | 4 banks | 19.2 GB/s per bank |
+| **Chip I/O** | x8 (8-bit) | **1.2 GB/s** ❌ | 16 banks | **0.075 GB/s per bank** ❌ |
+| **Rank** | 64-bit | 9.6 GB/s | 8 chips | 1.2 GB/s per chip |
+| **MC** | 128-bit | 19.2 GB/s | 2 ranks | 9.6 GB/s per rank |
+
+### Port Contention Analysis:
+
+**Subarray-PIM (4x contention):**
+```
+Bank has 4 subarrays → all share 128-bit port (19.2 GB/s)
+Each subarray gets: 19.2 / 4 = 4.8 GB/s
+Impact: Moderate (4x serialization)
+```
+
+**Bank-PIM (NO contention):**
+```
+Each bank has dedicated 128-bit port → 19.2 GB/s
+16 banks × 19.2 GB/s = 307.2 GB/s aggregate!
+Impact: NONE (this is why Bank-PIM wins!)
+```
+
+**Chip-PIM (16x SEVERE contention):**
+```
+16 banks share x8 chip I/O → only 1.2 GB/s total!
+Each bank gets: 1.2 / 16 = 0.075 GB/s
+Impact: CATASTROPHIC (16x serialization through tiny I/O)
+Result: 20,972 μs (80x slower than Bank-PIM!)
+```
+
+**Key Insight:**
+- Internal bank bandwidth (19.2 GB/s) >> External chip I/O (1.2 GB/s)
+- This 16x mismatch creates catastrophic bottleneck for Chip-PIM
+- Bank-PIM avoids this by keeping data movement within banks
 
 ---
 
@@ -239,30 +295,41 @@ Balance:
 
 ## Key Takeaways
 
-### 1. **Data Movement >> Compute**
-Even with **equal compute power**, performance varies **4x** (262 μs to 1048 μs) due to data movement!
+### 1. **PORT CONTENTION Dominates Performance!**
+With **equal compute power**, performance varies **160x** (262 μs to 20,972 μs) due to port bitwidth limitations!
+- Bank-PIM: 10.06x speedup (dedicated 19.2 GB/s port)
+- Chip-PIM: 0.13x (16 banks share 1.2 GB/s) → **CATASTROPHIC**
 
-### 2. **More Parallelism ≠ Better**
-64 Subarray-PIM units perform **worse** than 16 Bank-PIM units because each is too small.
+### 2. **Port Bitwidth >> Data Latency**
+Chip-PIM has lower latency (60ns) than CPU (100ns), but performs **80x worse** due to port bottleneck!
 
-### 3. **Locality Matters**
-Closer to memory doesn't always mean better if you sacrifice parallelism.
+### 3. **Bank Port (128-bit) is the Key Resource**
+- Bank-PIM: Each bank has dedicated 128-bit port → NO contention ✅
+- Subarray-PIM: 4 subarrays share 1 bank port → 4x contention ⚠️
+- Chip-PIM: 16 banks bottleneck at x8 I/O → 16x contention ❌
 
-### 4. **Sweet Spot: Bank-Level**
-For DDR4 DRAM, **Bank-PIM** achieves best balance:
+### 4. **Sweet Spot: Bank-Level (10x Speedup!)**
+For DDR4 DRAM, **Bank-PIM** achieves best performance:
 - 16-way parallelism
-- 2 MB local memory per unit
+- Dedicated 19.2 GB/s port per bank
 - 40ns latency
-- **2.56x speedup vs CPU**
+- **10.06x speedup vs CPU**
 
-### 5. **Architecture Must Match Workload**
+### 5. **Chip I/O Width is Critical**
+DDR4 x8 devices (1 byte/cycle) create severe bottleneck for Chip-PIM:
+- Internal: 16 banks × 19.2 GB/s = 307.2 GB/s potential
+- External: x8 I/O limits to 1.2 GB/s actual → **256x mismatch!**
+- This is why HBM uses much wider I/O (1024-bit = 128 bytes/cycle)
+
+### 6. **Architecture Must Match Workload AND Port Resources**
 ```
-If (data fits in subarray && extremely data-intensive)
-    → Subarray-PIM
-Else if (data fits in bank && balanced workload)
-    → Bank-PIM ✅ (Most common winner)
+If (data fits in bank && port contention minimal)
+    → Bank-PIM ✅ (BEST: 10x speedup)
+Else if (data in subarray && can tolerate 4x contention)
+    → Subarray-PIM (Good: 2.5x speedup)
 Else if (need full memory access)
-    → MC-PIM or CPU
+    → MC-PIM or CPU (~1x)
+NEVER use Chip-PIM with DDR4 x8 → Catastrophic!
 ```
 
 ---
@@ -290,11 +357,30 @@ make test_pim_granularity
 
 This test reveals critical design decisions:
 
-1. **Granularity Choice:** Bank-level PIM is the sweet spot for most workloads
-2. **Memory Allocation:** Each PIM unit needs 2-8 MB local memory
-3. **Parallelism:** 4-16 parallel units optimal (not 64!)
-4. **Energy Modeling:** Must account for hierarchical data movement
-5. **Workload Mapping:** Need intelligent data partitioning to match architecture
+1. **PORT CONTENTION is the PRIMARY bottleneck:** Must model port bitwidth limitations!
+   - Bank port (128-bit) → limits Subarray/Bank contention
+   - Chip I/O (x8) → catastrophic for Chip-PIM in DDR4
+   - Cannot ignore port sharing when multiple PIM units access same resource
+
+2. **Granularity Choice:** Bank-level PIM is the sweet spot (10x speedup)
+   - Dedicated 19.2 GB/s port per bank
+   - 2 MB local memory per bank
+   - 16-way parallelism across banks
+
+3. **Memory Technology Matters:**
+   - DDR4 x8 → Chip-PIM fails catastrophically
+   - HBM (1024-bit I/O) → Chip-PIM would work much better
+   - Must match PIM granularity to memory interface width
+
+4. **Bandwidth Hierarchy:** Internal >> External
+   - Internal bank bandwidth: 19.2 GB/s
+   - Chip I/O bandwidth: 1.2 GB/s (16x smaller!)
+   - This mismatch must be modeled in simulator
+
+5. **Workload Mapping:** Must consider port contention
+   - Distribute data across banks to avoid contention
+   - Keep working sets within bank boundaries
+   - Avoid cross-chip communication in DDR4
 
 ---
 

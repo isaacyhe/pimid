@@ -18,6 +18,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
 # Include directories
 include_directories(
+    ${PROJECT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/memory_models/include
     ${PROJECT_SOURCE_DIR}/network_models/include
@@ -113,6 +114,14 @@ set(PIMID_SOURCES
     memory_models/src/ramulator_wrapper.cpp
     memory_models/src/cacti_wrapper.cpp
     memory_models/src/nvsim_wrapper.cpp
+
+    # PIM extensions for Ramulator
+    memory_models/src/pim_bandwidth_tracker.cpp
+    memory_models/src/internal_dram_network.cpp
+    memory_models/src/pim_controller_plugin.cpp
+
+    # DRAM architecture specifications
+    memory/dram_architecture.cpp
 
     # Network (includes GARNET integration)
     network_models/src/network_model.cpp
@@ -231,8 +240,17 @@ if(BUILD_PLUGINS)
     endif()
 endif()
 
+# PIM Simulator command-line tool (config-driven simulation)
+# NOTE: Standalone tool, doesn't link against pimid_lib to avoid external dependencies
+add_executable(pimid_sim
+    tools/pimid_sim.cpp
+    memory/dram_architecture.cpp
+)
+target_compile_options(pimid_sim PRIVATE -std=c++17)
+target_link_libraries(pimid_sim Threads::Threads)
+
 # Install targets
-install(TARGETS pimid_lib pimid_host pimid_device pimid_standalone
+install(TARGETS pimid_lib pimid_host pimid_device pimid_standalone pimid_sim
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib

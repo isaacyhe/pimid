@@ -92,6 +92,23 @@ namespace DDR4 {
     const double RANK_ENERGY_pJ = 10.0;                             // + rank selection + I/O
     const double MC_ENERGY_pJ = 15.0;                               // + memory controller
     const double CPU_ENERGY_pJ = 20.0;                              // + system bus + LLC
+
+    // Port Bitwidth Constraints (CRITICAL CORRECTION!)
+    // INSIDE DRAM: Banks and bank groups have NARROW 8-16 bit ports!
+    // Only at RANK/DIMM level do we get wide 64-bit interfaces!
+    const int BANK_PORT_BITS = 8;                                   // 8-bit bank port (typical DDR4 internal)
+    const int BANK_GROUP_PORT_BITS = 16;                            // ~16-bit bank group (limited by internal routing)
+    const int CHIP_IO_BITS = 8;                                     // x8 device external I/O (1 byte per cycle)
+    const int RANK_DATA_BITS = 64;                                  // 8 chips × 8 bits = 64-bit rank interface
+    const int MC_DATA_BITS = 64;                                    // 64-bit memory controller (single channel)
+
+    // Port bandwidth at DDR4-2400 (2.4 GT/s effective, 1.2 GHz DDR clock)
+    const double CLOCK_GHz = 1.2;
+    const double BANK_PORT_BW_GBs = (BANK_PORT_BITS / 8.0) * CLOCK_GHz;         // 1.2 GB/s per bank (NARROW!)
+    const double BANK_GROUP_PORT_BW_GBs = (BANK_GROUP_PORT_BITS / 8.0) * CLOCK_GHz;  // 2.4 GB/s per bank group
+    const double CHIP_IO_BW_GBs = (CHIP_IO_BITS / 8.0) * CLOCK_GHz;            // 1.2 GB/s per chip (x8)
+    const double RANK_BW_GBs_PORT = (RANK_DATA_BITS / 8.0) * CLOCK_GHz;        // 9.6 GB/s per rank (WIDE!)
+    const double MC_BW_GBs_PORT = (MC_DATA_BITS / 8.0) * CLOCK_GHz;            // 9.6 GB/s for MC
 }
 
 //=============================================================================
@@ -107,12 +124,17 @@ struct PIMArchitecture {
 
     // Different data movement characteristics
     double data_latency_ns;       // Latency to access data
-    double aggregate_bw_GBs;      // Aggregate bandwidth
+    double aggregate_bw_GBs;      // Aggregate bandwidth (ideal, without port contention)
     double energy_per_byte_pJ;    // Energy cost per byte
 
     // Physical constraints
     int total_units;              // Total number in system
     size_t local_memory_kb;       // Local memory per unit
+
+    // Port contention modeling (CRITICAL!)
+    int units_per_port;           // How many PIM units share one port
+    double port_bw_GBs;           // Bandwidth of the shared port
+    double effective_bw_GBs;      // Actual bandwidth after contention
 
     // Color for visualization
     const char* color;
@@ -129,76 +151,97 @@ std::vector<PIMArchitecture> createArchitectures() {
     const double COMPUTE_POWER_PER_UNIT = 2.0;  // 2 GFLOPS per unit
 
     // 1. Subarray-level PIM
+    // 4 subarrays per bank SHARE the bank's 8-bit port (1.2 GB/s) → SEVERE CONTENTION!
     archs.push_back({
         "Subarray-PIM",
         "Compute at each subarray (finest granularity)",
         TOTAL_COMPUTE_UNITS / 64,  // 1 unit per subarray
         COMPUTE_POWER_PER_UNIT,
         DDR4::SUBARRAY_LATENCY_ns,
-        DDR4::SUBARRAY_BW_GBs * 64,  // 64 subarrays in parallel
+        DDR4::SUBARRAY_BW_GBs * 64,  // 64 subarrays in parallel (IDEAL, if no port limits)
         DDR4::SUBARRAY_ENERGY_pJ,
         64,  // 64 subarrays in system
         DDR4::SUBARRAY_SIZE_KB,
+        4,   // 4 subarrays share 1 bank port (CRITICAL!)
+        DDR4::BANK_PORT_BW_GBs,  // 1.2 GB/s shared by 4 subarrays
+        DDR4::BANK_PORT_BW_GBs / 4,  // 0.3 GB/s effective per subarray (TINY!)
         CYAN
     });
 
-    // 2. Bank-level PIM
+    // 2. Bank-level PIM (Multiple PEs per bank)
+    // Each bank has 8-bit port (1.2 GB/s) - NARROW internal port!
     archs.push_back({
         "Bank-PIM",
-        "Compute at each bank",
+        "Compute at each bank (4 PEs per bank)",
         TOTAL_COMPUTE_UNITS / 16,  // 4 units per bank
         COMPUTE_POWER_PER_UNIT,
         DDR4::BANK_LATENCY_ns,
-        DDR4::BANK_BW_GBs * 16,    // 16 banks in parallel
+        DDR4::BANK_BW_GBs * 16,    // 16 banks in parallel (IDEAL if no port limits)
         DDR4::BANK_ENERGY_pJ,
         16,  // 16 banks total
         DDR4::BANK_SIZE_MB * 1024,
+        1,   // Each bank has dedicated 8-bit port (no inter-bank contention)
+        DDR4::BANK_PORT_BW_GBs,  // 1.2 GB/s per bank (NARROW!)
+        DDR4::BANK_PORT_BW_GBs,  // 1.2 GB/s effective per bank
         BLUE
     });
 
     // 3. Bank Group-level PIM
+    // Each bank group has ~16-bit internal port (2.4 GB/s) - still narrow!
     archs.push_back({
         "BankGroup-PIM",
         "Compute at each bank group",
         TOTAL_COMPUTE_UNITS / 4,   // 16 units per bank group
         COMPUTE_POWER_PER_UNIT,
         DDR4::BANK_GROUP_LATENCY_ns,
-        DDR4::BANK_GROUP_BW_GBs * 4,  // 4 bank groups in parallel
+        DDR4::BANK_GROUP_BW_GBs * 4,  // 4 bank groups in parallel (IDEAL)
         DDR4::BANK_GROUP_ENERGY_pJ,
         4,   // 4 bank groups total
         DDR4::BANK_SIZE_MB * 4 * 1024,
+        1,   // Each bank group has dedicated ~16-bit port
+        DDR4::BANK_GROUP_PORT_BW_GBs,  // 2.4 GB/s per bank group (still narrow!)
+        DDR4::BANK_GROUP_PORT_BW_GBs,  // 2.4 GB/s effective
         MAGENTA
     });
 
     // 4. Chip-level PIM
+    // All 16 banks in chip share chip I/O (x8 = 1.2 GB/s) → SEVERE BOTTLENECK!
     archs.push_back({
         "Chip-PIM",
         "Compute at each chip (HBM-like)",
         TOTAL_COMPUTE_UNITS / 2,   // 32 units per chip
         COMPUTE_POWER_PER_UNIT,
         DDR4::CHIP_LATENCY_ns,
-        DDR4::CHIP_BW_GBs * 2,     // 2 chips in parallel
+        DDR4::CHIP_BW_GBs * 2,     // 2 chips in parallel (IDEAL)
         DDR4::CHIP_ENERGY_pJ,
         2,   // 2 chips (simplified)
         DDR4::CHIP_SIZE_MB * 1024,
+        16,  // 16 banks share chip I/O (SEVERE contention!)
+        DDR4::CHIP_IO_BW_GBs,  // Only 1.2 GB/s chip I/O!
+        DDR4::CHIP_IO_BW_GBs,  // 1.2 GB/s total for entire chip
         YELLOW
     });
 
     // 5. Rank-level PIM
+    // 8 chips combine to form rank interface (64-bit = 9.6 GB/s)
     archs.push_back({
         "Rank-PIM",
         "Compute at each rank (DIMM-level)",
         TOTAL_COMPUTE_UNITS / 2,   // 32 units per rank
         COMPUTE_POWER_PER_UNIT,
         DDR4::RANK_LATENCY_ns,
-        DDR4::RANK_BW_GBs * 2,     // 2 ranks in parallel
+        DDR4::RANK_BW_GBs * 2,     // 2 ranks in parallel (IDEAL)
         DDR4::RANK_ENERGY_pJ,
         2,   // 2 ranks
         DDR4::RANK_SIZE_GB * 1024 * 1024,
+        8,   // 8 chips share rank interface
+        DDR4::RANK_BW_GBs_PORT,  // 9.6 GB/s per rank
+        DDR4::RANK_BW_GBs_PORT,  // 9.6 GB/s total
         GREEN
     });
 
     // 6. MC-wide PIM
+    // MC has 64-bit interface (9.6 GB/s) - FIRST wide interface!
     archs.push_back({
         "MC-PIM",
         "Compute at memory controller",
@@ -209,10 +252,14 @@ std::vector<PIMArchitecture> createArchitectures() {
         DDR4::MC_ENERGY_pJ,
         1,   // 1 memory controller
         DDR4::DIMM_SIZE_GB * 2 * 1024 * 1024,
+        1,   // MC has dedicated 64-bit port
+        DDR4::MC_BW_GBs_PORT,  // 9.6 GB/s MC bandwidth (64-bit)
+        DDR4::MC_BW_GBs_PORT,  // 9.6 GB/s total
         BLUE
     });
 
     // 7. Traditional CPU (for comparison)
+    // CPU accesses memory through MC (64-bit interface)
     archs.push_back({
         "CPU",
         "Traditional CPU with remote memory",
@@ -223,6 +270,9 @@ std::vector<PIMArchitecture> createArchitectures() {
         DDR4::CPU_ENERGY_pJ,
         1,   // 1 CPU socket
         32 * 1024,  // 32MB LLC
+        1,   // Single CPU → MC path
+        DDR4::MC_BW_GBs_PORT,  // 9.6 GB/s (64-bit MC interface)
+        DDR4::MC_BW_GBs_PORT,  // 9.6 GB/s
         RED
     });
 
@@ -247,11 +297,12 @@ WorkloadResult simulateVectorAdd(const PIMArchitecture& arch, size_t vector_size
     const size_t element_size = 8;  // 8 bytes (double precision)
     const size_t total_data_bytes = vector_size_elements * element_size * 3;  // Read A, B, write C
 
-    // Compute time (same for all architectures!)
+    // Compute time - calculated PER UNIT (partition)
     const double ops_per_element = 1;  // One addition
     const double total_ops = vector_size_elements * ops_per_element;
-    const double total_compute_gflops = arch.num_compute_units * arch.compute_power_gflops;
-    result.compute_time_us = (total_ops / (total_compute_gflops * 1e9)) * 1e6;  // ops / (GFLOPS * 1e9 ops/s) * 1e6 us/s
+    const double ops_per_unit = total_ops / arch.total_units;  // Each partition processes its share
+    const double total_compute_gflops = arch.num_compute_units * arch.compute_power_gflops;  // Compute power per partition
+    result.compute_time_us = (ops_per_unit / (total_compute_gflops * 1e9)) * 1e6;  // Time for one partition
 
     // Data movement time (DIFFERS by architecture!)
     result.data_transferred_bytes = total_data_bytes;
@@ -260,7 +311,8 @@ WorkloadResult simulateVectorAdd(const PIMArchitecture& arch, size_t vector_size
     const double data_per_unit = (double)total_data_bytes / arch.total_units;
 
     // Data movement latency + transfer time
-    const double transfer_time_per_unit = (data_per_unit / 1e9) / arch.aggregate_bw_GBs * 1e6;  // us
+    // CRITICAL: Use effective_bw_GBs which accounts for port contention!
+    const double transfer_time_per_unit = (data_per_unit / 1e9) / arch.effective_bw_GBs * 1e6;  // us
     const double latency_overhead = arch.data_latency_ns / 1000.0;  // Convert to us
 
     result.data_movement_time_us = latency_overhead + transfer_time_per_unit;
@@ -355,7 +407,51 @@ void printArchitectureComparison() {
 
         std::cout << "\n";
     }
-    std::cout << std::string(125, '─') << "\n\n";
+    std::cout << std::string(125, '-') << "\n\n";
+
+    // Port Contention Analysis (CRITICAL!)
+    std::cout << RED << BOLD << "⚠️  PORT CONTENTION ANALYSIS (Critical Bottleneck!)" << NC << "\n";
+    std::cout << std::string(140, '-') << "\n";
+    std::cout << std::setw(15) << "Architecture"
+              << std::setw(18) << "Units per Port"
+              << std::setw(18) << "Port BW (GB/s)"
+              << std::setw(22) << "Effective BW (GB/s)"
+              << std::setw(20) << "Contention Impact"
+              << std::setw(35) << "Bottleneck"
+              << "\n";
+    std::cout << std::string(140, '-') << "\n";
+
+    for (const auto& arch : archs) {
+        double contention_factor = arch.port_bw_GBs / arch.effective_bw_GBs;
+        std::string impact;
+        std::string bottleneck;
+
+        if (arch.units_per_port == 1) {
+            impact = "None (dedicated)";
+            bottleneck = "No contention";
+        } else if (arch.units_per_port <= 4) {
+            impact = "Low (" + std::to_string(arch.units_per_port) + "x sharing)";
+            bottleneck = "Manageable serialization";
+        } else if (arch.units_per_port <= 8) {
+            impact = "Medium (" + std::to_string(arch.units_per_port) + "x sharing)";
+            bottleneck = "Significant serialization";
+        } else {
+            impact = "SEVERE (" + std::to_string(arch.units_per_port) + "x sharing)";
+            bottleneck = "CRITICAL BOTTLENECK!";
+        }
+
+        std::cout << arch.color << std::setw(15) << arch.name << NC
+                  << std::setw(18) << arch.units_per_port
+                  << std::setw(18) << std::fixed << std::setprecision(1) << arch.port_bw_GBs
+                  << std::setw(22) << arch.effective_bw_GBs
+                  << std::setw(20) << impact
+                  << std::setw(35) << bottleneck
+                  << "\n";
+    }
+    std::cout << std::string(140, '-') << "\n";
+    std::cout << YELLOW << "Note: Subarray-PIM suffers from 4x port contention (4 subarrays share 1 bank port)" << NC << "\n";
+    std::cout << YELLOW << "      Chip-PIM suffers from SEVERE contention (16 banks share tiny x8 I/O)" << NC << "\n";
+    std::cout << YELLOW << "      Bank-PIM has dedicated ports → NO contention!" << NC << "\n\n";
 }
 
 void runWorkloadComparison() {
@@ -411,7 +507,7 @@ void runWorkloadComparison() {
                   << std::setw(17) << energy_efficiency << "x"
                   << "\n";
     }
-    std::cout << std::string(140, '─') << "\n\n";
+    std::cout << std::string(140, '-') << "\n\n";
 }
 
 void analyzeResults() {
