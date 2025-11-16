@@ -1,3 +1,34 @@
+# Build directories
+build/
+*/build/
+cmake-build-*/
+
+# Compiled files
+*.o
+*.so
+*.a
+*.out
+*.exe
+
+# Log files
+*.log
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
 # Build artifacts - MPICH workloads
 workloads/mpich_examples/vector_dotproduct
 workloads/mpich_examples/matrix_multiply

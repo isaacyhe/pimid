@@ -1,0 +1,527 @@
+#include "address_translation/pe_placement.h"
+#include <iostream>
+#include <algorithm>
+#include <iomanip>
+
+namespace pimid {
+
+//=============================================================================
+// PEPlacementManager Implementation
+//=============================================================================
+
+PEPlacementManager::PEPlacementManager(const MemoryHierarchy& hierarchy,
+                                       PEPlacementLevel level,
+                                       AddressingMode mode)
+    : hierarchy_(hierarchy)
+    , placement_level_(level)
+    , addressing_mode_(mode)
+    , last_update_cycle_(0) {
+}
+
+void PEPlacementManager::registerPE(const PEDescriptor& pe) {
+    PEDescriptor pe_copy = pe;
+
+    // Compute constraints based on placement level
+    computeConstraints(pe_copy);
+
+    pes_[pe.pe_id] = pe_copy;
+
+    // Rebuild lookup tables
+    buildLookupTables();
+    buildBusSharingTables();
+
+    std::cout << "[PEPlacement] Registered PE " << pe.pe_id
+              << " at level " << static_cast<int>(pe.level) << std::endl;
+    printConstraints(pe.pe_id);
+}
+
+void PEPlacementManager::unregisterPE(uint32_t pe_id) {
+    pes_.erase(pe_id);
+    buildLookupTables();
+    buildBusSharingTables();
+}
+
+const PEDescriptor* PEPlacementManager::getPE(uint32_t pe_id) const {
+    auto it = pes_.find(pe_id);
+    if (it != pes_.end()) {
+        return &it->second;
+    }
+    return nullptr;
+}
+
+//=============================================================================
+// Constraint Computation
+//=============================================================================
+
+void PEPlacementManager::computeConstraints(PEDescriptor& pe) const {
+    // Calculate bus constraints
+    pe.bus_constraints = calculateBusConstraints(pe.level, pe.bank_id);
+
+    // Calculate address constraints
+    pe.addr_constraints = calculateAddressConstraints(pe.level, pe);
+}
+
+PEBusConstraints PEPlacementManager::calculateBusConstraints(
+    PEPlacementLevel level,
+    uint32_t location_id) const {
+
+    PEBusConstraints constraints;
+
+    switch (level) {
+        case PEPlacementLevel::SUBARRAY:
+            // Subarray level: Limited to row buffer width
+            constraints.data_bus_width_bits = 8192 * 8;  // 8KB row buffer = 64Kb
+            constraints.max_bandwidth_gbps = 10;         // Limited internal bandwidth
+            constraints.row_buffer_size_bytes = 8192;
+            constraints.shared_bus_pes = 1;              // Dedicated per subarray
+            constraints.has_dedicated_bus = true;
+            break;
+
+        case PEPlacementLevel::BANK:
+            // Bank level: Share bank I/O bus
+            constraints.data_bus_width_bits = 64;        // 64-bit bank bus
+            constraints.max_bandwidth_gbps = 25;         // Typical DDR4 per-bank
+            constraints.row_buffer_size_bytes = 8192;
+            constraints.shared_bus_pes = hierarchy_.num_subarrays_per_bank;
+            constraints.has_dedicated_bus = false;
+            break;
+
+        case PEPlacementLevel::CHIP:
+            // Chip level: Share chip-level interconnect
+            constraints.data_bus_width_bits = 64;        // 64-bit per channel
+            constraints.max_bandwidth_gbps = 25;         // Share with all banks
+            constraints.row_buffer_size_bytes = 0;       // No direct row buffer access
+            constraints.shared_bus_pes = hierarchy_.num_banks_per_chip;
+            constraints.has_dedicated_bus = false;
+            break;
+
+        case PEPlacementLevel::RANK:
+            // Rank level: Share rank-level bus
+            constraints.data_bus_width_bits = 64;
+            constraints.max_bandwidth_gbps = 25;
+            constraints.row_buffer_size_bytes = 0;
+            constraints.shared_bus_pes = hierarchy_.num_banks_per_chip *
+                                        hierarchy_.num_chips_per_rank;
+            constraints.has_dedicated_bus = false;
+            break;
+
+        case PEPlacementLevel::LOGIC_DIE:
+            // Logic die (HBM/HMC): Wide high-bandwidth interface
+            constraints.data_bus_width_bits = 1024;      // Wide bus (128 bytes)
+            constraints.max_bandwidth_gbps = 256;        // HBM2 bandwidth
+            constraints.row_buffer_size_bytes = 0;
+            constraints.shared_bus_pes = 1;              // Dedicated logic die bus
+            constraints.has_dedicated_bus = true;
+            break;
+    }
+
+    return constraints;
+}
+
+PEAddressConstraints PEPlacementManager::calculateAddressConstraints(
+    PEPlacementLevel level,
+    const PEDescriptor& pe) const {
+
+    PEAddressConstraints constraints;
+
+    // Base address calculation depends on memory hierarchy
+    // Assuming 256MB per rank, 64MB per chip, 8MB per bank, 128KB per subarray
+    const uint64_t SUBARRAY_SIZE = 128 * 1024;          // 128 KB
+    const uint64_t BANK_SIZE = 8 * 1024 * 1024;         // 8 MB
+    const uint64_t CHIP_SIZE = 64 * 1024 * 1024;        // 64 MB
+    const uint64_t RANK_SIZE = 256ULL * 1024 * 1024;    // 256 MB
+
+    switch (level) {
+        case PEPlacementLevel::SUBARRAY:
+            // Can only access single subarray
+            constraints.accessible_base = pe.rank_id * RANK_SIZE +
+                                         pe.chip_id * CHIP_SIZE +
+                                         pe.bank_id * BANK_SIZE +
+                                         pe.subarray_id * SUBARRAY_SIZE;
+            constraints.accessible_size_bytes = SUBARRAY_SIZE;
+            constraints.accessible_limit = constraints.accessible_base +
+                                          constraints.accessible_size_bytes;
+            constraints.can_access_remote = false;
+            constraints.remote_access_penalty = 0;  // Not allowed
+            break;
+
+        case PEPlacementLevel::BANK:
+            // Can access entire bank
+            constraints.accessible_base = pe.rank_id * RANK_SIZE +
+                                         pe.chip_id * CHIP_SIZE +
+                                         pe.bank_id * BANK_SIZE;
+            constraints.accessible_size_bytes = BANK_SIZE;
+            constraints.accessible_limit = constraints.accessible_base +
+                                          constraints.accessible_size_bytes;
+            constraints.can_access_remote = true;   // Can access other banks
+            constraints.remote_access_penalty = 50; // Cycles
+            break;
+
+        case PEPlacementLevel::CHIP:
+            // Can access entire chip
+            constraints.accessible_base = pe.rank_id * RANK_SIZE +
+                                         pe.chip_id * CHIP_SIZE;
+            constraints.accessible_size_bytes = CHIP_SIZE;
+            constraints.accessible_limit = constraints.accessible_base +
+                                          constraints.accessible_size_bytes;
+            constraints.can_access_remote = true;
+            constraints.remote_access_penalty = 100; // Cycles
+            break;
+
+        case PEPlacementLevel::RANK:
+            // Can access entire rank
+            constraints.accessible_base = pe.rank_id * RANK_SIZE;
+            constraints.accessible_size_bytes = RANK_SIZE;
+            constraints.accessible_limit = constraints.accessible_base +
+                                          constraints.accessible_size_bytes;
+            constraints.can_access_remote = true;
+            constraints.remote_access_penalty = 200; // Cross-rank penalty
+            break;
+
+        case PEPlacementLevel::LOGIC_DIE:
+            // Can access all memory
+            constraints.accessible_base = 0;
+            constraints.accessible_size_bytes = RANK_SIZE * hierarchy_.num_ranks;
+            constraints.accessible_limit = constraints.accessible_size_bytes;
+            constraints.can_access_remote = true;
+            constraints.remote_access_penalty = 150; // Logic die to DRAM
+            break;
+    }
+
+    return constraints;
+}
+
+//=============================================================================
+// Address Access Validation
+//=============================================================================
+
+bool PEPlacementManager::canAccess(uint32_t pe_id, Address addr) const {
+    auto pe = getPE(pe_id);
+    if (!pe) return false;
+
+    const auto& constraints = pe->addr_constraints;
+
+    // Check if address is in local accessible range
+    if (addr >= constraints.accessible_base &&
+        addr < constraints.accessible_limit) {
+        return true;
+    }
+
+    // Check if remote access is allowed
+    return constraints.can_access_remote;
+}
+
+bool PEPlacementManager::isLocalAddress(uint32_t pe_id, Address addr) const {
+    auto pe = getPE(pe_id);
+    if (!pe) return false;
+
+    const auto& constraints = pe->addr_constraints;
+    return (addr >= constraints.accessible_base &&
+            addr < constraints.accessible_limit);
+}
+
+bool PEPlacementManager::isRemoteAccess(uint32_t pe_id, Address addr) const {
+    return canAccess(pe_id, addr) && !isLocalAddress(pe_id, addr);
+}
+
+uint32_t PEPlacementManager::getAccessPenalty(uint32_t pe_id, Address addr) const {
+    auto pe = getPE(pe_id);
+    if (!pe) return 0;
+
+    if (isLocalAddress(pe_id, addr)) {
+        return 0;  // No penalty for local access
+    }
+
+    if (isRemoteAccess(pe_id, addr)) {
+        return pe->addr_constraints.remote_access_penalty;
+    }
+
+    // Address not accessible
+    return UINT32_MAX;
+}
+
+//=============================================================================
+// Bandwidth and Bus Contention
+//=============================================================================
+
+uint64_t PEPlacementManager::getAvailableBandwidth(uint32_t pe_id) const {
+    auto pe = getPE(pe_id);
+    if (!pe) return 0;
+
+    const auto& bus_constraints = pe->bus_constraints;
+
+    // If dedicated bus, return full bandwidth
+    if (bus_constraints.has_dedicated_bus) {
+        return bus_constraints.max_bandwidth_gbps;
+    }
+
+    // Shared bus: divide by number of PEs sharing it
+    uint32_t sharing_pes = bus_constraints.shared_bus_pes;
+    if (sharing_pes == 0) sharing_pes = 1;
+
+    return bus_constraints.max_bandwidth_gbps / sharing_pes;
+}
+
+uint64_t PEPlacementManager::getEffectiveBandwidth(uint32_t pe_id,
+                                                    Cycle current_cycle) const {
+    auto pe = getPE(pe_id);
+    if (!pe) return 0;
+
+    uint64_t available_bw = getAvailableBandwidth(pe_id);
+
+    // Get bus utilization
+    uint32_t bus_id = getBusID(*pe);
+    auto it = bus_utilization_.find(bus_id);
+
+    if (it == bus_utilization_.end()) {
+        return available_bw;  // No contention
+    }
+
+    // Reduce bandwidth based on utilization (0-100%)
+    uint64_t utilization_pct = it->second;
+    uint64_t effective_bw = available_bw * (100 - utilization_pct) / 100;
+
+    return effective_bw;
+}
+
+bool PEPlacementManager::hasBusContention(uint32_t pe_id) const {
+    auto sharing_pes = getSharingPEs(pe_id);
+    return sharing_pes.size() > 1;
+}
+
+std::vector<uint32_t> PEPlacementManager::getSharingPEs(uint32_t pe_id) const {
+    auto pe = getPE(pe_id);
+    if (!pe) return {};
+
+    uint32_t bus_id = getBusID(*pe);
+
+    // Find all PEs sharing the same bus
+    std::vector<uint32_t> sharing;
+
+    for (const auto& pair : pes_) {
+        if (getBusID(pair.second) == bus_id) {
+            sharing.push_back(pair.first);
+        }
+    }
+
+    return sharing;
+}
+
+//=============================================================================
+// Helper Functions
+//=============================================================================
+
+void PEPlacementManager::buildLookupTables() {
+    level_to_pes_.clear();
+    bank_to_pes_.clear();
+    chip_to_pes_.clear();
+    rank_to_pes_.clear();
+
+    for (const auto& pair : pes_) {
+        const auto& pe = pair.second;
+
+        level_to_pes_[pe.level].push_back(pe.pe_id);
+        bank_to_pes_[pe.bank_id].push_back(pe.pe_id);
+        chip_to_pes_[pe.chip_id].push_back(pe.pe_id);
+        rank_to_pes_[pe.rank_id].push_back(pe.pe_id);
+    }
+}
+
+void PEPlacementManager::buildBusSharingTables() {
+    subarray_bus_to_pes_.clear();
+    bank_bus_to_pes_.clear();
+    chip_bus_to_pes_.clear();
+    rank_bus_to_pes_.clear();
+
+    for (const auto& pair : pes_) {
+        const auto& pe = pair.second;
+        uint32_t bus_id = getBusID(pe);
+
+        switch (pe.level) {
+            case PEPlacementLevel::SUBARRAY:
+                subarray_bus_to_pes_[bus_id].push_back(pe.pe_id);
+                break;
+            case PEPlacementLevel::BANK:
+                bank_bus_to_pes_[bus_id].push_back(pe.pe_id);
+                break;
+            case PEPlacementLevel::CHIP:
+                chip_bus_to_pes_[bus_id].push_back(pe.pe_id);
+                break;
+            case PEPlacementLevel::RANK:
+            case PEPlacementLevel::LOGIC_DIE:
+                rank_bus_to_pes_[bus_id].push_back(pe.pe_id);
+                break;
+        }
+    }
+}
+
+uint32_t PEPlacementManager::getBusID(const PEDescriptor& pe) const {
+    // Generate unique bus ID based on PE location
+    switch (pe.level) {
+        case PEPlacementLevel::SUBARRAY:
+            return (pe.rank_id << 24) | (pe.chip_id << 16) |
+                   (pe.bank_id << 8) | pe.subarray_id;
+        case PEPlacementLevel::BANK:
+            return (pe.rank_id << 16) | (pe.chip_id << 8) | pe.bank_id;
+        case PEPlacementLevel::CHIP:
+            return (pe.rank_id << 8) | pe.chip_id;
+        case PEPlacementLevel::RANK:
+            return pe.rank_id;
+        case PEPlacementLevel::LOGIC_DIE:
+            return 0;  // Single logic die bus
+    }
+    return 0;
+}
+
+//=============================================================================
+// Hierarchy Navigation
+//=============================================================================
+
+std::vector<uint32_t> PEPlacementManager::getPEsAtLevel(PEPlacementLevel level) const {
+    auto it = level_to_pes_.find(level);
+    if (it != level_to_pes_.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+std::vector<uint32_t> PEPlacementManager::getPEsInBank(uint32_t bank_id) const {
+    auto it = bank_to_pes_.find(bank_id);
+    if (it != bank_to_pes_.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+//=============================================================================
+// Printing and Debugging
+//=============================================================================
+
+void PEPlacementManager::printPlacement() const {
+    std::cout << "\n=== PE Placement Summary ===" << std::endl;
+    std::cout << "Total PEs: " << pes_.size() << std::endl;
+    std::cout << "Placement Level: " << static_cast<int>(placement_level_) << std::endl;
+    std::cout << "Addressing Mode: " << static_cast<int>(addressing_mode_) << std::endl;
+
+    for (const auto& pair : pes_) {
+        const auto& pe = pair.second;
+        std::cout << "\nPE " << pe.pe_id << ":" << std::endl;
+        std::cout << "  Level: " << static_cast<int>(pe.level) << std::endl;
+        std::cout << "  Location: R" << pe.rank_id << "C" << pe.chip_id
+                  << "B" << pe.bank_id << "S" << pe.subarray_id << std::endl;
+        printConstraints(pe.pe_id);
+    }
+}
+
+void PEPlacementManager::printConstraints(uint32_t pe_id) const {
+    auto pe = getPE(pe_id);
+    if (!pe) return;
+
+    const auto& bus = pe->bus_constraints;
+    const auto& addr = pe->addr_constraints;
+
+    std::cout << "  Bus Constraints:" << std::endl;
+    std::cout << "    Data Bus Width: " << bus.data_bus_width_bits << " bits" << std::endl;
+    std::cout << "    Max Bandwidth: " << bus.max_bandwidth_gbps << " GB/s" << std::endl;
+    std::cout << "    Shared PEs: " << bus.shared_bus_pes << std::endl;
+    std::cout << "    Dedicated Bus: " << (bus.has_dedicated_bus ? "Yes" : "No") << std::endl;
+
+    std::cout << "  Address Constraints:" << std::endl;
+    std::cout << "    Accessible Range: 0x" << std::hex << addr.accessible_base
+              << " - 0x" << addr.accessible_limit << std::dec << std::endl;
+    std::cout << "    Accessible Size: " << (addr.accessible_size_bytes / 1024) << " KB" << std::endl;
+    std::cout << "    Remote Access: " << (addr.can_access_remote ? "Yes" : "No") << std::endl;
+    std::cout << "    Remote Penalty: " << addr.remote_access_penalty << " cycles" << std::endl;
+}
+
+//=============================================================================
+// Stub implementations for remaining functions
+//=============================================================================
+
+uint32_t PEPlacementManager::getPEForAddress(Address addr) const {
+    for (const auto& pair : pes_) {
+        if (isLocalAddress(pair.first, addr)) {
+            return pair.first;
+        }
+    }
+    return UINT32_MAX;
+}
+
+std::vector<uint32_t> PEPlacementManager::getPEsForAddress(Address addr) const {
+    std::vector<uint32_t> result;
+    for (const auto& pair : pes_) {
+        if (canAccess(pair.first, addr)) {
+            result.push_back(pair.first);
+        }
+    }
+    return result;
+}
+
+Address PEPlacementManager::translateAddress(uint32_t from_pe, uint32_t to_pe,
+                                             Address addr) const {
+    // For unified addressing, no translation needed
+    if (addressing_mode_ == AddressingMode::UNIFIED) {
+        return addr;
+    }
+
+    // For discrete addressing, would need offset calculation
+    // TODO: Implement discrete address translation
+    return addr;
+}
+
+std::vector<uint32_t> PEPlacementManager::getPEsInSubarray(uint32_t bank_id,
+                                                           uint32_t subarray_id) const {
+    std::vector<uint32_t> result;
+    for (const auto& pair : pes_) {
+        const auto& pe = pair.second;
+        if (pe.bank_id == bank_id && pe.subarray_id == subarray_id) {
+            result.push_back(pe.pe_id);
+        }
+    }
+    return result;
+}
+
+std::vector<uint32_t> PEPlacementManager::getPEsInChip(uint32_t chip_id) const {
+    auto it = chip_to_pes_.find(chip_id);
+    if (it != chip_to_pes_.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+std::vector<uint32_t> PEPlacementManager::getPEsInRank(uint32_t rank_id) const {
+    auto it = rank_to_pes_.find(rank_id);
+    if (it != rank_to_pes_.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+std::vector<uint32_t> PEPlacementManager::getPEsOnLogicDie() const {
+    std::vector<uint32_t> result;
+    for (const auto& pair : pes_) {
+        if (pair.second.on_logic_die) {
+            result.push_back(pair.first);
+        }
+    }
+    return result;
+}
+
+Address PEPlacementManager::getHierarchyBase(PEPlacementLevel level,
+                                             const PEDescriptor& pe) const {
+    // TODO: Implement based on memory organization
+    return 0;
+}
+
+Address PEPlacementManager::getHierarchyLimit(PEPlacementLevel level,
+                                              const PEDescriptor& pe) const {
+    // TODO: Implement based on memory organization
+    return 0;
+}
+
+bool PEPlacementManager::isAddressInRange(Address addr,
+                                          const PEDescriptor& pe) const {
+    return addr >= pe.addr_base && addr < pe.addr_limit;
+}
+
+} // namespace pimid
