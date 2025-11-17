@@ -94,8 +94,3 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_bank_inorder_bfs_pim.cpp)
     target_link_libraries(test_bank_inorder_bfs_pim pimid_lib)
     add_test(NAME BankInOrderBFSPIMTest COMMAND test_bank_inorder_bfs_pim)
 endif()
-
-# Benchmark suite (moved from root benchmarks/)
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks_suite/CMakeLists.txt)
-    add_subdirectory(benchmarks_suite)
-endif()
