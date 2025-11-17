@@ -29,19 +29,19 @@ Makefile
 # OS
 .DS_Store
 Thumbs.db
-# Build artifacts - MPICH workloads
-workloads/mpich_examples/vector_dotproduct
-workloads/mpich_examples/matrix_multiply
-workloads/mpich_examples/graph_pagerank
+# Build artifacts - MPICH workloads (moved to test/benchmarks/workloads)
+test/benchmarks/workloads/mpich_examples/vector_dotproduct
+test/benchmarks/workloads/mpich_examples/matrix_multiply
+test/benchmarks/workloads/mpich_examples/graph_pagerank
 
-# Build artifacts - BFS workload
-workloads/bfs/bfs
-workloads/bfs/bfs_omp
-workloads/bfs/bfs_pimid
-workloads/bfs/bfs_pimid_omp
+# Build artifacts - BFS workload (moved to test/benchmarks/workloads)
+test/benchmarks/workloads/bfs/bfs
+test/benchmarks/workloads/bfs/bfs_omp
+test/benchmarks/workloads/bfs/bfs_pimid
+test/benchmarks/workloads/bfs/bfs_pimid_omp
 
 # Test configuration files
-workloads/*/test_config.yaml
+test/benchmarks/workloads/*/test_config.yaml
 
 # Compiled executables
 *.o
@@ -55,9 +55,9 @@ workloads/*/test_config.yaml
 *~
 .DS_Store
 
-# Test executables
-tests/test_*
-!tests/test_*.cpp
-!tests/test_*.sh
-!tests/test_*.py
+# Test executables (changed from tests/ to test/)
+test/test_*
+!test/test_*.cpp
+!test/test_*.sh
+!test/test_*.py
 ext/
