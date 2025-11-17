@@ -34,6 +34,15 @@ workloads/mpich_examples/vector_dotproduct
 workloads/mpich_examples/matrix_multiply
 workloads/mpich_examples/graph_pagerank
 
+# Build artifacts - BFS workload
+workloads/bfs/bfs
+workloads/bfs/bfs_omp
+workloads/bfs/bfs_pimid
+workloads/bfs/bfs_pimid_omp
+
+# Test configuration files
+workloads/*/test_config.yaml
+
 # Compiled executables
 *.o
 *.exe
