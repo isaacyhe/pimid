@@ -144,6 +144,9 @@ set(PIMID_SOURCES
     src/scheduler/roundrobin_scheduler.cpp
     src/scheduler/loadbalanced_scheduler.cpp
 
+    # Instrumentation (PIMID API for workloads)
+    src/instrumentation/pimid_api.cpp
+
     # Main
     src/pimid.cpp
 )
@@ -243,6 +246,17 @@ if(BUILD_PLUGINS)
     endif()
 endif()
 
+# Main PIMID binary - primary entry point for running simulations
+# This is the main simulator that executes external workload binaries
+add_executable(pimid src/standalone_main_new.cpp)
+target_link_libraries(pimid pimid_lib)
+if(BUILD_PLUGINS)
+    target_link_libraries(pimid pimid_plugin)
+    if(yaml-cpp_FOUND)
+        target_link_libraries(pimid pimid_config)
+    endif()
+endif()
+
 # PIM Simulator command-line tool (config-driven simulation)
 # NOTE: Standalone tool, doesn't link against pimid_lib to avoid external dependencies
 add_executable(pimid_sim
@@ -253,7 +267,7 @@ target_compile_options(pimid_sim PRIVATE -std=c++17)
 target_link_libraries(pimid_sim Threads::Threads)
 
 # Install targets
-install(TARGETS pimid_lib pimid_host pimid_device pimid_standalone pimid_sim
+install(TARGETS pimid_lib pimid_host pimid_device pimid_standalone pimid pimid_sim
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
