@@ -110,13 +110,17 @@ public:
 
             config.placement_level = parts[1];
 
-            // Handle PE type (simple_alu vs inorder)
+            // Handle PE type (simple_alu vs inorder vs ooo)
             if (parts[2] == "simple" && parts.size() > 3 && parts[3] == "alu") {
                 config.pe_type = "simple_alu";
                 config.memory_tech = parts[4];
                 // parts[5] is size, parts[6] is degX
             } else if (parts[2] == "inorder") {
                 config.pe_type = "in_order_core";
+                config.memory_tech = parts[3];
+                // parts[4] is size, parts[5] is degX
+            } else if (parts[2] == "ooo") {
+                config.pe_type = "out_of_order_core";
                 config.memory_tech = parts[3];
                 // parts[4] is size, parts[5] is degX
             }

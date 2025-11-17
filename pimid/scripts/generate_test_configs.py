@@ -63,6 +63,16 @@ PE_TYPES = {
         'compare_ns': 1.0,
         'branch_ns': 3.0,
         'alu_ns': 1.0
+    },
+    'ooo': {
+        'name': 'Out-of-Order Core',
+        'type': 'out_of_order_core',
+        'fetch_decode_ns': 2.5,
+        'compare_ns': 0.8,
+        'branch_ns': 2.0,  # Better branch prediction
+        'alu_ns': 0.8,
+        'rob_size': 128,  # Reorder buffer size
+        'issue_width': 4  # Superscalar issue width
     }
 }
 
@@ -78,6 +88,24 @@ PLACEMENT_LEVELS = {
         'num_banks': 4,
         'subarrays_per_bank': 4,
         'num_pes': 4  # 1 per bank
+    },
+    'bg': {
+        'level': 'BG',  # Bank Group level
+        'num_banks': 4,
+        'subarrays_per_bank': 4,
+        'num_pes': 2  # 1 per bank group (2 bank groups)
+    },
+    'chip': {
+        'level': 'CHIP',  # Chip level
+        'num_banks': 4,
+        'subarrays_per_bank': 4,
+        'num_pes': 1  # 1 per chip
+    },
+    'mc': {
+        'level': 'MC',  # Memory Controller level
+        'num_banks': 4,
+        'subarrays_per_bank': 4,
+        'num_pes': 1  # 1 per memory controller
     },
     'rank': {
         'level': 'RANK',
@@ -188,6 +216,31 @@ processing_element:
     fetch_decode_pj: 10.0
     alu_pj: 5.0
     branch_pj: 8.0
+"""
+    elif pe_type == 'ooo':
+        yaml_content += f"""  # Out-of-Order Core specifications
+  pipeline:
+    stages: 7  # More stages for OOO
+    fetch_decode_ns: {pe['fetch_decode_ns']}
+    execute_compare_ns: {pe['compare_ns']}
+    execute_alu_ns: {pe['alu_ns']}
+    memory_access_ns: 1.0
+    writeback_ns: 0.5
+    branch_penalty_ns: {pe['branch_ns']}
+    branch_prediction_accuracy: 0.85  # Better prediction
+
+  ooo_config:
+    reorder_buffer_size: {pe['rob_size']}
+    issue_width: {pe['issue_width']}
+    retire_width: 4
+    load_queue_size: 64
+    store_queue_size: 32
+
+  energy:
+    fetch_decode_pj: 15.0  # Higher due to complexity
+    alu_pj: 6.0
+    branch_pj: 10.0
+    rob_pj: 8.0  # Reorder buffer energy
 """
     else:
         yaml_content += f"""  # Simple ALU specifications
@@ -300,13 +353,17 @@ combinations of memory technologies, PE types, placement levels, and workload si
 - **PCM**: 8ns read, 100ns write (12.5x asymmetry)
 - **ReRAM**: 5ns read, 12ns write (2.4x asymmetry)
 
-### PE Types (2)
+### PE Types (3)
 - **Simple ALU**: Fast compare (0.3ns), no branch support
 - **In-Order Core**: 5-stage pipeline, branch support (3ns penalty)
+- **Out-of-Order Core**: 7-stage pipeline, superscalar (issue width 4), better branch prediction (2ns penalty)
 
-### Placement Levels (3)
+### Placement Levels (6)
 - **Subarray**: 16 PEs (1 per subarray), 4 banks × 4 subarrays
 - **Bank**: 4 PEs (1 per bank)
+- **BG** (Bank Group): 2 PEs (1 per bank group)
+- **Chip**: 1 PE (per chip)
+- **MC** (Memory Controller): 1 PE (per memory controller)
 - **Rank**: 1 PE (shared across all banks)
 
 ### Workload Sizes (4)
@@ -321,7 +378,8 @@ combinations of memory technologies, PE types, placement levels, and workload si
 
 ## Total Configurations
 
-Total configs: 5 × 2 × 3 × 4 × 2 = **{total} configurations**
+Total configs: 5 memory × 3 PE types × 6 placements × 4 sizes × 2 degrees = **{total} configurations**
+(Full comprehensive: 5 × 3 × 6 × 4 × 2 = 720 configurations)
 
 ## Generated Configs
 

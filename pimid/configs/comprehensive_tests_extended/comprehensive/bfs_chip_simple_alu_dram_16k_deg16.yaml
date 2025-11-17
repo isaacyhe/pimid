@@ -1,0 +1,69 @@
+# BFS Benchmark Configuration - Auto-generated
+# Placement: CHIP, PE: Simple ALU, Memory: DRAM
+# Workload: Medium (16384 vertices, degree 16)
+
+benchmark:
+  name: "BFS_CHIP_SimpleALU_DRAM"
+  description: "BFS with CHIP-level Simple ALU PE on DRAM"
+  workload_type: "bfs"
+
+# Workload parameters
+workload:
+  graph:
+    num_vertices: 16384
+    avg_degree: 16
+    topology: "random"
+
+  bfs:
+    root_vertex: 0
+    traversal_mode: "level_synchronous"
+
+# Memory configuration
+memory:
+  technology: "DRAM"
+
+  hierarchy:
+    num_banks: 4
+    num_subarrays_per_bank: 4
+
+  # Memory timing characteristics
+  timing:
+    subarray_read_ns: 13.32
+    subarray_write_ns: 15.0
+    inner_bank_htree_ns: 6.65
+
+# Processing element configuration
+processing_element:
+  type: "simple_alu"
+  placement_level: "CHIP"
+  num_pes: 1
+
+  # Simple ALU specifications
+  timing:
+    compare_ns: 0.3
+    alu_ns: 0.5
+    load_ns: 0.5
+
+  energy:
+    alu_pj: 2.0
+
+# Simulation control
+simulation:
+  max_cycles: 1000000000
+  enable_power_modeling: true
+  enable_detailed_stats: true
+
+# Output configuration
+output:
+  stats_file: "results/bfs_chip_simple_alu_dram_16k_deg16_stats.txt"
+  detailed_log: "results/bfs_chip_simple_alu_dram_16k_deg16_detailed.log"
+  summary_format: "table"
+
+# Test metadata
+metadata:
+  placement_level: "chip"
+  pe_type: "simple_alu"
+  memory_tech: "dram"
+  workload_size: "medium"
+  graph_degree: 16
+  auto_generated: true
