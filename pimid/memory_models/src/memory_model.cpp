@@ -2,6 +2,9 @@
 #include "dram_model.h"
 #include "sram_model.h"
 #include "nvm_model.h"
+#include "sttmram_model.h"
+#include "pcm_model.h"
+#include "reram_model.h"
 #include <iostream>
 #include <stdexcept>
 
@@ -26,12 +29,28 @@ std::shared_ptr<MemoryModel> MemoryModelFactory::createMemoryModel(
                 return std::make_shared<DRAMModel>(config_path);
 
             case MemoryTechnology::SRAM:
-                std::cout << "  Creating SRAM model (CACTI)" << std::endl;
+                std::cout << "  Creating SRAM model (CACTI) with inner-bank timing" << std::endl;
                 return std::make_shared<SRAMModel>(config_path);
 
             case MemoryTechnology::STT_MRAM:
-                std::cout << "  Creating STT-MRAM model (NVSim)" << std::endl;
-                return std::make_shared<NVMModel>(config_path);
+                std::cout << "  Creating STT-MRAM model (NVSim) with inner-bank timing" << std::endl;
+                return std::make_shared<STTMRAMModel>(config_path);
+
+            case MemoryTechnology::PCM:
+                std::cout << "  Creating PCM model (NVSim) with inner-bank timing" << std::endl;
+                return std::make_shared<PCMModel>(config_path);
+
+            case MemoryTechnology::RERAM:
+                std::cout << "  Creating ReRAM model (NVSim) with analog compute support" << std::endl;
+                return std::make_shared<ReRAMModel>(config_path);
+
+            case MemoryTechnology::HBM:
+            case MemoryTechnology::HBM2:
+            case MemoryTechnology::DDR4:
+            case MemoryTechnology::DDR5:
+                // These are all DRAM variants, use DRAMModel
+                std::cout << "  Creating DRAM model (Ramulator) for DRAM variant" << std::endl;
+                return std::make_shared<DRAMModel>(config_path);
 
             default:
                 throw std::runtime_error("Unknown memory technology: " +

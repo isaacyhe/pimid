@@ -34,3 +34,24 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_host_device_comm.cpp)
     target_link_libraries(test_host_device_comm pimid_lib test_utils)
     add_test(NAME HostDeviceCommTest COMMAND test_host_device_comm)
 endif()
+
+# Memory models with inner-bank timing test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_memory_models_inner_bank_timing.cpp)
+    add_executable(test_memory_models_inner_bank_timing test_memory_models_inner_bank_timing.cpp)
+    target_link_libraries(test_memory_models_inner_bank_timing pimid_lib)
+    add_test(NAME MemoryModelsInnerBankTimingTest COMMAND test_memory_models_inner_bank_timing)
+endif()
+
+# Per-subarray PIM comparison test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_subarray_pim_comparison.cpp)
+    add_executable(test_subarray_pim_comparison test_subarray_pim_comparison.cpp)
+    target_link_libraries(test_subarray_pim_comparison pimid_lib)
+    add_test(NAME SubarrayPIMComparisonTest COMMAND test_subarray_pim_comparison)
+endif()
+
+# Bank-level PIM comparison test (in-order core vs ALU)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_bank_pim_comparison.cpp)
+    add_executable(test_bank_pim_comparison test_bank_pim_comparison.cpp)
+    target_link_libraries(test_bank_pim_comparison pimid_lib)
+    add_test(NAME BankPIMComparisonTest COMMAND test_bank_pim_comparison)
+endif()

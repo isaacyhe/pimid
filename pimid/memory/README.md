@@ -22,10 +22,17 @@ This fundamental architectural difference determines whether fine-grained PIM (a
 
 | File | Purpose |
 |------|---------|
-| `dram_architecture.h` | Main header with architecture specifications |
+| `dram_architecture.h` | DRAM architecture specifications (DDR4/DDR5/HBM2/HBM3) |
+| `dram_architecture_v2.h` | DRAM with inner-bank timing breakdown |
+| `sram_architecture.h` | **NEW!** SRAM (cache) specifications with inner-bank timing |
+| `sttmram_architecture.h` | **NEW!** STT-MRAM specifications with R/W asymmetry |
+| `pcm_architecture.h` | **NEW!** PCM specifications (phase-change memory) |
+| `reram_architecture.h` | **NEW!** ReRAM/Memristor with analog compute support |
 | `dram_architecture.cpp` | Implementation (printSummary, etc.) |
 | `dram_config_example.json` | Configuration example for hypothetical studies |
 | `README.md` | This file |
+
+**See also**: `INNER_BANK_TIMING_ALL_MEMORY_TECH.md` for comprehensive analysis across all memory technologies
 
 ---
 
@@ -65,9 +72,11 @@ std::cout << "Bank BW: " << ddr4_wide->getBankBandwidth() << " GB/s\n";      // 
 
 ---
 
-## Supported Architectures
+## Supported Memory Technologies
 
-### DDR4-2400 (Baseline)
+### DRAM Technologies
+
+#### DDR4-2400 (Baseline)
 
 **Key Specs:**
 - Bank port: **8-bit** (1.2 GB/s) ← CRITICAL BOTTLENECK!
@@ -105,6 +114,51 @@ std::cout << "Bank BW: " << ddr4_wide->getBankBandwidth() << " GB/s\n";      // 
 - **PIM Implication:** Even subarray-level PIM may be viable!
 
 **Use Case:** Future PIM systems, maximum bandwidth scenarios
+
+### On-Chip and Emerging NVM Technologies
+
+#### SRAM (L3/LLC Caches)
+
+**Key Specs** (`sram_architecture.h`):
+- Inner-bank timing: **1.95-3.80ns** (FASTEST!)
+- Banks: 4-16 per chip (on-chip)
+- H-tree network routing
+- **NO** bank groups, MC, or rank levels (on-chip memory)
+- **PIM Implication**: Excellent for all PIM levels (subarray/bank/chip)
+
+**Use Case:** Cache-based PIM accelerators, low-latency vector operations
+
+#### STT-MRAM (Spin-Transfer Torque)
+
+**Key Specs** (`sttmram_architecture.h`):
+- Read: 3.60-7.10ns, Write: 13-27ns (asymmetric!)
+- Banks: 32-64 per standalone chip
+- Non-volatile, good endurance (10^12-10^15 cycles)
+- **PIM Implication**: Good for read-heavy PIM (NN inference)
+
+**Use Case:** Persistent PIM, ML inference, embedded NVM
+
+#### PCM (Phase-Change Memory)
+
+**Key Specs** (`pcm_architecture.h`):
+- Read: 5.90-11.80ns, Write: 10-150ns (VERY slow writes!)
+- 3D stackable (e.g., Intel Optane)
+- Bus routing (some designs, not H-tree)
+- **PIM Implication**: Limited to read-only workloads
+
+**Use Case:** Archival PIM, read-mostly lookup tables, storage-class memory
+
+#### ReRAM (Resistive RAM / Memristor)
+
+**Key Specs** (`reram_architecture.h`):
+- Read: 3.70-7.40ns, Write: 5-20ns (FAST writes!)
+- Crossbar structure (natural for analog computing!)
+- Analog compute support (matrix-vector multiply)
+- **PIM Implication**: EXCELLENT for analog NN accelerators
+
+**Use Case:** Analog in-memory computing, neural network accelerators, AI workloads
+
+**See**: `INNER_BANK_TIMING_ALL_MEMORY_TECH.md` for detailed comparison of all technologies
 
 ---
 
@@ -306,13 +360,27 @@ const double BANK_BW_GBs = arch->getBankBandwidth();
 
 ### Inner-Bank Timing Research
 
+**DRAM**:
 - **"Improving DRAM Latency with Dynamic Asymmetric Subarray"** (MICRO'15) - Shih-Lien Lu et al.
   - Subarray segmentation and designated array strobe (DAS)
 - **"A Case for Exploiting Subarray-Level Parallelism (SALP) in DRAM"** (ISCA'12) - Yoongu Kim et al.
   - Bank internal parallelism and datapath analysis
 - **"Tiered-Latency DRAM: A Low Latency and Low Cost DRAM Architecture"** (HPCA'13) - Donghyuk Lee et al.
   - tRCD and tCAS component breakdown
-- **See:** `INNER_BANK_TIMING_RESEARCH.md` for complete analysis
+- **See:** `INNER_BANK_TIMING_RESEARCH.md` for DRAM-specific analysis
+
+**STT-MRAM**:
+- **"SMART: STT-MRAM Architecture for Smart Activation and Sensing"** (MEMSYS 2019)
+  - STT-MRAM bank and subarray architecture
+
+**ReRAM**:
+- **"ISAAC: A Convolutional Neural Network Accelerator with In-Situ Analog Arithmetic in Crossbars"** (ISCA 2016)
+  - ReRAM crossbar analog computing
+- **"PRIME: A Novel Processing-in-Memory Architecture for Neural Network Computation in ReRAM-Based Main Memory"** (ISCA 2016)
+  - ReRAM-based PIM architecture
+
+**All Technologies**:
+- **See:** `INNER_BANK_TIMING_ALL_MEMORY_TECH.md` for comprehensive comparison across SRAM, STT-MRAM, PCM, ReRAM, and DRAM
 
 ---
 
