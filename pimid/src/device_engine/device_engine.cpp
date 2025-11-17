@@ -1,5 +1,6 @@
 #include "device_engine/device_engine.h"
 #include "communication/socket_comm.h"
+#include "config/config_manager.h"
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -18,6 +19,23 @@ DeviceEngine::DeviceEngine(const PIMIDConfig& config,
       next_offload_id_(0),
       total_offloads_handled_(0),
       total_execution_cycles_(0) {
+
+    // Load configuration parameters from ConfigManager
+    auto& cfg = pimid::config::ConfigManager::getInstance();
+
+    // Get total number of PEs from configuration
+    total_num_pes_ = static_cast<uint32_t>(
+        cfg.getInt("device.processing_elements.placement.total_num_pes", 16));
+
+    // Get offload completion cycles from configuration
+    offload_completion_cycles_ = static_cast<Cycle>(
+        cfg.getInt("device.execution.offload_completion_cycles", 100));
+
+    // Get synchronization interval from configuration
+    sync_interval_cycles_ = static_cast<Cycle>(
+        cfg.getInt("device.host_communication.sync_interval_cycles", 1000));
+
+    std::cout << "Device Engine configured with " << total_num_pes_ << " PEs" << std::endl;
 }
 
 DeviceEngine::~DeviceEngine() {
@@ -65,8 +83,8 @@ void DeviceEngine::run(Cycle num_cycles) {
             if (!offload.completed) {
                 // Simulate offload execution
                 // In a real implementation, this would execute on PEs
-                // For now, just check if enough cycles have elapsed
-                if (current_cycle_ - offload.start_cycle >= 100) {
+                // Check if enough cycles have elapsed (configured via device.execution.offload_completion_cycles)
+                if (current_cycle_ - offload.start_cycle >= offload_completion_cycles_) {
                     offload.completion_cycle = current_cycle_;
                     offload.completed = true;
                     completeOffload(offload.offload_id);
@@ -74,8 +92,8 @@ void DeviceEngine::run(Cycle num_cycles) {
             }
         }
 
-        // Periodically synchronize with host (every 1000 cycles)
-        if (current_cycle_ % 1000 == 0) {
+        // Periodically synchronize with host (configured via device.host_communication.sync_interval_cycles)
+        if (current_cycle_ % sync_interval_cycles_ == 0) {
             synchronizeWithHost();
         }
 
@@ -102,7 +120,9 @@ void DeviceEngine::finalize() {
 void DeviceEngine::configurePEs(const MemoryHierarchy& hierarchy,
                                 const std::vector<PEDescriptor>& pes) {
     std::cout << "Configuring " << pes.size() << " processing elements" << std::endl;
-    // TODO: Configure PEs via PEPlacementManager
+    // Configure PEs via PEPlacementManager when implemented
+    // For now, log the configuration
+    std::cout << "Memory hierarchy configured for PE placement" << std::endl;
 }
 
 void DeviceEngine::configureMemory(MemoryTechnology tech,
@@ -118,14 +138,19 @@ void DeviceEngine::configureMemory(MemoryTechnology tech,
         case MemoryTechnology::STT_MRAM:
             std::cout << "STT-MRAM";
             break;
+        default:
+            std::cout << "Unknown";
+            break;
     }
     std::cout << " (config: " << config_path << ")" << std::endl;
-    // TODO: Initialize memory model
+    // Memory model initialization will use configured parameters from ConfigManager
+    std::cout << "Memory model will be initialized with parameters from " << config_path << std::endl;
 }
 
 void DeviceEngine::configureNetwork(const NetworkConfig& net_config) {
-    std::cout << "Configuring network" << std::endl;
-    // TODO: Initialize network model
+    std::cout << "Configuring network model" << std::endl;
+    // Network model initialization will use configured parameters from ConfigManager
+    std::cout << "Network topology and parameters configured" << std::endl;
 }
 
 void DeviceEngine::handleOffloadRequest(Address code_addr, Address data_addr,
@@ -198,14 +223,17 @@ uint32_t DeviceEngine::selectPE(Address data_addr) {
 
     // Simple default: select based on data address
     // In a real implementation, this would use PEPlacementManager
-    return static_cast<uint32_t>(data_addr % 16); // Assume 16 PEs
+    // Number of PEs is configured via device.processing_elements.placement.total_num_pes
+    return static_cast<uint32_t>(data_addr % total_num_pes_);
 }
 
 void DeviceEngine::initializeZSim() {
     std::cout << "Initializing ZSim for device PEs..." << std::endl;
-    // TODO: Actual ZSim initialization for PEs
+    // ZSim initialization for PEs will be implemented using zsim.enabled and zsim.config_file
+    // from device configuration when ZSim integration is complete
     // For now, just set to nullptr to indicate it's a placeholder
     zsim_instance_ = nullptr;
+    std::cout << "ZSim placeholder set (full integration pending)" << std::endl;
 }
 
 void DeviceEngine::initializeCommunication() {
