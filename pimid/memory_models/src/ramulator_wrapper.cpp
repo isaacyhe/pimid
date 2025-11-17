@@ -384,7 +384,7 @@ void RamulatorWrapper::initializePIMComponents() {
     // Initialize with DRAM organization
     // Use organization from Ramulator if available, otherwise use defaults
     int num_subarrays = 16;  // Typical
-    int num_bank_groups = dram_arch_->organization.bank_groups_per_rank;
+    int num_bank_groups = dram_arch_->organization.bank_groups_per_chip;
     int num_banks = dram_arch_->organization.banks_per_bank_group * num_bank_groups;
 
     bandwidth_tracker_->initialize(

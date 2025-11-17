@@ -22,11 +22,12 @@
 
 #include <string>
 #include <memory>
+#include "sram_architecture.h"  // For VerificationStatus enum
 
 namespace pimid {
 namespace memory {
 
-enum class VerificationStatus { VERIFIED, INFERRED, ESTIMATED, UNKNOWN };
+// VerificationStatus is defined in sram_architecture.h
 
 struct PCMOrganization {
     int banks_per_chip;

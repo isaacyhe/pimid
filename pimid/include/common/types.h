@@ -27,7 +27,13 @@ enum class PEPlacementLevel {
 enum class MemoryTechnology {
     DRAM,        // via Ramulator
     SRAM,        // via CACTI
-    STT_MRAM     // via NVSim
+    STT_MRAM,    // via NVSim
+    PCM,         // Phase Change Memory
+    RERAM,       // Resistive RAM
+    HBM,         // High Bandwidth Memory
+    HBM2,        // HBM2
+    DDR4,        // DDR4
+    DDR5         // DDR5
 };
 
 // Addressing mode

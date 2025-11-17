@@ -105,16 +105,16 @@ void SRAMModel::initialize() {
     // Initialize SRAM architecture with inner-bank timing (NEW!)
     if (sram_config_.capacity <= 512 * 1024) {
         // Small cache: use 8MB L3 22nm configuration
-        sram_arch_ = memory::createSRAM_8MB_L3_22nm();
+        sram_arch_ = memory::createSRAM_L3_8MB_22nm();
         std::cout << "[SRAMModel] Using 8MB L3 22nm architecture specs" << std::endl;
     } else {
         // Large cache: use 16MB LLC 14nm configuration
-        sram_arch_ = memory::createSRAM_16MB_LLC_14nm();
+        sram_arch_ = memory::createSRAM_LLC_16MB_14nm();
         std::cout << "[SRAMModel] Using 16MB LLC 14nm architecture specs" << std::endl;
     }
 
     std::cout << "[SRAMModel] Inner-bank datapath latency: "
-              << sram_arch_->timing.inner_bank.getTotalReadLatency() << " ns" << std::endl;
+              << sram_arch_->timing.inner_bank.getTotalInnerBank() << " ns" << std::endl;
 
     std::cout << "[SRAMModel] Initialization complete" << std::endl;
 }
@@ -246,27 +246,27 @@ void SRAMModel::useFallbackValues() {
 
 double SRAMModel::getSubarrayReadLatency() const {
     if (!sram_arch_) return 0.0;
-    return sram_arch_->timing.subarray_read_ns;
+    return sram_arch_->timing.subarray_access_ns;
 }
 
 double SRAMModel::getBankReadLatency() const {
     if (!sram_arch_) return 0.0;
-    return sram_arch_->timing.bank_read_ns;
+    return sram_arch_->timing.bank_access_ns;
 }
 
 double SRAMModel::getChipReadLatency() const {
     if (!sram_arch_) return 0.0;
-    return sram_arch_->timing.chip_read_ns;
+    return sram_arch_->timing.chip_access_ns;
 }
 
 double SRAMModel::getInnerBankDatapathLatency() const {
     if (!sram_arch_) return 0.0;
-    return sram_arch_->timing.inner_bank.getTotalReadLatency();
+    return sram_arch_->timing.inner_bank.getTotalInnerBank();
 }
 
 bool SRAMModel::supportsBankPIM() const {
-    if (!sram_arch_) return false;
-    return sram_arch_->isSuitableForPIM();
+    // SRAM supports bank-level PIM
+    return true;
 }
 
 bool SRAMModel::supportsSubarrayPIM() const {

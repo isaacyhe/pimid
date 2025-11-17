@@ -54,8 +54,8 @@ void STTMRAMModel::initialize() {
         std::cout << "[STTMRAMModel] Using Everspin 256Mb architecture specs" << std::endl;
     } else {
         // Large MRAM: use 8MB cache configuration
-        mram_arch_ = memory::createSTTMRAM_8MB_Cache_22nm();
-        std::cout << "[STTMRAMModel] Using 8MB cache 22nm architecture specs" << std::endl;
+        mram_arch_ = memory::createSTTMRAM_8MB_22nm();
+        std::cout << "[STTMRAMModel] Using 8MB 22nm architecture specs" << std::endl;
     }
 
     std::cout << "[STTMRAMModel] Inner-bank read latency: "
