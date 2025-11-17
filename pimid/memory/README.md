@@ -146,6 +146,21 @@ Includes both basic DRAM timing (tRCD, tCAS, etc.) and hierarchical access laten
 - `chip_access_ns` - Cross-bank-group access (~60 ns)
 - `rank_access_ns` - Rank switching (~80 ns)
 
+**NEW: Inner-Bank Datapath Timing** (see `INNER_BANK_TIMING_RESEARCH.md`)
+
+The `inner_bank` structure provides detailed breakdown of components **hidden inside tCAS**:
+- **Column path**: decoder (0.35ns) + mux (0.55ns) + output driver (0.50ns)
+- **H-tree network**: horizontal (1.20ns) + vertical (1.20ns) segments
+- **Global I/O**: bank-wide data lines (1.50ns)
+- **Total DDR4**: 6.65ns inner-bank datapath
+- **Total HBM2**: 3.05ns (~2.2x faster due to TSVs!)
+
+**Why this matters for PIM:**
+- Subarray-to-subarray communication must traverse H-tree (~4.8ns DDR4)
+- Local PIM operations can skip chip I/O (saves ~6.67ns!)
+- HBM2's TSVs enable much shorter internal paths
+- H-tree is a shared resource (contention modeling required)
+
 ### Energy (DRAMEnergy)
 
 Data movement energy at each hierarchy level (pJ per byte):
@@ -280,6 +295,7 @@ const double BANK_BW_GBs = arch->getBankBandwidth();
 - **HBM3 JEDEC Standard:** JESD238
 - **Micron DDR4 Datasheet:** MT40A2G4, MT40A1G8
 - **SK hynix HBM2 Datasheet:** H5CCG04F29AFR
+- **CACTI v6.5:** Analytical models for H-tree delay (`pimid/external/mcpat/cacti/`)
 
 ### Research Papers
 
@@ -287,6 +303,16 @@ const double BANK_BW_GBs = arch->getBankBandwidth();
 - "A Case for Richer Cross-layer Abstractions" (ISCA'18)
 - "Processing-in-Memory: A Workload-Driven Perspective" (IBM JRD'19)
 - "FIGARO: Improving System Performance via Fine-Grained In-DRAM Data Relocation" (MICRO'20)
+
+### Inner-Bank Timing Research
+
+- **"Improving DRAM Latency with Dynamic Asymmetric Subarray"** (MICRO'15) - Shih-Lien Lu et al.
+  - Subarray segmentation and designated array strobe (DAS)
+- **"A Case for Exploiting Subarray-Level Parallelism (SALP) in DRAM"** (ISCA'12) - Yoongu Kim et al.
+  - Bank internal parallelism and datapath analysis
+- **"Tiered-Latency DRAM: A Low Latency and Low Cost DRAM Architecture"** (HPCA'13) - Donghyuk Lee et al.
+  - tRCD and tCAS component breakdown
+- **See:** `INNER_BANK_TIMING_RESEARCH.md` for complete analysis
 
 ---
 
