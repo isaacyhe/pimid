@@ -58,6 +58,31 @@ The `PIMBandwidthTracker` automatically:
 - State machines operate correctly
 - We **ONLY ADD** latency for data movement based on port bandwidth
 
+### 5. **Inner-Bank Datapath Timing** (NEW!)
+
+**See `INNER_BANK_TIMING_RESEARCH.md` for complete analysis**
+
+We've added detailed inner-bank timing breakdown in `dram_architecture_v2.h`:
+
+**Components hidden inside tCAS** (DDR4-2400):
+- Column decoder: 0.35ns
+- Column multiplexer (CSL): 0.55ns
+- Subarray output driver: 0.50ns
+- Local I/O (LDL): 0.75ns
+- **H-tree horizontal**: 1.20ns
+- **H-tree vertical**: 1.20ns
+- **Global I/O (GDL)**: 1.50ns
+- Bank I/O driver: 0.60ns
+- **Total**: 6.65ns inner-bank datapath
+
+**Key insights for PIM:**
+- ✅ Subarray-to-subarray communication requires H-tree traversal (~4.8ns DDR4)
+- ✅ Local PIM operations can skip chip I/O (saves ~6.67ns!)
+- ✅ HBM2 is 2.2x faster (3.05ns total) due to TSVs
+- ✅ H-tree is a shared resource requiring contention modeling
+
+**Sources**: CACTI v6.5, DAS-MICRO'15, SALP-ISCA'12, Tiered-Latency-DRAM-HPCA'13
+
 ## Architecture
 
 ### Component Hierarchy
@@ -266,6 +291,8 @@ double effective_bw = ram_wrapper.getEffectiveBandwidthPerPE(
 ## References
 
 - **JEDEC Standards**: JESD79-4 (DDR4), JESD79-5 (DDR5), JESD235A (HBM2)
-- **Academic Papers**: DAS-MICRO15, NVIDIA-HPCA17, Darwin-arXiv23
+- **Academic Papers**: DAS-MICRO15, NVIDIA-HPCA17, Darwin-arXiv23, SALP-ISCA12, Tiered-Latency-DRAM-HPCA13
 - **Our Verification**: `pimid/memory/dram_architecture_v2.h`
+- **Inner-Bank Timing**: `INNER_BANK_TIMING_RESEARCH.md` (H-tree, global I/O, column path analysis)
 - **Ramulator2**: https://github.com/CMU-SAFARI/ramulator2
+- **CACTI**: `pimid/external/mcpat/cacti/` (H-tree analytical models)

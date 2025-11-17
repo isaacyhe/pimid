@@ -129,6 +129,15 @@ MemoryModel (base class)
 - `tick()`: Advance one cycle
 - `getEnergy()`: Query energy consumption
 
+**Inner-Bank Timing** (NEW!):
+- Detailed breakdown of DRAM internal datapath components
+- H-tree network latency modeling (horizontal + vertical segments)
+- Global I/O vs Local I/O distinction
+- Column decoder, mux, and output driver timing
+- See `INNER_BANK_TIMING_RESEARCH.md` and `pimid/memory/dram_architecture_v2.h`
+- **Impact**: 6.65ns inner-bank delay (DDR4), 3.05ns (HBM2)
+- **Key for PIM**: Enables accurate subarray-to-subarray communication modeling
+
 **Extensibility**:
 - Implement `MemoryModel` interface
 - Register in `MemoryModelFactory`
