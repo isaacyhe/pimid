@@ -1,22 +1,22 @@
-#ifndef PIMID_SRAM_MODEL_H
-#define PIMID_SRAM_MODEL_H
+#ifndef PIMID_STTMRAM_MODEL_H
+#define PIMID_STTMRAM_MODEL_H
 
 #include "memory_model.h"
-#include "cacti_wrapper.h"
-#include "memory/sram_architecture.h"
+#include "nvsim_wrapper.h"
+#include "memory/sttmram_architecture.h"
 #include <queue>
 #include <memory>
 
 namespace pimid {
 
 /**
- * SRAM memory model using CACTI
- * Provides timing, area, and power modeling for SRAM caches/scratchpads
+ * STT-MRAM memory model using NVSim
+ * Provides timing, area, and power modeling with inner-bank timing details
  */
-class SRAMModel : public MemoryModel {
+class STTMRAMModel : public MemoryModel {
 public:
-    explicit SRAMModel(const std::string& config_path);
-    ~SRAMModel() override = default;
+    explicit STTMRAMModel(const std::string& config_path);
+    ~STTMRAMModel() override = default;
 
     // MemoryModel interface implementation
     void initialize() override;
@@ -41,40 +41,44 @@ public:
     void printStats() const override;
     void resetStats() override;
 
-    // SRAM-specific queries
+    // STT-MRAM-specific queries
     double getArea() const { return area_mm2_; }
+    uint64_t getEndurance() const { return endurance_; }
 
     // Inner-bank timing queries (NEW!)
     double getSubarrayReadLatency() const;
     double getBankReadLatency() const;
     double getChipReadLatency() const;
-    double getInnerBankDatapathLatency() const;  // Total inner-bank datapath
+    double getSubarrayWriteLatency() const;
+    double getBankWriteLatency() const;
+    double getChipWriteLatency() const;
+    double getInnerBankReadLatency() const;   // Total read path
+    double getInnerBankWriteLatency() const;  // Total write path (MTJ switching!)
 
     // PIM support queries
     bool supportsBankPIM() const;
     bool supportsSubarrayPIM() const;
 
 private:
-    // SRAM-specific configuration
-    struct SRAMConfig {
-        uint64_t capacity;       // in bytes
-        uint32_t line_size;      // cache line size
-        uint32_t associativity;  // for cache-like SRAM
+    // STT-MRAM-specific configuration
+    struct STTMRAMConfig {
+        uint64_t capacity;
         uint32_t banks;
         uint32_t read_write_ports;
-        uint32_t read_ports;
-        uint32_t write_ports;
-        uint32_t tech_node_nm;   // Technology node
-        Cycle access_time;
+        uint32_t tech_node_nm;
+        Cycle read_latency;
+        Cycle write_latency;
+        uint64_t endurance;
+        bool is_pim_enabled;
     };
 
-    SRAMConfig sram_config_;
+    STTMRAMConfig mram_config_;
 
-    // CACTI wrapper instance
-    std::unique_ptr<CACTIWrapper> cacti_wrapper_;
+    // NVSim wrapper instance
+    std::unique_ptr<NVSimWrapper> nvsim_wrapper_;
 
-    // SRAM architecture specifications (NEW!)
-    std::unique_ptr<memory::SRAMArchitecture> sram_arch_;
+    // STT-MRAM architecture specifications (NEW!)
+    std::unique_ptr<memory::STTMRAMArchitecture> mram_arch_;
 
     // Request queue
     std::queue<MemoryRequest> pending_requests_;
@@ -82,12 +86,9 @@ private:
     // Statistics
     uint64_t total_reads_;
     uint64_t total_writes_;
-    uint64_t total_accesses_;
+    uint64_t write_cycles_;  // Track endurance
 
-    // Helper functions
-    void useFallbackValues();
-
-    // Energy and area from CACTI
+    // Energy and area from NVSim
     double read_energy_;
     double write_energy_;
     double leakage_power_;
@@ -97,8 +98,12 @@ private:
     Cycle current_cycle_;
     uint64_t capacity_;
     uint64_t bandwidth_;
+    uint64_t endurance_;
+
+    // Endurance tracking
+    void updateEndurance(Address addr);
 };
 
 } // namespace pimid
 
-#endif // PIMID_SRAM_MODEL_H
+#endif // PIMID_STTMRAM_MODEL_H

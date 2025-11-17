@@ -1,5 +1,6 @@
 #include "sram_model.h"
 #include "cacti_wrapper.h"
+#include "memory/sram_architecture.h"
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -101,6 +102,20 @@ void SRAMModel::initialize() {
     std::cout << "  Read Energy: " << read_energy_ << " nJ" << std::endl;
     std::cout << "  Write Energy: " << write_energy_ << " nJ" << std::endl;
     std::cout << "  Leakage Power: " << leakage_power_ << " W" << std::endl;
+    // Initialize SRAM architecture with inner-bank timing (NEW!)
+    if (sram_config_.capacity <= 512 * 1024) {
+        // Small cache: use 8MB L3 22nm configuration
+        sram_arch_ = memory::createSRAM_8MB_L3_22nm();
+        std::cout << "[SRAMModel] Using 8MB L3 22nm architecture specs" << std::endl;
+    } else {
+        // Large cache: use 16MB LLC 14nm configuration
+        sram_arch_ = memory::createSRAM_16MB_LLC_14nm();
+        std::cout << "[SRAMModel] Using 16MB LLC 14nm architecture specs" << std::endl;
+    }
+
+    std::cout << "[SRAMModel] Inner-bank datapath latency: "
+              << sram_arch_->timing.inner_bank.getTotalReadLatency() << " ns" << std::endl;
+
     std::cout << "[SRAMModel] Initialization complete" << std::endl;
 }
 
@@ -223,6 +238,40 @@ void SRAMModel::useFallbackValues() {
     write_energy_ = 0.8;   // nJ per access
     leakage_power_ = 0.05; // W
     area_mm2_ = 2.5;       // mm^2
+}
+
+//=============================================================================
+// Inner-Bank Timing Queries (NEW!)
+//=============================================================================
+
+double SRAMModel::getSubarrayReadLatency() const {
+    if (!sram_arch_) return 0.0;
+    return sram_arch_->timing.subarray_read_ns;
+}
+
+double SRAMModel::getBankReadLatency() const {
+    if (!sram_arch_) return 0.0;
+    return sram_arch_->timing.bank_read_ns;
+}
+
+double SRAMModel::getChipReadLatency() const {
+    if (!sram_arch_) return 0.0;
+    return sram_arch_->timing.chip_read_ns;
+}
+
+double SRAMModel::getInnerBankDatapathLatency() const {
+    if (!sram_arch_) return 0.0;
+    return sram_arch_->timing.inner_bank.getTotalReadLatency();
+}
+
+bool SRAMModel::supportsBankPIM() const {
+    if (!sram_arch_) return false;
+    return sram_arch_->isSuitableForPIM();
+}
+
+bool SRAMModel::supportsSubarrayPIM() const {
+    // SRAM supports subarray-level PIM (fast local operations)
+    return true;
 }
 
 } // namespace pimid

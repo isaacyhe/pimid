@@ -111,6 +111,9 @@ set(PIMID_SOURCES
     memory_models/src/dram_model.cpp
     memory_models/src/sram_model.cpp
     memory_models/src/nvm_model.cpp
+    memory_models/src/sttmram_model.cpp
+    memory_models/src/pcm_model.cpp
+    memory_models/src/reram_model.cpp
     memory_models/src/ramulator_wrapper.cpp
     memory_models/src/cacti_wrapper.cpp
     memory_models/src/nvsim_wrapper.cpp
