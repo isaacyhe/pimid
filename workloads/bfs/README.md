@@ -1,176 +1,119 @@
-# BFS MPICH Workloads
+# BFS Workload for PIMID
 
-Parallel Breadth-First Search (BFS) implementations for PIMID benchmarking.
-
-## Directory Structure
-
-```
-bfs/
-├── device/          # Device-side version with PIM annotations
-│   ├── bfs_pim.c
-│   └── Makefile
-├── host/            # Host-only baseline version
-│   ├── bfs_baseline.c
-│   └── Makefile
-├── Makefile         # Top-level build system
-└── README.md        # This file
-```
-
-## Versions
-
-### Device-Side (PIM-Annotated)
-- **Location:** `device/bfs_pim.c`
-- **Features:**
-  - Uses `#pragma pim offload begin/end` annotations
-  - Toggleable via `USE_PIM` macro (1 = device, 0 = host)
-  - Ready for PIMID simulator integration
-  - Graph traversal offloaded to PIM device
-
-### Host-Only Baseline
-- **Location:** `host/bfs_baseline.c`
-- **Features:**
-  - Pure host-side execution
-  - No PIM annotations
-  - Identical algorithm for fair comparison
-  - Baseline for performance benchmarking
-
-## Algorithm
-
-Both versions implement parallel BFS using:
-- **Graph format:** Compressed Sparse Row (CSR)
-- **Parallelization:** MPI for distributed computation
-- **Work distribution:** Node-based partitioning
-- **Synchronization:** MPI_Allreduce for frontier exchange
+This is a Breadth-First Search (BFS) workload implementation that can run:
+- **Standalone**: As a regular program
+- **With OpenMP**: Parallel execution using OpenMP
+- **Under PIMID**: Simulated on configured PIM architecture
+- **PIMID + OpenMP**: Parallel PIM simulation
 
 ## Building
 
-### Build both versions:
 ```bash
-make all
-```
+# Build standalone version (no dependencies)
+make standalone
 
-### Build specific version:
-```bash
-make device    # Device-side with PIM
-make host      # Host-only baseline
-```
+# Build with OpenMP support
+make openmp
 
-### Clean build artifacts:
-```bash
-make clean
+# Build with PIMID support
+make pimid
+
+# Build with both PIMID and OpenMP
+make pimid-openmp
 ```
 
 ## Running
 
-### Run device version:
+### Standalone
 ```bash
-cd device
-make run         # 1000 nodes, 4 processes
-make run-large   # 10000 nodes, 4 processes
-
-# Custom configuration
-mpirun -np <num_procs> ./bfs_pim <num_nodes>
+./bfs --vertices 10000 --degree 16 --root 0
 ```
 
-### Run host baseline:
+### With OpenMP
 ```bash
-cd host
-make run         # 1000 nodes, 4 processes
-make run-large   # 10000 nodes, 4 processes
-
-# Custom configuration
-mpirun -np <num_procs> ./bfs_baseline <num_nodes>
+./bfs_omp --vertices 100000 --degree 16 --parallel
 ```
 
-### Compare both versions:
+### Under PIMID
 ```bash
-make run-compare
+# First, create a PIMID configuration file (config.yaml)
+pimid --config config.yaml --workload ./bfs_pimid --vertices 100000 --degree 16
 ```
 
-## Performance Metrics
+## Command Line Options
 
-Both versions report:
-- **BFS levels:** Number of iterations required
-- **Nodes visited:** Total reachable nodes from source
-- **Execution time:** Wall-clock time in seconds
-- **Throughput:** Millions of edges processed per second
-
-## Usage with PIMID Simulator
-
-### Device-Side Integration
-The device version is designed for PIMID:
-
-1. **Compile with PIMID:**
-   ```bash
-   pimid-gcc -o bfs_pim bfs_pim.c
-   ```
-
-2. **Run through simulator:**
-   ```bash
-   pimid-sim --config pim.cfg mpirun -np 4 ./bfs_pim 10000
-   ```
-
-3. **PIM annotations recognized:**
-   - Code within `PIM_OFFLOAD_START/END` runs on device PEs
-   - Host and device communicate via PIMID interface
-   - Separate ZSim instances for host and device
-
-### Switching Modes
-In `bfs_pim.c`, change:
-```c
-#define USE_PIM 1  // 1 = PIM device, 0 = Host only
-```
-
-Then rebuild:
-```bash
-make clean && make all
-```
+- `--vertices N`: Number of vertices in the graph (default: 1024)
+- `--degree D`: Average degree (edges per vertex) (default: 16)
+- `--root R`: Starting vertex for BFS (default: 0)
+- `--parallel`: Use OpenMP parallel version (requires OpenMP build)
+- `--help`: Show help message
 
 ## Graph Generation
 
-Both versions generate random graphs with:
-- **Average edges per node:** 10
-- **Distribution:** Uniform random
-- **Format:** CSR (Compressed Sparse Row)
-- **Seed:** Time-based + process rank
+The workload generates a random graph with the specified number of vertices and average degree. The graph uses Compressed Sparse Row (CSR) format for efficient storage and traversal.
 
-## MPI Communication
+## BFS Algorithm
 
-### Collective operations:
-- `MPI_Allreduce`: Frontier size gathering
-- `MPI_Allreduce`: Visited array synchronization
-- `MPI_Reduce`: Final statistics collection
-- `MPI_Barrier`: Timing synchronization
+Two implementations are provided:
 
-## Comparison Benchmarking
+1. **Sequential BFS**: Queue-based traversal
+2. **Parallel BFS (OpenMP)**: Level-synchronous parallel traversal with work-sharing
 
-To compare performance:
+## PIMID Integration
 
-1. **Build both:**
-   ```bash
-   make all
-   ```
+When compiled with `-DPIMID_ENABLED` and linked with PIMID library, the workload:
+- Uses PIMID API to mark PIM regions
+- Reports simulation statistics (cycles, time, energy)
+- Can query PIM configuration at runtime
 
-2. **Run comparison:**
-   ```bash
-   make run-compare
-   ```
+### PIM Regions
 
-3. **Analyze metrics:**
-   - Execution time difference
-   - Throughput comparison
-   - Scalability (weak/strong scaling)
+The core BFS traversal is marked as a PIM region:
+```cpp
+PIMID_BEGIN_PIM_REGION("BFS_Sequential");
+// BFS code here
+PIMID_END_PIM_REGION();
+```
 
-## Requirements
+PIMID simulates memory operations within this region using the configured memory technology and PE placement.
 
-- **MPICH:** Version 3.0 or higher
-- **GCC:** C99 support
-- **Optional:** PIMID simulator for device-side execution
+## Performance
 
-## Future Workloads
+Example performance on 256K vertices, degree 16:
+- Sequential: ~50 M vertices/sec (varies by hardware)
+- OpenMP (4 threads): ~150 M vertices/sec
+- Under PIMID: depends on memory technology and PE configuration
 
-Planned additions:
-- Matrix multiplication
-- Heat diffusion (stencil)
-- Jacobi iteration
-- SpMV (Sparse Matrix-Vector)
+## Example PIMID Config
+
+```yaml
+simulation:
+  name: "BFS_Test"
+
+memory:
+  technology: "SRAM"
+  banks: 4
+  subarrays_per_bank: 4
+
+processing_elements:
+  type: "in_order_core"
+  placement_level: "BANK"
+  num_pes: 4
+
+workload:
+  binary: "./bfs_pimid_omp"
+  arguments: ["--vertices", "256000", "--degree", "16", "--parallel"]
+```
+
+## Dependencies
+
+- **C++17 compiler** (g++, clang++)
+- **OpenMP** (optional, for parallel version)
+- **PIMID library** (optional, for PIM simulation)
+
+## Notes
+
+- Graph is generated randomly with a fixed seed (42) for reproducibility
+- BFS visits all reachable vertices from the root
+- Memory usage: O(V + E) where V = vertices, E = edges
+- For large graphs (> 1M vertices), use the OpenMP version for better performance
