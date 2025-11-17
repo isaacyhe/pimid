@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <cstdlib>
+#include <cstring>
 
 namespace pimid {
 namespace config {

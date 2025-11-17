@@ -26,8 +26,17 @@ target_link_libraries(test_utils pimid_lib)
 # Unit tests
 add_subdirectory(unit)
 
+# Functional tests
+add_subdirectory(functional)
+
 # Integration tests
 add_subdirectory(integration)
+
+# Memory tests
+add_subdirectory(memory)
+
+# Workload tests
+add_subdirectory(workloads)
 
 # Benchmark tests
 add_subdirectory(benchmarks)
