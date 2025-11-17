@@ -95,6 +95,7 @@ set(PIMID_SOURCES
     src/common/simulation_engine.cpp
     src/common/event_queue.cpp
     src/common/config_parser.cpp
+    src/config/config_parser.cpp
 
     # Host engine
     src/host_engine/host_engine.cpp
