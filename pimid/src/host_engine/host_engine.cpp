@@ -1,5 +1,6 @@
 #include "host_engine/host_engine.h"
 #include "communication/socket_comm.h"
+#include "config/config_manager.h"
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -16,15 +17,34 @@ HostEngine::HostEngine(const PIMIDConfig& config, int comm_port)
       total_offloads_(0),
       total_offload_cycles_(0) {
 
-    // Set default cache configuration
-    cache_config_.l1i_size_kb = 32;
-    cache_config_.l1d_size_kb = 32;
-    cache_config_.l2_size_kb = 256;
-    cache_config_.l3_size_kb = 8192;
-    cache_config_.l1_line_size = 64;
-    cache_config_.l1_associativity = 8;
-    cache_config_.l2_associativity = 8;
-    cache_config_.l3_associativity = 16;
+    // Load cache configuration from ConfigManager
+    auto& cfg = pimid::config::ConfigManager::getInstance();
+
+    // Load cache sizes from configuration (configured in host.caches.* section)
+    cache_config_.l1i_size_kb = static_cast<uint64_t>(
+        cfg.getInt("host.caches.l1i.size_kb", 32));
+    cache_config_.l1d_size_kb = static_cast<uint64_t>(
+        cfg.getInt("host.caches.l1d.size_kb", 32));
+    cache_config_.l2_size_kb = static_cast<uint64_t>(
+        cfg.getInt("host.caches.l2.size_kb", 256));
+    cache_config_.l3_size_kb = static_cast<uint64_t>(
+        cfg.getInt("host.caches.l3.size_kb", 8192));
+
+    // Load cache parameters
+    cache_config_.l1_line_size = static_cast<uint32_t>(
+        cfg.getInt("host.caches.l1i.line_size_bytes", 64));
+    cache_config_.l1_associativity = static_cast<uint32_t>(
+        cfg.getInt("host.caches.l1i.associativity", 8));
+    cache_config_.l2_associativity = static_cast<uint32_t>(
+        cfg.getInt("host.caches.l2.associativity", 8));
+    cache_config_.l3_associativity = static_cast<uint32_t>(
+        cfg.getInt("host.caches.l3.associativity", 16));
+
+    std::cout << "Host Engine cache configuration loaded from config" << std::endl;
+    std::cout << "  L1I: " << cache_config_.l1i_size_kb << " KB, "
+              << "L1D: " << cache_config_.l1d_size_kb << " KB, "
+              << "L2: " << cache_config_.l2_size_kb << " KB, "
+              << "L3: " << cache_config_.l3_size_kb << " KB" << std::endl;
 }
 
 HostEngine::~HostEngine() {

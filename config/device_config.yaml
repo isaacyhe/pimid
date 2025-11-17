@@ -13,6 +13,11 @@ processing_elements:
     # Number of PEs at each placement level
     num_pes_per_level: 1
 
+    # Total number of PEs in the system
+    # (computed from num_pes_per_level × number of placement units)
+    # For BANK level with 16 banks: 16 PEs total
+    total_num_pes: 16
+
     # PE distribution strategy: uniform, adaptive, manual
     distribution: "uniform"
 
@@ -172,6 +177,10 @@ execution:
   # Context switch overhead (cycles)
   context_switch_overhead: 50
 
+  # Offload completion time (cycles)
+  # This is used when actual PE execution is not simulated
+  offload_completion_cycles: 100
+
   # Support for task preemption
   preemption_enabled: false
 
@@ -187,6 +196,9 @@ execution:
 host_communication:
   # Communication latency (cycles)
   latency_cycles: 1000
+
+  # Synchronization interval (cycles)
+  sync_interval_cycles: 1000
 
   # Message size (bytes)
   message_size_bytes: 64

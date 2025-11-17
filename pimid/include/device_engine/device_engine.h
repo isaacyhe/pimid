@@ -79,6 +79,11 @@ private:
     void synchronizeWithHost();
     void executeOnPE(uint32_t pe_id, Address code_addr, Address data_addr);
 
+    // Configuration parameters
+    uint32_t total_num_pes_;
+    Cycle offload_completion_cycles_;
+    Cycle sync_interval_cycles_;
+
     // Statistics
     uint64_t total_offloads_handled_;
     Cycle total_execution_cycles_;
