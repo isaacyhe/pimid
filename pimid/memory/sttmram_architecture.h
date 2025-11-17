@@ -30,20 +30,12 @@
 #include <string>
 #include <memory>
 #include <iostream>
+#include "sram_architecture.h"  // For VerificationStatus enum
 
 namespace pimid {
 namespace memory {
 
-//=============================================================================
-// Verification Status
-//=============================================================================
-
-enum class VerificationStatus {
-    VERIFIED,
-    INFERRED,
-    ESTIMATED,
-    UNKNOWN
-};
+// VerificationStatus is defined in sram_architecture.h
 
 //=============================================================================
 // STT-MRAM Hierarchy
