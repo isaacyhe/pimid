@@ -67,6 +67,18 @@ target_include_directories(test_config_validator PRIVATE
 )
 add_test(NAME ConfigValidatorComponentTest COMMAND test_config_validator)
 
+# Test configuration parsing runtime (Phase 2 - verifies ConfigParser linkage)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_config_parsing_runtime.cpp)
+    add_executable(test_config_parsing_runtime test_config_parsing_runtime.cpp)
+    target_compile_options(test_config_parsing_runtime PRIVATE -std=c++17)
+    target_include_directories(test_config_parsing_runtime PRIVATE
+        ${CMAKE_SOURCE_DIR}/../pimid/include
+        ${CMAKE_SOURCE_DIR}/../pimid/memory_models/include
+    )
+    target_link_libraries(test_config_parsing_runtime pimid_lib)
+    add_test(NAME ConfigParsingRuntimeTest COMMAND test_config_parsing_runtime)
+endif()
+
 # Shell script tests (build/compatibility)
 # These are run via run_all_tests.sh
 message(STATUS "Build verification tests: tests/build/*.sh")
