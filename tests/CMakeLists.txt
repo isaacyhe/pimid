@@ -30,6 +30,43 @@ add_subdirectory(integration)
 # Workload tests (application-level)
 add_subdirectory(workloads)
 
+# Core component tests (root level)
+# These tests verify the core PIMID components implemented in Phase 1
+
+# Test schedulers (nearest, round-robin, load-balanced)
+add_executable(test_schedulers test_schedulers.cpp)
+target_compile_options(test_schedulers PRIVATE -std=c++17)
+target_include_directories(test_schedulers PRIVATE
+    ${CMAKE_SOURCE_DIR}/../pimid/include
+    ${CMAKE_SOURCE_DIR}/../pimid/memory/include
+)
+add_test(NAME SchedulersComponentTest COMMAND test_schedulers)
+
+# Test address translator and PE placement
+add_executable(test_address_translator test_address_translator.cpp)
+target_compile_options(test_address_translator PRIVATE -std=c++17)
+target_include_directories(test_address_translator PRIVATE
+    ${CMAKE_SOURCE_DIR}/../pimid/include
+    ${CMAKE_SOURCE_DIR}/../pimid/memory/include
+)
+add_test(NAME AddressTranslatorComponentTest COMMAND test_address_translator)
+
+# Test event queue
+add_executable(test_event_queue test_event_queue.cpp)
+target_compile_options(test_event_queue PRIVATE -std=c++17)
+target_include_directories(test_event_queue PRIVATE
+    ${CMAKE_SOURCE_DIR}/../pimid/include
+)
+add_test(NAME EventQueueComponentTest COMMAND test_event_queue)
+
+# Test configuration validator
+add_executable(test_config_validator test_config_validator.cpp)
+target_compile_options(test_config_validator PRIVATE -std=c++17)
+target_include_directories(test_config_validator PRIVATE
+    ${CMAKE_SOURCE_DIR}/../pimid/include
+)
+add_test(NAME ConfigValidatorComponentTest COMMAND test_config_validator)
+
 # Shell script tests (build/compatibility)
 # These are run via run_all_tests.sh
 message(STATUS "Build verification tests: tests/build/*.sh")

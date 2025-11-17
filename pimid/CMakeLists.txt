@@ -137,6 +137,7 @@ set(PIMID_SOURCES
     # Address translation
     src/address_translation/pe_placement.cpp
     src/address_translation/address_translator.cpp
+    src/address_translation/pe_statistics.cpp
 
     # Scheduler
     src/scheduler/scheduler.cpp

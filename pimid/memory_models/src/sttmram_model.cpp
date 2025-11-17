@@ -1,6 +1,7 @@
 #include "sttmram_model.h"
 #include "nvsim_wrapper.h"
 #include "memory/sttmram_architecture.h"
+#include "config/config_parser.h"
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -86,9 +87,61 @@ void STTMRAMModel::initialize() {
 }
 
 void STTMRAMModel::loadConfig(const std::string& config_path) {
-    // TODO: Parse YAML configuration file
     std::cout << "[STTMRAMModel] Loading configuration from: " << config_path << std::endl;
-    std::cout << "[STTMRAMModel] Using default 256MB STT-MRAM configuration" << std::endl;
+
+    config::ConfigParser parser;
+    std::map<std::string, std::string> config;
+
+    if (!parser.parseFile(config_path, config)) {
+        std::cerr << "[STTMRAMModel] Warning: Failed to parse config, using defaults" << std::endl;
+        return;
+    }
+
+    // Extract STT-MRAM capacity
+    if (config.find("stt_mram.capacity_mb") != config.end()) {
+        try {
+            uint64_t capacity_mb = std::stoull(config["stt_mram.capacity_mb"]);
+            mram_config_.capacity = capacity_mb * 1024 * 1024;
+        } catch (...) {}
+    }
+
+    // Extract organization
+    if (config.find("stt_mram.organization.num_arrays") != config.end()) {
+        try {
+            mram_config_.banks = std::stoi(config["stt_mram.organization.num_arrays"]);
+        } catch (...) {}
+    }
+
+    // Extract timing
+    if (config.find("stt_mram.timing.read_latency_ns") != config.end()) {
+        try {
+            double read_ns = std::stod(config["stt_mram.timing.read_latency_ns"]);
+            mram_config_.read_latency = static_cast<Cycle>(read_ns);
+        } catch (...) {}
+    }
+
+    if (config.find("stt_mram.timing.write_latency_ns") != config.end()) {
+        try {
+            double write_ns = std::stod(config["stt_mram.timing.write_latency_ns"]);
+            mram_config_.write_latency = static_cast<Cycle>(write_ns);
+        } catch (...) {}
+    }
+
+    // Extract reliability
+    if (config.find("stt_mram.reliability.write_endurance") != config.end()) {
+        try {
+            mram_config_.endurance = std::stoull(config["stt_mram.reliability.write_endurance"]);
+        } catch (...) {}
+    }
+
+    // Extract technology
+    if (config.find("stt_mram.power.tech_node_nm") != config.end()) {
+        try {
+            mram_config_.tech_node_nm = std::stoi(config["stt_mram.power.tech_node_nm"]);
+        } catch (...) {}
+    }
+
+    std::cout << "[STTMRAMModel] Configuration loaded successfully" << std::endl;
 }
 
 Cycle STTMRAMModel::access(const MemoryRequest& req) {

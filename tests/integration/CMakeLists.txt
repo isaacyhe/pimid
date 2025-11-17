@@ -69,6 +69,19 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_pim_data_locality.cpp)
     add_test(NAME PIMDataLocality COMMAND test_pim_data_locality)
 endif()
 
+# Multi-component integration test (scheduler + address translator + event queue)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_multi_component.cpp)
+    add_executable(test_multi_component test_multi_component.cpp)
+    target_compile_options(test_multi_component PRIVATE -std=c++17)
+    target_include_directories(test_multi_component PRIVATE
+        ${CMAKE_SOURCE_DIR}/../pimid/include
+        ${CMAKE_SOURCE_DIR}/../pimid/memory/include
+    )
+    # Note: Tests interaction between scheduler, address translator, and event queue
+    # target_link_libraries(test_multi_component pimid_lib)
+    add_test(NAME MultiComponentIntegration COMMAND test_multi_component)
+endif()
+
 # TODO: Link with actual PIMID libraries when available
 # target_link_libraries(test_pim_full_system
 #     pimid_lib

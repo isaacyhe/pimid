@@ -2,6 +2,7 @@
 #include <iostream>
 #include <sstream>
 #include <algorithm>
+#include <filesystem>
 #include <dlfcn.h>  // For dynamic library loading
 
 namespace pimid {
@@ -168,32 +169,101 @@ PluginMetadata PluginRegistry::getPluginMetadata(const std::string& name) const 
 }
 
 void PluginRegistry::discoverPlugins(const std::string& plugin_dir) {
-    // TODO: Implement plugin discovery by scanning directory for .so files
-    //
-    // IMPLEMENTATION GUIDE (use std::filesystem, requires C++17):
-    // 1. Include: #include <filesystem>
-    // 2. Iterate: for (const auto& entry : std::filesystem::directory_iterator(plugin_dir))
-    // 3. Filter: if (entry.path().extension() == ".so")
-    // 4. Load: loadDynamicPlugin(entry.path().string())
-    //
-    // Example implementation:
-    //   #ifdef __linux__
-    //       const std::string ext = ".so";
-    //   #elif _WIN32
-    //       const std::string ext = ".dll";
-    //   #elif __APPLE__
-    //       const std::string ext = ".dylib";
-    //   #endif
-    //
-    //   for (const auto& entry : std::filesystem::directory_iterator(plugin_dir)) {
-    //       if (entry.is_regular_file() && entry.path().extension() == ext) {
-    //           loadDynamicPlugin(entry.path().string());
-    //       }
-    //   }
+    std::cout << "[PluginRegistry] Discovering plugins in: " << plugin_dir << std::endl;
 
-    std::cout << "Discovering plugins in: " << plugin_dir << std::endl;
-    std::cout << "NOTE: Plugin discovery not yet implemented. Use loadDynamicPlugin() directly." << std::endl;
-    // This would scan for *.so files and try to load them
+    // Check if directory exists
+    if (!std::filesystem::exists(plugin_dir)) {
+        std::cerr << "[PluginRegistry] Plugin directory does not exist: " << plugin_dir << std::endl;
+        return;
+    }
+
+    if (!std::filesystem::is_directory(plugin_dir)) {
+        std::cerr << "[PluginRegistry] Path is not a directory: " << plugin_dir << std::endl;
+        return;
+    }
+
+    // Determine platform-specific plugin extension
+#ifdef __linux__
+    const std::string ext = ".so";
+    const std::string platform = "Linux";
+#elif _WIN32
+    const std::string ext = ".dll";
+    const std::string platform = "Windows";
+#elif __APPLE__
+    const std::string ext = ".dylib";
+    const std::string platform = "macOS";
+#else
+    const std::string ext = ".so";
+    const std::string platform = "Unknown";
+#endif
+
+    std::cout << "[PluginRegistry] Platform: " << platform << ", looking for " << ext << " files" << std::endl;
+
+    int discovered_count = 0;
+    int loaded_count = 0;
+
+    try {
+        // Iterate through directory
+        for (const auto& entry : std::filesystem::directory_iterator(plugin_dir)) {
+            // Check if it's a regular file with the correct extension
+            if (entry.is_regular_file() && entry.path().extension() == ext) {
+                std::string plugin_path = entry.path().string();
+                std::cout << "[PluginRegistry] Found plugin: " << entry.path().filename().string() << std::endl;
+                discovered_count++;
+
+                // Try to load the plugin
+                size_t before_count = plugins_.size();
+                loadDynamicPlugin(plugin_path);
+                size_t after_count = plugins_.size();
+
+                // Check if plugin was successfully registered
+                if (after_count > before_count) {
+                    loaded_count++;
+                    std::cout << "[PluginRegistry] Successfully loaded: " << entry.path().filename().string() << std::endl;
+                } else {
+                    std::cerr << "[PluginRegistry] Failed to load: " << entry.path().filename().string() << std::endl;
+                }
+            }
+        }
+
+        // Also check subdirectories (one level deep)
+        for (const auto& entry : std::filesystem::directory_iterator(plugin_dir)) {
+            if (entry.is_directory()) {
+                std::string subdir = entry.path().string();
+                std::cout << "[PluginRegistry] Scanning subdirectory: " << entry.path().filename().string() << std::endl;
+
+                for (const auto& subentry : std::filesystem::directory_iterator(subdir)) {
+                    if (subentry.is_regular_file() && subentry.path().extension() == ext) {
+                        std::string plugin_path = subentry.path().string();
+                        std::cout << "[PluginRegistry] Found plugin: " << subentry.path().filename().string() << std::endl;
+                        discovered_count++;
+
+                        size_t before_count = plugins_.size();
+                        loadDynamicPlugin(plugin_path);
+                        size_t after_count = plugins_.size();
+
+                        if (after_count > before_count) {
+                            loaded_count++;
+                            std::cout << "[PluginRegistry] Successfully loaded: " << subentry.path().filename().string() << std::endl;
+                        } else {
+                            std::cerr << "[PluginRegistry] Failed to load: " << subentry.path().filename().string() << std::endl;
+                        }
+                    }
+                }
+            }
+        }
+    } catch (const std::filesystem::filesystem_error& e) {
+        std::cerr << "[PluginRegistry] Filesystem error during plugin discovery: " << e.what() << std::endl;
+        return;
+    } catch (const std::exception& e) {
+        std::cerr << "[PluginRegistry] Error during plugin discovery: " << e.what() << std::endl;
+        return;
+    }
+
+    std::cout << "[PluginRegistry] Plugin discovery complete:" << std::endl;
+    std::cout << "  Found: " << discovered_count << " plugin files" << std::endl;
+    std::cout << "  Loaded: " << loaded_count << " plugins successfully" << std::endl;
+    std::cout << "  Total registered plugins: " << plugins_.size() << std::endl;
 }
 
 void PluginRegistry::loadDynamicPlugin(const std::string& library_path) {

@@ -1,5 +1,6 @@
 #include "dram_model.h"
 #include "ramulator_wrapper.h"
+#include "config/config_parser.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -77,15 +78,135 @@ void DRAMModel::initialize() {
 }
 
 void DRAMModel::loadConfig(const std::string& config_path) {
-    // TODO: Parse YAML configuration file
-    // For now, use default configuration
-    // When YAML parsing is available:
-    // - Parse memory_config.yaml
-    // - Extract DRAM-specific parameters
-    // - Update dram_config_ structure
-
     std::cout << "[DRAMModel] Loading configuration from: " << config_path << std::endl;
-    std::cout << "[DRAMModel] Using default DDR4-2400 configuration" << std::endl;
+
+    // Parse YAML configuration file
+    config::ConfigParser parser;
+    std::map<std::string, std::string> config;
+
+    if (!parser.parseFile(config_path, config)) {
+        std::cerr << "[DRAMModel] Warning: Failed to parse config file, using defaults" << std::endl;
+        return;
+    }
+
+    // Extract DRAM standard and speed
+    if (config.find("dram.standard") != config.end()) {
+        dram_config_.standard = config["dram.standard"];
+    }
+    if (config.find("dram.speed_grade") != config.end()) {
+        // Speed grade is stored but primarily managed by Ramulator
+    }
+
+    // Extract organization parameters
+    if (config.find("dram.organization.channels") != config.end()) {
+        try {
+            dram_config_.channels = std::stoi(config["dram.organization.channels"]);
+        } catch (...) {
+            std::cerr << "[DRAMModel] Warning: Invalid channels value" << std::endl;
+        }
+    }
+
+    if (config.find("dram.organization.ranks_per_channel") != config.end()) {
+        try {
+            dram_config_.ranks_per_channel = std::stoi(config["dram.organization.ranks_per_channel"]);
+        } catch (...) {
+            std::cerr << "[DRAMModel] Warning: Invalid ranks_per_channel value" << std::endl;
+        }
+    }
+
+    if (config.find("dram.organization.banks_per_chip") != config.end()) {
+        try {
+            dram_config_.banks_per_rank = std::stoi(config["dram.organization.banks_per_chip"]);
+        } catch (...) {
+            std::cerr << "[DRAMModel] Warning: Invalid banks_per_chip value" << std::endl;
+        }
+    }
+
+    // Extract timing parameters (all in memory clock cycles)
+    if (config.find("dram.timing.tCL") != config.end()) {
+        try {
+            dram_config_.tCL = std::stoi(config["dram.timing.tCL"]);
+        } catch (...) {
+            std::cerr << "[DRAMModel] Warning: Invalid tCL value" << std::endl;
+        }
+    }
+
+    if (config.find("dram.timing.tRCD") != config.end()) {
+        try {
+            dram_config_.tRCD = std::stoi(config["dram.timing.tRCD"]);
+        } catch (...) {
+            std::cerr << "[DRAMModel] Warning: Invalid tRCD value" << std::endl;
+        }
+    }
+
+    if (config.find("dram.timing.tRP") != config.end()) {
+        try {
+            dram_config_.tRP = std::stoi(config["dram.timing.tRP"]);
+        } catch (...) {
+            std::cerr << "[DRAMModel] Warning: Invalid tRP value" << std::endl;
+        }
+    }
+
+    if (config.find("dram.timing.tRAS") != config.end()) {
+        try {
+            dram_config_.tRAS = std::stoi(config["dram.timing.tRAS"]);
+        } catch (...) {
+            std::cerr << "[DRAMModel] Warning: Invalid tRAS value" << std::endl;
+        }
+    }
+
+    // Calculate capacity based on organization
+    // This is a simplified calculation; Ramulator will provide exact values
+    if (config.find("dram.organization.rows_per_bank") != config.end() &&
+        config.find("dram.organization.columns_per_row") != config.end() &&
+        config.find("dram.organization.chips_per_rank") != config.end()) {
+        try {
+            uint64_t rows = std::stoull(config["dram.organization.rows_per_bank"]);
+            uint64_t cols = std::stoull(config["dram.organization.columns_per_row"]);
+            uint64_t chips = std::stoull(config["dram.organization.chips_per_rank"]);
+
+            // Capacity = channels * ranks * banks * rows * cols * chip_width (bytes)
+            // Assuming 8-bit chip width (x8 device)
+            dram_config_.capacity = dram_config_.channels *
+                                   dram_config_.ranks_per_channel *
+                                   dram_config_.banks_per_rank *
+                                   rows * cols * chips;
+        } catch (...) {
+            std::cerr << "[DRAMModel] Warning: Could not calculate capacity from organization" << std::endl;
+        }
+    }
+
+    // Extract bandwidth if specified, otherwise calculate from speed grade
+    if (config.find("channels.bandwidth_per_channel_gbs") != config.end()) {
+        try {
+            double bw_per_channel = std::stod(config["channels.bandwidth_per_channel_gbs"]);
+            dram_config_.bandwidth = static_cast<uint64_t>(
+                bw_per_channel * dram_config_.channels * 1024 * 1024 * 1024
+            );
+        } catch (...) {
+            std::cerr << "[DRAMModel] Warning: Invalid bandwidth value" << std::endl;
+        }
+    }
+
+    // Row buffer policy
+    if (config.find("dram.row_buffer.policy") != config.end()) {
+        std::string policy = config["dram.row_buffer.policy"];
+        std::cout << "[DRAMModel] Row buffer policy: " << policy << std::endl;
+        // Row buffer policy would be passed to Ramulator
+    }
+
+    // Ramulator-specific settings
+    if (config.find("dram.ramulator.config_file") != config.end()) {
+        std::string ramulator_config = config["dram.ramulator.config_file"];
+        std::cout << "[DRAMModel] Ramulator config: " << ramulator_config << std::endl;
+        // Pass to Ramulator wrapper during initialization
+    }
+
+    std::cout << "[DRAMModel] Configuration loaded successfully" << std::endl;
+    std::cout << "[DRAMModel] DRAM Standard: " << dram_config_.standard << std::endl;
+    std::cout << "[DRAMModel] Channels: " << dram_config_.channels << std::endl;
+    std::cout << "[DRAMModel] Ranks per channel: " << dram_config_.ranks_per_channel << std::endl;
+    std::cout << "[DRAMModel] Banks per rank: " << dram_config_.banks_per_rank << std::endl;
 }
 
 Cycle DRAMModel::access(const MemoryRequest& req) {
