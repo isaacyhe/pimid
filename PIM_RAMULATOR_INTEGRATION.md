@@ -293,6 +293,13 @@ double effective_bw = ram_wrapper.getEffectiveBandwidthPerPE(
 - **JEDEC Standards**: JESD79-4 (DDR4), JESD79-5 (DDR5), JESD235A (HBM2)
 - **Academic Papers**: DAS-MICRO15, NVIDIA-HPCA17, Darwin-arXiv23, SALP-ISCA12, Tiered-Latency-DRAM-HPCA13
 - **Our Verification**: `pimid/memory/dram_architecture_v2.h`
-- **Inner-Bank Timing**: `INNER_BANK_TIMING_RESEARCH.md` (H-tree, global I/O, column path analysis)
+- **Inner-Bank Timing (DRAM)**: `INNER_BANK_TIMING_RESEARCH.md` (H-tree, global I/O, column path analysis)
+- **Inner-Bank Timing (All Memory Tech)**: `INNER_BANK_TIMING_ALL_MEMORY_TECH.md` (SRAM, STT-MRAM, PCM, ReRAM comparison)
+- **Architecture Headers**:
+  - SRAM: `pimid/memory/sram_architecture.h`
+  - STT-MRAM: `pimid/memory/sttmram_architecture.h`
+  - PCM: `pimid/memory/pcm_architecture.h`
+  - ReRAM: `pimid/memory/reram_architecture.h`
 - **Ramulator2**: https://github.com/CMU-SAFARI/ramulator2
-- **CACTI**: `pimid/external/mcpat/cacti/` (H-tree analytical models)
+- **CACTI**: `pimid/external/mcpat/cacti/` (SRAM H-tree analytical models)
+- **NVSim**: `pimid/external/nvsim/` (NVM modeling - STT-MRAM, PCM, ReRAM)
