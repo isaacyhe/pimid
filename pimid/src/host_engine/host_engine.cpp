@@ -122,12 +122,36 @@ void HostEngine::finalize() {
 void HostEngine::loadBinary(const std::string& binary_path) {
     std::cout << "Loading binary: " << binary_path << std::endl;
     // TODO: Implement binary loading via ZSim
+    //
+    // IMPLEMENTATION GUIDE:
+    // ZSim uses Pin for binary instrumentation. Integration requires:
+    // 1. Initialize Pin tool with binary path
+    // 2. Set up callbacks for memory operations and instructions
+    // 3. Create ZSim configuration with memory hierarchy
+    // 4. Launch Pin with the binary
+    //
+    // Key ZSim integration points (see pimid/external/zsim/):
+    // - zsim_harness.cpp: Main ZSim entry point
+    // - pin_cmd.cpp: Pin command-line setup
+    // - zsim.cpp: Core simulation loop
+    //
+    // Example integration pattern:
+    //   zsim_instance_ = new ZsimHarness(binary_path);
+    //   zsim_instance_->setMemoryHierarchy(memory_hierarchy_);
+    //   zsim_instance_->initialize();
+    //
     // For now, just store the path
 }
 
 void HostEngine::setArguments(int argc, char** argv) {
     std::cout << "Setting program arguments (argc=" << argc << ")" << std::endl;
     // TODO: Pass arguments to ZSim
+    //
+    // IMPLEMENTATION GUIDE:
+    // ZSim/Pin needs program arguments for proper binary execution:
+    //   zsim_instance_->setProgramArguments(argc, argv);
+    // Or via Pin command builder:
+    //   pin_cmd.addApplicationArgs(argc, argv);
 }
 
 void HostEngine::offloadToDevice(Address code_addr, Address data_addr, uint64_t data_size) {

@@ -332,6 +332,16 @@ uint64_t InternalDRAMNetwork::calculateTransferTime(const InternalNetworkLink& l
                                                     uint64_t data_bytes) {
     // transfer_time = data_bytes / bandwidth_GBs / (1 / freq_GHz)
     //               = data_bytes / bandwidth_GBs * freq_GHz
+
+    // Safety check: prevent division by zero
+    if (link.bandwidth_GBs <= 0.0 || link.frequency_GHz <= 0.0) {
+        std::cerr << "ERROR: Invalid link parameters - bandwidth: "
+                  << link.bandwidth_GBs << " GB/s, frequency: "
+                  << link.frequency_GHz << " GHz" << std::endl;
+        // Return conservative estimate: 1 cycle per byte
+        return std::max(data_bytes, (uint64_t)1);
+    }
+
     double transfer_time_ns = data_bytes / link.bandwidth_GBs;
     uint64_t transfer_cycles = std::ceil(transfer_time_ns * link.frequency_GHz);
     return std::max(transfer_cycles, (uint64_t)1);

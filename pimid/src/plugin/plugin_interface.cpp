@@ -169,7 +169,30 @@ PluginMetadata PluginRegistry::getPluginMetadata(const std::string& name) const 
 
 void PluginRegistry::discoverPlugins(const std::string& plugin_dir) {
     // TODO: Implement plugin discovery by scanning directory for .so files
+    //
+    // IMPLEMENTATION GUIDE (use std::filesystem, requires C++17):
+    // 1. Include: #include <filesystem>
+    // 2. Iterate: for (const auto& entry : std::filesystem::directory_iterator(plugin_dir))
+    // 3. Filter: if (entry.path().extension() == ".so")
+    // 4. Load: loadDynamicPlugin(entry.path().string())
+    //
+    // Example implementation:
+    //   #ifdef __linux__
+    //       const std::string ext = ".so";
+    //   #elif _WIN32
+    //       const std::string ext = ".dll";
+    //   #elif __APPLE__
+    //       const std::string ext = ".dylib";
+    //   #endif
+    //
+    //   for (const auto& entry : std::filesystem::directory_iterator(plugin_dir)) {
+    //       if (entry.is_regular_file() && entry.path().extension() == ext) {
+    //           loadDynamicPlugin(entry.path().string());
+    //       }
+    //   }
+
     std::cout << "Discovering plugins in: " << plugin_dir << std::endl;
+    std::cout << "NOTE: Plugin discovery not yet implemented. Use loadDynamicPlugin() directly." << std::endl;
     // This would scan for *.so files and try to load them
 }
 
