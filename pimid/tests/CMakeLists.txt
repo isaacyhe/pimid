@@ -69,3 +69,10 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_bank_bfs_pim.cpp)
     target_link_libraries(test_bank_bfs_pim pimid_lib)
     add_test(NAME BankBFSPIMTest COMMAND test_bank_bfs_pim)
 endif()
+
+# Bank-level BFS PIM test with In-Order Core across all memory technologies
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_bank_inorder_bfs_pim.cpp)
+    add_executable(test_bank_inorder_bfs_pim test_bank_inorder_bfs_pim.cpp)
+    target_link_libraries(test_bank_inorder_bfs_pim pimid_lib)
+    add_test(NAME BankInOrderBFSPIMTest COMMAND test_bank_inorder_bfs_pim)
+endif()
