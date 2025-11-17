@@ -2,6 +2,7 @@
 #include <iostream>
 #include <algorithm>
 #include <limits>
+#include <cmath>
 
 namespace pimid {
 

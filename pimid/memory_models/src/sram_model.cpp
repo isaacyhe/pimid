@@ -1,6 +1,7 @@
 #include "sram_model.h"
 #include "cacti_wrapper.h"
 #include "memory/sram_architecture.h"
+#include "config/config_parser.h"
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -120,15 +121,60 @@ void SRAMModel::initialize() {
 }
 
 void SRAMModel::loadConfig(const std::string& config_path) {
-    // TODO: Parse YAML configuration file
-    // For now, use default configuration
-    // When YAML parsing is available:
-    // - Parse memory_config.yaml
-    // - Extract SRAM-specific parameters
-    // - Update sram_config_ structure
-
     std::cout << "[SRAMModel] Loading configuration from: " << config_path << std::endl;
-    std::cout << "[SRAMModel] Using default 256KB 8-way SRAM configuration" << std::endl;
+
+    config::ConfigParser parser;
+    std::map<std::string, std::string> config;
+
+    if (!parser.parseFile(config_path, config)) {
+        std::cerr << "[SRAMModel] Warning: Failed to parse config, using defaults" << std::endl;
+        return;
+    }
+
+    // Extract SRAM capacity
+    if (config.find("sram.capacity_mb") != config.end()) {
+        try {
+            uint64_t capacity_mb = std::stoull(config["sram.capacity_mb"]);
+            sram_config_.capacity = capacity_mb * 1024 * 1024;
+        } catch (...) {}
+    }
+
+    // Extract organization
+    if (config.find("sram.organization.num_arrays") != config.end()) {
+        try {
+            sram_config_.banks = std::stoi(config["sram.organization.num_arrays"]);
+        } catch (...) {}
+    }
+
+    // Extract timing
+    if (config.find("sram.timing.access_time_ns") != config.end()) {
+        try {
+            double access_ns = std::stod(config["sram.timing.access_time_ns"]);
+            sram_config_.access_time = static_cast<Cycle>(access_ns * 1.0); // Assume 1GHz
+        } catch (...) {}
+    }
+
+    // Extract technology
+    if (config.find("sram.power.tech_node_nm") != config.end()) {
+        try {
+            sram_config_.tech_node_nm = std::stoi(config["sram.power.tech_node_nm"]);
+        } catch (...) {}
+    }
+
+    // Extract CACTI settings
+    if (config.find("sram.cacti.line_size_bytes") != config.end()) {
+        try {
+            sram_config_.line_size = std::stoi(config["sram.cacti.line_size_bytes"]);
+        } catch (...) {}
+    }
+
+    if (config.find("sram.cacti.associativity") != config.end()) {
+        try {
+            sram_config_.associativity = std::stoi(config["sram.cacti.associativity"]);
+        } catch (...) {}
+    }
+
+    std::cout << "[SRAMModel] Configuration loaded successfully" << std::endl;
 }
 
 Cycle SRAMModel::access(const MemoryRequest& req) {
