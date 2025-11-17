@@ -97,8 +97,19 @@ void PIMControllerPlugin::update(bool request_found, Ramulator::ReqBuffer::itera
     total_pim_requests_++;
 
     // Calculate data movement latency based on port bandwidth
-    uint64_t data_movement_latency = bandwidth_tracker_->requestBandwidth(
-        *pim_payload, pim_payload->data_bytes);
+    // Safety check: ensure bandwidth_tracker_ is initialized
+    uint64_t data_movement_latency = 0;
+    if (bandwidth_tracker_) {
+        data_movement_latency = bandwidth_tracker_->requestBandwidth(
+            *pim_payload, pim_payload->data_bytes);
+    } else {
+        // Fallback: estimate latency based on typical bandwidth
+        // Assume 10 GB/s for bank-level PIM
+        const double FALLBACK_BANDWIDTH_GBps = 10.0;
+        data_movement_latency = static_cast<uint64_t>(
+            (pim_payload->data_bytes / FALLBACK_BANDWIDTH_GBps) * 1e9  // Convert to ns
+        );
+    }
 
     pim_payload->data_movement_cycles = data_movement_latency;
 

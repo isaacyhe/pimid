@@ -9,6 +9,8 @@ namespace pimid {
 
 /**
  * Memory hierarchy structure
+ * NOTE: All size parameters should come from DRAM architecture configuration,
+ * not hard-coded values. See pimid/memory/dram_architecture_v2.h
  */
 struct MemoryHierarchy {
     uint32_t num_subarrays_per_bank;
@@ -17,9 +19,17 @@ struct MemoryHierarchy {
     uint32_t num_ranks;
     bool has_logic_die;  // For HBM/HMC
 
+    // Memory sizes (in bytes) - should be populated from DRAM architecture
+    uint64_t subarray_size_bytes;
+    uint64_t bank_size_bytes;
+    uint64_t chip_size_bytes;
+    uint64_t rank_size_bytes;
+
     MemoryHierarchy() : num_subarrays_per_bank(0), num_banks_per_chip(0),
                         num_chips_per_rank(0), num_ranks(0),
-                        has_logic_die(false) {}
+                        has_logic_die(false),
+                        subarray_size_bytes(0), bank_size_bytes(0),
+                        chip_size_bytes(0), rank_size_bytes(0) {}
 };
 
 /**

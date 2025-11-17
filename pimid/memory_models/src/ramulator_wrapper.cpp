@@ -2,6 +2,7 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <cmath>
 #include <yaml-cpp/yaml.h>
 
 // Include Ramulator headers
@@ -227,21 +228,100 @@ double RamulatorWrapper::getWriteEnergy() const {
 }
 
 double RamulatorWrapper::getActivationEnergy() const {
-    // Energy for row activations
-    // This would come from Ramulator statistics
-    return total_reads_ * 0.5 + total_writes_ * 0.5;  // Placeholder nJ
+    // Energy for row activations (ACT command)
+    // Based on DRAM power model from literature and DRAM architecture
+    //
+    // DDR4 typical values from NVIDIA-HPCA17, DAS-MICRO15:
+    //   - Row activation: ~2-3 nJ per activation
+    //   - Includes: wordline driver, bitline precharge, sense amp settling
+    //
+    // HBM2: Lower due to shorter bitlines and TSV architecture (~1-1.5 nJ)
+
+    double activation_energy_per_op_nJ = 2.5;  // Default DDR4 value
+
+    // Use actual energy from DRAM architecture if available
+    if (dram_arch_) {
+        // Bank energy includes activation + column access
+        // Estimate activation is ~60% of total bank energy
+        activation_energy_per_op_nJ = dram_arch_->energy.bank_energy_pJ * 0.6 / 1000.0;
+    }
+
+    // Estimate number of row activations
+    // In worst case, every access causes activation (0% row hit rate)
+    // In best case, only row misses cause activation
+    uint64_t estimated_activations = row_misses_ + row_conflicts_;
+    if (estimated_activations == 0) {
+        // If no statistics, assume activations proportional to total accesses
+        // with typical row buffer locality (assume 50% hit rate)
+        estimated_activations = (total_reads_ + total_writes_) / 2;
+    }
+
+    return estimated_activations * activation_energy_per_op_nJ;
 }
 
 double RamulatorWrapper::getPrechargeEnergy() const {
-    // Energy for row precharges
-    return total_reads_ * 0.3 + total_writes_ * 0.3;  // Placeholder nJ
+    // Energy for row precharges (PRE command)
+    // Based on DRAM power model from literature
+    //
+    // DDR4 typical values:
+    //   - Precharge: ~1.5-2 nJ per precharge
+    //   - Includes: bitline discharge, sense amp reset
+    //
+    // HBM2: Lower due to TSV architecture (~0.8-1 nJ)
+
+    double precharge_energy_per_op_nJ = 1.8;  // Default DDR4 value
+
+    // Use actual energy from DRAM architecture if available
+    if (dram_arch_) {
+        // Estimate precharge is ~40% of total bank energy
+        precharge_energy_per_op_nJ = dram_arch_->energy.bank_energy_pJ * 0.4 / 1000.0;
+    }
+
+    // Estimate number of precharges (roughly equal to activations)
+    uint64_t estimated_precharges = row_misses_ + row_conflicts_;
+    if (estimated_precharges == 0) {
+        // If no statistics, assume precharges proportional to total accesses
+        estimated_precharges = (total_reads_ + total_writes_) / 2;
+    }
+
+    return estimated_precharges * precharge_energy_per_op_nJ;
 }
 
 double RamulatorWrapper::getRefreshEnergy() const {
     // Energy for DRAM refresh operations
-    // Calculated based on refresh period and row count
-    uint64_t refresh_count = current_cycle_ / 7800;  // tREFI = 7.8us at 1ns cycle
-    return refresh_count * 2.0;  // Placeholder nJ per refresh
+    // Based on JEDEC specs and literature
+    //
+    // DDR4 refresh parameters:
+    //   - tREFI = 7.8µs (average refresh interval)
+    //   - Each refresh activates one row per bank
+    //   - Energy per refresh ≈ activation energy
+    //
+    // Refresh energy = (num_refreshes) × (energy_per_refresh) × (num_banks)
+
+    double refresh_energy_per_row_nJ = 2.0;  // Default: similar to activation
+
+    // Use DRAM architecture energy if available
+    if (dram_arch_) {
+        // Refresh energy is similar to activation (same operation, different trigger)
+        refresh_energy_per_row_nJ = dram_arch_->energy.bank_energy_pJ * 0.6 / 1000.0;
+    }
+
+    // Calculate number of refresh cycles
+    // tREFI for DDR4 = 7.8µs = 7800ns
+    // At 1ns cycle time (typical for modeling), tREFI = 7800 cycles
+    // At actual DRAM clock (1.2GHz = 0.833ns), tREFI = 9360 cycles
+
+    double clock_period_ns = 1.0;  // Default 1ns modeling cycle
+    if (dram_arch_) {
+        clock_period_ns = 1000.0 / dram_arch_->timing.clock_freq_mhz;
+    }
+
+    double tREFI_cycles = 7800.0 / clock_period_ns;  // 7.8µs refresh interval
+    uint64_t refresh_count = current_cycle_ / static_cast<uint64_t>(tREFI_cycles);
+
+    // Total refresh energy = refreshes × banks × energy_per_refresh
+    uint32_t total_banks = banks_per_rank_ * ranks_per_channel_ * channels_;
+    return refresh_count * total_banks * refresh_energy_per_row_nJ;
 }
 
 double RamulatorWrapper::getLeakagePower() const {
@@ -259,9 +339,52 @@ Cycle RamulatorWrapper::getAverageLatency() const {
     if (total_reads_ + total_writes_ == 0) {
         return 0;
     }
-    // Average DRAM latency depends on row buffer hit rate
-    // Simplified calculation
-    return 50;  // Placeholder cycles
+
+    // Calculate average DRAM latency based on row buffer hit/miss behavior
+    // This is a realistic calculation based on DRAM timing parameters
+    //
+    // Row Hit: tCAS (Column Access Strobe) - ~13-15ns for DDR4-2400
+    // Row Miss (Conflict): tRP + tRCD + tCAS - ~40ns for DDR4-2400
+    //
+    // Formula: avg_latency = hit_rate * hit_latency + miss_rate * miss_latency
+
+    // Get DRAM timing parameters from architecture if available
+    // For DDR4-2400: tCAS=13.32ns, tRCD=13.32ns, tRP=13.32ns
+    // For HBM2: tCAS=12.5ns, tRCD=12.5ns, tRP=12.5ns
+    double tCAS_cycles = 16;   // ~13.32ns @ 1.2GHz for DDR4-2400
+    double tRCD_cycles = 16;   // ~13.32ns @ 1.2GHz
+    double tRP_cycles = 16;    // ~13.32ns @ 1.2GHz
+
+    // If DRAM architecture is available, use actual timing
+    if (dram_arch_) {
+        double clock_period_ns = 1000.0 / dram_arch_->timing.clock_freq_mhz;
+        tCAS_cycles = std::ceil(dram_arch_->timing.tCAS_ns / clock_period_ns);
+        tRCD_cycles = std::ceil(dram_arch_->timing.tRCD_ns / clock_period_ns);
+        tRP_cycles = std::ceil(dram_arch_->timing.tRP_ns / clock_period_ns);
+    }
+
+    // Calculate row buffer hit rate
+    uint64_t total_accesses = total_reads_ + total_writes_;
+    double hit_rate = 0.0;
+
+    if (row_hits_ > 0 || row_misses_ > 0 || row_conflicts_ > 0) {
+        // Use actual statistics from Ramulator
+        hit_rate = static_cast<double>(row_hits_) / total_accesses;
+    } else {
+        // Conservative estimate: assume 50% hit rate if no statistics available
+        hit_rate = 0.5;
+    }
+
+    // Row hit latency (just column access)
+    Cycle hit_latency = static_cast<Cycle>(tCAS_cycles);
+
+    // Row miss/conflict latency (precharge + activate + column)
+    Cycle miss_latency = static_cast<Cycle>(tRP_cycles + tRCD_cycles + tCAS_cycles);
+
+    // Weighted average latency
+    double avg_latency = hit_rate * hit_latency + (1.0 - hit_rate) * miss_latency;
+
+    return static_cast<Cycle>(avg_latency);
 }
 
 void RamulatorWrapper::updateEnergyMetrics() const {
@@ -269,14 +392,47 @@ void RamulatorWrapper::updateEnergyMetrics() const {
         return;  // Already updated this cycle
     }
 
-    // DDR4 typical values at 1.2V
-    const double read_energy_per_access = 2.5;   // nJ per read
-    const double write_energy_per_access = 3.0;  // nJ per write
-    const double leakage_power_per_gb = 0.8;     // mW per GB
+    // Energy per memory access from DRAM architecture and literature
+    // Based on NVIDIA-HPCA17, DAS-MICRO15, and JEDEC power specs
+    //
+    // DDR4 typical values at 1.2V (from literature):
+    //   Read:  2.0-2.5 nJ per access (activate + column read + precharge)
+    //   Write: 2.5-3.0 nJ per access (higher due to write recovery)
+    //
+    // HBM2 typical values (from papers):
+    //   Read:  1.0-1.5 nJ per access (TSV reduces energy)
+    //   Write: 1.2-1.8 nJ per access
 
+    double read_energy_per_access = 2.5;   // Default DDR4 value (nJ)
+    double write_energy_per_access = 3.0;  // Default DDR4 value (nJ)
+    double leakage_power_per_gb = 0.8;     // Default DDR4 value (mW per GB)
+
+    // Use actual energy from DRAM architecture if available
+    if (dram_arch_) {
+        // Bank energy (pJ/byte) includes activation + column access + data transfer
+        // Convert to nJ per 64-byte access (typical cache line)
+        const double BYTES_PER_ACCESS = 64.0;
+        read_energy_per_access = dram_arch_->energy.bank_energy_pJ * BYTES_PER_ACCESS / 1000.0;
+
+        // Write energy is typically 15-20% higher than read
+        write_energy_per_access = read_energy_per_access * 1.2;
+
+        // Leakage power scales with capacity
+        // DDR4: ~80-100 mW/GB, HBM2: ~50-60 mW/GB (better due to lower voltage)
+        if (dram_arch_->technology == "HBM2" || dram_arch_->technology == "HBM3") {
+            leakage_power_per_gb = 0.55;  // Lower for HBM
+        } else {
+            leakage_power_per_gb = 0.85;  // DDR4/DDR5
+        }
+    }
+
+    // Calculate total energy
     cached_read_energy_ = total_reads_ * read_energy_per_access;
     cached_write_energy_ = total_writes_ * write_energy_per_access;
-    cached_leakage_power_ = (capacity_ / (1024.0 * 1024 * 1024)) * leakage_power_per_gb;
+
+    // Leakage power (mW) = capacity (GB) × leakage_per_GB
+    double capacity_gb = capacity_ / (1024.0 * 1024.0 * 1024.0);
+    cached_leakage_power_ = capacity_gb * leakage_power_per_gb;
 
     last_energy_update_ = current_cycle_;
 }

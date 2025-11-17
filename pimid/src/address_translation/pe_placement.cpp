@@ -124,12 +124,19 @@ PEAddressConstraints PEPlacementManager::calculateAddressConstraints(
 
     PEAddressConstraints constraints;
 
-    // Base address calculation depends on memory hierarchy
-    // Assuming 256MB per rank, 64MB per chip, 8MB per bank, 128KB per subarray
-    const uint64_t SUBARRAY_SIZE = 128 * 1024;          // 128 KB
-    const uint64_t BANK_SIZE = 8 * 1024 * 1024;         // 8 MB
-    const uint64_t CHIP_SIZE = 64 * 1024 * 1024;        // 64 MB
-    const uint64_t RANK_SIZE = 256ULL * 1024 * 1024;    // 256 MB
+    // Calculate sizes from memory hierarchy configuration
+    // These values come from DRAM architecture (see pimid/memory/dram_architecture_v2.h)
+    // NOT hard-coded to allow different DRAM types (DDR4, HBM2, etc.)
+
+    // Get sizes from hierarchy, with fallback to safe defaults if not configured
+    const uint64_t SUBARRAY_SIZE = hierarchy_.subarray_size_bytes > 0 ?
+        hierarchy_.subarray_size_bytes : (128ULL * 1024);  // Default: 128 KB
+    const uint64_t BANK_SIZE = hierarchy_.bank_size_bytes > 0 ?
+        hierarchy_.bank_size_bytes : (8ULL * 1024 * 1024);  // Default: 8 MB
+    const uint64_t CHIP_SIZE = hierarchy_.chip_size_bytes > 0 ?
+        hierarchy_.chip_size_bytes : (64ULL * 1024 * 1024);  // Default: 64 MB
+    const uint64_t RANK_SIZE = hierarchy_.rank_size_bytes > 0 ?
+        hierarchy_.rank_size_bytes : (256ULL * 1024 * 1024);  // Default: 256 MB
 
     switch (level) {
         case PEPlacementLevel::SUBARRAY:
