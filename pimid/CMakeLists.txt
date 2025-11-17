@@ -278,12 +278,7 @@ install(TARGETS pimid_lib pimid_host pimid_device pimid_standalone pimid pimid_s
 install(DIRECTORY include/ DESTINATION include/pimid)
 install(DIRECTORY configs/ DESTINATION share/pimid/configs)
 
-# Testing
-enable_testing()
-add_subdirectory(tests)
-
-# Benchmarks
-add_subdirectory(benchmarks)
+# Testing and Benchmarks moved to root level CMakeLists.txt
 
 # Documentation
 find_package(Doxygen)
