@@ -246,9 +246,9 @@ if(BUILD_PLUGINS)
     endif()
 endif()
 
-# Main PIMID binary - primary entry point for running simulations
-# This is the main simulator that executes external workload binaries
-add_executable(pimid src/standalone_main_new.cpp)
+# Main PIMID binary - unified entry point for all simulation modes
+# Supports: standalone, host, device, and host/device co-simulation
+add_executable(pimid src/standalone_main_unified.cpp)
 target_link_libraries(pimid pimid_lib)
 if(BUILD_PLUGINS)
     target_link_libraries(pimid pimid_plugin)

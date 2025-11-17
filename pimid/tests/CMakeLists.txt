@@ -49,6 +49,13 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_subarray_pim_comparison.cpp)
     add_test(NAME SubarrayPIMComparisonTest COMMAND test_subarray_pim_comparison)
 endif()
 
+# Host/Device cooperation test (standalone, no PIMID dependencies)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../tests/host_device_cooperation_test.cpp)
+    add_executable(host_device_cooperation_test ../tests/host_device_cooperation_test.cpp)
+    # Standalone test - no library dependencies needed
+    add_test(NAME HostDeviceCooperationTest COMMAND host_device_cooperation_test 10000)
+endif()
+
 # Bank-level PIM comparison test (in-order core vs ALU)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_bank_pim_comparison.cpp)
     add_executable(test_bank_pim_comparison test_bank_pim_comparison.cpp)

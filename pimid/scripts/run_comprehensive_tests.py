@@ -73,7 +73,9 @@ class BenchmarkResults:
                     break
 
             # PE type
-            if 'inorder' in result['config']:
+            if 'ooo_' in result['config']:
+                by_pe.setdefault('ooo', []).append(result.get('latency_ms', 0))
+            elif 'inorder' in result['config']:
                 by_pe.setdefault('inorder', []).append(result.get('latency_ms', 0))
             elif 'simple' in result['config'] or 'alu' in result['config']:
                 by_pe.setdefault('simple_alu', []).append(result.get('latency_ms', 0))
@@ -83,6 +85,12 @@ class BenchmarkResults:
                 by_placement.setdefault('subarray', []).append(result.get('latency_ms', 0))
             elif 'bank_' in result['config']:
                 by_placement.setdefault('bank', []).append(result.get('latency_ms', 0))
+            elif 'bg_' in result['config']:
+                by_placement.setdefault('bg', []).append(result.get('latency_ms', 0))
+            elif 'chip_' in result['config']:
+                by_placement.setdefault('chip', []).append(result.get('latency_ms', 0))
+            elif 'mc_' in result['config']:
+                by_placement.setdefault('mc', []).append(result.get('latency_ms', 0))
             elif 'rank_' in result['config']:
                 by_placement.setdefault('rank', []).append(result.get('latency_ms', 0))
 

@@ -1,0 +1,69 @@
+# BFS Benchmark Configuration - Auto-generated
+# Placement: MC, PE: Simple ALU, Memory: ReRAM
+# Workload: Tiny (1024 vertices, degree 16)
+
+benchmark:
+  name: "BFS_MC_SimpleALU_ReRAM"
+  description: "BFS with MC-level Simple ALU PE on ReRAM"
+  workload_type: "bfs"
+
+# Workload parameters
+workload:
+  graph:
+    num_vertices: 1024
+    avg_degree: 16
+    topology: "random"
+
+  bfs:
+    root_vertex: 0
+    traversal_mode: "level_synchronous"
+
+# Memory configuration
+memory:
+  technology: "ReRAM"
+
+  hierarchy:
+    num_banks: 4
+    num_subarrays_per_bank: 4
+
+  # Memory timing characteristics
+  timing:
+    subarray_read_ns: 5.0
+    subarray_write_ns: 12.0
+    inner_bank_htree_ns: 5.62
+
+# Processing element configuration
+processing_element:
+  type: "simple_alu"
+  placement_level: "MC"
+  num_pes: 1
+
+  # Simple ALU specifications
+  timing:
+    compare_ns: 0.3
+    alu_ns: 0.5
+    load_ns: 0.5
+
+  energy:
+    alu_pj: 2.0
+
+# Simulation control
+simulation:
+  max_cycles: 1000000000
+  enable_power_modeling: true
+  enable_detailed_stats: true
+
+# Output configuration
+output:
+  stats_file: "results/bfs_mc_simple_alu_reram_1k_deg16_stats.txt"
+  detailed_log: "results/bfs_mc_simple_alu_reram_1k_deg16_detailed.log"
+  summary_format: "table"
+
+# Test metadata
+metadata:
+  placement_level: "mc"
+  pe_type: "simple_alu"
+  memory_tech: "reram"
+  workload_size: "tiny"
+  graph_degree: 16
+  auto_generated: true
