@@ -72,19 +72,59 @@ public:
 
         std::cout << "Parsing config file: " << config_file << std::endl;
 
-        // Extract memory technology from filename
-        // Format: bfs_bank_inorder_<tech>.yaml
-        size_t pos = config_file.rfind("_");
-        size_t dot = config_file.rfind(".");
-        if (pos != std::string::npos && dot != std::string::npos) {
-            std::string tech = config_file.substr(pos + 1, dot - pos - 1);
+        // Extract components from filename
+        // Format: bfs_<placement>_<pe_type>_<memory>_<size>_deg<degree>.yaml
+        std::string filename = config_file;
 
-            // Convert to uppercase
-            for (char& c : tech) {
-                c = std::toupper(c);
+        // Get just the filename without path
+        size_t last_slash = filename.rfind('/');
+        if (last_slash != std::string::npos) {
+            filename = filename.substr(last_slash + 1);
+        }
+
+        // Remove .yaml extension
+        size_t dot = filename.rfind(".");
+        if (dot != std::string::npos) {
+            filename = filename.substr(0, dot);
+        }
+
+        // Split by underscore: bfs_<placement>_<pe_type>_<memory>_<size>_deg<degree>
+        std::vector<std::string> parts;
+        size_t start = 0;
+        size_t end = filename.find('_');
+        while (end != std::string::npos) {
+            parts.push_back(filename.substr(start, end - start));
+            start = end + 1;
+            end = filename.find('_', start);
+        }
+        parts.push_back(filename.substr(start));
+
+        // Parse components
+        if (parts.size() >= 6) {
+            // parts[0] = "bfs"
+            // parts[1] = placement (subarray/bank/rank)
+            // parts[2] = pe_type part 1 (simple/inorder)
+            // parts[3] = pe_type part 2 (alu) or memory tech
+            // parts[4] = memory tech or size
+            // parts[5] = size or degX
+
+            config.placement_level = parts[1];
+
+            // Handle PE type (simple_alu vs inorder)
+            if (parts[2] == "simple" && parts.size() > 3 && parts[3] == "alu") {
+                config.pe_type = "simple_alu";
+                config.memory_tech = parts[4];
+                // parts[5] is size, parts[6] is degX
+            } else if (parts[2] == "inorder") {
+                config.pe_type = "in_order_core";
+                config.memory_tech = parts[3];
+                // parts[4] is size, parts[5] is degX
             }
 
-            config.memory_tech = tech;
+            // Convert memory tech to uppercase
+            for (char& c : config.memory_tech) {
+                c = std::toupper(c);
+            }
         }
 
         // Default values

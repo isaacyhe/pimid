@@ -1,0 +1,194 @@
+[
+  {
+    "config": "bfs_bank_inorder_dram_1k_deg16",
+    "timestamp": "2025-11-17T09:40:51.520633",
+    "latency_ms": 68.0,
+    "throughput_mvps": 3.86,
+    "edges_per_sec_m": 61.68,
+    "per_vertex_ns": 1037.53
+  },
+  {
+    "config": "bfs_bank_inorder_dram_4k_deg16",
+    "timestamp": "2025-11-17T09:40:51.532358",
+    "latency_ms": 68.0,
+    "throughput_mvps": 3.86,
+    "edges_per_sec_m": 61.68,
+    "per_vertex_ns": 1037.53
+  },
+  {
+    "config": "bfs_bank_inorder_reram_1k_deg16",
+    "timestamp": "2025-11-17T09:40:51.541581",
+    "latency_ms": 43.54,
+    "throughput_mvps": 6.02,
+    "edges_per_sec_m": 96.32,
+    "per_vertex_ns": 664.42
+  },
+  {
+    "config": "bfs_bank_inorder_reram_4k_deg16",
+    "timestamp": "2025-11-17T09:40:51.552394",
+    "latency_ms": 43.54,
+    "throughput_mvps": 6.02,
+    "edges_per_sec_m": 96.32,
+    "per_vertex_ns": 664.42
+  },
+  {
+    "config": "bfs_bank_inorder_sram_1k_deg16",
+    "timestamp": "2025-11-17T09:40:51.562102",
+    "latency_ms": 20.27,
+    "throughput_mvps": 12.93,
+    "edges_per_sec_m": 206.89,
+    "per_vertex_ns": 309.34
+  },
+  {
+    "config": "bfs_bank_inorder_sram_4k_deg16",
+    "timestamp": "2025-11-17T09:40:51.571950",
+    "latency_ms": 20.27,
+    "throughput_mvps": 12.93,
+    "edges_per_sec_m": 206.89,
+    "per_vertex_ns": 309.34
+  },
+  {
+    "config": "bfs_bank_simple_alu_dram_1k_deg16",
+    "timestamp": "2025-11-17T09:40:51.580688",
+    "latency_ms": 68.0,
+    "throughput_mvps": 3.86,
+    "edges_per_sec_m": 61.68,
+    "per_vertex_ns": 1037.53
+  },
+  {
+    "config": "bfs_bank_simple_alu_dram_4k_deg16",
+    "timestamp": "2025-11-17T09:40:51.589323",
+    "latency_ms": 68.0,
+    "throughput_mvps": 3.86,
+    "edges_per_sec_m": 61.68,
+    "per_vertex_ns": 1037.53
+  },
+  {
+    "config": "bfs_bank_simple_alu_reram_1k_deg16",
+    "timestamp": "2025-11-17T09:40:51.597861",
+    "latency_ms": 43.54,
+    "throughput_mvps": 6.02,
+    "edges_per_sec_m": 96.32,
+    "per_vertex_ns": 664.42
+  },
+  {
+    "config": "bfs_bank_simple_alu_reram_4k_deg16",
+    "timestamp": "2025-11-17T09:40:51.608267",
+    "latency_ms": 43.54,
+    "throughput_mvps": 6.02,
+    "edges_per_sec_m": 96.32,
+    "per_vertex_ns": 664.42
+  },
+  {
+    "config": "bfs_bank_simple_alu_sram_1k_deg16",
+    "timestamp": "2025-11-17T09:40:51.617439",
+    "latency_ms": 20.27,
+    "throughput_mvps": 12.93,
+    "edges_per_sec_m": 206.89,
+    "per_vertex_ns": 309.34
+  },
+  {
+    "config": "bfs_bank_simple_alu_sram_4k_deg16",
+    "timestamp": "2025-11-17T09:40:51.627094",
+    "latency_ms": 20.27,
+    "throughput_mvps": 12.93,
+    "edges_per_sec_m": 206.89,
+    "per_vertex_ns": 309.34
+  },
+  {
+    "config": "bfs_subarray_inorder_dram_1k_deg16",
+    "timestamp": "2025-11-17T09:40:51.637931",
+    "latency_ms": 68.0,
+    "throughput_mvps": 3.86,
+    "edges_per_sec_m": 61.68,
+    "per_vertex_ns": 1037.53
+  },
+  {
+    "config": "bfs_subarray_inorder_dram_4k_deg16",
+    "timestamp": "2025-11-17T09:40:51.648871",
+    "latency_ms": 68.0,
+    "throughput_mvps": 3.86,
+    "edges_per_sec_m": 61.68,
+    "per_vertex_ns": 1037.53
+  },
+  {
+    "config": "bfs_subarray_inorder_reram_1k_deg16",
+    "timestamp": "2025-11-17T09:40:51.658899",
+    "latency_ms": 43.54,
+    "throughput_mvps": 6.02,
+    "edges_per_sec_m": 96.32,
+    "per_vertex_ns": 664.42
+  },
+  {
+    "config": "bfs_subarray_inorder_reram_4k_deg16",
+    "timestamp": "2025-11-17T09:40:51.669020",
+    "latency_ms": 43.54,
+    "throughput_mvps": 6.02,
+    "edges_per_sec_m": 96.32,
+    "per_vertex_ns": 664.42
+  },
+  {
+    "config": "bfs_subarray_inorder_sram_1k_deg16",
+    "timestamp": "2025-11-17T09:40:51.679815",
+    "latency_ms": 20.27,
+    "throughput_mvps": 12.93,
+    "edges_per_sec_m": 206.89,
+    "per_vertex_ns": 309.34
+  },
+  {
+    "config": "bfs_subarray_inorder_sram_4k_deg16",
+    "timestamp": "2025-11-17T09:40:51.690634",
+    "latency_ms": 20.27,
+    "throughput_mvps": 12.93,
+    "edges_per_sec_m": 206.89,
+    "per_vertex_ns": 309.34
+  },
+  {
+    "config": "bfs_subarray_simple_alu_dram_1k_deg16",
+    "timestamp": "2025-11-17T09:40:51.700763",
+    "latency_ms": 68.0,
+    "throughput_mvps": 3.86,
+    "edges_per_sec_m": 61.68,
+    "per_vertex_ns": 1037.53
+  },
+  {
+    "config": "bfs_subarray_simple_alu_dram_4k_deg16",
+    "timestamp": "2025-11-17T09:40:51.711311",
+    "latency_ms": 68.0,
+    "throughput_mvps": 3.86,
+    "edges_per_sec_m": 61.68,
+    "per_vertex_ns": 1037.53
+  },
+  {
+    "config": "bfs_subarray_simple_alu_reram_1k_deg16",
+    "timestamp": "2025-11-17T09:40:51.722205",
+    "latency_ms": 43.54,
+    "throughput_mvps": 6.02,
+    "edges_per_sec_m": 96.32,
+    "per_vertex_ns": 664.42
+  },
+  {
+    "config": "bfs_subarray_simple_alu_reram_4k_deg16",
+    "timestamp": "2025-11-17T09:40:51.734856",
+    "latency_ms": 43.54,
+    "throughput_mvps": 6.02,
+    "edges_per_sec_m": 96.32,
+    "per_vertex_ns": 664.42
+  },
+  {
+    "config": "bfs_subarray_simple_alu_sram_1k_deg16",
+    "timestamp": "2025-11-17T09:40:51.745155",
+    "latency_ms": 20.27,
+    "throughput_mvps": 12.93,
+    "edges_per_sec_m": 206.89,
+    "per_vertex_ns": 309.34
+  },
+  {
+    "config": "bfs_subarray_simple_alu_sram_4k_deg16",
+    "timestamp": "2025-11-17T09:40:51.755281",
+    "latency_ms": 20.27,
+    "throughput_mvps": 12.93,
+    "edges_per_sec_m": 206.89,
+    "per_vertex_ns": 309.34
+  }
+]
