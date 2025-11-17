@@ -13,6 +13,7 @@
 #include <iostream>
 #include <cassert>
 #include <string>
+#include <vector>
 #include <iomanip>
 #include <cmath>
 
