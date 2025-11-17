@@ -266,6 +266,9 @@ install(DIRECTORY configs/ DESTINATION share/pimid/configs)
 enable_testing()
 add_subdirectory(tests)
 
+# Benchmarks
+add_subdirectory(benchmarks)
+
 # Documentation
 find_package(Doxygen)
 if(DOXYGEN_FOUND)
