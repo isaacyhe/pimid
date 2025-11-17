@@ -3,13 +3,17 @@
 #include <cmath>
 #include <stdexcept>
 
-// Include CACTI headers
+// Include CACTI headers if available
+#ifdef HAVE_CACTI
 #include "cacti_interface.h"
+#endif
 
 namespace pimid {
 
+#ifdef HAVE_CACTI
+
 //=============================================================================
-// CACTIWrapper Implementation
+// CACTIWrapper Implementation (WITH CACTI)
 //=============================================================================
 
 CACTIWrapper::CACTIWrapper(const SRAMConfig& config)
@@ -394,4 +398,70 @@ void CACTIWrapper::printDetailedResults() const {
     std::cout << "=====================\n" << std::endl;
 }
 
-} // namespace pimid
+#else  // !HAVE_CACTI
+
+//=============================================================================
+// CACTIWrapper Stub Implementation (WITHOUT CACTI)
+//=============================================================================
+
+CACTIWrapper::CACTIWrapper(const SRAMConfig& config)
+    : config_(config)
+    , cacti_result_(nullptr)
+    , cacti_input_(nullptr)
+    , initialized_(false)
+    , valid_(true)
+    , error_message_("")
+{
+    std::cerr << "[CACTIWrapper] WARNING: CACTI not available, using placeholder values" << std::endl;
+}
+
+CACTIWrapper::~CACTIWrapper() {}
+
+void CACTIWrapper::initialize() {
+    initialized_ = true;
+    std::cout << "[CACTIWrapper] Using placeholder values (CACTI not compiled)" << std::endl;
+}
+
+void CACTIWrapper::runCACTI() {}
+void CACTIWrapper::validateConfiguration() { valid_ = true; }
+bool CACTIWrapper::isValid() const { return true; }
+std::string CACTIWrapper::getErrorMessage() const { return ""; }
+
+void CACTIWrapper::reconfigure(const SRAMConfig& config) {
+    config_ = config;
+    initialized_ = false;
+}
+
+// Return placeholder values
+double CACTIWrapper::getAccessTime() const { return 2.0e-9; }  // 2ns
+double CACTIWrapper::getCycleTime() const { return 2.0e-9; }
+double CACTIWrapper::getArea() const { return 1.0; }
+double CACTIWrapper::getCacheHeight() const { return 1.0; }
+double CACTIWrapper::getCacheWidth() const { return 1.0; }
+double CACTIWrapper::getAreaEfficiency() const { return 0.5; }
+double CACTIWrapper::getDynamicReadEnergy() const { return 0.1; }
+double CACTIWrapper::getDynamicWriteEnergy() const { return 0.1; }
+double CACTIWrapper::getReadDynamicPower() const { return 10.0; }
+double CACTIWrapper::getWriteDynamicPower() const { return 10.0; }
+double CACTIWrapper::getLeakagePower() const { return 5.0; }
+double CACTIWrapper::getGateLeakagePower() const { return 2.0; }
+
+Cycle CACTIWrapper::getAccessLatencyCycles(double freq_hz) const {
+    return static_cast<Cycle>(getAccessTime() * freq_hz);
+}
+
+Cycle CACTIWrapper::getCycleTimeCycles(double freq_hz) const {
+    return static_cast<Cycle>(getCycleTime() * freq_hz);
+}
+
+void CACTIWrapper::printDetailedResults() const {
+    std::cout << "[CACTIWrapper] CACTI not available - using placeholder values" << std::endl;
+}
+
+InputParameter* CACTIWrapper::createCACTIInput(const SRAMConfig& config) {
+    return nullptr;
+}
+
+#endif  // HAVE_CACTI
+
+}  // namespace pimid

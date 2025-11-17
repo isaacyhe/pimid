@@ -5,7 +5,8 @@
 #include <cmath>
 #include <stdexcept>
 
-// Include NVSim headers
+// Include NVSim headers if available
+#ifdef HAVE_NVSIM
 #include "InputParameter.h"
 #include "MemCell.h"
 #include "Result.h"
@@ -13,8 +14,11 @@
 #include "BankWithHtree.h"
 #include "BankWithoutHtree.h"
 #include "global.h"
+#endif
 
 namespace pimid {
+
+#ifdef HAVE_NVSIM
 
 //=============================================================================
 // NVSimWrapper Implementation
@@ -401,5 +405,67 @@ void NVSimWrapper::printDetailedResults() const {
     std::cout << "  Write Bandwidth: " << getWriteBandwidth() << " GB/s" << std::endl;
     std::cout << "===================\n" << std::endl;
 }
+
+#else  // !HAVE_NVSIM
+
+//=============================================================================
+// NVSimWrapper Stub Implementation (WITHOUT NVSIM)
+//=============================================================================
+
+NVSimWrapper::NVSimWrapper(const NVMConfig& config)
+    : config_(config)
+    , nvsim_input_(nullptr)
+    , nvsim_cell_(nullptr)
+    , nvsim_result_(nullptr)
+    , initialized_(false)
+    , valid_(true)
+    , error_message_("")
+{
+    std::cerr << "[NVSimWrapper] WARNING: NVSim not available, using placeholder values" << std::endl;
+}
+
+NVSimWrapper::~NVSimWrapper() {}
+
+void NVSimWrapper::initialize() {
+    initialized_ = true;
+    std::cout << "[NVSimWrapper] Using placeholder values (NVSim not compiled)" << std::endl;
+}
+
+void NVSimWrapper::reconfigure(const NVMConfig& config) {
+    config_ = config;
+    initialized_ = false;
+}
+
+void NVSimWrapper::runNVSim() {}
+void NVSimWrapper::validateConfiguration() { valid_ = true; }
+void NVSimWrapper::createNVSimInput() {}
+void NVSimWrapper::loadCellParameters() {}
+
+bool NVSimWrapper::isValid() const { return true; }
+std::string NVSimWrapper::getErrorMessage() const { return ""; }
+std::string NVSimWrapper::getCellFileName() const { return ""; }
+
+// Return placeholder values
+double NVSimWrapper::getReadLatency() const { return 5.0e-9; }  // 5ns
+double NVSimWrapper::getWriteLatency() const { return 15.0e-9; } // 15ns (asymmetric)
+double NVSimWrapper::getReadDynamicEnergy() const { return 0.5; }
+double NVSimWrapper::getWriteDynamicEnergy() const { return 1.0; }
+double NVSimWrapper::getLeakagePower() const { return 10.0; }
+double NVSimWrapper::getReadEDP() const { return 2.5; }
+double NVSimWrapper::getWriteEDP() const { return 15.0; }
+double NVSimWrapper::getArea() const { return 2.0; }
+double NVSimWrapper::getHeight() const { return 1.0; }
+double NVSimWrapper::getWidth() const { return 2.0; }
+double NVSimWrapper::getCellReadLatency() const { return 5.0e-9; }
+double NVSimWrapper::getCellWriteLatency() const { return 15.0e-9; }
+double NVSimWrapper::getCellArea() const { return 0.01; }
+double NVSimWrapper::getReadBandwidth() const { return 10.0; }
+double NVSimWrapper::getWriteBandwidth() const { return 5.0; }
+
+void NVSimWrapper::printDetailedResults() const {
+    std::cout << "[NVSimWrapper] NVSim not available - using placeholder values" << std::endl;
+}
+
+#endif  // HAVE_NVSIM
 
 } // namespace pimid
