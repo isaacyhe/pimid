@@ -108,6 +108,7 @@ struct GlobSimInfo {
     bool blockingSyscalls;
     bool perProcessCpuEnum; //if true, cpus are enumerated according to per-process masks (e.g., a 16-core mask in a 64-core sim sees 16 cores)
     bool oooDecode; //if true, Decoder does OOO (instr->uop) decoding
+    uint32_t simdWidth; //SIMD vector width in bits (128, 256, 512), default 128 (SSE)
 
     PAD();
 

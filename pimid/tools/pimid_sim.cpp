@@ -47,12 +47,43 @@ struct SimulationConfig {
 };
 
 struct DRAMConfig {
-    std::string type;  // DDR4-2400, DDR4-3200, HBM2, HBM3
+    std::string type;  // DDR4-2400, DDR4-3200, HBM2, HBM3, or "CUSTOM"
     int channels;
     int ranks_per_channel;
     int bank_groups;
     int banks_per_group;
     int subarrays_per_bank;
+
+    // Scaling factors for hypothetical studies (applied AFTER base parameters)
+    int bandwidth_scale_factor;     // Default: 1 (positive integer: 2 = 2× BW, 4 = 4× BW)
+    double latency_scale_factor;    // Default: 1.0 (range: (0.0, 1.0], 0.5 = half latency)
+
+    // Interface widths (bits) - optional overrides for Ramulator defaults
+    // If -1, use Ramulator's verified values
+    double rank_interface_width;    // Default: -1 (use Ramulator: 64 for DDR4, 128 for HBM2)
+    double bank_io_width;           // Default: -1 (use Ramulator: 8 for DDR4, 64 for HBM2)
+    double gsa_width;               // Default: -1 (use Ramulator: 256 for DDR4, 512 for HBM2)
+
+    // Timing parameters - optional overrides for Ramulator defaults
+    // If -1, use Ramulator's verified values for the DRAM type
+    struct TimingOverrides {
+        double clock_freq_mhz;   // Default: -1 (use Ramulator: 1200 for DDR4-2400, 1000 for HBM2)
+        double tRCD_ns;          // Default: -1 (use Ramulator: 13.32 for DDR4-2400)
+        double tCAS_ns;          // Default: -1 (use Ramulator: 13.32 for DDR4-2400)
+        double tRP_ns;           // Default: -1 (use Ramulator: 13.32 for DDR4-2400)
+        double tRAS_ns;          // Default: -1 (use Ramulator)
+    } timing_overrides;
+
+    // Latency overheads (nanoseconds) - added on top of base DRAM latency
+    // These are SYSTEM-LEVEL overheads (cache, coherence, distance), not DRAM-specific
+    struct LatencyOverheads {
+        double host_cpu;      // Default: 150ns (cache + coherence + distance)
+        double mc_pim;        // Default: 40ns  (MC logic delay)
+        double rank_pim;      // Default: 15ns  (minimal MC overhead)
+        double chip_pim;      // Default: 7ns   (close to banks)
+        double bg_pim;        // Default: 3ns   (very close to data)
+        double bank_pim;      // Default: 0ns   (at the data)
+    } latency_overheads;
 };
 
 struct PIMConfig {
@@ -214,7 +245,8 @@ const char* granularityToString(PIMGranularity granularity) {
  */
 double getAccessLatencyOverhead(
     PIMGranularity granularity,
-    std::shared_ptr<DRAMArchitectureV2> dram_arch) {
+    std::shared_ptr<DRAMArchitectureV2> dram_arch,
+    const DRAMConfig::LatencyOverheads& overheads) {
 
     // Base DRAM access latency (tRCD + tCAS)
     double base_dram_latency_ns = dram_arch->timing.tRCD_ns + dram_arch->timing.tCAS_ns;
@@ -222,28 +254,28 @@ double getAccessLatencyOverhead(
     switch (granularity) {
         case PIMGranularity::CPU:
             // Host CPU: Cache hierarchy + coherence + OS overhead + distance from MC
-            return base_dram_latency_ns + 150.0;  // ~180ns total
+            return base_dram_latency_ns + overheads.host_cpu;
 
         case PIMGranularity::MEMORY_CONTROLLER:
             // MC-PIM: At memory controller, no cache/coherence overhead, but MC logic delay
-            return base_dram_latency_ns + 40.0;   // ~70ns total
+            return base_dram_latency_ns + overheads.mc_pim;
 
         case PIMGranularity::RANK:
             // Rank-PIM: Even closer to DRAM, minimal MC overhead
-            return base_dram_latency_ns + 15.0;   // ~42ns total
+            return base_dram_latency_ns + overheads.rank_pim;
 
         case PIMGranularity::CHIP:
             // Chip-PIM: Close to banks
-            return base_dram_latency_ns + 7.0;    // ~34ns total
+            return base_dram_latency_ns + overheads.chip_pim;
 
         case PIMGranularity::BANK_GROUP:
             // BG-PIM: Very close to data
-            return base_dram_latency_ns + 3.0;    // ~30ns total
+            return base_dram_latency_ns + overheads.bg_pim;
 
         case PIMGranularity::BANK:
         case PIMGranularity::SUBARRAY:
             // Bank/Subarray-PIM: Directly at the data, minimal overhead
-            return base_dram_latency_ns;          // ~27ns total
+            return base_dram_latency_ns + overheads.bank_pim;
 
         default:
             return base_dram_latency_ns;
@@ -381,7 +413,7 @@ public:
         double local_bw_time_us = (result.local_data_bytes / local_bw_GBs) / 1e3;  // GB/(GB/s) = s, /1e3 = us
 
         // Calculate access latency overhead
-        double access_latency_ns = getAccessLatencyOverhead(granularity, dram_arch_);
+        double access_latency_ns = getAccessLatencyOverhead(granularity, dram_arch_, config_.dram.latency_overheads);
         uint64_t num_local_accesses = (result.local_data_bytes + workload.cache_line_size - 1) / workload.cache_line_size;
         double local_latency_time_us = (num_local_accesses * access_latency_ns) / 1e3;
 
@@ -492,52 +524,147 @@ private:
     std::shared_ptr<DRAMArchitectureV2> dram_arch_;
 
     void setupDRAMArchitecture() {
-        // Create DRAM architecture based on config
-        dram_arch_ = std::make_shared<DRAMArchitectureV2>(config_.dram.type, "DDR4");
-
-        // Set up based on DRAM type
-        if (config_.dram.type.find("DDR4-2400") != std::string::npos) {
-            dram_arch_->timing.clock_freq_mhz = 1200;  // DDR4-2400 = 1200 MHz
-            dram_arch_->timing.tRCD_ns = 13.32;
-            dram_arch_->timing.tCAS_ns = 13.32;
-            dram_arch_->timing.tRP_ns = 13.32;
-        } else if (config_.dram.type.find("DDR4-3200") != std::string::npos) {
-            dram_arch_->timing.clock_freq_mhz = 1600;  // DDR4-3200 = 1600 MHz
-            dram_arch_->timing.tRCD_ns = 13.75;
-            dram_arch_->timing.tCAS_ns = 13.75;
-            dram_arch_->timing.tRP_ns = 13.75;
+        // Use Ramulator's factory functions to get fully initialized DRAM models
+        // These include VERIFIED timing, datapath widths, and bandwidth limits
+        // For CUSTOM type, start with DDR4-2400 defaults and override everything
+        if (config_.dram.type == "CUSTOM" || config_.dram.type == "custom") {
+            std::cout << "Using CUSTOM DRAM configuration (all parameters from config file)\n";
+            dram_arch_ = createDDR4_2400_Verified();
+        } else if (config_.dram.type.find("DDR4-2400") != std::string::npos) {
+            dram_arch_ = createDDR4_2400_Verified();
         } else if (config_.dram.type.find("HBM2") != std::string::npos) {
-            dram_arch_->timing.clock_freq_mhz = 1000;  // HBM2 = 1 GHz
-            dram_arch_->timing.tRCD_ns = 14.0;
-            dram_arch_->timing.tCAS_ns = 14.0;
-            dram_arch_->timing.tRP_ns = 14.0;
+            dram_arch_ = createHBM2_Verified();
+        } else {
+            // Default to DDR4-2400
+            std::cerr << "Warning: Unknown DRAM type '" << config_.dram.type
+                      << "', using DDR4-2400 as default\n";
+            dram_arch_ = createDDR4_2400_Verified();
         }
 
-        // Set organization
+        // Override organization if specified in config
         dram_arch_->organization.subarrays_per_bank = config_.dram.subarrays_per_bank;
         dram_arch_->organization.banks_per_bank_group = config_.dram.banks_per_group;
         dram_arch_->organization.bank_groups_per_chip = config_.dram.bank_groups;
         dram_arch_->organization.ranks_per_channel = config_.dram.ranks_per_channel;
+
+        // Override interface widths if specified in config (not -1)
+        if (config_.dram.rank_interface_width >= 0) {
+            dram_arch_->datapath.rank_databus_bits.value_bits = config_.dram.rank_interface_width;
+            dram_arch_->datapath.rank_databus_bits.status = VerificationStatus::ESTIMATED;
+            dram_arch_->datapath.rank_databus_bits.source = "User override from config file";
+        }
+        if (config_.dram.bank_io_width >= 0) {
+            dram_arch_->datapath.bank_serialization_bits.value_bits = config_.dram.bank_io_width;
+            dram_arch_->datapath.bank_serialization_bits.status = VerificationStatus::ESTIMATED;
+            dram_arch_->datapath.bank_serialization_bits.source = "User override from config file";
+        }
+        if (config_.dram.gsa_width >= 0) {
+            dram_arch_->datapath.gsa_datapath_bits.value_bits = config_.dram.gsa_width;
+            dram_arch_->datapath.gsa_datapath_bits.status = VerificationStatus::ESTIMATED;
+            dram_arch_->datapath.gsa_datapath_bits.source = "User override from config file";
+        }
+
+        // Override timing parameters if specified in config (not -1)
+        if (config_.dram.timing_overrides.clock_freq_mhz >= 0) {
+            dram_arch_->timing.clock_freq_mhz = config_.dram.timing_overrides.clock_freq_mhz;
+            dram_arch_->timing.data_rate_mtps = config_.dram.timing_overrides.clock_freq_mhz * 2;  // DDR
+        }
+        if (config_.dram.timing_overrides.tRCD_ns >= 0) {
+            dram_arch_->timing.tRCD_ns = config_.dram.timing_overrides.tRCD_ns;
+        }
+        if (config_.dram.timing_overrides.tCAS_ns >= 0) {
+            dram_arch_->timing.tCAS_ns = config_.dram.timing_overrides.tCAS_ns;
+        }
+        if (config_.dram.timing_overrides.tRP_ns >= 0) {
+            dram_arch_->timing.tRP_ns = config_.dram.timing_overrides.tRP_ns;
+        }
+        if (config_.dram.timing_overrides.tRAS_ns >= 0) {
+            dram_arch_->timing.tRAS_ns = config_.dram.timing_overrides.tRAS_ns;
+        }
+
+        // Apply scaling factors for hypothetical studies
+        // These are applied AFTER all other overrides to scale the final DRAM parameters
+
+        // Bandwidth scaling: multiply interface widths by integer factor
+        // Example: bandwidth_scale_factor=2 doubles all bandwidths (2× future technology)
+        if (config_.dram.bandwidth_scale_factor > 1) {
+            std::cout << "Applying bandwidth scale factor: " << config_.dram.bandwidth_scale_factor << "×\n";
+            dram_arch_->datapath.rank_databus_bits.value_bits *= config_.dram.bandwidth_scale_factor;
+            dram_arch_->datapath.bank_serialization_bits.value_bits *= config_.dram.bandwidth_scale_factor;
+            dram_arch_->datapath.gsa_datapath_bits.value_bits *= config_.dram.bandwidth_scale_factor;
+
+            // Mark as estimated since this is hypothetical
+            dram_arch_->datapath.rank_databus_bits.status = VerificationStatus::ESTIMATED;
+            dram_arch_->datapath.bank_serialization_bits.status = VerificationStatus::ESTIMATED;
+            dram_arch_->datapath.gsa_datapath_bits.status = VerificationStatus::ESTIMATED;
+            dram_arch_->datapath.rank_databus_bits.source = "Scaled by bandwidth_scale_factor from config";
+            dram_arch_->datapath.bank_serialization_bits.source = "Scaled by bandwidth_scale_factor from config";
+            dram_arch_->datapath.gsa_datapath_bits.source = "Scaled by bandwidth_scale_factor from config";
+        }
+
+        // Latency scaling: multiply timing parameters by fractional factor
+        // Example: latency_scale_factor=0.5 halves all latencies (faster future technology)
+        // Valid range: (0.0, 1.0], where 1.0 = no change, 0.5 = half latency
+        if (config_.dram.latency_scale_factor > 0 && config_.dram.latency_scale_factor != 1.0) {
+            std::cout << "Applying latency scale factor: " << config_.dram.latency_scale_factor << "×\n";
+            dram_arch_->timing.tRCD_ns *= config_.dram.latency_scale_factor;
+            dram_arch_->timing.tCAS_ns *= config_.dram.latency_scale_factor;
+            dram_arch_->timing.tRP_ns *= config_.dram.latency_scale_factor;
+            dram_arch_->timing.tRAS_ns *= config_.dram.latency_scale_factor;
+        }
     }
 
     double getBandwidthForGranularity(PIMGranularity granularity) const {
         double freq_GHz = dram_arch_->timing.clock_freq_mhz / 1000.0;
 
+        // Get interface widths from Ramulator's DRAM architecture
+        // These are VERIFIED from JEDEC specs and academic papers
+        double rank_interface_bits = dram_arch_->datapath.rank_databus_bits.value_bits;
+        double bank_io_bits = dram_arch_->datapath.bank_serialization_bits.value_bits;
+        double gsa_bits = dram_arch_->datapath.gsa_datapath_bits.value_bits;
+        int num_channels = config_.dram.channels;
+
+        // Bandwidth Hierarchy (from Ramulator's verified DRAM model):
+        // - Host/MC: External interface, rank_interface_bits per channel × num_channels
+        // - Rank: External rank interface, rank_interface_bits
+        // - Chip/BG/Bank: Internal bank I/O, bank_io_bits (CRITICAL BOTTLENECK!)
+        // - Subarray: GSA width (widest internal path)
+
         switch (granularity) {
-            case PIMGranularity::SUBARRAY:
-                return (256.0 / 8.0) * freq_GHz;  // 256-bit GSA
-            case PIMGranularity::BANK:
-                return (8.0 / 8.0) * freq_GHz;    // 8-bit bank serialization (CRITICAL BOTTLENECK!)
-            case PIMGranularity::BANK_GROUP:
-                return (16.0 / 8.0) * freq_GHz;   // ~16-bit BG aggregation
-            case PIMGranularity::CHIP:
-                return (8.0 / 8.0) * freq_GHz;    // 8-bit chip I/O (x8 device)
-            case PIMGranularity::RANK:
-            case PIMGranularity::MEMORY_CONTROLLER:
-                return (64.0 / 8.0) * freq_GHz;   // 64-bit rank interface
             case PIMGranularity::CPU:
+                // Host CPU: Can access all channels in parallel
+                // Ranks share the same channel bus (time-multiplexed), only channels add bandwidth
+                // From Ramulator: rank_databus_bits = 64 (DDR4) or 128 (HBM2)
+                return (rank_interface_bits / 8.0) * num_channels * freq_GHz;
+
+            case PIMGranularity::MEMORY_CONTROLLER:
+                // MC-PIM: At memory controller, can access ALL channels in parallel!
+                // This is the HIGHEST aggregate interface bandwidth
+                // Ranks are time-multiplexed on each channel, only channels add parallel bandwidth
+                return (rank_interface_bits / 8.0) * num_channels * freq_GHz;
+
+            case PIMGranularity::RANK:
+                // Rank-PIM: Uses external rank interface
+                // From Ramulator: 64-bit (DDR4), 128-bit (HBM2)
+                return (rank_interface_bits / 8.0) * freq_GHz;
+
+            case PIMGranularity::CHIP:
+            case PIMGranularity::BANK_GROUP:
+            case PIMGranularity::BANK:
+                // Chip/BG/Bank-PIM: All use internal bank serialization path
+                // From Ramulator: 8-bit (DDR4), 64-bit (HBM2)
+                // CRITICAL BOTTLENECK: bank_serialization_bits
+                // This is THE limiting factor for bank-level PIM!
+                return (bank_io_bits / 8.0) * freq_GHz;
+
+            case PIMGranularity::SUBARRAY:
+                // Subarray-PIM: Can access Global Sense Amplifier width
+                // From Ramulator: 256-bit (DDR4), 512-bit (HBM2)
+                // Highest internal bandwidth for compute-in-place
+                return (gsa_bits / 8.0) * freq_GHz;
+
             default:
-                return (64.0 / 8.0) * freq_GHz;   // CPU via rank interface
+                return (rank_interface_bits / 8.0) * freq_GHz;
         }
     }
 };
@@ -662,6 +789,35 @@ int main(int argc, char* argv[]) {
     config.dram.bank_groups = parser.getInt("dram.bank_groups", 4);
     config.dram.banks_per_group = parser.getInt("dram.banks_per_group", 4);
     config.dram.subarrays_per_bank = parser.getInt("dram.subarrays_per_bank", 16);
+
+    // Interface widths (bits) - optional overrides for Ramulator defaults
+    // -1 means use Ramulator's verified values for the selected DRAM type
+    config.dram.rank_interface_width = parser.getDouble("dram.rank_interface_width", -1.0);
+    config.dram.bank_io_width = parser.getDouble("dram.bank_io_width", -1.0);
+    config.dram.gsa_width = parser.getDouble("dram.gsa_width", -1.0);
+
+    // Timing parameters - optional overrides for Ramulator defaults
+    // -1 means use Ramulator's verified values for the selected DRAM type
+    config.dram.timing_overrides.clock_freq_mhz = parser.getDouble("dram.clock_freq_mhz", -1.0);
+    config.dram.timing_overrides.tRCD_ns = parser.getDouble("dram.tRCD_ns", -1.0);
+    config.dram.timing_overrides.tCAS_ns = parser.getDouble("dram.tCAS_ns", -1.0);
+    config.dram.timing_overrides.tRP_ns = parser.getDouble("dram.tRP_ns", -1.0);
+    config.dram.timing_overrides.tRAS_ns = parser.getDouble("dram.tRAS_ns", -1.0);
+
+    // Scaling factors for hypothetical studies
+    // bandwidth_scale_factor: positive integer (1 = default, 2 = 2× BW, 4 = 4× BW)
+    // latency_scale_factor: (0.0, 1.0] (1.0 = default, 0.5 = half latency, 0.25 = quarter latency)
+    config.dram.bandwidth_scale_factor = parser.getInt("dram.bandwidth_scale_factor", 1);
+    config.dram.latency_scale_factor = parser.getDouble("dram.latency_scale_factor", 1.0);
+
+    // Latency overheads (nanoseconds) - SYSTEM-LEVEL, not DRAM-specific
+    // DRAM-specific parameters (interface widths, timing) come from Ramulator
+    config.dram.latency_overheads.host_cpu = parser.getDouble("dram.latency_overhead_host_cpu", 150.0);
+    config.dram.latency_overheads.mc_pim = parser.getDouble("dram.latency_overhead_mc_pim", 40.0);
+    config.dram.latency_overheads.rank_pim = parser.getDouble("dram.latency_overhead_rank_pim", 15.0);
+    config.dram.latency_overheads.chip_pim = parser.getDouble("dram.latency_overhead_chip_pim", 7.0);
+    config.dram.latency_overheads.bg_pim = parser.getDouble("dram.latency_overhead_bg_pim", 3.0);
+    config.dram.latency_overheads.bank_pim = parser.getDouble("dram.latency_overhead_bank_pim", 0.0);
 
     // PIM config
     config.pim.granularity = parser.getString("pim.granularity", "BANK");
