@@ -68,3 +68,4 @@ test/test_*
 !test/test_*.sh
 !test/test_*.py
 ext/
+/DAC26/workloads_pimid/reduction_shared_pimid
