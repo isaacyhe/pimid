@@ -110,3 +110,10 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_garnet_htree_dram.cpp)
     target_link_libraries(test_garnet_htree_dram pimid_lib)
     add_test(NAME GarnetHTreeDRAMTest COMMAND test_garnet_htree_dram)
 endif()
+
+# Test GARNET H-tree support for all Ramulator 2.0 DRAM types
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_all_dram_types_garnet.cpp)
+    add_executable(test_all_dram_types_garnet test_all_dram_types_garnet.cpp)
+    target_link_libraries(test_all_dram_types_garnet pimid_lib)
+    add_test(NAME AllDRAMTypesGarnetTest COMMAND test_all_dram_types_garnet)
+endif()

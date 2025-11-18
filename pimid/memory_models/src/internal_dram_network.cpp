@@ -46,10 +46,18 @@ void InternalDRAMNetwork::initialize(int num_subarrays_per_bank,
     num_chips_per_rank_ = num_chips_per_rank;
 
     // Configure network based on DRAM type
-    if (dram_type_ == "DDR4") {
+    if (dram_type_ == "DDR3") {
+        configureDDR3Network();
+    } else if (dram_type_ == "DDR4" || dram_type_ == "DDR4-RVRR" || dram_type_ == "DDR4-VRR") {
         configureDDR4Network();
-    } else if (dram_type_ == "DDR5") {
+    } else if (dram_type_ == "DDR5" || dram_type_ == "DDR5-RVRR" || dram_type_ == "DDR5-VRR") {
         configureDDR5Network();
+    } else if (dram_type_ == "LPDDR5") {
+        configureLPDDR5Network();
+    } else if (dram_type_ == "GDDR6") {
+        configureGDDR6Network();
+    } else if (dram_type_ == "HBM") {
+        configureHBMNetwork();
     } else if (dram_type_ == "HBM2") {
         configureHBM2Network();
     } else if (dram_type_ == "HBM3") {
@@ -219,6 +227,166 @@ void InternalDRAMNetwork::configureHBM3Network() {
         (chip_network_config_.link_width_bits / 8.0) *
         chip_network_config_.frequency_GHz;
     chip_network_config_.latency_cycles = 10;
+    chip_network_config_.topology = "crossbar";
+}
+
+void InternalDRAMNetwork::configureDDR3Network() {
+    // DDR3 has narrower internal paths than DDR4
+
+    // Subarray network (within bank): 8n prefetch (32 bits internal)
+    subarray_network_config_.link_width_bits = 32;  // 4-byte prefetch
+    subarray_network_config_.frequency_GHz = 0.8;    // DDR3-1600
+    subarray_network_config_.bandwidth_GBs =
+        (subarray_network_config_.link_width_bits / 8.0) *
+        subarray_network_config_.frequency_GHz;
+    subarray_network_config_.latency_cycles = 6;    // Slightly slower
+    subarray_network_config_.topology = "crossbar";
+
+    // Bank network (within rank): Very narrow paths
+    bank_network_config_.link_width_bits = 8;       // 8-bit bank port
+    bank_network_config_.frequency_GHz = 0.8;
+    bank_network_config_.bandwidth_GBs =
+        (bank_network_config_.link_width_bits / 8.0) *
+        bank_network_config_.frequency_GHz;
+    bank_network_config_.latency_cycles = 12;       // Older tech, slower
+    bank_network_config_.topology = "bus";
+
+    // Bank group network: DDR3 has no bank groups, use rank-level
+    bg_network_config_.link_width_bits = 16;
+    bg_network_config_.frequency_GHz = 0.8;
+    bg_network_config_.bandwidth_GBs =
+        (bg_network_config_.link_width_bits / 8.0) *
+        bg_network_config_.frequency_GHz;
+    bg_network_config_.latency_cycles = 25;
+    bg_network_config_.topology = "bus";
+
+    // Chip network (within rank): Via external pins
+    chip_network_config_.link_width_bits = 8;        // x8 device I/O
+    chip_network_config_.frequency_GHz = 0.8;
+    chip_network_config_.bandwidth_GBs =
+        (chip_network_config_.link_width_bits / 8.0) *
+        chip_network_config_.frequency_GHz;
+    chip_network_config_.latency_cycles = 60;        // Off-chip is slow
+    chip_network_config_.topology = "point-to-point";
+}
+
+void InternalDRAMNetwork::configureLPDDR5Network() {
+    // LPDDR5 optimized for mobile: Wide I/O, low power
+
+    // Subarray network: 16n prefetch (128 bits)
+    subarray_network_config_.link_width_bits = 128;  // Wide prefetch
+    subarray_network_config_.frequency_GHz = 1.6;    // LPDDR5-6400
+    subarray_network_config_.bandwidth_GBs =
+        (subarray_network_config_.link_width_bits / 8.0) *
+        subarray_network_config_.frequency_GHz;
+    subarray_network_config_.latency_cycles = 4;     // Optimized for mobile
+    subarray_network_config_.topology = "crossbar";
+
+    // Bank network: Wider than DDR5 for bandwidth
+    bank_network_config_.link_width_bits = 16;       // 16-bit paths
+    bank_network_config_.frequency_GHz = 1.6;
+    bank_network_config_.bandwidth_GBs =
+        (bank_network_config_.link_width_bits / 8.0) *
+        bank_network_config_.frequency_GHz;
+    bank_network_config_.latency_cycles = 8;         // Low latency
+    bank_network_config_.topology = "bus";
+
+    // Bank group network
+    bg_network_config_.link_width_bits = 32;
+    bg_network_config_.frequency_GHz = 1.6;
+    bg_network_config_.bandwidth_GBs =
+        (bg_network_config_.link_width_bits / 8.0) *
+        bg_network_config_.frequency_GHz;
+    bg_network_config_.latency_cycles = 15;
+    bg_network_config_.topology = "bus";
+
+    // Chip network: Mobile uses on-package connections
+    chip_network_config_.link_width_bits = 16;       // x16 only for LPDDR5
+    chip_network_config_.frequency_GHz = 1.6;
+    chip_network_config_.bandwidth_GBs =
+        (chip_network_config_.link_width_bits / 8.0) *
+        chip_network_config_.frequency_GHz;
+    chip_network_config_.latency_cycles = 30;        // PoP is faster than off-chip
+    chip_network_config_.topology = "point-to-point";
+}
+
+void InternalDRAMNetwork::configureGDDR6Network() {
+    // GDDR6 for graphics: VERY wide paths, high bandwidth
+
+    // Subarray network: Extremely wide for graphics bandwidth
+    subarray_network_config_.link_width_bits = 256;  // Wide graphics paths
+    subarray_network_config_.frequency_GHz = 2.0;    // GDDR6-16000 (2 GHz)
+    subarray_network_config_.bandwidth_GBs =
+        (subarray_network_config_.link_width_bits / 8.0) *
+        subarray_network_config_.frequency_GHz;
+    subarray_network_config_.latency_cycles = 4;     // Optimized for throughput
+    subarray_network_config_.topology = "crossbar";
+
+    // Bank network: Wide paths for graphics workloads
+    bank_network_config_.link_width_bits = 32;       // 32-bit bank ports
+    bank_network_config_.frequency_GHz = 2.0;
+    bank_network_config_.bandwidth_GBs =
+        (bank_network_config_.link_width_bits / 8.0) *
+        bank_network_config_.frequency_GHz;
+    bank_network_config_.latency_cycles = 6;         // Graphics optimized
+    bank_network_config_.topology = "bus";
+
+    // Bank group network: Graphics needs wide buses
+    bg_network_config_.link_width_bits = 64;
+    bg_network_config_.frequency_GHz = 2.0;
+    bg_network_config_.bandwidth_GBs =
+        (bg_network_config_.link_width_bits / 8.0) *
+        bg_network_config_.frequency_GHz;
+    bg_network_config_.latency_cycles = 10;
+    bg_network_config_.topology = "bus";
+
+    // Chip network: GDDR6 has dual channel per chip
+    chip_network_config_.link_width_bits = 16;       // x8 or x16
+    chip_network_config_.frequency_GHz = 2.0;
+    chip_network_config_.bandwidth_GBs =
+        (chip_network_config_.link_width_bits / 8.0) *
+        chip_network_config_.frequency_GHz;
+    chip_network_config_.latency_cycles = 20;        // On-board traces
+    chip_network_config_.topology = "point-to-point";
+}
+
+void InternalDRAMNetwork::configureHBMNetwork() {
+    // HBM Gen 1: First generation 3D-stacked memory
+
+    // Subarray network: Wide but not as wide as HBM2
+    subarray_network_config_.link_width_bits = 256;  // HBM Gen 1 width
+    subarray_network_config_.frequency_GHz = 1.0;    // HBM-1Gbps
+    subarray_network_config_.bandwidth_GBs =
+        (subarray_network_config_.link_width_bits / 8.0) *
+        subarray_network_config_.frequency_GHz;
+    subarray_network_config_.latency_cycles = 4;     // TSV benefits
+    subarray_network_config_.topology = "crossbar";
+
+    // Bank network: TSV-enabled wide paths
+    bank_network_config_.link_width_bits = 64;       // 64-bit via TSV
+    bank_network_config_.frequency_GHz = 1.0;
+    bank_network_config_.bandwidth_GBs =
+        (bank_network_config_.link_width_bits / 8.0) *
+        bank_network_config_.frequency_GHz;
+    bank_network_config_.latency_cycles = 6;         // 3D stacking
+    bank_network_config_.topology = "crossbar";
+
+    // Bank group network
+    bg_network_config_.link_width_bits = 128;
+    bg_network_config_.frequency_GHz = 1.0;
+    bg_network_config_.bandwidth_GBs =
+        (bg_network_config_.link_width_bits / 8.0) *
+        bg_network_config_.frequency_GHz;
+    bg_network_config_.latency_cycles = 10;
+    bg_network_config_.topology = "crossbar";
+
+    // Chip network: Via interposer
+    chip_network_config_.link_width_bits = 128;      // Wide channel
+    chip_network_config_.frequency_GHz = 1.0;
+    chip_network_config_.bandwidth_GBs =
+        (chip_network_config_.link_width_bits / 8.0) *
+        chip_network_config_.frequency_GHz;
+    chip_network_config_.latency_cycles = 12;        // On-interposer
     chip_network_config_.topology = "crossbar";
 }
 

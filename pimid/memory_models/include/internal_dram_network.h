@@ -281,8 +281,12 @@ private:
     /**
      * @brief Configure network based on DRAM type
      */
+    void configureDDR3Network();
     void configureDDR4Network();
     void configureDDR5Network();
+    void configureLPDDR5Network();
+    void configureGDDR6Network();
+    void configureHBMNetwork();
     void configureHBM2Network();
     void configureHBM3Network();
 
