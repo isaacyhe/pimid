@@ -12,10 +12,12 @@ namespace pimid {
 
 PEPlacementManager::PEPlacementManager(const MemoryHierarchy& hierarchy,
                                        PEPlacementLevel level,
-                                       AddressingMode mode)
+                                       AddressingMode mode,
+                                       std::shared_ptr<memory::DRAMArchitectureV2> dram_arch)
     : hierarchy_(hierarchy)
     , placement_level_(level)
     , addressing_mode_(mode)
+    , dram_arch_(dram_arch)
     , last_update_cycle_(0) {
 }
 
@@ -66,6 +68,35 @@ PEBusConstraints PEPlacementManager::calculateBusConstraints(
     PEPlacementLevel level,
     uint32_t location_id) const {
 
+    // If DRAM architecture is available, use it for accurate constraints
+    if (dram_arch_) {
+        PEBusConstraints constraints = createPEBusConstraintsFromDRAM(*dram_arch_, level);
+
+        // Adjust shared_bus_pes based on hierarchy (not in DRAM arch)
+        switch (level) {
+            case PEPlacementLevel::SUBARRAY:
+                constraints.shared_bus_pes = 1;  // Dedicated per subarray
+                break;
+            case PEPlacementLevel::BANK:
+                constraints.shared_bus_pes = hierarchy_.num_subarrays_per_bank;
+                break;
+            case PEPlacementLevel::CHIP:
+                constraints.shared_bus_pes = hierarchy_.num_banks_per_chip;
+                break;
+            case PEPlacementLevel::RANK:
+                constraints.shared_bus_pes = hierarchy_.num_banks_per_chip *
+                                            hierarchy_.num_chips_per_rank;
+                break;
+            case PEPlacementLevel::LOGIC_DIE:
+                constraints.shared_bus_pes = 1;  // Dedicated logic die
+                break;
+        }
+
+        return constraints;
+    }
+
+    // FALLBACK: If no DRAM architecture provided, use legacy hardcoded values
+    // NOTE: This path is deprecated and should not be used for accurate simulations
     PEBusConstraints constraints;
 
     switch (level) {

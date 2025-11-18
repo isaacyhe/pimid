@@ -4,8 +4,14 @@
 #include "common/types.h"
 #include <vector>
 #include <map>
+#include <memory>
 
 namespace pimid {
+
+// Forward declaration for DRAM architecture
+namespace memory {
+    struct DRAMArchitectureV2;
+}
 
 /**
  * Memory hierarchy structure
@@ -109,7 +115,8 @@ class PEPlacementManager {
 public:
     PEPlacementManager(const MemoryHierarchy& hierarchy,
                        PEPlacementLevel level,
-                       AddressingMode mode);
+                       AddressingMode mode,
+                       std::shared_ptr<memory::DRAMArchitectureV2> dram_arch = nullptr);
 
     // PE registration
     void registerPE(const PEDescriptor& pe);
@@ -164,6 +171,9 @@ private:
     MemoryHierarchy hierarchy_;
     PEPlacementLevel placement_level_;
     AddressingMode addressing_mode_;
+
+    // DRAM architecture (optional - if provided, used for accurate bus constraints)
+    std::shared_ptr<memory::DRAMArchitectureV2> dram_arch_;
 
     // PE storage
     std::map<uint32_t, PEDescriptor> pes_;
