@@ -35,6 +35,7 @@ struct Stencil1DMetrics {
     uint64_t sync_cycles = 0;
     uint64_t barrier_count = 0;
     uint64_t stencil_ops = 0;
+    uint64_t remote_accesses = 0;
     double total_energy = 0.0;
 };
 
@@ -42,13 +43,14 @@ class Stencil1DShared {
 private:
     Stencil1DConfig config;
     Stencil1DMetrics metrics;
+    bool is_libcom;
 
     std::vector<double> grid_old;
     std::vector<double> grid_new;
     std::vector<int> point_assignment;
 
 public:
-    Stencil1DShared(const Stencil1DConfig& cfg) : config(cfg) {
+    Stencil1DShared(const Stencil1DConfig& cfg, bool use_libcom) : config(cfg), is_libcom(use_libcom) {
         grid_old.resize(config.grid_size);
         grid_new.resize(config.grid_size);
         point_assignment.resize(config.grid_size);
@@ -95,6 +97,14 @@ private:
                         // Read from shared memory (3 reads)
                         metrics.total_cycles += 3 * config.read_latency;
 
+                        // Track remote accesses (accessing elements from other subarrays)
+                        if (point_assignment[i - 1] != sa) {
+                            metrics.remote_accesses++;
+                        }
+                        if (point_assignment[i + 1] != sa) {
+                            metrics.remote_accesses++;
+                        }
+
                         // Compute average
                         metrics.total_cycles += 2 * config.compute_latency;  // 2 adds + divide
                         grid_new[i] = (grid_old[i - 1] + grid_old[i] + grid_old[i + 1]) / 3.0;
@@ -122,6 +132,10 @@ private:
             }
         }
 
+        // Calculate total energy based on remote accesses
+        double energy_per_access = is_libcom ? 0.55 : 1.0;
+        metrics.total_energy = metrics.remote_accesses * energy_per_access;
+
         std::cout << "\n✓ Stencil computation complete" << std::endl;
     }
 
@@ -148,6 +162,11 @@ private:
         std::cout << "\nCommunication (Shared Memory):" << std::endl;
         std::cout << "  Inter-subarray transfers: 0 (shared memory model)" << std::endl;
         std::cout << "  Boundary access: implicit via shared memory" << std::endl;
+
+        std::cout << "\nEnergy:" << std::endl;
+        std::cout << "  Remote accesses: " << metrics.remote_accesses << std::endl;
+        std::cout << "  Energy per access: " << (is_libcom ? 0.55 : 1.0) << " pJ" << std::endl;
+        std::cout << "  Total energy: " << metrics.total_energy << " pJ" << std::endl;
 
         // Validation
         std::cout << "\nValidation:" << std::endl;
@@ -200,7 +219,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Source: Parallel Research Kernels (PRK), MiniFE" << std::endl;
     std::cout << "Programming Model: SHARED MEMORY" << std::endl;
 
-    Stencil1DShared workload(config);
+    Stencil1DShared workload(config, is_libcom);
     workload.execute();
 
     return 0;

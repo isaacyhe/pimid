@@ -33,6 +33,7 @@ struct ReductionMetrics {
     uint64_t sync_cycles = 0;
     uint64_t atomic_ops = 0;
     uint64_t elements_processed = 0;
+    uint64_t remote_accesses = 0;    // Track remote memory accesses
     double total_energy = 0.0;
 };
 
@@ -40,13 +41,15 @@ class ReductionShared {
 private:
     ReductionConfig config;
     ReductionMetrics metrics;
+    bool is_libcom;
 
     std::vector<double> shared_data;
     std::vector<double> partial_sums;
     double final_result;
 
 public:
-    ReductionShared(const ReductionConfig& cfg) : config(cfg), final_result(0.0) {
+    ReductionShared(const ReductionConfig& cfg, bool use_libcom)
+        : config(cfg), is_libcom(use_libcom), final_result(0.0) {
         int total_elements = config.num_subarrays * config.elements_per_subarray;
         shared_data.resize(total_elements, 1.0);
         partial_sums.resize(config.num_subarrays, 0.0);
@@ -114,15 +117,27 @@ private:
 
     void accumulatePartialSums() {
         // Each subarray atomically adds its partial sum to final result
+        // Assume final_result resides in subarray 0
         for (int sa = 0; sa < config.num_subarrays; sa++) {
             // Atomic add to shared result
             metrics.total_cycles += 2;  // Atomic operation overhead
             metrics.atomic_ops++;
 
+            // Energy cost for remote access (if not subarray 0)
+            if (sa != 0) {
+                metrics.remote_accesses++;
+                if (is_libcom) {
+                    metrics.total_energy += 0.55;  // LIBCom: library communication
+                } else {
+                    metrics.total_energy += 1.0;   // Baseline: bank port/peripheral
+                }
+            }
+
             final_result += partial_sums[sa];
         }
 
         std::cout << "  " << metrics.atomic_ops << " atomic additions" << std::endl;
+        std::cout << "  " << metrics.remote_accesses << " remote memory accesses" << std::endl;
     }
 
     void printMetrics() {
@@ -139,6 +154,14 @@ private:
 
         std::cout << "\nCommunication (Shared Memory):" << std::endl;
         std::cout << "  Inter-subarray transfers: 0 (shared memory model)" << std::endl;
+        std::cout << "  Remote memory accesses: " << metrics.remote_accesses << std::endl;
+
+        std::cout << "\nEnergy:" << std::endl;
+        std::cout << "  Total energy (relative): " << metrics.total_energy << std::endl;
+        if (metrics.remote_accesses > 0) {
+            std::cout << "  Avg energy per remote access: "
+                      << (metrics.total_energy / metrics.remote_accesses) << std::endl;
+        }
 
         // Validation
         double expected_sum = config.num_subarrays * config.elements_per_subarray * 1.0;
@@ -186,7 +209,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Configuration: " << (is_libcom ? "LIBCom" : "Baseline H-tree") << std::endl;
     std::cout << "Programming Model: SHARED MEMORY" << std::endl;
 
-    ReductionShared workload(config);
+    ReductionShared workload(config, is_libcom);
     workload.execute();
 
     return 0;

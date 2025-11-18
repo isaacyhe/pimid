@@ -34,6 +34,7 @@ struct PrefixSumMetrics {
     uint64_t sync_cycles = 0;
     uint64_t barrier_count = 0;
     uint64_t add_ops = 0;
+    uint64_t remote_accesses = 0;
     double total_energy = 0.0;
 };
 
@@ -41,13 +42,14 @@ class PrefixSumShared {
 private:
     PrefixSumConfig config;
     PrefixSumMetrics metrics;
+    bool is_libcom;
 
     std::vector<int> input_array;
     std::vector<int> output_array;
     std::vector<int> element_assignment;
 
 public:
-    PrefixSumShared(const PrefixSumConfig& cfg) : config(cfg) {
+    PrefixSumShared(const PrefixSumConfig& cfg, bool use_libcom) : config(cfg), is_libcom(use_libcom) {
         input_array.resize(config.array_length);
         output_array.resize(config.array_length, 0);
         element_assignment.resize(config.array_length);
@@ -91,6 +93,19 @@ private:
                 if (idx < config.array_length) {
                     int left = i + offset;
 
+                    // Track remote accesses (cross-subarray accesses)
+                    int idx_subarray = element_assignment[idx];
+                    int left_subarray = element_assignment[left];
+
+                    // Reading left element
+                    if (left_subarray != idx_subarray) {
+                        metrics.remote_accesses++;
+                    }
+                    // Reading idx element
+                    if (idx_subarray != idx_subarray) {  // Always local for idx
+                        metrics.remote_accesses++;
+                    }
+
                     // Read-modify-write in shared memory
                     metrics.total_cycles += 2 * config.read_latency + config.write_latency + config.compute_latency;
                     output_array[idx] += output_array[left];
@@ -125,6 +140,23 @@ private:
                 if (idx < config.array_length) {
                     int left = i + offset;
 
+                    // Track remote accesses (cross-subarray accesses)
+                    int idx_subarray = element_assignment[idx];
+                    int left_subarray = element_assignment[left];
+
+                    // Reading left element
+                    if (left_subarray != idx_subarray) {
+                        metrics.remote_accesses++;
+                    }
+                    // Reading idx element
+                    if (idx_subarray != idx_subarray) {  // Always local for idx
+                        metrics.remote_accesses++;
+                    }
+                    // Writing to left element
+                    if (left_subarray != idx_subarray) {
+                        metrics.remote_accesses++;
+                    }
+
                     // Swap and add
                     metrics.total_cycles += 2 * config.read_latency + 2 * config.write_latency + config.compute_latency;
                     int temp = output_array[left];
@@ -140,6 +172,10 @@ private:
             std::cout << "  Level " << (depth - d) << ": " << ops_this_level << " operations" << std::endl;
             metrics.compute_cycles += ops_this_level * config.compute_latency;
         }
+
+        // Calculate total energy based on remote accesses
+        double energy_per_access = is_libcom ? 0.55 : 1.0;
+        metrics.total_energy = metrics.remote_accesses * energy_per_access;
 
         std::cout << "\n✓ Exclusive prefix sum complete" << std::endl;
     }
@@ -165,6 +201,12 @@ private:
 
         std::cout << "\nCommunication (Shared Memory):" << std::endl;
         std::cout << "  Inter-subarray transfers: 0 (shared memory model)" << std::endl;
+        std::cout << "  Remote accesses: " << metrics.remote_accesses << std::endl;
+
+        std::cout << "\nEnergy:" << std::endl;
+        std::cout << "  Remote accesses: " << metrics.remote_accesses << std::endl;
+        std::cout << "  Energy per access: " << (is_libcom ? 0.55 : 1.0) << " pJ" << std::endl;
+        std::cout << "  Total energy: " << metrics.total_energy << " pJ" << std::endl;
 
         // Validation
         std::cout << "\nValidation:" << std::endl;
@@ -228,7 +270,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Source: Parallel Research Kernels (PRK), CUDA SDK" << std::endl;
     std::cout << "Programming Model: SHARED MEMORY" << std::endl;
 
-    PrefixSumShared workload(config);
+    PrefixSumShared workload(config, is_libcom);
     workload.execute();
 
     return 0;

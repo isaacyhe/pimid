@@ -33,6 +33,7 @@ struct GEMMMetrics {
     uint64_t sync_cycles = 0;
     uint64_t mac_ops = 0;
     uint64_t atomic_ops = 0;
+    uint64_t remote_accesses = 0;    // Track remote memory accesses
     double total_energy = 0.0;
 };
 
@@ -40,12 +41,14 @@ class GEMMShared {
 private:
     GEMMConfig config;
     GEMMMetrics metrics;
+    bool is_libcom;
 
     int num_blocks;
     std::vector<int> block_assignment;  // Which subarray computes each C block
 
 public:
-    GEMMShared(const GEMMConfig& cfg) : config(cfg) {
+    GEMMShared(const GEMMConfig& cfg, bool use_libcom)
+        : config(cfg), is_libcom(use_libcom) {
         num_blocks = config.matrix_size / config.block_size;
         int total_c_blocks = num_blocks * num_blocks;
         block_assignment.resize(total_c_blocks);
@@ -104,10 +107,30 @@ private:
 
     void computeBlockMultiply(int i, int j, int k, int subarray_id) {
         // Read A[i][k] block from shared memory
+        // Assume A blocks are row-distributed: A[i][*] in subarray (i % num_subarrays)
+        int a_owner = i % config.num_subarrays;
         metrics.total_cycles += config.read_latency;
+        if (a_owner != subarray_id) {
+            metrics.remote_accesses++;
+            if (is_libcom) {
+                metrics.total_energy += 0.55;  // LIBCom: library communication
+            } else {
+                metrics.total_energy += 1.0;   // Baseline: bank port/peripheral
+            }
+        }
 
         // Read B[k][j] block from shared memory
+        // Assume B blocks are row-distributed: B[k][*] in subarray (k % num_subarrays)
+        int b_owner = k % config.num_subarrays;
         metrics.total_cycles += config.read_latency;
+        if (b_owner != subarray_id) {
+            metrics.remote_accesses++;
+            if (is_libcom) {
+                metrics.total_energy += 0.55;  // LIBCom: library communication
+            } else {
+                metrics.total_energy += 1.0;   // Baseline: bank port/peripheral
+            }
+        }
 
         // Compute block multiply-accumulate
         // Each block multiply is block_size^3 MAC operations
@@ -138,6 +161,14 @@ private:
 
         std::cout << "\nCommunication (Shared Memory):" << std::endl;
         std::cout << "  Inter-subarray transfers: 0 (shared memory model)" << std::endl;
+        std::cout << "  Remote memory accesses: " << metrics.remote_accesses << std::endl;
+
+        std::cout << "\nEnergy:" << std::endl;
+        std::cout << "  Total energy (relative): " << metrics.total_energy << std::endl;
+        if (metrics.remote_accesses > 0) {
+            std::cout << "  Avg energy per remote access: "
+                      << (metrics.total_energy / metrics.remote_accesses) << std::endl;
+        }
 
         // Validation
         std::cout << "\nValidation:" << std::endl;
@@ -178,7 +209,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Source: BLAS Level 3 (DGEMM)" << std::endl;
     std::cout << "Programming Model: SHARED MEMORY" << std::endl;
 
-    GEMMShared workload(config);
+    GEMMShared workload(config, is_libcom);
     workload.execute();
 
     return 0;

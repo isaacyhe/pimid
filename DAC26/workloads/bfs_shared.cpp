@@ -36,6 +36,7 @@ struct BFSMetrics {
     uint64_t atomic_ops = 0;
     uint64_t edges_processed = 0;
     int num_levels = 0;
+    uint64_t remote_accesses = 0;
     double total_energy = 0.0;
 };
 
@@ -43,6 +44,7 @@ class BFSShared {
 private:
     BFSConfig config;
     BFSMetrics metrics;
+    bool is_libcom;
 
     std::vector<std::vector<int>> adjacency_list;
     std::vector<int> vertex_levels;
@@ -50,7 +52,7 @@ private:
     std::vector<int> vertex_assignment;  // Which subarray processes each vertex
 
 public:
-    BFSShared(const BFSConfig& cfg) : config(cfg) {
+    BFSShared(const BFSConfig& cfg, bool use_libcom) : config(cfg), is_libcom(use_libcom) {
         adjacency_list.resize(config.num_vertices);
         vertex_levels.resize(config.num_vertices, -1);
         visited.resize(config.num_vertices, false);
@@ -148,10 +150,20 @@ private:
             // Read adjacency list from shared memory
             metrics.total_cycles += config.read_latency;
 
+            // Track remote access if vertex is from another subarray
+            if (vertex_assignment[v] != subarray_id) {
+                metrics.remote_accesses++;
+            }
+
             // Explore neighbors
             for (int u : adjacency_list[v]) {
                 // Read visited flag from shared memory
                 metrics.total_cycles += config.read_latency;
+
+                // Track remote access if neighbor is in another subarray
+                if (vertex_assignment[u] != subarray_id) {
+                    metrics.remote_accesses++;
+                }
 
                 if (!visited[u]) {
                     // Atomic test-and-set on visited flag
@@ -160,6 +172,11 @@ private:
 
                     visited[u] = true;
                     vertex_levels[u] = current_level + 1;
+
+                    // Track remote write if neighbor is in another subarray
+                    if (vertex_assignment[u] != subarray_id) {
+                        metrics.remote_accesses++;
+                    }
 
                     // Add to next frontier (shared structure)
                     next_frontier.push(u);
@@ -176,6 +193,10 @@ private:
     }
 
     void printMetrics() {
+        // Calculate energy
+        double energy_per_access = is_libcom ? 0.55 : 1.0;
+        metrics.total_energy = metrics.remote_accesses * energy_per_access;
+
         std::cout << "\n=== BFS Results (SHARED MEMORY) ===" << std::endl;
         std::cout << "BFS levels: " << metrics.num_levels << std::endl;
         std::cout << "Total cycles: " << metrics.total_cycles << std::endl;
@@ -190,6 +211,12 @@ private:
 
         std::cout << "\nCommunication (Shared Memory):" << std::endl;
         std::cout << "  Inter-subarray transfers: 0 (shared memory model)" << std::endl;
+        std::cout << "  Remote accesses: " << metrics.remote_accesses << std::endl;
+
+        std::cout << "\nEnergy:" << std::endl;
+        std::cout << "  Remote accesses: " << metrics.remote_accesses << std::endl;
+        std::cout << "  Energy per access: " << energy_per_access << " pJ" << std::endl;
+        std::cout << "  Total energy: " << metrics.total_energy << " pJ" << std::endl;
 
         // Validation
         std::cout << "\nValidation:" << std::endl;
@@ -234,7 +261,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Source: Graph500 Benchmark" << std::endl;
     std::cout << "Programming Model: SHARED MEMORY" << std::endl;
 
-    BFSShared workload(config);
+    BFSShared workload(config, is_libcom);
     workload.execute();
 
     return 0;

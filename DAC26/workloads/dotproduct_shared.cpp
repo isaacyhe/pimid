@@ -32,6 +32,7 @@ struct DotProductMetrics {
     uint64_t sync_cycles = 0;
     uint64_t mac_ops = 0;  // Multiply-accumulate operations
     uint64_t atomic_ops = 0;
+    uint64_t remote_accesses = 0;
     double total_energy = 0.0;
 };
 
@@ -39,6 +40,7 @@ class DotProductShared {
 private:
     DotProductConfig config;
     DotProductMetrics metrics;
+    bool is_libcom;
 
     std::vector<double> vector_a;
     std::vector<double> vector_b;
@@ -46,7 +48,8 @@ private:
     double shared_result;
 
 public:
-    DotProductShared(const DotProductConfig& cfg) : config(cfg), shared_result(0.0) {
+    DotProductShared(const DotProductConfig& cfg, bool use_libcom)
+        : config(cfg), is_libcom(use_libcom), shared_result(0.0) {
         vector_a.resize(config.vector_length);
         vector_b.resize(config.vector_length);
         element_assignment.resize(config.vector_length);
@@ -102,13 +105,24 @@ private:
         std::cout << "\nPhase 2: Atomic accumulation to shared result" << std::endl;
 
         for (int sa = 0; sa < config.num_subarrays; sa++) {
-            // Atomic add to shared result
+            // Atomic add to shared result (assume result in subarray 0)
             metrics.total_cycles += 2;  // Atomic operation overhead
             metrics.atomic_ops++;
+
+            if (sa != 0) {
+                metrics.remote_accesses++;
+                if (is_libcom) {
+                    metrics.total_energy += 0.55;
+                } else {
+                    metrics.total_energy += 1.0;
+                }
+            }
+
             shared_result += partial_sums[sa];
         }
 
         std::cout << "  " << metrics.atomic_ops << " atomic additions to shared result" << std::endl;
+        std::cout << "  " << metrics.remote_accesses << " remote memory accesses" << std::endl;
 
         // Phase 3: Barrier synchronization
         std::cout << "\nPhase 3: Synchronization barrier" << std::endl;
@@ -131,6 +145,14 @@ private:
 
         std::cout << "\nCommunication (Shared Memory):" << std::endl;
         std::cout << "  Inter-subarray transfers: 0 (shared memory model)" << std::endl;
+        std::cout << "  Remote memory accesses: " << metrics.remote_accesses << std::endl;
+
+        std::cout << "\nEnergy:" << std::endl;
+        std::cout << "  Total energy (relative): " << metrics.total_energy << std::endl;
+        if (metrics.remote_accesses > 0) {
+            std::cout << "  Avg energy per remote access: "
+                      << (metrics.total_energy / metrics.remote_accesses) << std::endl;
+        }
 
         // Validation
         std::cout << "\nValidation:" << std::endl;
@@ -182,7 +204,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Source: BLAS Level 1 (DDOT)" << std::endl;
     std::cout << "Programming Model: SHARED MEMORY" << std::endl;
 
-    DotProductShared workload(config);
+    DotProductShared workload(config, is_libcom);
     workload.execute();
 
     return 0;

@@ -36,6 +36,7 @@ struct HistogramMetrics {
     uint64_t intersubarray_transfers = 0;
     uint64_t htree_traversals = 0;
     uint64_t direct_transfers = 0;
+    uint64_t remote_accesses = 0;
     double total_energy = 0.0;
 };
 
@@ -43,13 +44,14 @@ class HistogramShared {
 private:
     HistogramConfig config;
     HistogramMetrics metrics;
+    bool is_libcom;
 
     std::vector<int> input_data;
     std::vector<int> histogram;
     std::vector<int> subarray_assignment;  // Which subarray owns each element
 
 public:
-    HistogramShared(const HistogramConfig& cfg) : config(cfg) {
+    HistogramShared(const HistogramConfig& cfg, bool use_libcom) : config(cfg), is_libcom(use_libcom) {
         histogram.resize(config.num_bins, 0);
         input_data.resize(config.num_elements);
         subarray_assignment.resize(config.num_elements);
@@ -97,6 +99,17 @@ private:
                     metrics.atomic_ops++;
                     local_atomic_ops++;
 
+                    // Energy tracking: check if bin is remote
+                    int bin_owner = bin % config.num_subarrays;
+                    if (bin_owner != sa) {
+                        metrics.remote_accesses++;
+                        if (is_libcom) {
+                            metrics.total_energy += 0.55;
+                        } else {
+                            metrics.total_energy += 1.0;
+                        }
+                    }
+
                     histogram[bin]++;
                 }
             }
@@ -129,7 +142,14 @@ private:
 
         std::cout << "\nCommunication (Shared Memory):" << std::endl;
         std::cout << "  Inter-subarray transfers: " << metrics.intersubarray_transfers << std::endl;
+        std::cout << "  Remote accesses: " << metrics.remote_accesses << std::endl;
         std::cout << "  (Shared memory model - no explicit transfers)" << std::endl;
+
+        std::cout << "\nEnergy:" << std::endl;
+        std::cout << "  Total energy: " << metrics.total_energy << " pJ" << std::endl;
+        if (metrics.remote_accesses > 0) {
+            std::cout << "  Avg per remote access: " << (metrics.total_energy / metrics.remote_accesses) << " pJ" << std::endl;
+        }
 
         // Validation
         std::cout << "\nValidation:" << std::endl;
@@ -184,7 +204,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Source: Rodinia Benchmark Suite" << std::endl;
     std::cout << "Programming Model: SHARED MEMORY" << std::endl;
 
-    HistogramShared workload(config);
+    HistogramShared workload(config, is_libcom);
     workload.execute();
 
     return 0;

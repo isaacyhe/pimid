@@ -35,6 +35,7 @@ struct SpMVMetrics {
     uint64_t atomic_ops = 0;
     uint64_t mac_ops = 0;
     uint64_t nnz = 0;
+    uint64_t remote_accesses = 0;
     double total_energy = 0.0;
 };
 
@@ -47,6 +48,7 @@ class SpMVShared {
 private:
     SpMVConfig config;
     SpMVMetrics metrics;
+    bool is_libcom;
 
     std::vector<SparseRow> sparse_matrix;
     std::vector<int> row_assignment;
@@ -54,7 +56,7 @@ private:
     std::vector<double> result_y;
 
 public:
-    SpMVShared(const SpMVConfig& cfg) : config(cfg) {
+    SpMVShared(const SpMVConfig& cfg, bool use_libcom) : config(cfg), is_libcom(use_libcom) {
         sparse_matrix.resize(config.num_rows);
         row_assignment.resize(config.num_rows);
         vector_x.resize(config.num_cols, 1.0);
@@ -137,6 +139,7 @@ private:
 
             // Read x[col_idx] from shared memory
             metrics.total_cycles += config.read_latency;
+            metrics.remote_accesses++;
 
             // Multiply-accumulate
             metrics.total_cycles += config.compute_latency;
@@ -154,6 +157,10 @@ private:
     }
 
     void printMetrics() {
+        // Calculate energy
+        double energy_per_access = is_libcom ? 0.55 : 1.0;
+        metrics.total_energy = metrics.remote_accesses * energy_per_access;
+
         std::cout << "\n=== SpMV Results (SHARED MEMORY) ===" << std::endl;
         std::cout << "Total cycles: " << metrics.total_cycles << std::endl;
         std::cout << "  Compute cycles: " << metrics.compute_cycles
@@ -168,6 +175,11 @@ private:
 
         std::cout << "\nCommunication (Shared Memory):" << std::endl;
         std::cout << "  Inter-subarray transfers: 0 (shared memory model)" << std::endl;
+
+        std::cout << "\nEnergy:" << std::endl;
+        std::cout << "  Remote accesses: " << metrics.remote_accesses << std::endl;
+        std::cout << "  Energy per access: " << energy_per_access << " pJ" << std::endl;
+        std::cout << "  Total energy: " << metrics.total_energy << " pJ" << std::endl;
 
         // Validation
         std::cout << "\nValidation:" << std::endl;
@@ -208,7 +220,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Source: Sparse BLAS (SpBLAS)" << std::endl;
     std::cout << "Programming Model: SHARED MEMORY" << std::endl;
 
-    SpMVShared workload(config);
+    SpMVShared workload(config, is_libcom);
     workload.execute();
 
     return 0;
