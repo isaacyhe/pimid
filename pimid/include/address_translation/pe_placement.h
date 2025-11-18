@@ -34,6 +34,8 @@ struct MemoryHierarchy {
 
 /**
  * Data bus constraints based on PE placement level
+ * NOTE: Do not use the default constructor values. Always populate from
+ * DRAM architecture configuration using createFromDRAMArchitecture().
  */
 struct PEBusConstraints {
     uint64_t data_bus_width_bits;      // Width of data bus in bits
@@ -42,8 +44,9 @@ struct PEBusConstraints {
     uint32_t shared_bus_pes;            // Number of PEs sharing this bus
     bool has_dedicated_bus;             // True if PE has dedicated data path
 
-    PEBusConstraints() : data_bus_width_bits(64), max_bandwidth_gbps(25),
-                         row_buffer_size_bytes(8192), shared_bus_pes(1),
+    // Default constructor - values should be overridden from DRAM architecture
+    PEBusConstraints() : data_bus_width_bits(0), max_bandwidth_gbps(0),
+                         row_buffer_size_bytes(0), shared_bus_pes(1),
                          has_dedicated_bus(false) {}
 };
 
@@ -84,16 +87,17 @@ struct PEDescriptor {
     PEBusConstraints bus_constraints;
     PEAddressConstraints addr_constraints;
 
-    // Capabilities
+    // Capabilities (should be populated from PE configuration)
     uint32_t num_cores;
     uint32_t frequency_mhz;
     bool has_l1_cache;
     uint32_t l1_size_kb;
 
+    // Default constructor - frequency_mhz should be set from configuration
     PEDescriptor() : pe_id(0), level(PEPlacementLevel::RANK),
                      subarray_id(0), bank_id(0), chip_id(0), rank_id(0),
                      on_logic_die(false), addr_base(0), addr_limit(0),
-                     num_cores(1), frequency_mhz(1000),
+                     num_cores(1), frequency_mhz(0),
                      has_l1_cache(false), l1_size_kb(0) {}
 };
 
@@ -189,6 +193,35 @@ private:
     Address getHierarchyBase(PEPlacementLevel level, const PEDescriptor& pe) const;
     Address getHierarchyLimit(PEPlacementLevel level, const PEDescriptor& pe) const;
 };
+
+//=============================================================================
+// Factory Functions for Creating Constraints from DRAM Architecture
+//=============================================================================
+
+/**
+ * Create PEBusConstraints from DRAM architecture configuration
+ * This ensures that PE placement uses actual DRAM datapath widths and
+ * bandwidths rather than hardcoded values.
+ *
+ * Example usage:
+ *   auto dram_arch = memory::createDDR4_2400_Verified();
+ *   PEBusConstraints subarray_constraints =
+ *       createPEBusConstraintsFromDRAM(*dram_arch, PEPlacementLevel::SUBARRAY);
+ */
+namespace memory {
+    class DRAMArchitectureV2;  // Forward declaration
+}
+
+PEBusConstraints createPEBusConstraintsFromDRAM(
+    const memory::DRAMArchitectureV2& dram_arch,
+    PEPlacementLevel level);
+
+/**
+ * Create MemoryHierarchy from DRAM architecture configuration
+ * Populates all size and organization parameters from verified DRAM specs.
+ */
+MemoryHierarchy createMemoryHierarchyFromDRAM(
+    const memory::DRAMArchitectureV2& dram_arch);
 
 } // namespace pimid
 

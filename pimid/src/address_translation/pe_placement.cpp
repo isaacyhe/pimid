@@ -1,4 +1,5 @@
 #include "address_translation/pe_placement.h"
+#include "memory/dram_architecture_v2.h"
 #include <iostream>
 #include <algorithm>
 #include <iomanip>
@@ -529,6 +530,116 @@ Address PEPlacementManager::getHierarchyLimit(PEPlacementLevel level,
 bool PEPlacementManager::isAddressInRange(Address addr,
                                           const PEDescriptor& pe) const {
     return addr >= pe.addr_base && addr < pe.addr_limit;
+}
+
+//=============================================================================
+// Factory Functions for Creating Constraints from DRAM Architecture
+//=============================================================================
+
+PEBusConstraints createPEBusConstraintsFromDRAM(
+    const memory::DRAMArchitectureV2& dram_arch,
+    PEPlacementLevel level) {
+
+    PEBusConstraints constraints;
+
+    switch (level) {
+        case PEPlacementLevel::SUBARRAY:
+            // Use subarray-level constraints from DRAM architecture
+            constraints.data_bus_width_bits =
+                dram_arch.pe_bus_constraints.subarray_level.data_bus_width_bits;
+            constraints.max_bandwidth_gbps =
+                dram_arch.pe_bus_constraints.subarray_level.max_bandwidth_gbps;
+            constraints.row_buffer_size_bytes =
+                dram_arch.pe_bus_constraints.subarray_level.row_buffer_size_bytes;
+            constraints.shared_bus_pes = 1;  // Dedicated per subarray
+            constraints.has_dedicated_bus =
+                dram_arch.pe_bus_constraints.subarray_level.has_dedicated_bus;
+            break;
+
+        case PEPlacementLevel::BANK:
+            // Use bank-level constraints from DRAM architecture
+            constraints.data_bus_width_bits =
+                dram_arch.pe_bus_constraints.bank_level.data_bus_width_bits;
+            constraints.max_bandwidth_gbps =
+                dram_arch.pe_bus_constraints.bank_level.max_bandwidth_gbps;
+            constraints.row_buffer_size_bytes = 0;  // No direct row buffer access
+            constraints.shared_bus_pes = dram_arch.organization.subarrays_per_bank;
+            constraints.has_dedicated_bus =
+                dram_arch.pe_bus_constraints.bank_level.has_dedicated_bus;
+            break;
+
+        case PEPlacementLevel::CHIP:
+            // Use chip-level constraints from DRAM architecture
+            constraints.data_bus_width_bits =
+                dram_arch.pe_bus_constraints.chip_level.data_bus_width_bits;
+            constraints.max_bandwidth_gbps =
+                dram_arch.pe_bus_constraints.chip_level.max_bandwidth_gbps;
+            constraints.row_buffer_size_bytes = 0;
+            constraints.shared_bus_pes =
+                dram_arch.organization.banks_per_bank_group *
+                dram_arch.organization.bank_groups_per_chip;
+            constraints.has_dedicated_bus =
+                dram_arch.pe_bus_constraints.chip_level.has_dedicated_bus;
+            break;
+
+        case PEPlacementLevel::RANK:
+            // Use rank-level constraints from DRAM architecture
+            constraints.data_bus_width_bits =
+                dram_arch.pe_bus_constraints.rank_level.data_bus_width_bits;
+            constraints.max_bandwidth_gbps =
+                dram_arch.pe_bus_constraints.rank_level.max_bandwidth_gbps;
+            constraints.row_buffer_size_bytes = 0;
+            constraints.shared_bus_pes =
+                dram_arch.organization.chips_per_rank *
+                dram_arch.organization.banks_per_bank_group *
+                dram_arch.organization.bank_groups_per_chip;
+            constraints.has_dedicated_bus =
+                dram_arch.pe_bus_constraints.rank_level.has_dedicated_bus;
+            break;
+
+        case PEPlacementLevel::LOGIC_DIE:
+            // Use logic die level constraints (for HBM/HMC)
+            constraints.data_bus_width_bits =
+                dram_arch.pe_bus_constraints.logic_die_level.data_bus_width_bits;
+            constraints.max_bandwidth_gbps =
+                dram_arch.pe_bus_constraints.logic_die_level.max_bandwidth_gbps;
+            constraints.row_buffer_size_bytes = 0;
+            constraints.shared_bus_pes = 1;  // Dedicated logic die
+            constraints.has_dedicated_bus =
+                dram_arch.pe_bus_constraints.logic_die_level.has_dedicated_bus;
+            break;
+
+        default:
+            // Return empty constraints for unknown level
+            break;
+    }
+
+    return constraints;
+}
+
+MemoryHierarchy createMemoryHierarchyFromDRAM(
+    const memory::DRAMArchitectureV2& dram_arch) {
+
+    MemoryHierarchy hierarchy;
+
+    // Populate organization from DRAM architecture
+    hierarchy.num_subarrays_per_bank = dram_arch.organization.subarrays_per_bank;
+    hierarchy.num_banks_per_chip =
+        dram_arch.organization.banks_per_bank_group *
+        dram_arch.organization.bank_groups_per_chip;
+    hierarchy.num_chips_per_rank = dram_arch.organization.chips_per_rank;
+    hierarchy.num_ranks = dram_arch.organization.ranks_per_channel;
+    hierarchy.has_logic_die = (dram_arch.technology == "HBM2" ||
+                                dram_arch.technology == "HBM3" ||
+                                dram_arch.technology == "HMC");
+
+    // Populate sizes from DRAM architecture
+    hierarchy.subarray_size_bytes = dram_arch.organization.subarray_size_kb * 1024;
+    hierarchy.bank_size_bytes = dram_arch.organization.bank_size_mb * 1024 * 1024;
+    hierarchy.chip_size_bytes = dram_arch.organization.chip_size_mb * 1024 * 1024;
+    hierarchy.rank_size_bytes = dram_arch.organization.rank_size_gb * 1024ULL * 1024 * 1024;
+
+    return hierarchy;
 }
 
 } // namespace pimid

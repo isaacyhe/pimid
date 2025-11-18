@@ -83,7 +83,9 @@ public:
         // XML configuration file (optional)
         std::string xml_file;
 
-        // Default constructor with sensible defaults
+        // Default constructor with typical values
+        // NOTE: For accurate power modeling, override these with your actual
+        // system configuration values from processor specs or DRAM architecture.
         SystemConfig()
             : num_cores(4)
             , core_clock_mhz(2000.0)  // 2 GHz

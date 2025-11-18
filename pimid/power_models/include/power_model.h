@@ -70,6 +70,9 @@ struct ActivityStats {
 
 /**
  * Technology parameters
+ * NOTE: The default constructor provides placeholder values.
+ * For accurate power modeling, these should be populated from your
+ * system configuration (e.g., from DRAM architecture or processor specs).
  */
 struct TechnologyParams {
     uint32_t tech_node_nm;      // Technology node (e.g., 45, 22, 14)
@@ -78,6 +81,7 @@ struct TechnologyParams {
     uint32_t core_count;
     double frequency_ghz;
 
+    // Default constructor - override these with actual configuration values
     TechnologyParams() : tech_node_nm(22), device_type("HP"),
                          temperature_k(350.0), core_count(1),
                          frequency_ghz(2.0) {}
