@@ -203,10 +203,17 @@ private:
  * This ensures that PE placement uses actual DRAM datapath widths and
  * bandwidths rather than hardcoded values.
  *
+ * NOTE: Automatically applies port_width_scale from DRAMArchitectureV2.
+ * This allows "what if the bus was 2x wider?" exploratory studies by setting:
+ *   dram_arch->port_width_scale = 2.0;
+ *
  * Example usage:
  *   auto dram_arch = memory::createDDR4_2400_Verified();
+ *   // Optional: Scale bus widths for exploration (default is 1.0)
+ *   dram_arch->port_width_scale = 2.0;  // 2x wider buses
  *   PEBusConstraints subarray_constraints =
  *       createPEBusConstraintsFromDRAM(*dram_arch, PEPlacementLevel::SUBARRAY);
+ *   // subarray_constraints.data_bus_width_bits will be 2x the base value
  */
 namespace memory {
     class DRAMArchitectureV2;  // Forward declaration

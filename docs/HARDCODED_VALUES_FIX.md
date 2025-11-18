@@ -95,6 +95,12 @@ Several components in the codebase contained hardcoded values that should have b
 - `dram_architecture_v2.h` tracks whether values are VERIFIED, INFERRED, or ESTIMATED
 - Easier to audit and improve accuracy over time
 
+### 5. Configurability
+- Bus widths can be scaled via `port_width_scale` parameter
+- Enables exploratory "what if 2x wider?" studies
+- Bandwidth scales proportionally with bus width
+- Useful for research and optimization studies
+
 ## Usage Example
 
 ```cpp
@@ -126,6 +132,28 @@ pe.bus_constraints = pimid::createPEBusConstraintsFromDRAM(
 );
 
 placement_manager.registerPE(pe);
+```
+
+### Usage Example with Scaling
+
+```cpp
+// Exploratory study: What if bank buses were 2x wider?
+auto dram_arch = pimid::memory::createDDR4_2400_Verified();
+
+// Scale port widths by 2x (default is 1.0)
+dram_arch->port_width_scale = 2.0;
+
+// Create constraints with scaled widths
+auto bank_constraints = pimid::createPEBusConstraintsFromDRAM(
+    *dram_arch,
+    pimid::PEPlacementLevel::BANK
+);
+
+// bank_constraints.data_bus_width_bits = 64 * 2.0 = 128 bits
+// bank_constraints.max_bandwidth_gbps = 25 * 2.0 = 50 GB/s
+
+std::cout << "Scaled bus width: " << bank_constraints.data_bus_width_bits << " bits\n";
+std::cout << "Scaled bandwidth: " << bank_constraints.max_bandwidth_gbps << " GB/s\n";
 ```
 
 ## Files Modified
