@@ -137,6 +137,7 @@ set(PIMID_SOURCES
     power_models/src/power_model.cpp
     power_models/src/mcpat_model.cpp
     power_models/src/mcpat_wrapper.cpp
+    power_models/src/power_model_manager.cpp
 
     # Address translation
     src/address_translation/pe_placement.cpp
