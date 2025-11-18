@@ -103,3 +103,10 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_bank_inorder_bfs_pim.cpp)
     target_link_libraries(test_bank_inorder_bfs_pim pimid_lib)
     add_test(NAME BankInOrderBFSPIMTest COMMAND test_bank_inorder_bfs_pim)
 endif()
+
+# GARNET H-tree integration test for DRAM internal networks
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_garnet_htree_dram.cpp)
+    add_executable(test_garnet_htree_dram test_garnet_htree_dram.cpp)
+    target_link_libraries(test_garnet_htree_dram pimid_lib)
+    add_test(NAME GarnetHTreeDRAMTest COMMAND test_garnet_htree_dram)
+endif()

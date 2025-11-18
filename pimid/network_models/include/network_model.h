@@ -20,6 +20,7 @@ enum class NetworkTopology {
     TORUS_3D,
     DRAGONFLY,
     FAT_TREE,
+    H_TREE,        // H-tree for DRAM internal interconnects
     CROSSBAR
 };
 
@@ -33,7 +34,8 @@ enum class RoutingAlgorithm {
     WEST_FIRST,
     NORTH_LAST,
     MINIMAL,
-    VALIANT
+    VALIANT,
+    TREE_BASED      // For H-tree and Fat-tree (route up then down)
 };
 
 /**

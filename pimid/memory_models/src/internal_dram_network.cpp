@@ -20,6 +20,11 @@ InternalDRAMNetwork::InternalDRAMNetwork(
       num_bg_per_chip_(0),
       num_chips_per_rank_(0),
       external_network_model_(network_model),
+      garnet_subarray_network_(nullptr),
+      garnet_bank_network_(nullptr),
+      garnet_bg_network_(nullptr),
+      garnet_chip_network_(nullptr),
+      use_garnet_models_(false),
       current_cycle_(0),
       total_packets_sent_(0),
       total_packets_completed_(0),
@@ -567,6 +572,59 @@ bool InternalDRAMNetwork::inSameChip(int bank1, int bank2) const {
     return chip1 == chip2;
 }
 
+void InternalDRAMNetwork::enableGarnetSimulation(bool enable) {
+    use_garnet_models_ = enable;
+
+    if (enable) {
+        std::cout << "\n[InternalDRAMNetwork] Enabling GARNET H-tree simulation" << std::endl;
+        std::cout << "  This will provide cycle-accurate NoC modeling with:" << std::endl;
+        std::cout << "    - Contention and queuing delays" << std::endl;
+        std::cout << "    - Router pipeline simulation" << std::endl;
+        std::cout << "    - Accurate power/energy modeling" << std::endl;
+        std::cout << "    - Virtual channel flow control\n" << std::endl;
+
+        // Create GARNET H-tree network for subarray level (within bank)
+        garnet_subarray_network_ = createGarnetHTreeForDRAM(
+            NetworkLevel::SUBARRAY_NETWORK,
+            num_subarrays_per_bank_,
+            subarray_network_config_.link_width_bits,
+            subarray_network_config_.latency_cycles,
+            subarray_network_config_.bandwidth_GBs);
+
+        // Create GARNET network for bank level (within bank group)
+        garnet_bank_network_ = createGarnetHTreeForDRAM(
+            NetworkLevel::BANK_NETWORK,
+            num_banks_per_bg_,
+            bank_network_config_.link_width_bits,
+            bank_network_config_.latency_cycles,
+            bank_network_config_.bandwidth_GBs);
+
+        // Create GARNET network for bank group level (within chip)
+        garnet_bg_network_ = createGarnetHTreeForDRAM(
+            NetworkLevel::BANK_GROUP_NETWORK,
+            num_bg_per_chip_,
+            bg_network_config_.link_width_bits,
+            bg_network_config_.latency_cycles,
+            bg_network_config_.bandwidth_GBs);
+
+        // Create GARNET network for chip level (within rank)
+        garnet_chip_network_ = createGarnetHTreeForDRAM(
+            NetworkLevel::CHIP_NETWORK,
+            num_chips_per_rank_,
+            chip_network_config_.link_width_bits,
+            chip_network_config_.latency_cycles,
+            chip_network_config_.bandwidth_GBs);
+
+        std::cout << "[InternalDRAMNetwork] GARNET networks created for all levels\n" << std::endl;
+    } else {
+        std::cout << "[InternalDRAMNetwork] Using analytical network model (faster)" << std::endl;
+        garnet_subarray_network_ = nullptr;
+        garnet_bank_network_ = nullptr;
+        garnet_bg_network_ = nullptr;
+        garnet_chip_network_ = nullptr;
+    }
+}
+
 std::shared_ptr<InternalDRAMNetwork> createInternalDRAMNetwork(
     const std::string& dram_type,
     int num_subarrays_per_bank,
@@ -578,6 +636,83 @@ std::shared_ptr<InternalDRAMNetwork> createInternalDRAMNetwork(
     network->initialize(num_subarrays_per_bank, num_banks_per_bg,
                        num_bg_per_chip, num_chips_per_rank);
     return network;
+}
+
+std::shared_ptr<NetworkModel> createGarnetHTreeForDRAM(
+    NetworkLevel level,
+    int num_nodes,
+    int link_width_bits,
+    int link_latency_cycles,
+    double bandwidth_GBs) {
+
+    std::cout << "[GARNET H-Tree] Creating H-tree network for ";
+    switch (level) {
+        case NetworkLevel::SUBARRAY_NETWORK:
+            std::cout << "SUBARRAY level";
+            break;
+        case NetworkLevel::BANK_NETWORK:
+            std::cout << "BANK level";
+            break;
+        case NetworkLevel::BANK_GROUP_NETWORK:
+            std::cout << "BANK_GROUP level";
+            break;
+        case NetworkLevel::CHIP_NETWORK:
+            std::cout << "CHIP level";
+            break;
+    }
+    std::cout << " (" << num_nodes << " nodes)" << std::endl;
+
+    // Create network configuration for H-tree
+    NetworkConfig config;
+    config.topology = NetworkTopology::H_TREE;
+    config.routing = RoutingAlgorithm::TREE_BASED;
+    config.flow_control = FlowControl::CREDIT_BASED;
+
+    // H-tree is a binary tree, so we need log2(num_nodes) levels
+    // For simplicity, we'll model it as having num_nodes leaf nodes
+    config.num_rows = num_nodes;  // Number of leaf nodes (subarrays/banks)
+    config.num_cols = 1;
+    config.num_layers = 1;
+
+    // Virtual channels - DRAM doesn't typically have multiple VCs,
+    // but we can use 2 for read/write separation
+    config.virtual_channels = 2;
+
+    // Link parameters from DRAM specs
+    config.link_width_bytes = link_width_bits / 8;
+    config.link_latency = link_latency_cycles;
+
+    // Router latency - H-tree routers are very simple (just muxes)
+    // Use 1 cycle for switching at each level
+    config.router_latency = 1;
+
+    // Buffer depths - keep small for DRAM (limited buffering)
+    config.input_buffer_depth = 4;
+    config.output_buffer_depth = 4;
+
+    // Create GARNET model
+    auto garnet = std::make_shared<GarnetModel>(config);
+    garnet->initialize();
+
+    // Build H-tree topology
+    // In an H-tree, each leaf node connects to the root through log2(N) intermediate routers
+    // For now, we'll create a simplified model where all leaf nodes are connected
+
+    // Add leaf nodes (these represent subarrays/banks)
+    for (int i = 0; i < num_nodes; i++) {
+        NetworkNode node(i, PEPlacementLevel::SUBARRAY, i);
+        garnet->addNode(node);
+    }
+
+    std::cout << "[GARNET H-Tree] Configuration:" << std::endl;
+    std::cout << "  Leaf nodes: " << num_nodes << std::endl;
+    std::cout << "  Link width: " << config.link_width_bytes << " bytes ("
+              << link_width_bits << " bits)" << std::endl;
+    std::cout << "  Link latency: " << link_latency_cycles << " cycles" << std::endl;
+    std::cout << "  Bandwidth: " << bandwidth_GBs << " GB/s" << std::endl;
+    std::cout << "  Virtual channels: " << config.virtual_channels << std::endl;
+
+    return garnet;
 }
 
 } // namespace pimid

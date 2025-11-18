@@ -77,6 +77,17 @@ void GarnetModel::initialize() {
                       << "x" << config_.num_cols << std::endl;
             break;
 
+        case NetworkTopology::H_TREE:
+            std::cout << "  Creating H-Tree for DRAM internal network" << std::endl;
+            std::cout << "  Leaf nodes: " << config_.num_rows << std::endl;
+            // H-tree nodes will be created dynamically based on DRAM hierarchy
+            break;
+
+        case NetworkTopology::FAT_TREE:
+            std::cout << "  Creating Fat-Tree network" << std::endl;
+            std::cout << "  Leaf nodes: " << config_.num_rows << std::endl;
+            break;
+
         case NetworkTopology::CROSSBAR:
             std::cout << "  Creating Crossbar network" << std::endl;
             break;
