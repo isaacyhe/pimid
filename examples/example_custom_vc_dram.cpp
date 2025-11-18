@@ -1,6 +1,10 @@
 /**
  * @file example_custom_vc_dram.cpp
- * @brief Example: Using custom VC counts for DRAM H-tree networks
+ * @brief Example: Understanding VN vs VC in DRAM H-tree networks
+ *
+ * IMPORTANT: This file explains the critical distinction between:
+ * - Virtual Networks (VN): Message classes (read vs write traffic)
+ * - Virtual Channels (VC): Deadlock avoidance within each VN
  */
 
 #include "internal_dram_network.h"
@@ -9,41 +13,63 @@
 using namespace pimid;
 
 /**
- * Example 1: Standard 2-VC configuration (default)
+ * Example 1: Understanding VN vs VC (CRITICAL!)
  */
-void example_standard_vcs() {
-    std::cout << "\n=== Example 1: Standard 2-VC Configuration ===\n";
+void example_vn_vs_vc_explanation() {
+    std::cout << "\n=== Example 1: VN vs VC Explanation ===\n";
 
     auto ddr4 = createInternalDRAMNetwork("DDR4", 16, 4, 4, 8);
     ddr4->enableGarnetSimulation(true);
 
-    // Default: 2 VCs for read/write separation
-    // VC 0: Read traffic
-    // VC 1: Write traffic
+    std::cout << "\n🔴 IMPORTANT CORRECTION:\n";
+    std::cout << "Virtual Networks (VN) ≠ Virtual Channels (VC)\n\n";
 
-    std::cout << "✅ DDR4 network with 2 VCs (read/write separation)\n";
+    std::cout << "Default DRAM configuration:\n";
+    std::cout << "  Virtual Networks (VN): 2\n";
+    std::cout << "    - VN 0: Read traffic (message class)\n";
+    std::cout << "    - VN 1: Write traffic (message class)\n\n";
+
+    std::cout << "  Virtual Channels per VN: 1\n";
+    std::cout << "    - 1 VC per VN (no deadlock in tree topology)\n\n";
+
+    std::cout << "  Total VCs: 2 (2 VNs × 1 VC/VN)\n\n";
+
+    std::cout << "Why 2 VNs (not 2 VCs):\n";
+    std::cout << "  ✅ Separates read/write message classes\n";
+    std::cout << "  ✅ Models separate DRAM datapaths\n";
+    std::cout << "  ✅ Prevents protocol-level deadlock\n\n";
+
+    std::cout << "Why 1 VC per VN:\n";
+    std::cout << "  ✅ H-trees are acyclic (deadlock-free)\n";
+    std::cout << "  ✅ No need for escape VCs\n";
+    std::cout << "  ✅ Minimal complexity for DRAM\n";
 }
 
 /**
- * Example 2: Multi-class traffic with 4 VCs
+ * Example 2: Multi-class traffic with 4 VNs
  *
  * Use case: Different priority classes or traffic types
  */
-void example_multiclass_vcs() {
-    std::cout << "\n=== Example 2: Multi-Class Traffic (4 VCs) ===\n";
+void example_multiclass_vns() {
+    std::cout << "\n=== Example 2: Multi-Class Traffic (4 VNs) ===\n";
 
     // For this example, we would need to modify createGarnetHTreeForDRAM
-    // to accept custom VC count, but the GARNET router supports it!
+    // to accept custom VN count, but the GARNET router supports it!
 
-    // Hypothetical 4-VC configuration:
-    // VC 0: High-priority reads (real-time)
-    // VC 1: High-priority writes (real-time)
-    // VC 2: Low-priority reads (background)
-    // VC 3: Low-priority writes (background)
+    std::cout << "Hypothetical 4-VN configuration:\n";
+    std::cout << "  VN 0: High-priority reads (real-time)\n";
+    std::cout << "  VN 1: High-priority writes (real-time)\n";
+    std::cout << "  VN 2: Low-priority reads (background)\n";
+    std::cout << "  VN 3: Low-priority writes (background)\n\n";
+
+    std::cout << "  VCs per VN: 1 (still deadlock-free in tree)\n";
+    std::cout << "  Total VCs: 4 (4 VNs × 1 VC/VN)\n\n";
 
     std::cout << "Use case: QoS-aware PIM with priority classes\n";
-    std::cout << "- VCs 0-1: Real-time traffic (guaranteed BW)\n";
-    std::cout << "- VCs 2-3: Best-effort traffic\n";
+    std::cout << "- VNs 0-1: Real-time traffic (guaranteed BW)\n";
+    std::cout << "- VNs 2-3: Best-effort traffic\n\n";
+
+    std::cout << "Note: This uses VNs for message classes, NOT VCs!\n";
 }
 
 /**
@@ -152,12 +178,13 @@ void explain_vc_mechanism() {
 
 int main() {
     std::cout << "============================================\n";
-    std::cout << " GARNET Virtual Channel (VC) Examples\n";
+    std::cout << " GARNET Virtual Networks (VN) vs\n";
+    std::cout << " Virtual Channels (VC) Examples\n";
     std::cout << " For DRAM H-Tree Networks\n";
     std::cout << "============================================\n";
 
-    example_standard_vcs();
-    example_multiclass_vcs();
+    example_vn_vs_vc_explanation();
+    example_multiclass_vns();
     example_graphics_vcs();
     example_hbm_multicore_vcs();
     example_vc_contention_benefit();
@@ -166,10 +193,16 @@ int main() {
     std::cout << "\n============================================\n";
     std::cout << "Key Takeaways:\n";
     std::cout << "============================================\n";
-    std::cout << "1. All DRAM H-trees use 2 VCs by default (R/W separation)\n";
-    std::cout << "2. GARNET fully supports VCs with separate buffers & credits\n";
-    std::cout << "3. VCs prevent head-of-line blocking\n";
-    std::cout << "4. Can be customized for QoS, priority, multi-requestor\n";
+    std::cout << "1. VN ≠ VC!\n";
+    std::cout << "   - VN = Message classes (read vs write)\n";
+    std::cout << "   - VC = Deadlock avoidance within VN\n\n";
+    std::cout << "2. DRAM default: 2 VNs × 1 VC/VN = 2 total VCs\n";
+    std::cout << "   - VN0: Read traffic\n";
+    std::cout << "   - VN1: Write traffic\n\n";
+    std::cout << "3. Router pipeline: MINIMAL (1-stage mux)\n";
+    std::cout << "   - Just switching, no routing computation\n";
+    std::cout << "   - 1 cycle latency (realistic for DRAM)\n\n";
+    std::cout << "4. Customizable for QoS (more VNs for priority)\n\n";
     std::cout << "5. Critical for realistic multi-PE PIM simulation\n";
     std::cout << "============================================\n";
 

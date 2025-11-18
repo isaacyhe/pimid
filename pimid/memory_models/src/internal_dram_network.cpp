@@ -842,21 +842,27 @@ std::shared_ptr<NetworkModel> createGarnetHTreeForDRAM(
     config.num_cols = 1;
     config.num_layers = 1;
 
-    // Virtual channels - DRAM doesn't typically have multiple VCs,
-    // but we can use 2 for read/write separation
-    config.virtual_channels = 2;
+    // Virtual Networks (VN) and Virtual Channels (VC) for DRAM
+    // VN = message classes (read vs write traffic)
+    // VC = deadlock avoidance within each VN
+    config.virtual_networks = 2;          // VN 0: Reads, VN 1: Writes
+    config.virtual_channels_per_vn = 1;   // 1 VC per VN (no deadlock in tree)
+    config.virtual_channels = config.virtual_networks * config.virtual_channels_per_vn;
 
     // Link parameters from DRAM specs
     config.link_width_bytes = link_width_bits / 8;
     config.link_latency = link_latency_cycles;
 
-    // Router latency - H-tree routers are very simple (just muxes)
-    // Use 1 cycle for switching at each level
-    config.router_latency = 1;
+    // Router pipeline - DRAM uses MINIMAL (just muxes, no complex routing)
+    // This is critical for realistic DRAM modeling!
+    config.router_pipeline = RouterPipelineComplexity::MINIMAL;
+    config.router_latency = 1;            // 1 cycle for mux switching
+    config.enable_router_bypass = true;   // Bypass for single-hop
 
     // Buffer depths - keep small for DRAM (limited buffering)
-    config.input_buffer_depth = 4;
-    config.output_buffer_depth = 4;
+    // DRAM has minimal buffering (sense amp latches, column latches)
+    config.input_buffer_depth = 2;        // Minimal buffering
+    config.output_buffer_depth = 2;
 
     // Create GARNET model
     auto garnet = std::make_shared<GarnetModel>(config);
@@ -878,7 +884,14 @@ std::shared_ptr<NetworkModel> createGarnetHTreeForDRAM(
               << link_width_bits << " bits)" << std::endl;
     std::cout << "  Link latency: " << link_latency_cycles << " cycles" << std::endl;
     std::cout << "  Bandwidth: " << bandwidth_GBs << " GB/s" << std::endl;
-    std::cout << "  Virtual channels: " << config.virtual_channels << std::endl;
+    std::cout << "  Virtual Networks (VN): " << config.virtual_networks
+              << " (VN0=Read, VN1=Write)" << std::endl;
+    std::cout << "  Virtual Channels per VN: " << config.virtual_channels_per_vn << std::endl;
+    std::cout << "  Total VCs: " << config.virtual_channels << std::endl;
+    std::cout << "  Router pipeline: MINIMAL (1-stage mux, lightweight)" << std::endl;
+    std::cout << "  Router latency: " << config.router_latency << " cycle" << std::endl;
+    std::cout << "  Buffer depth: " << config.input_buffer_depth
+              << " (minimal, DRAM-realistic)" << std::endl;
 
     return garnet;
 }
