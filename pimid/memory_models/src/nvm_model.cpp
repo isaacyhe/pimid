@@ -2,6 +2,8 @@
 #include <iostream>
 #include <cmath>
 #include <algorithm>
+#include <fstream>
+#include <yaml-cpp/yaml.h>
 
 namespace pimid {
 
@@ -89,15 +91,98 @@ void NVMModel::initialize() {
 }
 
 void NVMModel::loadConfig(const std::string& config_path) {
-    // TODO: Parse YAML configuration file
-    // For now, use default configuration
-    // When YAML parsing is available:
-    // - Parse memory_config.yaml
-    // - Extract NVM-specific parameters
-    // - Update nvm_config_ structure
-
     std::cout << "[NVMModel] Loading configuration from: " << config_path << std::endl;
-    std::cout << "[NVMModel] Using default " << nvm_config_.cell_type << " configuration" << std::endl;
+
+    try {
+        YAML::Node config = YAML::LoadFile(config_path);
+
+        if (!config["nvm"]) {
+            std::cout << "[NVMModel] No 'nvm' section found, using default configuration" << std::endl;
+            return;
+        }
+
+        YAML::Node nvm = config["nvm"];
+
+        // Load NVM type
+        if (nvm["type"]) {
+            nvm_config_.cell_type = nvm["type"].as<std::string>();
+        }
+
+        // Load capacity
+        if (nvm["capacity_mb"]) {
+            nvm_config_.capacity = nvm["capacity_mb"].as<uint64_t>() * 1024ULL * 1024ULL;
+        }
+
+        // Load organization
+        if (nvm["organization"]) {
+            auto org = nvm["organization"];
+            if (org["banks"]) {
+                nvm_config_.banks = org["banks"].as<uint32_t>();
+            }
+            if (org["read_write_ports"]) {
+                nvm_config_.read_write_ports = org["read_write_ports"].as<uint32_t>();
+            }
+        }
+
+        // Load timing
+        if (nvm["timing"]) {
+            auto timing = nvm["timing"];
+            if (timing["read_latency_cycles"]) {
+                nvm_config_.read_latency = timing["read_latency_cycles"].as<uint32_t>();
+            }
+            if (timing["write_latency_cycles"]) {
+                nvm_config_.write_latency = timing["write_latency_cycles"].as<uint32_t>();
+            }
+        }
+
+        // Load reliability/endurance
+        if (nvm["reliability"] && nvm["reliability"]["write_endurance"]) {
+            nvm_config_.endurance = static_cast<uint64_t>(nvm["reliability"]["write_endurance"].as<double>());
+        }
+
+        // Load power parameters based on cell type
+        std::string cell_type_lower = nvm_config_.cell_type;
+        std::transform(cell_type_lower.begin(), cell_type_lower.end(), cell_type_lower.begin(), ::tolower);
+
+        // Try to load technology-specific parameters
+        std::string tech_key;
+        if (cell_type_lower.find("stt") != std::string::npos || cell_type_lower.find("mram") != std::string::npos) {
+            tech_key = "stt_mram";
+        } else if (cell_type_lower.find("pcm") != std::string::npos) {
+            tech_key = "pcm";
+        } else if (cell_type_lower.find("reram") != std::string::npos || cell_type_lower.find("rram") != std::string::npos) {
+            tech_key = "reram";
+        }
+
+        if (!tech_key.empty() && nvm[tech_key]) {
+            auto tech = nvm[tech_key];
+            if (tech["tech_node_nm"]) {
+                nvm_config_.tech_node_nm = tech["tech_node_nm"].as<uint32_t>();
+            }
+            if (tech["read_energy_nj"]) {
+                read_energy_ = tech["read_energy_nj"].as<double>();
+            }
+            if (tech["write_energy_nj"]) {
+                write_energy_ = tech["write_energy_nj"].as<double>();
+            }
+            if (tech["leakage_power_mw"]) {
+                leakage_power_ = tech["leakage_power_mw"].as<double>() / 1000.0;  // Convert mW to W
+            }
+            if (tech["area_mm2"]) {
+                area_mm2_ = tech["area_mm2"].as<double>();
+            }
+        }
+
+        std::cout << "[NVMModel] Successfully loaded configuration from YAML" << std::endl;
+        std::cout << "[NVMModel] Cell type: " << nvm_config_.cell_type << std::endl;
+
+    } catch (const YAML::Exception& e) {
+        std::cerr << "[NVMModel] YAML parsing error: " << e.what() << std::endl;
+        std::cerr << "[NVMModel] Using default configuration" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "[NVMModel] Error loading config: " << e.what() << std::endl;
+        std::cerr << "[NVMModel] Using default configuration" << std::endl;
+    }
 }
 
 Cycle NVMModel::access(const MemoryRequest& req) {

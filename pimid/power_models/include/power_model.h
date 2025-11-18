@@ -185,6 +185,12 @@ private:
     PowerMetrics parseMcPATOutput();
     double calculateComponentEnergy(PowerComponent component, Cycle cycles);
 
+    // XML generation helpers
+    void generateCoreXML(std::ofstream& xml, const ActivityStats& stats);
+    void generateCacheXML(std::ofstream& xml, const std::string& level, const ActivityStats& stats);
+    void generateMemoryControllerXML(std::ofstream& xml, const ActivityStats& stats);
+    uint32_t getNumCores(PowerComponent component) const;
+
     PowerMetrics estimateCorePower(const ActivityStats& stats);
     PowerMetrics estimateCachePower(PowerComponent component,
                                      const ActivityStats& stats);
