@@ -58,53 +58,135 @@ run_workload() {
     echo "" | tee -a "$RESULT_FILE"
 }
 
+run_workload_with_models() {
+    local workload=$1
+    local num_subarrays=$2
+    local bank_name=$3
+    local extra_args=$4
+
+    echo "" | tee -a "$RESULT_FILE"
+    echo "=========================================" | tee -a "$RESULT_FILE"
+    echo "$workload - $bank_name ($num_subarrays subarrays)" | tee -a "$RESULT_FILE"
+    echo "=========================================" | tee -a "$RESULT_FILE"
+
+    # Message Passing Model - Baseline
+    echo "" | tee -a "$RESULT_FILE"
+    echo "--- Message Passing - Baseline (H-tree) ---" | tee -a "$RESULT_FILE"
+    "$BUILD_DIR/${workload}_message" $num_subarrays $extra_args 0 | tee -a "$RESULT_FILE"
+
+    # Message Passing Model - LIBCom
+    echo "" | tee -a "$RESULT_FILE"
+    echo "--- Message Passing - LIBCom ---" | tee -a "$RESULT_FILE"
+    "$BUILD_DIR/${workload}_message" $num_subarrays $extra_args 1 | tee -a "$RESULT_FILE"
+
+    # Shared Memory Model - Baseline
+    echo "" | tee -a "$RESULT_FILE"
+    echo "--- Shared Memory - Baseline (H-tree) ---" | tee -a "$RESULT_FILE"
+    "$BUILD_DIR/${workload}_shared" $num_subarrays $extra_args 0 | tee -a "$RESULT_FILE"
+
+    # Shared Memory Model - LIBCom
+    echo "" | tee -a "$RESULT_FILE"
+    echo "--- Shared Memory - LIBCom ---" | tee -a "$RESULT_FILE"
+    "$BUILD_DIR/${workload}_shared" $num_subarrays $extra_args 1 | tee -a "$RESULT_FILE"
+
+    echo "" | tee -a "$RESULT_FILE"
+}
+
 # =========================================
-# GEMM Workload
+# GEMM Workload (Message + Shared)
 # =========================================
 echo "" | tee -a "$RESULT_FILE"
 echo "####################################" | tee -a "$RESULT_FILE"
 echo "# GEMM: Matrix Multiplication" | tee -a "$RESULT_FILE"
 echo "####################################" | tee -a "$RESULT_FILE"
 
-run_workload "gemm" 8 "Bank1-32KB" "512"     # 512×512 matrix
-run_workload "gemm" 16 "Bank2-64KB" "1024"   # 1024×1024 matrix
-run_workload "gemm" 32 "Bank3-128KB" "1024"  # 1024×1024 matrix
+run_workload_with_models "gemm" 8 "Bank1-32KB" "512"     # 512×512 matrix
+run_workload_with_models "gemm" 16 "Bank2-64KB" "1024"   # 1024×1024 matrix
+run_workload_with_models "gemm" 32 "Bank3-128KB" "1024"  # 1024×1024 matrix
 
 # =========================================
-# BFS Workload
+# BFS Workload (Message + Shared)
 # =========================================
 echo "" | tee -a "$RESULT_FILE"
 echo "####################################" | tee -a "$RESULT_FILE"
 echo "# BFS: Graph Traversal" | tee -a "$RESULT_FILE"
 echo "####################################" | tee -a "$RESULT_FILE"
 
-run_workload "bfs" 8 "Bank1-32KB" "64"     # 64 vertices
-run_workload "bfs" 16 "Bank2-64KB" "128"   # 128 vertices
-run_workload "bfs" 32 "Bank3-128KB" "256"  # 256 vertices
+run_workload_with_models "bfs" 8 "Bank1-32KB" "64"     # 64 vertices
+run_workload_with_models "bfs" 16 "Bank2-64KB" "128"   # 128 vertices
+run_workload_with_models "bfs" 32 "Bank3-128KB" "256"  # 256 vertices
 
 # =========================================
-# SpMV Workload
+# SpMV Workload (Message + Shared)
 # =========================================
 echo "" | tee -a "$RESULT_FILE"
 echo "####################################" | tee -a "$RESULT_FILE"
 echo "# SpMV: Sparse Matrix-Vector" | tee -a "$RESULT_FILE"
 echo "####################################" | tee -a "$RESULT_FILE"
 
-run_workload "spmv" 8 "Bank1-32KB" "256"        # 256×256 sparse matrix
-run_workload "spmv" 16 "Bank2-64KB" "512"       # 512×512 sparse matrix
-run_workload "spmv" 32 "Bank3-128KB" "1024"     # 1024×1024 sparse matrix
+run_workload_with_models "spmv" 8 "Bank1-32KB" "256"        # 256×256 sparse matrix
+run_workload_with_models "spmv" 16 "Bank2-64KB" "512"       # 512×512 sparse matrix
+run_workload_with_models "spmv" 32 "Bank3-128KB" "1024"     # 1024×1024 sparse matrix
 
 # =========================================
-# Reduction Workload
+# Reduction Workload (Message + Shared)
 # =========================================
 echo "" | tee -a "$RESULT_FILE"
 echo "####################################" | tee -a "$RESULT_FILE"
 echo "# Reduction: Tree Reduction" | tee -a "$RESULT_FILE"
 echo "####################################" | tee -a "$RESULT_FILE"
 
-run_workload "reduction" 8 "Bank1-32KB" "1024"   # 1024 elements per subarray
-run_workload "reduction" 16 "Bank2-64KB" "1024"  # 1024 elements per subarray
-run_workload "reduction" 32 "Bank3-128KB" "1024" # 1024 elements per subarray (CRITICAL TEST)
+run_workload_with_models "reduction" 8 "Bank1-32KB" "1024"   # 1024 elements per subarray
+run_workload_with_models "reduction" 16 "Bank2-64KB" "1024"  # 1024 elements per subarray
+run_workload_with_models "reduction" 32 "Bank3-128KB" "1024" # 1024 elements per subarray (CRITICAL TEST)
+
+# =========================================
+# Histogram Workload (Message + Shared)
+# =========================================
+echo "" | tee -a "$RESULT_FILE"
+echo "####################################" | tee -a "$RESULT_FILE"
+echo "# Histogram: Parallel Histogram" | tee -a "$RESULT_FILE"
+echo "####################################" | tee -a "$RESULT_FILE"
+
+run_workload_with_models "histogram" 8 "Bank1-32KB" "2048 256"     # 2048 elements, 256 bins
+run_workload_with_models "histogram" 16 "Bank2-64KB" "4096 256"   # 4096 elements, 256 bins
+run_workload_with_models "histogram" 32 "Bank3-128KB" "8192 256"  # 8192 elements, 256 bins
+
+# =========================================
+# Dot Product Workload (Message + Shared)
+# =========================================
+echo "" | tee -a "$RESULT_FILE"
+echo "####################################" | tee -a "$RESULT_FILE"
+echo "# Dot Product: Vector Dot Product" | tee -a "$RESULT_FILE"
+echo "####################################" | tee -a "$RESULT_FILE"
+
+run_workload_with_models "dotproduct" 8 "Bank1-32KB" "2048"     # 2048 elements
+run_workload_with_models "dotproduct" 16 "Bank2-64KB" "4096"    # 4096 elements
+run_workload_with_models "dotproduct" 32 "Bank3-128KB" "8192"   # 8192 elements
+
+# =========================================
+# Prefix Sum Workload (Message + Shared)
+# =========================================
+echo "" | tee -a "$RESULT_FILE"
+echo "####################################" | tee -a "$RESULT_FILE"
+echo "# Prefix Sum: Parallel Scan" | tee -a "$RESULT_FILE"
+echo "####################################" | tee -a "$RESULT_FILE"
+
+run_workload_with_models "prefixsum" 8 "Bank1-32KB" "2048"     # 2048 elements
+run_workload_with_models "prefixsum" 16 "Bank2-64KB" "4096"    # 4096 elements
+run_workload_with_models "prefixsum" 32 "Bank3-128KB" "8192"   # 8192 elements
+
+# =========================================
+# Stencil 1D Workload (Message + Shared)
+# =========================================
+echo "" | tee -a "$RESULT_FILE"
+echo "####################################" | tee -a "$RESULT_FILE"
+echo "# Stencil 1D: 1D Stencil Operation" | tee -a "$RESULT_FILE"
+echo "####################################" | tee -a "$RESULT_FILE"
+
+run_workload_with_models "stencil1d" 8 "Bank1-32KB" "2048 3"     # 2048 elements, radius 3
+run_workload_with_models "stencil1d" 16 "Bank2-64KB" "4096 3"    # 4096 elements, radius 3
+run_workload_with_models "stencil1d" 32 "Bank3-128KB" "8192 3"   # 8192 elements, radius 3
 
 # =========================================
 # Summary
@@ -113,6 +195,11 @@ echo "" | tee -a "$RESULT_FILE"
 echo "=========================================" | tee -a "$RESULT_FILE"
 echo "Benchmark Suite Completed" | tee -a "$RESULT_FILE"
 echo "=========================================" | tee -a "$RESULT_FILE"
+echo "Total workloads: 8 (each with 2 programming models)" | tee -a "$RESULT_FILE"
+echo "Total implementations: 16" | tee -a "$RESULT_FILE"
+echo "Bank configurations: 3 (8, 16, 32 subarrays)" | tee -a "$RESULT_FILE"
+echo "Interconnects: 2 (Baseline H-tree, LIBCom)" | tee -a "$RESULT_FILE"
+echo "" | tee -a "$RESULT_FILE"
 echo "Results saved to: $RESULT_FILE" | tee -a "$RESULT_FILE"
 echo "" | tee -a "$RESULT_FILE"
 echo "Next steps:" | tee -a "$RESULT_FILE"
