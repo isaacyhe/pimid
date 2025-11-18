@@ -1,0 +1,83 @@
+# Bank 1: 32KB with 8 Subarrays - Baseline H-tree Configuration
+# DAC'26 Evaluation: H-tree interconnect
+
+memory:
+  type: "SRAM"  # On-chip bank
+  organization:
+    capacity: 32768      # 32 KB
+    num_banks: 1
+    num_subarrays: 8     # 8 × 4KB subarrays
+    num_bank_groups: 1
+    num_chips: 1
+
+    # Subarray details
+    subarray_size_bytes: 4096     # 4 KB
+    words_per_subarray: 1024      # 1024 × 32-bit words
+    word_size_bits: 32
+
+  # Timing parameters
+  timing:
+    access_latency_cycles: 1      # Subarray access: 1 cycle
+    clock_frequency_mhz: 500      # 500 MHz
+    cycle_time_ns: 2              # 2 ns per cycle
+
+  # Technology
+  technology:
+    node_nm: 22
+    line_size: 32  # 32 bits
+
+# Network Configuration: H-tree (Baseline)
+network:
+  topology: "H_TREE"
+  model: "GARNET"
+
+  # H-tree parameters
+  htree_latency_cycles: 3         # log₂(8) = 3 cycles
+
+  # Virtual Networks
+  virtual_networks: 2              # VN0: Read, VN1: Write
+  virtual_channels_per_vn: 1
+
+  # Router configuration
+  router_pipeline: "MINIMAL"
+  router_latency: 1
+  enable_router_bypass: true
+
+  # Buffer configuration
+  input_buffer_depth: 2
+  output_buffer_depth: 2
+
+  # Link parameters
+  subarray_network:
+    link_width_bits: 128          # Wide on-chip paths
+    frequency_GHz: 0.5            # 500 MHz
+    latency_cycles: 3             # H-tree latency for 8 subarrays
+
+# Operations Configuration
+operations:
+  # Traditional operations
+  read:
+    latency_cycles: 1
+    energy_relative: 1.0
+
+  write:
+    latency_cycles: 1
+    energy_relative: 1.0
+
+  # Inter-subarray operations (via H-tree)
+  copy:
+    latency_cycles: 5             # 2× subarray (2) + H-tree (3)
+    energy_relative: 1.0          # Baseline = 100%
+    description: "Read + H-tree + Write"
+
+  move:
+    latency_cycles: 5             # 2× subarray (2) + H-tree (3)
+    energy_relative: 1.0          # Baseline = 100%
+    description: "Read + H-tree + Write"
+
+# Evaluation metrics
+metrics:
+  track_htree_traversals: true
+  track_intersubarray_comm: true
+  track_energy: true
+  track_cycles: true
