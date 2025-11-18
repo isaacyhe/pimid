@@ -27,6 +27,13 @@ dram:
   # DRAM speed grade
   speed_grade: "2400"  # MT/s
 
+  # Port width scaling factor (for exploratory studies)
+  # Default: 1.0 (use verified base values)
+  # Set to 2.0 for "what if 2x wider buses?" studies
+  # Set to 0.5 for "what if narrower buses?" studies
+  # Affects all internal datapath widths and bandwidths
+  port_width_scale: 1.0
+
   # Memory organization
   organization:
     channels: 4

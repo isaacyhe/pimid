@@ -156,6 +156,43 @@ std::cout << "Scaled bus width: " << bank_constraints.data_bus_width_bits << " b
 std::cout << "Scaled bandwidth: " << bank_constraints.max_bandwidth_gbps << " GB/s\n";
 ```
 
+### Usage Example with Configuration File
+
+The recommended way to configure `port_width_scale` is through the memory configuration file:
+
+**`config/memory_config.yaml`:**
+```yaml
+dram:
+  standard: "DDR4"
+  speed_grade: "2400"
+
+  # Port width scaling factor (for exploratory studies)
+  port_width_scale: 2.0  # 2x wider buses
+
+  organization:
+    channels: 4
+    # ... other config ...
+```
+
+**C++ code to load from config:**
+```cpp
+#include "memory/dram_architecture_v2.h"
+
+// Read port_width_scale from config file (using your YAML parser)
+double port_width_scale = config["dram"]["port_width_scale"].as<double>();
+
+// Create DRAM architecture with config value
+auto dram_arch = memory::createDDR4_2400_Verified(port_width_scale);
+
+// Use with PE placement
+auto constraints = createPEBusConstraintsFromDRAM(*dram_arch, level);
+```
+
+This approach allows users to configure bus width scaling without modifying code:
+- **Production runs**: Set `port_width_scale: 1.0` (verified values)
+- **Research studies**: Set `port_width_scale: 2.0` (explore wider buses)
+- **Sensitivity analysis**: Test multiple values (0.5, 1.0, 2.0, 4.0)
+
 ## Files Modified
 
 1. `/pimid/include/address_translation/pe_placement.h`

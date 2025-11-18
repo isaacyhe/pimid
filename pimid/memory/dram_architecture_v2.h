@@ -464,6 +464,19 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR4_2400_Verified() {
     return arch;
 }
 
+/**
+ * Create DDR4-2400 with configurable port width scaling
+ *
+ * @param port_width_scale Scaling factor for all port widths (default 1.0)
+ *                         2.0 = 2x wider buses, 0.5 = half-width buses
+ * @return Configured DDR4-2400 architecture with scaled port widths
+ */
+inline std::unique_ptr<DRAMArchitectureV2> createDDR4_2400_Verified(double port_width_scale) {
+    auto arch = createDDR4_2400_Verified();
+    arch->port_width_scale = port_width_scale;
+    return arch;
+}
+
 //=============================================================================
 // HBM2 (Rigorously Verified)
 //=============================================================================
@@ -624,6 +637,19 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified() {
     arch->pe_bus_constraints.logic_die_level.max_bandwidth_gbps = 256.0;  // HBM2 peak BW
     arch->pe_bus_constraints.logic_die_level.has_dedicated_bus = true;
 
+    return arch;
+}
+
+/**
+ * Create HBM2 with configurable port width scaling
+ *
+ * @param port_width_scale Scaling factor for all port widths (default 1.0)
+ *                         2.0 = 2x wider buses, 0.5 = half-width buses
+ * @return Configured HBM2 architecture with scaled port widths
+ */
+inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified(double port_width_scale) {
+    auto arch = createHBM2_Verified();
+    arch->port_width_scale = port_width_scale;
     return arch;
 }
 
