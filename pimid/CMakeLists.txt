@@ -96,6 +96,9 @@ set(PIMID_SOURCES
     src/common/event_queue.cpp
     src/common/config_parser.cpp
     src/config/config_parser.cpp
+    src/config/config_manager.cpp
+    src/config/config_schema.cpp
+    src/config/config_validator.cpp
 
     # Host engine
     src/host_engine/host_engine.cpp
@@ -160,26 +163,24 @@ set(PIMID_PLUGIN_SOURCES
     src/plugin/scheduler_plugin.cpp
 )
 
-# Configuration system sources
-set(PIMID_CONFIG_SOURCES
-    src/config/config_schema.cpp
-    src/config/config_validator.cpp
-    src/config/config_manager.cpp
-)
+# Configuration system sources (MOVED TO PIMID_SOURCES - see above)
+# ConfigManager is now part of pimid_lib to resolve linkage issues
+# set(PIMID_CONFIG_SOURCES
+#     src/config/config_schema.cpp
+#     src/config/config_validator.cpp
+#     src/config/config_manager.cpp
+# )
 
 # PIMID core library
 add_library(pimid_lib STATIC ${PIMID_SOURCES})
 target_link_libraries(pimid_lib
     Threads::Threads
     ${CMAKE_DL_LIBS}
+    yaml-cpp
 )
 
 if(Boost_FOUND)
     target_link_libraries(pimid_lib Boost::system Boost::filesystem)
-endif()
-
-if(yaml-cpp_FOUND)
-    target_link_libraries(pimid_lib yaml-cpp)
 endif()
 
 # Link external models
@@ -208,24 +209,21 @@ if(BUILD_PLUGINS)
     )
 endif()
 
-# Configuration system library
-if(BUILD_PLUGINS AND yaml-cpp_FOUND)
-    add_library(pimid_config SHARED ${PIMID_CONFIG_SOURCES})
-    target_link_libraries(pimid_config
-        pimid_lib
-        pimid_plugin
-        yaml-cpp
-    )
-endif()
+# Configuration system library (NO LONGER NEEDED - ConfigManager moved to pimid_lib)
+# if(BUILD_PLUGINS AND yaml-cpp_FOUND)
+#     add_library(pimid_config SHARED ${PIMID_CONFIG_SOURCES})
+#     target_link_libraries(pimid_config
+#         pimid_lib
+#         pimid_plugin
+#         yaml-cpp
+#     )
+# endif()
 
 # Host simulator executable
 add_executable(pimid_host src/host_main.cpp)
 target_link_libraries(pimid_host pimid_lib)
 if(BUILD_PLUGINS)
     target_link_libraries(pimid_host pimid_plugin)
-    if(yaml-cpp_FOUND)
-        target_link_libraries(pimid_host pimid_config)
-    endif()
 endif()
 
 # Device simulator executable
@@ -233,9 +231,6 @@ add_executable(pimid_device src/device_main.cpp)
 target_link_libraries(pimid_device pimid_lib)
 if(BUILD_PLUGINS)
     target_link_libraries(pimid_device pimid_plugin)
-    if(yaml-cpp_FOUND)
-        target_link_libraries(pimid_device pimid_config)
-    endif()
 endif()
 
 # Standalone simulator (single-process mode for debugging)
@@ -243,9 +238,6 @@ add_executable(pimid_standalone src/standalone_main.cpp)
 target_link_libraries(pimid_standalone pimid_lib)
 if(BUILD_PLUGINS)
     target_link_libraries(pimid_standalone pimid_plugin)
-    if(yaml-cpp_FOUND)
-        target_link_libraries(pimid_standalone pimid_config)
-    endif()
 endif()
 
 # Main PIMID binary - unified entry point for all simulation modes
@@ -254,9 +246,6 @@ add_executable(pimid src/standalone_main_unified.cpp)
 target_link_libraries(pimid pimid_lib)
 if(BUILD_PLUGINS)
     target_link_libraries(pimid pimid_plugin)
-    if(yaml-cpp_FOUND)
-        target_link_libraries(pimid pimid_config)
-    endif()
 endif()
 
 # PIM Simulator command-line tool (config-driven simulation)
