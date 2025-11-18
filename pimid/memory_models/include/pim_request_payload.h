@@ -226,7 +226,7 @@ struct PIMRequestPayload {
      * @brief Calculate data locality based on source/dest locations
      */
     static DataLocality calculateLocality(
-        PIMGranularity granularity,
+        [[maybe_unused]] PIMGranularity granularity,
         int pe_bank, int pe_bg, int pe_chip,
         int data_bank, int data_bg, int data_chip) {
 

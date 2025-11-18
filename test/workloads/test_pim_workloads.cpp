@@ -15,6 +15,7 @@
 #include <string>
 #include <iomanip>
 #include <cmath>
+#include <cstdint>
 
 #define GREEN "\033[0;32m"
 #define RED "\033[0;31m"
