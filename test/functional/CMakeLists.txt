@@ -34,3 +34,11 @@ add_test(NAME PortWidthScaleConfig COMMAND test_port_width_scale)
 # target_link_libraries(test_cacti_wrapper pimid_cacti_wrapper)
 # target_link_libraries(test_nvsim_wrapper pimid_nvsim_wrapper)
 # target_link_libraries(test_mcpat_wrapper pimid_mcpat_wrapper)
+
+# Comprehensive integration test
+add_executable(test_comprehensive_integration
+    ${CMAKE_SOURCE_DIR}/test/integration/test_comprehensive_integration.cpp
+)
+target_link_libraries(test_comprehensive_integration pimid_lib)
+target_compile_options(test_comprehensive_integration PRIVATE -std=c++17)
+add_test(NAME ComprehensiveIntegration COMMAND test_comprehensive_integration)

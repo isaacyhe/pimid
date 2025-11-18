@@ -235,7 +235,7 @@ if(BUILD_PLUGINS)
 endif()
 
 # Standalone simulator (single-process mode for debugging)
-add_executable(pimid_standalone src/standalone_main.cpp)
+add_executable(pimid_standalone src/standalone_main_new.cpp)
 target_link_libraries(pimid_standalone pimid_lib)
 if(BUILD_PLUGINS)
     target_link_libraries(pimid_standalone pimid_plugin)

@@ -10,7 +10,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/pimid/memory_models/include
     ${CMAKE_SOURCE_DIR}/pimid/network_models/include
     ${CMAKE_SOURCE_DIR}/pimid/power_models/include
-    ${CMAKE_SOURCE_DIR}/pimid/memory/include
+    ${CMAKE_SOURCE_DIR}/pimid/memory
     ${CMAKE_SOURCE_DIR}/pimid
     ${CMAKE_SOURCE_DIR}/pimid/external/ramulator/src
 )
@@ -30,7 +30,7 @@ add_subdirectory(unit)
 add_subdirectory(functional)
 
 # Integration tests
-add_subdirectory(integration)
+# add_subdirectory(integration) # Moved to functional
 
 # Memory tests
 add_subdirectory(memory)
