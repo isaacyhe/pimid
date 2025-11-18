@@ -17,6 +17,7 @@ dram:
   subarrays_per_bank: 16
 
   # Test scaling factors
+  port_width_scale: 2.0         # 2× port widths (applies to all internal datapaths)
   bandwidth_scale_factor: 2     # 2× bandwidth (rank: 128-bit, bank_io: 16-bit)
   latency_scale_factor: 0.5     # Half latency (tRCD/tCAS: ~6.66ns)
 

@@ -5,6 +5,8 @@
 #include <iostream>
 #include <cmath>
 #include <algorithm>
+#include <fstream>
+#include <yaml-cpp/yaml.h>
 
 namespace pimid {
 
@@ -123,58 +125,86 @@ void SRAMModel::initialize() {
 void SRAMModel::loadConfig(const std::string& config_path) {
     std::cout << "[SRAMModel] Loading configuration from: " << config_path << std::endl;
 
-    config::ConfigParser parser;
-    std::map<std::string, std::string> config;
+    try {
+        YAML::Node config = YAML::LoadFile(config_path);
 
-    if (!parser.parseFile(config_path, config)) {
-        std::cerr << "[SRAMModel] Warning: Failed to parse config, using defaults" << std::endl;
-        return;
-    }
+        if (!config["sram"]) {
+            std::cout << "[SRAMModel] No 'sram' section found, using default configuration" << std::endl;
+            return;
+        }
 
-    // Extract SRAM capacity
-    if (config.find("sram.capacity_mb") != config.end()) {
-        try {
-            uint64_t capacity_mb = std::stoull(config["sram.capacity_mb"]);
+        YAML::Node sram = config["sram"];
+
+        // Load capacity
+        if (sram["capacity_mb"]) {
+            uint64_t capacity_mb = sram["capacity_mb"].as<uint64_t>();
             sram_config_.capacity = capacity_mb * 1024 * 1024;
-        } catch (...) {}
-    }
+        }
 
-    // Extract organization
-    if (config.find("sram.organization.num_arrays") != config.end()) {
-        try {
-            sram_config_.banks = std::stoi(config["sram.organization.num_arrays"]);
-        } catch (...) {}
-    }
+        // Load organization
+        if (sram["organization"]) {
+            auto org = sram["organization"];
+            if (org["banks"]) {
+                sram_config_.banks = org["banks"].as<uint32_t>();
+            }
+            if (org["read_write_ports"]) {
+                sram_config_.read_write_ports = org["read_write_ports"].as<uint32_t>();
+            }
+            if (org["read_ports"]) {
+                sram_config_.read_ports = org["read_ports"].as<uint32_t>();
+            }
+            if (org["write_ports"]) {
+                sram_config_.write_ports = org["write_ports"].as<uint32_t>();
+            }
+        }
 
-    // Extract timing
-    if (config.find("sram.timing.access_time_ns") != config.end()) {
-        try {
-            double access_ns = std::stod(config["sram.timing.access_time_ns"]);
-            sram_config_.access_time = static_cast<Cycle>(access_ns * 1.0); // Assume 1GHz
-        } catch (...) {}
-    }
+        // Load cache configuration
+        if (sram["cache"]) {
+            auto cache = sram["cache"];
+            if (cache["line_size_bytes"]) {
+                sram_config_.line_size = cache["line_size_bytes"].as<uint32_t>();
+            }
+            if (cache["associativity"]) {
+                sram_config_.associativity = cache["associativity"].as<uint32_t>();
+            }
+        }
 
-    // Extract technology
-    if (config.find("sram.power.tech_node_nm") != config.end()) {
-        try {
-            sram_config_.tech_node_nm = std::stoi(config["sram.power.tech_node_nm"]);
-        } catch (...) {}
-    }
+        // Load timing
+        if (sram["timing"]) {
+            auto timing = sram["timing"];
+            if (timing["read_latency_cycles"]) {
+                sram_config_.access_time = timing["read_latency_cycles"].as<uint32_t>();
+            }
+        }
 
-    // Extract CACTI settings
-    if (config.find("sram.cacti.line_size_bytes") != config.end()) {
-        try {
-            sram_config_.line_size = std::stoi(config["sram.cacti.line_size_bytes"]);
-        } catch (...) {}
-    }
+        // Load power parameters
+        if (sram["power"]) {
+            auto power = sram["power"];
+            if (power["tech_node_nm"]) {
+                sram_config_.tech_node_nm = power["tech_node_nm"].as<uint32_t>();
+            }
+            // Load energy values (will be overridden by CACTI if available)
+            if (power["read_energy_nj"]) {
+                read_energy_ = power["read_energy_nj"].as<double>();
+            }
+            if (power["write_energy_nj"]) {
+                write_energy_ = power["write_energy_nj"].as<double>();
+            }
+            if (power["leakage_power_mw"]) {
+                leakage_power_ = power["leakage_power_mw"].as<double>() / 1000.0;  // Convert mW to W
+            }
+        }
 
-    if (config.find("sram.cacti.associativity") != config.end()) {
-        try {
-            sram_config_.associativity = std::stoi(config["sram.cacti.associativity"]);
-        } catch (...) {}
-    }
+        std::cout << "[SRAMModel] Successfully loaded configuration from YAML" << std::endl;
+        std::cout << "[SRAMModel] Capacity: " << (sram_config_.capacity / 1024) << " KB" << std::endl;
 
-    std::cout << "[SRAMModel] Configuration loaded successfully" << std::endl;
+    } catch (const YAML::Exception& e) {
+        std::cerr << "[SRAMModel] YAML parsing error: " << e.what() << std::endl;
+        std::cerr << "[SRAMModel] Using default configuration" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "[SRAMModel] Error loading config: " << e.what() << std::endl;
+        std::cerr << "[SRAMModel] Using default configuration" << std::endl;
+    }
 }
 
 Cycle SRAMModel::access(const MemoryRequest& req) {

@@ -1,6 +1,7 @@
 #include "power_model.h"
 #include <iostream>
 #include <iomanip>
+#include <fstream>
 #include <cmath>
 
 namespace pimid {
@@ -332,14 +333,203 @@ PowerMetrics McPATModel::estimatePEPower(const ActivityStats& stats) {
 
 void McPATModel::generateMcPATInput(PowerComponent component,
                                      const ActivityStats& stats) {
-    // TODO: Generate XML input file for McPAT
-    // This will be implemented when McPAT integration is complete
+    // Generate XML input file for McPAT
+    std::ofstream xml_file("mcpat_input.xml");
+
+    if (!xml_file.is_open()) {
+        std::cerr << "[McPATModel] ERROR: Could not create mcpat_input.xml" << std::endl;
+        return;
+    }
+
+    xml_file << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    xml_file << "<component id=\"root\" name=\"root\">\n";
+    xml_file << "  <param name=\"number_of_cores\" value=\"" << getNumCores(component) << "\"/>\n";
+    xml_file << "  <param name=\"number_of_L1Directories\" value=\"0\"/>\n";
+    xml_file << "  <param name=\"number_of_L2Directories\" value=\"0\"/>\n";
+    xml_file << "  <param name=\"number_of_L2s\" value=\"" << (component == PowerComponent::L2_CACHE ? 1 : 0) << "\"/>\n";
+    xml_file << "  <param name=\"number_of_L3s\" value=\"" << (component == PowerComponent::L3_CACHE ? 1 : 0) << "\"/>\n";
+    xml_file << "  <param name=\"number_of_NoCs\" value=\"0\"/>\n";
+    xml_file << "  <param name=\"homogeneous_cores\" value=\"1\"/>\n";
+    xml_file << "  <param name=\"homogeneous_L2s\" value=\"1\"/>\n";
+    xml_file << "  <param name=\"homogeneous_L1s\" value=\"1\"/>\n";
+    xml_file << "  <param name=\"homogeneous_L3s\" value=\"1\"/>\n";
+    xml_file << "  <param name=\"homogeneous_ccs\" value=\"1\"/>\n";
+    xml_file << "  <param name=\"homogeneous_NoCs\" value=\"1\"/>\n";
+    xml_file << "  <param name=\"core_tech_node\" value=\"" << tech_params_.tech_node_nm << "\"/>\n";
+    xml_file << "  <param name=\"target_core_clockrate\" value=\"" << static_cast<int>(tech_params_.frequency_ghz * 1000) << "\"/>\n";
+    xml_file << "  <param name=\"temperature\" value=\"" << static_cast<int>(tech_params_.temperature_k - 273.15) << "\"/>\n";
+    xml_file << "  <param name=\"number_cache_levels\" value=\"3\"/>\n";
+    xml_file << "  <param name=\"interconnect_projection_type\" value=\"0\"/>\n";
+    xml_file << "  <param name=\"device_type\" value=\"0\"/>\n";
+    xml_file << "  <param name=\"longer_channel_device\" value=\"1\"/>\n";
+    xml_file << "  <param name=\"power_gating\" value=\"0\"/>\n";
+    xml_file << "  <param name=\"machine_bits\" value=\"64\"/>\n";
+    xml_file << "  <param name=\"virtual_address_width\" value=\"64\"/>\n";
+    xml_file << "  <param name=\"physical_address_width\" value=\"48\"/>\n";
+    xml_file << "  <param name=\"virtual_memory_page_size\" value=\"4096\"/>\n";
+
+    // Add statistics based on component type and activity
+    xml_file << "  <stat name=\"total_cycles\" value=\"" << stats.total_cycles << "\"/>\n";
+    xml_file << "  <stat name=\"idle_cycles\" value=\"" << (stats.total_cycles - stats.total_instructions) << "\"/>\n";
+    xml_file << "  <stat name=\"busy_cycles\" value=\"" << stats.total_instructions << "\"/>\n";
+
+    if (component == PowerComponent::CORE || component == PowerComponent::PE) {
+        generateCoreXML(xml_file, stats);
+    } else if (component == PowerComponent::L1_CACHE) {
+        generateCacheXML(xml_file, "L1", stats);
+    } else if (component == PowerComponent::L2_CACHE) {
+        generateCacheXML(xml_file, "L2", stats);
+    } else if (component == PowerComponent::L3_CACHE) {
+        generateCacheXML(xml_file, "L3", stats);
+    } else if (component == PowerComponent::MEMORY_CONTROLLER) {
+        generateMemoryControllerXML(xml_file, stats);
+    }
+
+    xml_file << "</component>\n";
+    xml_file.close();
+
+    std::cout << "[McPATModel] Generated McPAT XML input: mcpat_input.xml" << std::endl;
 }
 
 PowerMetrics McPATModel::parseMcPATOutput() {
-    // TODO: Parse McPAT XML output
-    // This will be implemented when McPAT integration is complete
-    return PowerMetrics();
+    // Parse McPAT XML output file
+    PowerMetrics metrics;
+
+    std::ifstream xml_file("mcpat_output.xml");
+    if (!xml_file.is_open()) {
+        std::cerr << "[McPATModel] WARNING: Could not open mcpat_output.xml" << std::endl;
+        return metrics;
+    }
+
+    std::string line;
+    double total_leakage = 0.0;
+    double total_dynamic = 0.0;
+    double total_area = 0.0;
+
+    // Parse XML output (simple text-based parsing)
+    while (std::getline(xml_file, line)) {
+        // Look for key power metrics in XML
+        if (line.find("Total Leakage") != std::string::npos) {
+            size_t pos = line.find("=");
+            if (pos != std::string::npos) {
+                std::string value_str = line.substr(pos + 1);
+                // Extract numerical value (format: = X.XXX W)
+                size_t w_pos = value_str.find("W");
+                if (w_pos != std::string::npos) {
+                    value_str = value_str.substr(0, w_pos);
+                    try {
+                        total_leakage += std::stod(value_str);
+                    } catch (...) {}
+                }
+            }
+        }
+        else if (line.find("Runtime Dynamic") != std::string::npos ||
+                 line.find("Total Dynamic") != std::string::npos) {
+            size_t pos = line.find("=");
+            if (pos != std::string::npos) {
+                std::string value_str = line.substr(pos + 1);
+                size_t w_pos = value_str.find("W");
+                if (w_pos != std::string::npos) {
+                    value_str = value_str.substr(0, w_pos);
+                    try {
+                        total_dynamic += std::stod(value_str);
+                    } catch (...) {}
+                }
+            }
+        }
+        else if (line.find("Area") != std::string::npos) {
+            size_t pos = line.find("=");
+            if (pos != std::string::npos) {
+                std::string value_str = line.substr(pos + 1);
+                size_t mm_pos = value_str.find("mm");
+                if (mm_pos != std::string::npos) {
+                    value_str = value_str.substr(0, mm_pos);
+                    try {
+                        total_area += std::stod(value_str);
+                    } catch (...) {}
+                }
+            }
+        }
+    }
+
+    xml_file.close();
+
+    // Populate metrics
+    metrics.leakage_power_w = total_leakage;
+    metrics.dynamic_power_w = total_dynamic;
+    metrics.total_power_w = total_leakage + total_dynamic;
+
+    std::cout << "[McPATModel] Parsed McPAT output:" << std::endl;
+    std::cout << "  Dynamic Power: " << metrics.dynamic_power_w << " W" << std::endl;
+    std::cout << "  Leakage Power: " << metrics.leakage_power_w << " W" << std::endl;
+    std::cout << "  Total Power: " << metrics.total_power_w << " W" << std::endl;
+    std::cout << "  Area: " << total_area << " mm^2" << std::endl;
+
+    return metrics;
+}
+
+// Helper functions for XML generation
+void McPATModel::generateCoreXML(std::ofstream& xml, const ActivityStats& stats) {
+    xml << "  <component id=\"system.core0\" name=\"core0\">\n";
+    xml << "    <param name=\"clock_rate\" value=\"" << static_cast<int>(tech_params_.frequency_ghz * 1000) << "\"/>\n";
+    xml << "    <param name=\"instruction_length\" value=\"32\"/>\n";
+    xml << "    <param name=\"opcode_width\" value=\"7\"/>\n";
+    xml << "    <param name=\"x86\" value=\"0\"/>\n";
+    xml << "    <param name=\"micro_opcode_width\" value=\"8\"/>\n";
+    xml << "    <param name=\"machine_type\" value=\"0\"/>\n";
+    xml << "    <param name=\"number_hardware_threads\" value=\"1\"/>\n";
+    xml << "    <param name=\"fetch_width\" value=\"4\"/>\n";
+    xml << "    <param name=\"number_instruction_fetch_ports\" value=\"1\"/>\n";
+    xml << "    <param name=\"decode_width\" value=\"4\"/>\n";
+    xml << "    <param name=\"issue_width\" value=\"4\"/>\n";
+    xml << "    <param name=\"commit_width\" value=\"4\"/>\n";
+    xml << "    <stat name=\"total_instructions\" value=\"" << stats.total_instructions << "\"/>\n";
+    xml << "    <stat name=\"int_instructions\" value=\"" << static_cast<uint64_t>(stats.total_instructions * 0.7) << "\"/>\n";
+    xml << "    <stat name=\"fp_instructions\" value=\"" << static_cast<uint64_t>(stats.total_instructions * 0.3) << "\"/>\n";
+    xml << "    <stat name=\"load_instructions\" value=\"" << static_cast<uint64_t>(stats.total_instructions * 0.3) << "\"/>\n";
+    xml << "    <stat name=\"store_instructions\" value=\"" << static_cast<uint64_t>(stats.total_instructions * 0.15) << "\"/>\n";
+    xml << "    <stat name=\"committed_instructions\" value=\"" << stats.total_instructions << "\"/>\n";
+    xml << "  </component>\n";
+}
+
+void McPATModel::generateCacheXML(std::ofstream& xml, const std::string& level, const ActivityStats& stats) {
+    std::string cache_name = level + "Cache";
+    uint64_t cache_size = (level == "L1") ? 32768 : (level == "L2") ? 262144 : 2097152;
+
+    xml << "  <component id=\"system." << cache_name << "\" name=\"" << cache_name << "\">\n";
+    xml << "    <param name=\"size\" value=\"" << cache_size << "\"/>\n";
+    xml << "    <param name=\"block_size\" value=\"64\"/>\n";
+    xml << "    <param name=\"associativity\" value=\"8\"/>\n";
+    xml << "    <param name=\"banks\" value=\"1\"/>\n";
+    uint64_t reads = static_cast<uint64_t>(stats.total_instructions * 0.3);
+    uint64_t writes = static_cast<uint64_t>(stats.total_instructions * 0.15);
+    xml << "    <stat name=\"read_accesses\" value=\"" << reads << "\"/>\n";
+    xml << "    <stat name=\"write_accesses\" value=\"" << writes << "\"/>\n";
+    xml << "    <stat name=\"read_misses\" value=\"" << static_cast<uint64_t>(reads * 0.05) << "\"/>\n";
+    xml << "    <stat name=\"write_misses\" value=\"" << static_cast<uint64_t>(writes * 0.05) << "\"/>\n";
+    xml << "  </component>\n";
+}
+
+void McPATModel::generateMemoryControllerXML(std::ofstream& xml, const ActivityStats& stats) {
+    xml << "  <component id=\"system.mc\" name=\"mc\">\n";
+    xml << "    <param name=\"type\" value=\"0\"/>\n";
+    xml << "    <param name=\"mc_clock\" value=\"" << static_cast<int>(tech_params_.frequency_ghz * 1000) << "\"/>\n";
+    xml << "    <param name=\"vdd\" value=\"" << 1.2 << "\"/>\n";  // Default DDR voltage
+    xml << "    <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
+    xml << "    <param name=\"peak_transfer_rate\" value=\"6400\"/>\n";
+    uint64_t mem_reads = static_cast<uint64_t>(stats.total_instructions * 0.3);
+    uint64_t mem_writes = static_cast<uint64_t>(stats.total_instructions * 0.15);
+    xml << "    <stat name=\"memory_accesses\" value=\"" << (mem_reads + mem_writes) << "\"/>\n";
+    xml << "    <stat name=\"memory_reads\" value=\"" << mem_reads << "\"/>\n";
+    xml << "    <stat name=\"memory_writes\" value=\"" << mem_writes << "\"/>\n";
+    xml << "  </component>\n";
+}
+
+uint32_t McPATModel::getNumCores(PowerComponent component) const {
+    if (component == PowerComponent::CORE || component == PowerComponent::PE) {
+        return 1;
+    }
+    return 0;
 }
 
 double McPATModel::calculateComponentEnergy(PowerComponent component, Cycle cycles) {

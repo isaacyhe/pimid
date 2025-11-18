@@ -141,14 +141,56 @@ void McPATWrapper::setL3Accesses(uint64_t reads, uint64_t writes) {
 
 void McPATWrapper::createMcPATInput() {
     std::cout << "[McPATWrapper] Creating McPAT configuration" << std::endl;
-    // In full implementation, this would generate XML configuration
-    // or parse existing XML file
+
+    if (!config_.xml_file.empty()) {
+        // Use provided XML file
+        std::cout << "  Using XML file: " << config_.xml_file << std::endl;
+        valid_ = true;
+        return;
+    }
+
+    // Generate XML configuration from parameters
+    std::string xml_content = generateXMLConfig();
+
+    // Write to temporary file for McPAT
+    std::string temp_xml = "/tmp/mcpat_input.xml";
+    std::ofstream xml_file(temp_xml);
+    if (!xml_file) {
+        throw std::runtime_error("Failed to create McPAT XML file");
+    }
+
+    xml_file << xml_content;
+    xml_file.close();
+
+    config_.xml_file = temp_xml;
     valid_ = true;
+
+    std::cout << "  Generated XML configuration: " << temp_xml << std::endl;
 }
 
 void McPATWrapper::runMcPAT() {
     std::cout << "[McPATWrapper] Running McPAT power analysis..." << std::endl;
-    // Full implementation would call McPAT's analysis functions
+
+    // NOTE: Full McPAT integration would require:
+    // 1. Linking against McPAT library (or running as subprocess)
+    // 2. Parsing XML with ParseXML class
+    // 3. Creating Processor object
+    // 4. Calling computeEnergy() and displayEnergy()
+    //
+    // For now, we use analytical models that approximate McPAT results
+    // The full integration is straightforward once McPAT is built:
+    //
+    //   #include "XML_Parse.h"
+    //   #include "processor.h"
+    //
+    //   mcpat_parser_ = new ParseXML();
+    //   mcpat_parser_->parse(config_.xml_file.c_str());
+    //   mcpat_processor_ = new Processor(mcpat_parser_);
+    //   mcpat_processor_->computeEnergy();
+    //   mcpat_processor_->displayEnergy();
+    //
+    // The XML file format is already generated correctly below.
+
     valid_ = true;
 }
 
@@ -357,6 +399,240 @@ void McPATWrapper::printComponentBreakdown() const {
     if (config_.has_noc) {
         print_component("NoC", getComponentPower(ComponentType::NOC));
     }
+}
+
+//=============================================================================
+// XML Generation for McPAT
+//=============================================================================
+
+std::string McPATWrapper::generateXMLConfig() const {
+    std::ostringstream xml;
+
+    xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    xml << "<component id=\"root\" name=\"root\">\n";
+
+    // System parameters
+    xml << "  <component id=\"system\" name=\"system\">\n";
+    xml << "    <param name=\"number_of_cores\" value=\"" << config_.num_cores << "\"/>\n";
+    xml << "    <param name=\"number_of_L1Directories\" value=\"0\"/>\n";
+    xml << "    <param name=\"number_of_L2Directories\" value=\"0\"/>\n";
+    xml << "    <param name=\"number_of_L2s\" value=\"" << config_.num_cores << "\"/>\n";
+    xml << "    <param name=\"number_of_L3s\" value=\"1\"/>\n";
+    xml << "    <param name=\"number_of_NoCs\" value=\"" << (config_.has_noc ? 1 : 0) << "\"/>\n";
+    xml << "    <param name=\"homogeneous_cores\" value=\"1\"/>\n";
+    xml << "    <param name=\"homogeneous_L2s\" value=\"1\"/>\n";
+    xml << "    <param name=\"homogeneous_L1Directories\" value=\"1\"/>\n";
+    xml << "    <param name=\"homogeneous_L2Directories\" value=\"1\"/>\n";
+    xml << "    <param name=\"homogeneous_L3s\" value=\"1\"/>\n";
+    xml << "    <param name=\"homogeneous_ccs\" value=\"1\"/>\n";
+    xml << "    <param name=\"homogeneous_NoCs\" value=\"1\"/>\n";
+    xml << "    <param name=\"core_tech_node\" value=\"" << config_.tech_node_nm << "\"/>\n";
+    xml << "    <param name=\"target_core_clockrate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
+    xml << "    <param name=\"temperature\" value=\"" << config_.temperature_k << "\"/>\n";
+    xml << "    <param name=\"number_cache_levels\" value=\"3\"/>\n";
+    xml << "    <param name=\"interconnect_projection_type\" value=\"0\"/>\n";
+    xml << "    <param name=\"device_type\" value=\"0\"/>\n";
+    xml << "    <param name=\"longer_channel_device\" value=\"1\"/>\n";
+    xml << "    <param name=\"power_gating\" value=\"0\"/>\n";
+    xml << "    <param name=\"machine_bits\" value=\"64\"/>\n";
+    xml << "    <param name=\"virtual_address_width\" value=\"48\"/>\n";
+    xml << "    <param name=\"physical_address_width\" value=\"48\"/>\n";
+    xml << "    <param name=\"virtual_memory_page_size\" value=\"4096\"/>\n";
+
+    // System statistics
+    xml << "    <stat name=\"total_cycles\" value=\"" << total_cycles_ << "\"/>\n";
+    xml << "    <stat name=\"idle_cycles\" value=\"" << (total_cycles_ - busy_cycles_) << "\"/>\n";
+    xml << "    <stat name=\"busy_cycles\" value=\"" << busy_cycles_ << "\"/>\n";
+
+    // Core component (for each core)
+    for (int i = 0; i < config_.num_cores; i++) {
+        xml << "    <component id=\"system.core" << i << "\" name=\"core" << i << "\">\n";
+        xml << "      <param name=\"clock_rate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
+        xml << "      <param name=\"vdd\" value=\"0\"/>\n";
+        xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
+        xml << "      <param name=\"opt_local\" value=\"0\"/>\n";
+        xml << "      <param name=\"instruction_length\" value=\"32\"/>\n";
+        xml << "      <param name=\"opcode_width\" value=\"7\"/>\n";
+        xml << "      <param name=\"x86\" value=\"0\"/>\n";
+        xml << "      <param name=\"micro_opcode_width\" value=\"8\"/>\n";
+        xml << "      <param name=\"machine_type\" value=\"0\"/>\n";
+        xml << "      <param name=\"number_hardware_threads\" value=\"1\"/>\n";
+        xml << "      <param name=\"fetch_width\" value=\"" << config_.issue_width << "\"/>\n";
+        xml << "      <param name=\"number_instruction_fetch_ports\" value=\"1\"/>\n";
+        xml << "      <param name=\"decode_width\" value=\"" << config_.issue_width << "\"/>\n";
+        xml << "      <param name=\"issue_width\" value=\"" << config_.issue_width << "\"/>\n";
+        xml << "      <param name=\"peak_issue_width\" value=\"" << config_.issue_width << "\"/>\n";
+        xml << "      <param name=\"commit_width\" value=\"" << config_.issue_width << "\"/>\n";
+        xml << "      <param name=\"pipelines_per_core\" value=\"1,1\"/>\n";
+        xml << "      <param name=\"pipeline_depth\" value=\"" << config_.pipeline_depth << ",14\"/>\n";
+        xml << "      <param name=\"ALU_per_core\" value=\"3\"/>\n";
+        xml << "      <param name=\"MUL_per_core\" value=\"1\"/>\n";
+        xml << "      <param name=\"FPU_per_core\" value=\"1\"/>\n";
+        xml << "      <param name=\"instruction_buffer_size\" value=\"32\"/>\n";
+        xml << "      <param name=\"decoded_stream_buffer_size\" value=\"16\"/>\n";
+        xml << "      <param name=\"instruction_window_scheme\" value=\"0\"/>\n";
+        xml << "      <param name=\"instruction_window_size\" value=\"64\"/>\n";
+        xml << "      <param name=\"fp_instruction_window_size\" value=\"32\"/>\n";
+        xml << "      <param name=\"ROB_size\" value=\"128\"/>\n";
+        xml << "      <param name=\"archi_Regs_IRF_size\" value=\"32\"/>\n";
+        xml << "      <param name=\"archi_Regs_FRF_size\" value=\"32\"/>\n";
+        xml << "      <param name=\"phy_Regs_IRF_size\" value=\"256\"/>\n";
+        xml << "      <param name=\"phy_Regs_FRF_size\" value=\"256\"/>\n";
+        xml << "      <param name=\"rename_scheme\" value=\"0\"/>\n";
+        xml << "      <param name=\"register_windows_size\" value=\"0\"/>\n";
+        xml << "      <param name=\"LSU_order\" value=\"inorder\"/>\n";
+        xml << "      <param name=\"store_buffer_size\" value=\"32\"/>\n";
+        xml << "      <param name=\"load_buffer_size\" value=\"32\"/>\n";
+        xml << "      <param name=\"memory_ports\" value=\"1\"/>\n";
+        xml << "      <param name=\"RAS_size\" value=\"32\"/>\n";
+
+        // Core statistics
+        uint64_t inst_per_core = total_instructions_ / config_.num_cores;
+        xml << "      <stat name=\"total_instructions\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"int_instructions\" value=\"" << (inst_per_core * 70 / 100) << "\"/>\n";
+        xml << "      <stat name=\"fp_instructions\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"branch_instructions\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"branch_mispredictions\" value=\"" << (inst_per_core * 1 / 100) << "\"/>\n";
+        xml << "      <stat name=\"load_instructions\" value=\"" << (inst_per_core * 20 / 100) << "\"/>\n";
+        xml << "      <stat name=\"store_instructions\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"committed_instructions\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"committed_int_instructions\" value=\"" << (inst_per_core * 70 / 100) << "\"/>\n";
+        xml << "      <stat name=\"committed_fp_instructions\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"pipeline_duty_cycle\" value=\"" << (busy_cycles_ > 0 ? 0.8 : 0.0) << "\"/>\n";
+        xml << "      <stat name=\"total_cycles\" value=\"" << total_cycles_ << "\"/>\n";
+        xml << "      <stat name=\"idle_cycles\" value=\"" << (total_cycles_ - busy_cycles_) << "\"/>\n";
+        xml << "      <stat name=\"busy_cycles\" value=\"" << busy_cycles_ << "\"/>\n";
+        xml << "      <stat name=\"ROB_reads\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"ROB_writes\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"rename_reads\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"rename_writes\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"fp_rename_reads\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"fp_rename_writes\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"inst_window_reads\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"inst_window_writes\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"inst_window_wakeup_accesses\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"fp_inst_window_reads\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"fp_inst_window_writes\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"fp_inst_window_wakeup_accesses\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"int_regfile_reads\" value=\"" << (inst_per_core * 2) << "\"/>\n";
+        xml << "      <stat name=\"int_regfile_writes\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"float_regfile_reads\" value=\"" << (inst_per_core * 20 / 100) << "\"/>\n";
+        xml << "      <stat name=\"float_regfile_writes\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"function_calls\" value=\"" << (inst_per_core / 100) << "\"/>\n";
+        xml << "      <stat name=\"context_switches\" value=\"0\"/>\n";
+        xml << "      <stat name=\"ialu_accesses\" value=\"" << (inst_per_core * 70 / 100) << "\"/>\n";
+        xml << "      <stat name=\"fpu_accesses\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"mul_accesses\" value=\"" << (inst_per_core * 5 / 100) << "\"/>\n";
+        xml << "      <stat name=\"cdb_alu_accesses\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"cdb_mul_accesses\" value=\"" << (inst_per_core * 5 / 100) << "\"/>\n";
+        xml << "      <stat name=\"cdb_fpu_accesses\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "    </component>\n";
+
+        // L1 caches for this core
+        xml << "    <component id=\"system.core" << i << ".icache\" name=\"icache\">\n";
+        xml << "      <param name=\"icache_config\" value=\"" << (config_.l1i_size_bytes/1024)
+            << ",64,8,1,1,3,64,0\"/>\n";
+        xml << "      <param name=\"buffer_sizes\" value=\"16,16,16,0\"/>\n";
+        xml << "      <stat name=\"read_accesses\" value=\"" << l1_reads_ / config_.num_cores << "\"/>\n";
+        xml << "      <stat name=\"read_misses\" value=\"" << (l1_reads_ / config_.num_cores / 10) << "\"/>\n";
+        xml << "      <stat name=\"conflicts\" value=\"0\"/>\n";
+        xml << "    </component>\n";
+
+        xml << "    <component id=\"system.core" << i << ".dcache\" name=\"dcache\">\n";
+        xml << "      <param name=\"dcache_config\" value=\"" << (config_.l1d_size_bytes/1024)
+            << ",64,8,1,1,3,64,0\"/>\n";
+        xml << "      <param name=\"buffer_sizes\" value=\"16,16,16,16\"/>\n";
+        xml << "      <stat name=\"read_accesses\" value=\"" << l1_reads_ / config_.num_cores << "\"/>\n";
+        xml << "      <stat name=\"write_accesses\" value=\"" << l1_writes_ / config_.num_cores << "\"/>\n";
+        xml << "      <stat name=\"read_misses\" value=\"" << (l1_reads_ / config_.num_cores / 10) << "\"/>\n";
+        xml << "      <stat name=\"write_misses\" value=\"" << (l1_writes_ / config_.num_cores / 10) << "\"/>\n";
+        xml << "      <stat name=\"conflicts\" value=\"0\"/>\n";
+        xml << "    </component>\n";
+
+        // L2 cache for this core
+        xml << "    <component id=\"system.L2" << i << "\" name=\"L2\">\n";
+        xml << "      <param name=\"L2_config\" value=\"" << (config_.l2_size_bytes/1024)
+            << ",64,8,8,8,23,64,1\"/>\n";
+        xml << "      <param name=\"buffer_sizes\" value=\"16,16,16,16\"/>\n";
+        xml << "      <param name=\"clockrate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
+        xml << "      <param name=\"ports\" value=\"1,1,1\"/>\n";
+        xml << "      <param name=\"device_type\" value=\"0\"/>\n";
+        xml << "      <stat name=\"read_accesses\" value=\"" << l2_reads_ / config_.num_cores << "\"/>\n";
+        xml << "      <stat name=\"write_accesses\" value=\"" << l2_writes_ / config_.num_cores << "\"/>\n";
+        xml << "      <stat name=\"read_misses\" value=\"" << (l2_reads_ / config_.num_cores / 10) << "\"/>\n";
+        xml << "      <stat name=\"write_misses\" value=\"" << (l2_writes_ / config_.num_cores / 10) << "\"/>\n";
+        xml << "      <stat name=\"conflicts\" value=\"0\"/>\n";
+        xml << "      <stat name=\"duty_cycle\" value=\"" << (busy_cycles_ > 0 ? 0.5 : 0.0) << "\"/>\n";
+        xml << "    </component>\n";
+    }
+
+    // L3 cache (shared)
+    xml << "    <component id=\"system.L3\" name=\"L3\">\n";
+    xml << "      <param name=\"L3_config\" value=\"" << (config_.l3_size_bytes/(1024*1024))
+        << ",64,16,16,16,23,64,1\"/>\n";
+    xml << "      <param name=\"clockrate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
+    xml << "      <param name=\"ports\" value=\"1,1,1\"/>\n";
+    xml << "      <param name=\"device_type\" value=\"0\"/>\n";
+    xml << "      <param name=\"buffer_sizes\" value=\"16,16,16,16\"/>\n";
+    xml << "      <stat name=\"read_accesses\" value=\"" << l3_reads_ << "\"/>\n";
+    xml << "      <stat name=\"write_accesses\" value=\"" << l3_writes_ << "\"/>\n";
+    xml << "      <stat name=\"read_misses\" value=\"" << (l3_reads_ / 10) << "\"/>\n";
+    xml << "      <stat name=\"write_misses\" value=\"" << (l3_writes_ / 10) << "\"/>\n";
+    xml << "      <stat name=\"conflicts\" value=\"0\"/>\n";
+    xml << "      <stat name=\"duty_cycle\" value=\"" << (busy_cycles_ > 0 ? 0.3 : 0.0) << "\"/>\n";
+    xml << "    </component>\n";
+
+    // Memory controller
+    for (int i = 0; i < config_.num_memory_controllers; i++) {
+        xml << "    <component id=\"system.mc\" name=\"mc\">\n";
+        xml << "      <param name=\"type\" value=\"0\"/>\n";
+        xml << "      <param name=\"mc_clock\" value=\"" << static_cast<int>(config_.mc_clock_mhz) << "\"/>\n";
+        xml << "      <param name=\"vdd\" value=\"0\"/>\n";
+        xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
+        xml << "      <param name=\"peak_transfer_rate\" value=\"6400\"/>\n";
+        xml << "      <param name=\"block_size\" value=\"64\"/>\n";
+        xml << "      <param name=\"number_mcs\" value=\"" << config_.num_memory_controllers << "\"/>\n";
+        xml << "      <param name=\"memory_channels_per_mc\" value=\"1\"/>\n";
+        xml << "      <param name=\"number_ranks\" value=\"2\"/>\n";
+        xml << "      <param name=\"withPHY\" value=\"0\"/>\n";
+        xml << "      <param name=\"req_window_size_per_channel\" value=\"32\"/>\n";
+        xml << "      <param name=\"IO_buffer_size_per_channel\" value=\"32\"/>\n";
+        xml << "      <param name=\"databus_width\" value=\"128\"/>\n";
+        xml << "      <param name=\"addressbus_width\" value=\"51\"/>\n";
+        xml << "      <stat name=\"memory_accesses\" value=\"" << (l3_reads_ + l3_writes_) / config_.num_memory_controllers << "\"/>\n";
+        xml << "      <stat name=\"memory_reads\" value=\"" << l3_reads_ / config_.num_memory_controllers << "\"/>\n";
+        xml << "      <stat name=\"memory_writes\" value=\"" << l3_writes_ / config_.num_memory_controllers << "\"/>\n";
+        xml << "    </component>\n";
+    }
+
+    // NoC (Network-on-Chip)
+    if (config_.has_noc) {
+        std::string topology = (config_.noc_topology == 0) ? "0" :
+                             (config_.noc_topology == 1) ? "1" : "2";
+        xml << "    <component id=\"system.noc0\" name=\"noc0\">\n";
+        xml << "      <param name=\"clockrate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
+        xml << "      <param name=\"vdd\" value=\"0\"/>\n";
+        xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
+        xml << "      <param name=\"type\" value=\"" << topology << "\"/>\n";
+        xml << "      <param name=\"horizontal_nodes\" value=\"" << static_cast<int>(std::sqrt(config_.num_cores)) << "\"/>\n";
+        xml << "      <param name=\"vertical_nodes\" value=\"" << static_cast<int>(std::sqrt(config_.num_cores)) << "\"/>\n";
+        xml << "      <param name=\"has_global_link\" value=\"0\"/>\n";
+        xml << "      <param name=\"link_throughput\" value=\"1\"/>\n";
+        xml << "      <param name=\"link_latency\" value=\"1\"/>\n";
+        xml << "      <param name=\"input_ports\" value=\"5\"/>\n";
+        xml << "      <param name=\"output_ports\" value=\"5\"/>\n";
+        xml << "      <param name=\"flit_bits\" value=\"128\"/>\n";
+        xml << "      <param name=\"chip_coverage\" value=\"1\"/>\n";
+        xml << "      <param name=\"link_routing_over_percentage\" value=\"0.5\"/>\n";
+        xml << "      <stat name=\"total_accesses\" value=\"" << (l3_reads_ + l3_writes_) << "\"/>\n";
+        xml << "      <stat name=\"duty_cycle\" value=\"" << (busy_cycles_ > 0 ? 0.5 : 0.0) << "\"/>\n";
+        xml << "    </component>\n";
+    }
+
+    xml << "  </component>\n";
+    xml << "</component>\n";
+
+    return xml.str();
 }
 
 } // namespace pimid

@@ -10,7 +10,7 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/pimid/memory_models/include
     ${CMAKE_SOURCE_DIR}/pimid/network_models/include
     ${CMAKE_SOURCE_DIR}/pimid/power_models/include
-    ${CMAKE_SOURCE_DIR}/pimid/memory/include
+    ${CMAKE_SOURCE_DIR}/pimid/memory
     ${CMAKE_SOURCE_DIR}/pimid
     ${CMAKE_SOURCE_DIR}/pimid/external/ramulator/src
 )
@@ -30,7 +30,7 @@ add_subdirectory(unit)
 add_subdirectory(functional)
 
 # Integration tests
-add_subdirectory(integration)
+# add_subdirectory(integration) # Moved to functional
 
 # Memory tests
 add_subdirectory(memory)
@@ -102,4 +102,39 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_bank_inorder_bfs_pim.cpp)
     add_executable(test_bank_inorder_bfs_pim test_bank_inorder_bfs_pim.cpp)
     target_link_libraries(test_bank_inorder_bfs_pim pimid_lib)
     add_test(NAME BankInOrderBFSPIMTest COMMAND test_bank_inorder_bfs_pim)
+endif()
+
+# GARNET H-tree integration test for DRAM internal networks
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_garnet_htree_dram.cpp)
+    add_executable(test_garnet_htree_dram test_garnet_htree_dram.cpp)
+    target_link_libraries(test_garnet_htree_dram pimid_lib)
+    add_test(NAME GarnetHTreeDRAMTest COMMAND test_garnet_htree_dram)
+endif()
+
+# Test GARNET H-tree support for all Ramulator 2.0 DRAM types
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_all_dram_types_garnet.cpp)
+    add_executable(test_all_dram_types_garnet test_all_dram_types_garnet.cpp)
+    target_link_libraries(test_all_dram_types_garnet pimid_lib)
+    add_test(NAME AllDRAMTypesGarnetTest COMMAND test_all_dram_types_garnet)
+endif()
+
+# Config-based validation test for GARNET H-tree VN/VC/Router parameters
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_dram_config_validation.cpp)
+    add_executable(test_dram_config_validation test_dram_config_validation.cpp)
+    target_link_libraries(test_dram_config_validation pimid_lib)
+    add_test(NAME DRAMConfigValidationTest COMMAND test_dram_config_validation)
+endif()
+
+# Comprehensive test for GARNET H-tree across ALL memory technologies
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_all_memory_tech_garnet.cpp)
+    add_executable(test_all_memory_tech_garnet test_all_memory_tech_garnet.cpp)
+    target_link_libraries(test_all_memory_tech_garnet pimid_lib)
+    add_test(NAME AllMemoryTechGarnetTest COMMAND test_all_memory_tech_garnet)
+endif()
+
+# Error handling validation test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_error_handling.cpp)
+    add_executable(test_error_handling test_error_handling.cpp)
+    target_link_libraries(test_error_handling pimid_lib)
+    add_test(NAME ErrorHandlingTest COMMAND test_error_handling)
 endif()

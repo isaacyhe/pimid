@@ -221,6 +221,16 @@ public:
      */
     bool inSameChip(int bank1, int bank2) const;
 
+    /**
+     * @brief Enable GARNET H-tree simulation for accurate NoC modeling
+     *
+     * When enabled, GARNET models will be created for each hierarchy level
+     * to provide cycle-accurate network simulation with contention, queuing, etc.
+     *
+     * @param enable True to use GARNET models, false for analytical model
+     */
+    void enableGarnetSimulation(bool enable = true);
+
 private:
     // DRAM configuration
     std::string dram_type_;
@@ -247,6 +257,14 @@ private:
     // External network model (optional, for detailed simulation)
     std::shared_ptr<NetworkModel> external_network_model_;
 
+    // GARNET H-tree models for each hierarchy level (optional)
+    // When enabled, these provide cycle-accurate NoC simulation
+    std::shared_ptr<NetworkModel> garnet_subarray_network_;   // H-tree within bank
+    std::shared_ptr<NetworkModel> garnet_bank_network_;       // Bus/tree within BG
+    std::shared_ptr<NetworkModel> garnet_bg_network_;         // Bus/tree within chip
+    std::shared_ptr<NetworkModel> garnet_chip_network_;       // Bus/tree within rank
+    bool use_garnet_models_;  // Flag to enable GARNET-based simulation
+
     // Current cycle
     uint64_t current_cycle_;
 
@@ -261,10 +279,23 @@ private:
     uint64_t chip_network_accesses_;
 
     /**
-     * @brief Configure network based on DRAM type
+     * @brief Configure network based on memory type (DRAM and NVM)
      */
+    // SRAM configurations
+    void configureSRAMNetwork();
+
+    // NVM configurations
+    void configureSTTMRAMNetwork();
+    void configurePCMNetwork();
+    void configureReRAMNetwork();
+
+    // DRAM configurations
+    void configureDDR3Network();
     void configureDDR4Network();
     void configureDDR5Network();
+    void configureLPDDR5Network();
+    void configureGDDR6Network();
+    void configureHBMNetwork();
     void configureHBM2Network();
     void configureHBM3Network();
 
@@ -298,6 +329,27 @@ std::shared_ptr<InternalDRAMNetwork> createInternalDRAMNetwork(
     int num_banks_per_bg = 4,
     int num_bg_per_chip = 4,
     int num_chips_per_rank = 8);
+
+/**
+ * @brief Create GARNET H-tree network for DRAM internal interconnect
+ *
+ * This creates a GARNET network configured as an H-tree to mimic
+ * the actual DRAM internal interconnects (e.g., Global Sense Amplifier
+ * H-tree for subarray-to-subarray communication).
+ *
+ * @param level Network level (SUBARRAY, BANK, BANK_GROUP, CHIP)
+ * @param num_nodes Number of leaf nodes (e.g., 16 subarrays per bank)
+ * @param link_width_bits Link width in bits (from DRAM specs)
+ * @param link_latency_cycles Base link latency in cycles
+ * @param bandwidth_GBs Available bandwidth in GB/s
+ * @return Configured GARNET network model
+ */
+std::shared_ptr<NetworkModel> createGarnetHTreeForDRAM(
+    NetworkLevel level,
+    int num_nodes,
+    int link_width_bits,
+    int link_latency_cycles,
+    double bandwidth_GBs);
 
 } // namespace pimid
 

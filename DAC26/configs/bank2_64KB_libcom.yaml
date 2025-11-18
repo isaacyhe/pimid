@@ -1,0 +1,71 @@
+# Bank 2: 64KB with 16 Subarrays - LIBCom Configuration
+# DAC'26 Evaluation: LIBCom direct interconnect
+
+memory:
+  type: "SRAM"
+  organization:
+    capacity: 65536      # 64 KB
+    num_banks: 1
+    num_subarrays: 16    # 16 × 4KB subarrays
+    num_bank_groups: 1
+    num_chips: 1
+
+    subarray_size_bytes: 4096
+    words_per_subarray: 1024
+    word_size_bits: 32
+
+  timing:
+    access_latency_cycles: 1
+    clock_frequency_mhz: 500
+    cycle_time_ns: 2
+
+  technology:
+    node_nm: 22
+    line_size: 32
+
+network:
+  topology: "CROSSBAR"
+  model: "GARNET"
+
+  switch_latency_cycles: 1
+  max_hops: 1
+
+  virtual_networks: 2
+  virtual_channels_per_vn: 1
+
+  router_pipeline: "MINIMAL"
+  router_latency: 1
+  enable_router_bypass: true
+
+  input_buffer_depth: 2
+  output_buffer_depth: 2
+
+  subarray_network:
+    link_width_bits: 128
+    frequency_GHz: 0.5
+    latency_cycles: 1
+
+operations:
+  read:
+    latency_cycles: 1
+    energy_relative: 1.0
+
+  write:
+    latency_cycles: 1
+    energy_relative: 1.0
+
+  copy:
+    latency_cycles: 1
+    energy_relative: 0.55
+    description: "Direct LIBCom transfer"
+
+  move:
+    latency_cycles: 1
+    energy_relative: 0.53
+    description: "Direct LIBCom transfer"
+
+metrics:
+  track_direct_transfers: true
+  track_intersubarray_comm: true
+  track_energy: true
+  track_cycles: true

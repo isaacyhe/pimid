@@ -20,6 +20,7 @@ enum class NetworkTopology {
     TORUS_3D,
     DRAGONFLY,
     FAT_TREE,
+    H_TREE,        // H-tree for DRAM internal interconnects
     CROSSBAR
 };
 
@@ -33,7 +34,8 @@ enum class RoutingAlgorithm {
     WEST_FIRST,
     NORTH_LAST,
     MINIMAL,
-    VALIANT
+    VALIANT,
+    TREE_BASED      // For H-tree and Fat-tree (route up then down)
 };
 
 /**
@@ -46,6 +48,17 @@ enum class FlowControl {
 };
 
 /**
+ * Router pipeline complexity
+ * Controls how many stages are in the router pipeline
+ */
+enum class RouterPipelineComplexity {
+    FULL,       // RC → VA → SA → ST (4-stage, full NoC router with VC allocation)
+    REDUCED,    // RC → SA → ST (3-stage, no VC allocation, simpler)
+    SIMPLE,     // SA → ST (2-stage, just arbitration + traversal)
+    MINIMAL     // ST only (1-stage, just a mux/switch, for DRAM)
+};
+
+/**
  * Network configuration
  */
 struct NetworkConfig {
@@ -53,18 +66,47 @@ struct NetworkConfig {
     RoutingAlgorithm routing;
     FlowControl flow_control;
 
+    // Topology parameters
     uint32_t num_rows;
     uint32_t num_cols;
     uint32_t num_layers;        // For 3D topologies
-    uint32_t virtual_channels;
+
+    // Virtual Networks (VN) and Virtual Channels (VC)
+    uint32_t virtual_networks;  // Number of VNs (message classes: req/resp, read/write, etc.)
+    uint32_t virtual_channels_per_vn;  // Number of VCs per VN (for deadlock avoidance)
+    uint32_t virtual_channels;  // DEPRECATED: Use virtual_networks * virtual_channels_per_vn
+
+    // Link parameters
     uint32_t link_width_bytes;
     Cycle link_latency;
-    Cycle router_latency;
 
+    // Router parameters
+    RouterPipelineComplexity router_pipeline;  // Pipeline complexity
+    Cycle router_latency;      // Total router latency (overrides pipeline if set)
+    bool enable_router_bypass; // Bypass router for single-hop transfers
+
+    // Buffer parameters
     uint32_t input_buffer_depth;
     uint32_t output_buffer_depth;
 
     std::string garnet_config_path;
+
+    // Constructor with defaults
+    NetworkConfig()
+        : topology(NetworkTopology::MESH_2D),
+          routing(RoutingAlgorithm::XY),
+          flow_control(FlowControl::CREDIT_BASED),
+          num_rows(4), num_cols(4), num_layers(1),
+          virtual_networks(1),
+          virtual_channels_per_vn(1),
+          virtual_channels(1),
+          link_width_bytes(4),
+          link_latency(1),
+          router_pipeline(RouterPipelineComplexity::FULL),
+          router_latency(0),  // 0 = use pipeline stages
+          enable_router_bypass(false),
+          input_buffer_depth(4),
+          output_buffer_depth(4) {}
 };
 
 /**

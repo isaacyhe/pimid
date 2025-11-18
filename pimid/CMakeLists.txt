@@ -125,6 +125,7 @@ set(PIMID_SOURCES
     # PIM extensions for Ramulator
     memory_models/src/pim_bandwidth_tracker.cpp
     memory_models/src/internal_dram_network.cpp
+    memory_models/src/internal_memory_network.cpp
     memory_models/src/pim_controller_plugin.cpp
 
     # DRAM architecture specifications
@@ -137,6 +138,7 @@ set(PIMID_SOURCES
     power_models/src/power_model.cpp
     power_models/src/mcpat_model.cpp
     power_models/src/mcpat_wrapper.cpp
+    power_models/src/power_model_manager.cpp
 
     # Address translation
     src/address_translation/pe_placement.cpp
@@ -234,7 +236,7 @@ if(BUILD_PLUGINS)
 endif()
 
 # Standalone simulator (single-process mode for debugging)
-add_executable(pimid_standalone src/standalone_main.cpp)
+add_executable(pimid_standalone src/standalone_main_new.cpp)
 target_link_libraries(pimid_standalone pimid_lib)
 if(BUILD_PLUGINS)
     target_link_libraries(pimid_standalone pimid_plugin)

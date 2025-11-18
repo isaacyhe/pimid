@@ -27,6 +27,13 @@ dram:
   # DRAM speed grade
   speed_grade: "2400"  # MT/s
 
+  # Port width scaling factor (for exploratory studies)
+  # Default: 1.0 (use verified base values)
+  # Set to 2.0 for "what if 2x wider buses?" studies
+  # Set to 0.5 for "what if narrower buses?" studies
+  # Affects all internal datapath widths and bandwidths
+  port_width_scale: 1.0
+
   # Memory organization
   organization:
     channels: 4
@@ -125,12 +132,23 @@ sram:
     rows_per_array: 512
     columns_per_array: 512
     bits_per_cell: 8
+    banks: 8
+    read_write_ports: 1
+    read_ports: 0
+    write_ports: 0
+
+  # Cache configuration (if using as cache)
+  cache:
+    line_size_bytes: 64
+    associativity: 8  # 8-way set associative
 
   # Access timing (ns)
   timing:
     read_latency_ns: 1.0
     write_latency_ns: 1.0
     access_time_ns: 0.8
+    read_latency_cycles: 1   # Cycles
+    write_latency_cycles: 1  # Cycles
 
   # Power parameters
   power:
@@ -143,16 +161,88 @@ sram:
     # Temperature (C)
     temperature: 25
 
+    # Energy per access (nJ) - will be overridden by CACTI if available
+    read_energy_nj: 0.1
+    write_energy_nj: 0.15
+    leakage_power_mw: 5.0
+
   # CACTI settings
   cacti:
     config_file: "pimid/external/cacti/cacti_sram.cfg"
     cache_size_bytes: 16777216  # 16MB
     line_size_bytes: 64
-    associativity: 1  # Direct-mapped for SRAM
-    banks: 16
+    associativity: 8  # 8-way set associative
+    banks: 8
+    read_write_ports: 1
 
 #==============================================================================
-# STT-MRAM CONFIGURATION (when technology = STT_MRAM)
+# NVM CONFIGURATION (STT-MRAM, PCM, ReRAM)
+#==============================================================================
+nvm:
+  # NVM type: STT_MRAM, PCM, RERAM
+  type: "STT_MRAM"
+
+  # NVM capacity
+  capacity_mb: 16
+
+  # NVM organization
+  organization:
+    num_arrays: 16
+    rows_per_array: 512
+    columns_per_array: 512
+    bits_per_cell: 8
+    banks: 8
+    read_write_ports: 1
+
+  # Access timing (cycles and ns)
+  timing:
+    read_latency_cycles: 10   # Cycles
+    write_latency_cycles: 50  # Cycles (slower for NVM)
+    read_latency_ns: 5.0
+    write_latency_ns: 20.0
+
+  # Endurance and reliability
+  reliability:
+    write_endurance: 1e15  # Write cycles
+    retention_time_years: 10
+    error_rate: 1e-12
+
+  # Power parameters per technology type
+  # STT-MRAM parameters
+  stt_mram:
+    tech_node_nm: 22
+    voltage: 1.8
+    read_energy_nj: 0.3   # nJ per read
+    write_energy_nj: 5.0  # nJ per write
+    leakage_power_mw: 10  # mW
+    area_mm2: 15.0        # mm^2
+
+  # PCM parameters
+  pcm:
+    tech_node_nm: 22
+    voltage: 1.8
+    read_energy_nj: 1.0   # nJ per read
+    write_energy_nj: 20.0 # nJ per write (high write energy)
+    leakage_power_mw: 20  # mW
+    area_mm2: 12.0        # mm^2
+
+  # ReRAM parameters
+  reram:
+    tech_node_nm: 22
+    voltage: 1.5
+    read_energy_nj: 0.5   # nJ per read
+    write_energy_nj: 8.0  # nJ per write
+    leakage_power_mw: 15  # mW
+    area_mm2: 10.0        # mm^2
+
+  # NVSim settings
+  nvsim:
+    config_file: "pimid/external/nvsim/nvsim_config.cfg"
+    cell_type: "STTRAM"  # STTRAM, PCRAM, RRAM
+    process_tech: 22
+
+#==============================================================================
+# LEGACY STT-MRAM CONFIGURATION (deprecated - use nvm.type = STT_MRAM)
 #==============================================================================
 stt_mram:
   # STT-MRAM capacity
