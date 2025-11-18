@@ -131,3 +131,10 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_all_memory_tech_garnet.cpp)
     target_link_libraries(test_all_memory_tech_garnet pimid_lib)
     add_test(NAME AllMemoryTechGarnetTest COMMAND test_all_memory_tech_garnet)
 endif()
+
+# Error handling validation test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_error_handling.cpp)
+    add_executable(test_error_handling test_error_handling.cpp)
+    target_link_libraries(test_error_handling pimid_lib)
+    add_test(NAME ErrorHandlingTest COMMAND test_error_handling)
+endif()

@@ -988,6 +988,68 @@ std::shared_ptr<NetworkModel> createGarnetHTreeForDRAM(
     int link_latency_cycles,
     double bandwidth_GBs) {
 
+    // ========================================
+    // Input Validation
+    // ========================================
+
+    // Validate number of nodes
+    if (num_nodes <= 0) {
+        throw std::invalid_argument("Number of nodes must be positive (got " +
+                                   std::to_string(num_nodes) + ")");
+    }
+
+    if (num_nodes > 1024) {
+        throw std::invalid_argument("Number of nodes exceeds reasonable limit (got " +
+                                   std::to_string(num_nodes) + ", max 1024)");
+    }
+
+    // Validate link width
+    if (link_width_bits <= 0) {
+        throw std::invalid_argument("Link width must be positive (got " +
+                                   std::to_string(link_width_bits) + " bits)");
+    }
+
+    // Link width should be a power of 2 and at least 8 bits (1 byte)
+    if (link_width_bits < 8 || (link_width_bits & (link_width_bits - 1)) != 0) {
+        throw std::invalid_argument("Link width must be a power of 2 and >= 8 bits (got " +
+                                   std::to_string(link_width_bits) + " bits)");
+    }
+
+    if (link_width_bits > 1024) {
+        throw std::invalid_argument("Link width exceeds reasonable limit (got " +
+                                   std::to_string(link_width_bits) + " bits, max 1024)");
+    }
+
+    // Validate link latency
+    if (link_latency_cycles < 0) {
+        throw std::invalid_argument("Link latency cannot be negative (got " +
+                                   std::to_string(link_latency_cycles) + " cycles)");
+    }
+
+    if (link_latency_cycles > 1000) {
+        throw std::invalid_argument("Link latency exceeds reasonable limit (got " +
+                                   std::to_string(link_latency_cycles) + " cycles, max 1000)");
+    }
+
+    // Validate bandwidth
+    if (bandwidth_GBs < 0.0) {
+        throw std::invalid_argument("Bandwidth cannot be negative (got " +
+                                   std::to_string(bandwidth_GBs) + " GB/s)");
+    }
+
+    if (bandwidth_GBs > 10000.0) {
+        throw std::invalid_argument("Bandwidth exceeds reasonable limit (got " +
+                                   std::to_string(bandwidth_GBs) + " GB/s, max 10000)");
+    }
+
+    // Validate bandwidth consistency with link parameters
+    // BW should approximately equal (link_width_bits / 8) * frequency
+    // Since we don't have frequency, we'll just check if it's not zero when link_width > 0
+    if (link_width_bits > 0 && bandwidth_GBs == 0.0) {
+        throw std::invalid_argument("Bandwidth is zero despite non-zero link width (" +
+                                   std::to_string(link_width_bits) + " bits)");
+    }
+
     std::cout << "[GARNET H-Tree] Creating H-tree network for ";
     switch (level) {
         case NetworkLevel::SUBARRAY_NETWORK:

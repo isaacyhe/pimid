@@ -49,12 +49,79 @@ std::shared_ptr<InternalDRAMNetwork> createInternalMemoryNetwork(
     int num_bank_groups,
     int num_chips
 ) {
+    // ========================================
+    // Input Validation
+    // ========================================
+
+    // Validate memory technology string
+    if (memory_tech.empty()) {
+        throw std::invalid_argument("Memory technology type cannot be empty");
+    }
+
+    // Validate positive counts
+    if (num_subarrays <= 0) {
+        throw std::invalid_argument("Number of subarrays must be positive (got " +
+                                   std::to_string(num_subarrays) + ")");
+    }
+
+    if (num_banks <= 0) {
+        throw std::invalid_argument("Number of banks must be positive (got " +
+                                   std::to_string(num_banks) + ")");
+    }
+
+    if (num_bank_groups <= 0) {
+        throw std::invalid_argument("Number of bank groups must be positive (got " +
+                                   std::to_string(num_bank_groups) + ")");
+    }
+
+    if (num_chips <= 0) {
+        throw std::invalid_argument("Number of chips must be positive (got " +
+                                   std::to_string(num_chips) + ")");
+    }
+
+    // Validate reasonable upper bounds to catch configuration errors
+    const int MAX_SUBARRAYS = 1024;
+    const int MAX_BANKS = 256;
+    const int MAX_BANK_GROUPS = 64;
+    const int MAX_CHIPS = 128;
+
+    if (num_subarrays > MAX_SUBARRAYS) {
+        throw std::invalid_argument("Number of subarrays exceeds reasonable limit (got " +
+                                   std::to_string(num_subarrays) + ", max " +
+                                   std::to_string(MAX_SUBARRAYS) + ")");
+    }
+
+    if (num_banks > MAX_BANKS) {
+        throw std::invalid_argument("Number of banks exceeds reasonable limit (got " +
+                                   std::to_string(num_banks) + ", max " +
+                                   std::to_string(MAX_BANKS) + ")");
+    }
+
+    if (num_bank_groups > MAX_BANK_GROUPS) {
+        throw std::invalid_argument("Number of bank groups exceeds reasonable limit (got " +
+                                   std::to_string(num_bank_groups) + ", max " +
+                                   std::to_string(MAX_BANK_GROUPS) + ")");
+    }
+
+    if (num_chips > MAX_CHIPS) {
+        throw std::invalid_argument("Number of chips exceeds reasonable limit (got " +
+                                   std::to_string(num_chips) + ", max " +
+                                   std::to_string(MAX_CHIPS) + ")");
+    }
+
+    // Validate logical consistency: banks should be multiple of bank groups
+    if (num_banks % num_bank_groups != 0) {
+        throw std::invalid_argument("Number of banks (" + std::to_string(num_banks) +
+                                   ") must be evenly divisible by number of bank groups (" +
+                                   std::to_string(num_bank_groups) + ")");
+    }
+
     std::cout << "[InternalMemoryNetwork] Creating network for " << memory_tech << std::endl;
     std::cout << "  Organization: " << num_subarrays << " subarrays, "
               << num_banks << " banks, " << num_bank_groups << " bank groups, "
               << num_chips << " chips" << std::endl;
 
-    // Get technology type
+    // Get technology type (may throw std::runtime_error if unknown)
     MemoryTechnologyType tech_type = getMemoryTechnologyType(memory_tech);
 
     // Create network using existing InternalDRAMNetwork infrastructure

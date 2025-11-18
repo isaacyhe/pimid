@@ -47,7 +47,7 @@ struct MemoryConfigTest {
     int expected_subarray_latency_cycles;
 };
 
-// Simple YAML parser for validation
+// Simple YAML parser for validation with improved error handling
 class MemoryConfigParser {
 public:
     std::map<std::string, std::string> parse(const std::string& filename) {
@@ -55,29 +55,62 @@ public:
         std::ifstream file(filename);
 
         if (!file.is_open()) {
-            std::cerr << "Failed to open config file: " << filename << std::endl;
-            return values;
+            throw std::runtime_error("Failed to open config file: " + filename +
+                                   " (check path and file permissions)");
         }
 
+        int line_num = 0;
         std::string line;
-        while (std::getline(file, line)) {
-            // Skip comments and empty lines
-            if (line.empty() || line[0] == '#') continue;
+        try {
+            while (std::getline(file, line)) {
+                line_num++;
 
-            // Parse key: value
-            size_t colon = line.find(':');
-            if (colon == std::string::npos) continue;
+                // Skip comments and empty lines
+                if (line.empty() || line[0] == '#') continue;
 
-            std::string key = line.substr(0, colon);
-            std::string value = line.substr(colon + 1);
+                // Parse key: value
+                size_t colon = line.find(':');
+                if (colon == std::string::npos) continue;
 
-            // Trim whitespace
-            key.erase(0, key.find_first_not_of(" \t"));
-            key.erase(key.find_last_not_of(" \t") + 1);
-            value.erase(0, value.find_first_not_of(" \t\""));
-            value.erase(value.find_last_not_of(" \t\"") + 1);
+                std::string key = line.substr(0, colon);
+                std::string value = line.substr(colon + 1);
 
-            values[key] = value;
+                // Trim whitespace
+                key.erase(0, key.find_first_not_of(" \t"));
+                if (!key.empty()) {
+                    key.erase(key.find_last_not_of(" \t") + 1);
+                }
+
+                value.erase(0, value.find_first_not_of(" \t\""));
+                if (!value.empty()) {
+                    value.erase(value.find_last_not_of(" \t\"") + 1);
+                }
+
+                // Remove trailing comments from value
+                size_t comment_pos = value.find('#');
+                if (comment_pos != std::string::npos) {
+                    value = value.substr(0, comment_pos);
+                    // Trim trailing whitespace after removing comment
+                    if (!value.empty()) {
+                        value.erase(value.find_last_not_of(" \t") + 1);
+                    }
+                }
+
+                if (!key.empty()) {
+                    values[key] = value;
+                }
+            }
+        } catch (const std::exception& e) {
+            file.close();
+            throw std::runtime_error("Error parsing " + filename + " at line " +
+                                   std::to_string(line_num) + ": " + e.what());
+        }
+
+        file.close();
+
+        if (values.empty()) {
+            throw std::runtime_error("Config file " + filename +
+                                   " is empty or contains no valid key-value pairs");
         }
 
         return values;
@@ -91,12 +124,14 @@ bool validateMemoryTech(const MemoryConfigTest& test) {
     std::cout << "Config: " << test.config_file << std::endl;
     std::cout << "Memory Type: " << test.memory_type << std::endl;
 
-    // Parse config file
+    // Parse config file with error handling
     MemoryConfigParser parser;
-    auto config_values = parser.parse(test.config_file);
+    std::map<std::string, std::string> config_values;
 
-    if (config_values.empty()) {
-        std::cerr << "❌ Failed to parse config file" << std::endl;
+    try {
+        config_values = parser.parse(test.config_file);
+    } catch (const std::exception& e) {
+        std::cerr << "❌ Config file parsing error: " << e.what() << std::endl;
         return false;
     }
 
@@ -108,18 +143,32 @@ bool validateMemoryTech(const MemoryConfigTest& test) {
     }
     std::cout << "✅ Memory type: " << config_values["type"] << std::endl;
 
-    // Validate organization
-    if (std::stoi(config_values["num_subarrays"]) != test.expected_num_subarrays) {
-        std::cerr << "❌ Subarray count mismatch" << std::endl;
+    // Validate organization with error handling for string-to-int conversion
+    try {
+        int num_subarrays = std::stoi(config_values["num_subarrays"]);
+        if (num_subarrays != test.expected_num_subarrays) {
+            std::cerr << "❌ Subarray count mismatch: expected "
+                      << test.expected_num_subarrays << ", got " << num_subarrays << std::endl;
+            return false;
+        }
+        std::cout << "✅ Subarrays: " << config_values["num_subarrays"] << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "❌ Invalid num_subarrays value: " << config_values["num_subarrays"] << std::endl;
         return false;
     }
-    std::cout << "✅ Subarrays: " << config_values["num_subarrays"] << std::endl;
 
-    if (std::stoi(config_values["num_banks"]) != test.expected_num_banks) {
-        std::cerr << "❌ Bank count mismatch" << std::endl;
+    try {
+        int num_banks = std::stoi(config_values["num_banks"]);
+        if (num_banks != test.expected_num_banks) {
+            std::cerr << "❌ Bank count mismatch: expected "
+                      << test.expected_num_banks << ", got " << num_banks << std::endl;
+            return false;
+        }
+        std::cout << "✅ Banks: " << config_values["num_banks"] << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "❌ Invalid num_banks value: " << config_values["num_banks"] << std::endl;
         return false;
     }
-    std::cout << "✅ Banks: " << config_values["num_banks"] << std::endl;
 
     // Validate network topology
     if (config_values["topology"] != "H_TREE") {
@@ -128,34 +177,57 @@ bool validateMemoryTech(const MemoryConfigTest& test) {
     }
     std::cout << "✅ Topology: " << config_values["topology"] << std::endl;
 
-    // Validate Virtual Networks (VN)
-    if (std::stoi(config_values["virtual_networks"]) != test.expected_vn) {
-        std::cerr << "❌ Virtual Networks mismatch" << std::endl;
+    // Validate Virtual Networks (VN) with error handling
+    try {
+        int vn = std::stoi(config_values["virtual_networks"]);
+        if (vn != test.expected_vn) {
+            std::cerr << "❌ Virtual Networks mismatch: expected "
+                      << test.expected_vn << ", got " << vn << std::endl;
+            return false;
+        }
+        std::cout << "✅ Virtual Networks (VN): " << config_values["virtual_networks"]
+                  << " (Read/Write message classes)" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "❌ Invalid virtual_networks value: " << config_values["virtual_networks"] << std::endl;
         return false;
     }
-    std::cout << "✅ Virtual Networks (VN): " << config_values["virtual_networks"]
-              << " (Read/Write message classes)" << std::endl;
 
-    // Validate Virtual Channels per VN
-    if (std::stoi(config_values["virtual_channels_per_vn"]) != test.expected_vc_per_vn) {
-        std::cerr << "❌ VCs per VN mismatch" << std::endl;
+    // Validate Virtual Channels per VN with error handling
+    try {
+        int vc_per_vn = std::stoi(config_values["virtual_channels_per_vn"]);
+        if (vc_per_vn != test.expected_vc_per_vn) {
+            std::cerr << "❌ VCs per VN mismatch: expected "
+                      << test.expected_vc_per_vn << ", got " << vc_per_vn << std::endl;
+            return false;
+        }
+        std::cout << "✅ Virtual Channels per VN: " << config_values["virtual_channels_per_vn"] << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "❌ Invalid virtual_channels_per_vn value: " << config_values["virtual_channels_per_vn"] << std::endl;
         return false;
     }
-    std::cout << "✅ Virtual Channels per VN: " << config_values["virtual_channels_per_vn"] << std::endl;
 
     // Validate router pipeline
     if (config_values["router_pipeline"] != test.expected_router_pipeline) {
-        std::cerr << "❌ Router pipeline mismatch" << std::endl;
+        std::cerr << "❌ Router pipeline mismatch: expected "
+                  << test.expected_router_pipeline << ", got "
+                  << config_values["router_pipeline"] << std::endl;
         return false;
     }
     std::cout << "✅ Router Pipeline: " << config_values["router_pipeline"] << std::endl;
 
-    // Validate router latency
-    if (std::stoi(config_values["router_latency"]) != test.expected_router_latency) {
-        std::cerr << "❌ Router latency mismatch" << std::endl;
+    // Validate router latency with error handling
+    try {
+        int router_latency = std::stoi(config_values["router_latency"]);
+        if (router_latency != test.expected_router_latency) {
+            std::cerr << "❌ Router latency mismatch: expected "
+                      << test.expected_router_latency << ", got " << router_latency << std::endl;
+            return false;
+        }
+        std::cout << "✅ Router Latency: " << config_values["router_latency"] << " cycles" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "❌ Invalid router_latency value: " << config_values["router_latency"] << std::endl;
         return false;
     }
-    std::cout << "✅ Router Latency: " << config_values["router_latency"] << " cycles" << std::endl;
 
     // Note: Link parameters are nested in YAML, validated during network creation
 
