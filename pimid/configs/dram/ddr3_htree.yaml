@@ -1,0 +1,73 @@
+# DDR3 DRAM with GARNET H-tree Internal Network Configuration
+# Memory Technology: DDR3
+# Topology: H-tree (hierarchical tree for subarray interconnect)
+
+dram:
+  type: "DDR3"
+  organization:
+    num_subarrays: 16
+    num_banks: 4
+    num_bank_groups: 2  # DDR3 has 8 banks, using 2 as placeholder
+    num_chips: 8
+
+  # Timing parameters (ns)
+  timing:
+    tCK: 1.25      # DDR3-1600 clock period
+    tCL: 11        # CAS latency
+    tRCD: 11       # RAS to CAS delay
+    tRP: 11        # Precharge time
+    tRAS: 28       # Row active time
+
+# GARNET H-tree Network Configuration
+network:
+  topology: "H_TREE"
+  model: "GARNET"
+
+  # Virtual Networks (VN) - Message Classes
+  # VN separates different traffic types (read vs write)
+  virtual_networks: 2  # VN0: Reads, VN1: Writes
+
+  # Virtual Channels (VC) per VN - Deadlock Avoidance
+  # For H-trees (acyclic), we only need 1 VC per VN
+  virtual_channels_per_vn: 1
+
+  # Router Pipeline Complexity
+  # MINIMAL: Just mux/switch (1-stage: ST only)
+  # SIMPLE: Arbitration + switch (2-stage: SA→ST)
+  # REDUCED: Routing + arbitration + switch (3-stage: RC→SA→ST)
+  # FULL: Full NoC router (4-stage: RC→VA→SA→ST)
+  router_pipeline: "MINIMAL"
+
+  # Router latency (cycles)
+  router_latency: 1  # 1 cycle for mux switching
+
+  # Router bypass optimization
+  enable_router_bypass: true
+
+  # Buffer depths (realistic for DRAM - minimal buffering)
+  input_buffer_depth: 2   # Sense amp latch + column latch
+  output_buffer_depth: 2  # Output driver buffer
+
+  # Link parameters - Subarray level
+  subarray_network:
+    link_width_bits: 32    # DDR3: 4-byte prefetch
+    frequency_GHz: 0.8     # DDR3-1600
+    latency_cycles: 6
+
+  # Link parameters - Bank level
+  bank_network:
+    link_width_bits: 8     # 8-bit bank port
+    frequency_GHz: 0.8
+    latency_cycles: 12
+
+  # Link parameters - Bank Group level
+  bank_group_network:
+    link_width_bits: 8
+    frequency_GHz: 0.8
+    latency_cycles: 18
+
+  # Link parameters - Chip level
+  chip_network:
+    link_width_bits: 8
+    frequency_GHz: 0.8
+    latency_cycles: 24

@@ -117,3 +117,10 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_all_dram_types_garnet.cpp)
     target_link_libraries(test_all_dram_types_garnet pimid_lib)
     add_test(NAME AllDRAMTypesGarnetTest COMMAND test_all_dram_types_garnet)
 endif()
+
+# Config-based validation test for GARNET H-tree VN/VC/Router parameters
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_dram_config_validation.cpp)
+    add_executable(test_dram_config_validation test_dram_config_validation.cpp)
+    target_link_libraries(test_dram_config_validation pimid_lib)
+    add_test(NAME DRAMConfigValidationTest COMMAND test_dram_config_validation)
+endif()
