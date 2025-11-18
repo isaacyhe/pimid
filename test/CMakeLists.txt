@@ -124,3 +124,10 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_dram_config_validation.cpp)
     target_link_libraries(test_dram_config_validation pimid_lib)
     add_test(NAME DRAMConfigValidationTest COMMAND test_dram_config_validation)
 endif()
+
+# Comprehensive test for GARNET H-tree across ALL memory technologies
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_all_memory_tech_garnet.cpp)
+    add_executable(test_all_memory_tech_garnet test_all_memory_tech_garnet.cpp)
+    target_link_libraries(test_all_memory_tech_garnet pimid_lib)
+    add_test(NAME AllMemoryTechGarnetTest COMMAND test_all_memory_tech_garnet)
+endif()
