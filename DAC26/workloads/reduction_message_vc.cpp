@@ -21,7 +21,8 @@ using namespace dac26;
 struct ReductionConfig {
     int num_subarrays;
     int elements_per_subarray;
-    int num_vcs;  // NEW: Virtual channels per link
+    int num_vcs;         // Virtual channels per link
+    int buffer_depth;    // Buffer depth per VC (entries)
 
     int copy_latency;  // Base latency (without contention)
     int read_latency;
@@ -64,7 +65,8 @@ public:
         network = new NetworkContentionModel(
             config.num_subarrays,
             config.num_vcs,
-            config.topology
+            config.topology,
+            config.buffer_depth
         );
 
         // Initialize each subarray with local data
@@ -83,6 +85,7 @@ public:
         std::cout << "Elements per subarray: " << config.elements_per_subarray << std::endl;
         std::cout << "Total elements: " << (config.num_subarrays * config.elements_per_subarray) << std::endl;
         std::cout << "Virtual Channels: " << config.num_vcs << " VCs" << std::endl;
+        std::cout << "Buffer Depth: " << config.buffer_depth << "d (entries per VC)" << std::endl;
 
         // Topology description
         std::string topo_name;
@@ -293,16 +296,17 @@ private:
 };
 
 int main(int argc, char* argv[]) {
-    if (argc < 5) {
-        std::cerr << "Usage: " << argv[0] << " <num_subarrays> <elements_per_subarray> <topology> <num_vcs>" << std::endl;
+    if (argc < 6) {
+        std::cerr << "Usage: " << argv[0] << " <num_subarrays> <elements_per_subarray> <topology> <num_vcs> <buffer_depth>" << std::endl;
         std::cerr << "  topology: 0 = H-tree bus only (no switches, baseline)" << std::endl;
         std::cerr << "            1 = H-tree with switches" << std::endl;
         std::cerr << "            2 = LIBCom" << std::endl;
-        std::cerr << "Example: " << argv[0] << " 32 1024 0 1   # 32 SA, bus only (baseline), 1 VC" << std::endl;
-        std::cerr << "Example: " << argv[0] << " 32 1024 1 1   # 32 SA, H-tree switches, 1 VC" << std::endl;
-        std::cerr << "Example: " << argv[0] << " 32 1024 1 2   # 32 SA, H-tree switches, 2 VCs" << std::endl;
-        std::cerr << "Example: " << argv[0] << " 32 1024 1 4   # 32 SA, H-tree switches, 4 VCs" << std::endl;
-        std::cerr << "Example: " << argv[0] << " 32 1024 2 1   # 32 SA, LIBCom, 1 VC" << std::endl;
+        std::cerr << "  buffer_depth: 1, 2, or 4 (entries per VC)" << std::endl;
+        std::cerr << "Example: " << argv[0] << " 32 1024 0 1 2   # 32 SA, bus only, 1 VC, 2d buffer" << std::endl;
+        std::cerr << "Example: " << argv[0] << " 32 1024 1 1 2   # 32 SA, H-tree switches, 1 VC, 2d buffer" << std::endl;
+        std::cerr << "Example: " << argv[0] << " 32 1024 1 2 2   # 32 SA, H-tree switches, 2 VCs, 2d buffer" << std::endl;
+        std::cerr << "Example: " << argv[0] << " 32 1024 1 4 4   # 32 SA, H-tree switches, 4 VCs, 4d buffer" << std::endl;
+        std::cerr << "Example: " << argv[0] << " 32 1024 2 1 2   # 32 SA, LIBCom, 1 VC, 2d buffer" << std::endl;
         return 1;
     }
 
@@ -311,6 +315,7 @@ int main(int argc, char* argv[]) {
     config.elements_per_subarray = std::atoi(argv[2]);
     int topology_type = std::atoi(argv[3]);
     config.num_vcs = std::atoi(argv[4]);
+    config.buffer_depth = std::atoi(argv[5]);
 
     if ((config.num_subarrays & (config.num_subarrays - 1)) != 0) {
         std::cerr << "Warning: num_subarrays should be power of 2 for balanced tree" << std::endl;
@@ -318,6 +323,11 @@ int main(int argc, char* argv[]) {
 
     if (config.num_vcs != 1 && config.num_vcs != 2 && config.num_vcs != 4) {
         std::cerr << "Error: num_vcs must be 1, 2, or 4" << std::endl;
+        return 1;
+    }
+
+    if (config.buffer_depth != 1 && config.buffer_depth != 2 && config.buffer_depth != 4) {
+        std::cerr << "Error: buffer_depth must be 1, 2, or 4" << std::endl;
         return 1;
     }
 
@@ -355,6 +365,7 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=== DAC'26 Tree Reduction Benchmark (VC-Aware) ===" << std::endl;
     std::cout << "Configuration: " << config_name << std::endl;
     std::cout << "Virtual Channels: " << config.num_vcs << std::endl;
+    std::cout << "Buffer Depth: " << config.buffer_depth << "d" << std::endl;
 
     ReductionMessageVC workload(config);
     workload.execute();

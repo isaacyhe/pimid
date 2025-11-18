@@ -97,10 +97,11 @@ public:
         LIBCOM            // Direct crossbar with LIBCom switches
     };
 
-    NetworkContentionModel(int num_subarrays, int num_vcs, Topology topo)
+    NetworkContentionModel(int num_subarrays, int num_vcs, Topology topo, int buffer_depth = 2)
         : num_subarrays_(num_subarrays),
           num_vcs_(num_vcs),
           topology_(topo),
+          buffer_depth_(buffer_depth),
           current_cycle_(0) {
 
         initializeNetwork();
@@ -292,12 +293,16 @@ private:
     }
 
     /**
-     * Compute contention penalty based on VCs
+     * Compute contention penalty based on VCs and buffer depth
      *
-     * Key insight:
+     * Key insights:
      * - With 1 VC: Full head-of-line blocking (serialization)
      * - With 2 VCs: 50% reduction in blocking (2 concurrent streams)
      * - With 4 VCs: 75% reduction in blocking (4 concurrent streams)
+     * - With deeper buffers: Can absorb more transient contention
+     *   - 1d (depth): Minimal buffering, immediate blocking
+     *   - 2d (depth): Can absorb 1 extra flit of contention
+     *   - 4d (depth): Can absorb 3 extra flits of contention
      */
     int computeContentionPenalty(const Transfer& new_transfer) {
         int conflicts = 0;
@@ -317,16 +322,19 @@ private:
 
         if (conflicts == 0) return 0;
 
-        // Contention penalty depends on VC count
-        // With K VCs, we can handle K concurrent transfers
-        // Penalty = max(0, conflicts - num_vcs) serialization cycles
+        // Effective concurrency = VCs × buffer_depth
+        // With K VCs and D buffer depth, we can handle K*D concurrent flits
+        int effective_capacity = num_vcs_ * buffer_depth_;
+
+        // Contention penalty depends on VC count AND buffer depth
+        // Penalty = max(0, conflicts - effective_capacity) serialization cycles
 
         int penalty = 0;
-        if (conflicts > num_vcs_) {
+        if (conflicts > effective_capacity) {
             // Some transfers must wait
-            penalty = (conflicts - num_vcs_) * 2;  // 2 cycles per blocked transfer
+            penalty = (conflicts - effective_capacity) * 2;  // 2 cycles per blocked transfer
         } else {
-            // All transfers can proceed concurrently via different VCs
+            // All transfers can proceed concurrently via VCs + buffering
             penalty = 0;
         }
 
@@ -336,6 +344,7 @@ private:
     int num_subarrays_;
     int num_vcs_;
     Topology topology_;
+    int buffer_depth_;    // Buffer depth per VC (in entries)
     int current_cycle_;
 
     std::vector<PhysicalLink> switches_;
