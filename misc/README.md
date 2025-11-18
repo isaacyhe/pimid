@@ -8,14 +8,19 @@ This directory contains audit reports, test results, and test scripts organized 
 Comprehensive audit reports from different phases of development:
 - `PHASE_2_AUDIT_REPORT.md` - Initial audit after Phase 2 features
 - `COMPREHENSIVE_AUDIT_REPORT.md` - Post-reorganization audit (Round 1)
+- `COMPREHENSIVE_AUDIT_REPORT_ADDITIONAL.md` - Additional comprehensive audit
 - `AUDIT_REPORT_2025-11-17_ROUND2.md` - Post-BFS testing audit (Round 2)
+- `AUDIT_REPORT_FINAL.md` - Final audit report
+- `COMPREHENSIVE_AUDIT_AND_STATS.md` - Audit with detailed statistics
+- `AUDIT_SUMMARY.txt` - Concise audit summary
+- `VERIFICATION_SUMMARY.txt` - Verification summary
 
 ### `test_results/`
 BFS (Breadth-First Search) test results across all PIM levels and memory technologies:
 
 **Comprehensive Reports:**
+- `COMPREHENSIVE_BFS_TEST_RESULTS.md` - Complete BFS evaluation (latest) ⭐
 - `BFS_COMPREHENSIVE_TEST_REPORT.md` - Initial BFS test report (previous session)
-- `COMPREHENSIVE_BFS_TEST_RESULTS.md` - Complete BFS evaluation (latest)
 
 **Test Outputs:**
 - `bfs_bank_inorder_results.txt` - Bank-level BFS with in-order core PE
@@ -25,6 +30,7 @@ BFS (Breadth-First Search) test results across all PIM levels and memory technol
 - `test_results_bank.txt` - Older bank-level results
 - `test_results_bank_inorder.txt` - Older bank-level in-order core results
 - `test_pim_granularity_output.txt` - PIM granularity comparison output
+- `bfs_test_execution.log` - BFS test execution log
 - `bfs_comprehensive_results_20251117_211939/` - Comprehensive test run directory
 
 ### `test_scripts/`
@@ -50,8 +56,15 @@ Test automation scripts:
 - ReRAM offers best overall technology (fast, energy-efficient, analog compute)
 - SRAM achieves highest throughput (4 billion edges/sec at subarray level)
 
+## Related Directories
+
+- **../docs/implementation_reports/** - Feature implementation and verification reports
+- **../docs/presentations/** - Conference presentations and papers
+- **../test/** - Test suite including scripts moved from root
+
 ## References
 
 For detailed analysis, see:
-- Latest results: `test_results/COMPREHENSIVE_BFS_TEST_RESULTS.md`
-- Latest audit: `audit_reports/AUDIT_REPORT_2025-11-17_ROUND2.md`
+- Latest BFS results: `test_results/COMPREHENSIVE_BFS_TEST_RESULTS.md` ⭐
+- Latest audit: `audit_reports/AUDIT_REPORT_2025-11-17_ROUND2.md` ⭐
+- Implementation reports: `../docs/implementation_reports/`
