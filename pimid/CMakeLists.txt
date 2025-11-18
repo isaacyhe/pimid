@@ -125,6 +125,7 @@ set(PIMID_SOURCES
     # PIM extensions for Ramulator
     memory_models/src/pim_bandwidth_tracker.cpp
     memory_models/src/internal_dram_network.cpp
+    memory_models/src/internal_memory_network.cpp
     memory_models/src/pim_controller_plugin.cpp
 
     # DRAM architecture specifications

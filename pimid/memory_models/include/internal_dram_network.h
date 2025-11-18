@@ -279,8 +279,17 @@ private:
     uint64_t chip_network_accesses_;
 
     /**
-     * @brief Configure network based on DRAM type
+     * @brief Configure network based on memory type (DRAM and NVM)
      */
+    // SRAM configurations
+    void configureSRAMNetwork();
+
+    // NVM configurations
+    void configureSTTMRAMNetwork();
+    void configurePCMNetwork();
+    void configureReRAMNetwork();
+
+    // DRAM configurations
     void configureDDR3Network();
     void configureDDR4Network();
     void configureDDR5Network();

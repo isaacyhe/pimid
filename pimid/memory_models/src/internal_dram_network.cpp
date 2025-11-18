@@ -45,8 +45,16 @@ void InternalDRAMNetwork::initialize(int num_subarrays_per_bank,
     num_bg_per_chip_ = num_bg_per_chip;
     num_chips_per_rank_ = num_chips_per_rank;
 
-    // Configure network based on DRAM type
-    if (dram_type_ == "DDR3") {
+    // Configure network based on memory type (DRAM and NVM)
+    if (dram_type_ == "SRAM") {
+        configureSRAMNetwork();
+    } else if (dram_type_ == "STT-MRAM" || dram_type_ == "STTMRAM" || dram_type_ == "MRAM") {
+        configureSTTMRAMNetwork();
+    } else if (dram_type_ == "PCM" || dram_type_ == "PRAM") {
+        configurePCMNetwork();
+    } else if (dram_type_ == "ReRAM" || dram_type_ == "RERAM") {
+        configureReRAMNetwork();
+    } else if (dram_type_ == "DDR3") {
         configureDDR3Network();
     } else if (dram_type_ == "DDR4" || dram_type_ == "DDR4-RVRR" || dram_type_ == "DDR4-VRR") {
         configureDDR4Network();
@@ -63,7 +71,7 @@ void InternalDRAMNetwork::initialize(int num_subarrays_per_bank,
     } else if (dram_type_ == "HBM3") {
         configureHBM3Network();
     } else {
-        std::cerr << "WARNING: Unknown DRAM type " << dram_type_
+        std::cerr << "WARNING: Unknown memory type " << dram_type_
                   << ", using DDR4 defaults\n";
         configureDDR4Network();
     }
@@ -347,6 +355,173 @@ void InternalDRAMNetwork::configureGDDR6Network() {
         (chip_network_config_.link_width_bits / 8.0) *
         chip_network_config_.frequency_GHz;
     chip_network_config_.latency_cycles = 20;        // On-board traces
+    chip_network_config_.topology = "point-to-point";
+}
+
+//=============================================================================
+// Non-Volatile Memory (NVM) Configurations
+//=============================================================================
+
+void InternalDRAMNetwork::configureSRAMNetwork() {
+    // SRAM: On-chip memory with very fast, wide interconnects
+
+    // Subarray network: Very wide on-chip buses
+    subarray_network_config_.link_width_bits = 128;  // Wide on-chip paths
+    subarray_network_config_.frequency_GHz = 2.5;    // High frequency on-chip
+    subarray_network_config_.bandwidth_GBs =
+        (subarray_network_config_.link_width_bits / 8.0) *
+        subarray_network_config_.frequency_GHz;
+    subarray_network_config_.latency_cycles = 1;     // Very low latency
+    subarray_network_config_.topology = "crossbar";
+
+    // Bank network: Still on-chip, fast
+    bank_network_config_.link_width_bits = 64;       // 64-bit on-chip
+    bank_network_config_.frequency_GHz = 2.5;
+    bank_network_config_.bandwidth_GBs =
+        (bank_network_config_.link_width_bits / 8.0) *
+        bank_network_config_.frequency_GHz;
+    bank_network_config_.latency_cycles = 2;         // Fast on-chip
+    bank_network_config_.topology = "crossbar";
+
+    // Bank group network: On-chip crossbar
+    bg_network_config_.link_width_bits = 64;
+    bg_network_config_.frequency_GHz = 2.5;
+    bg_network_config_.bandwidth_GBs =
+        (bg_network_config_.link_width_bits / 8.0) *
+        bg_network_config_.frequency_GHz;
+    bg_network_config_.latency_cycles = 3;
+    bg_network_config_.topology = "crossbar";
+
+    // Chip network: On-chip, very fast
+    chip_network_config_.link_width_bits = 32;
+    chip_network_config_.frequency_GHz = 2.5;
+    chip_network_config_.bandwidth_GBs =
+        (chip_network_config_.link_width_bits / 8.0) *
+        chip_network_config_.frequency_GHz;
+    chip_network_config_.latency_cycles = 4;
+    chip_network_config_.topology = "crossbar";
+}
+
+void InternalDRAMNetwork::configureSTTMRAMNetwork() {
+    // STT-MRAM: Non-volatile with asymmetric read/write
+    // Write latency >> read latency due to MTJ switching
+
+    // Subarray network: Moderate width
+    subarray_network_config_.link_width_bits = 64;   // Moderate width
+    subarray_network_config_.frequency_GHz = 1.5;    // STT-MRAM frequency
+    subarray_network_config_.bandwidth_GBs =
+        (subarray_network_config_.link_width_bits / 8.0) *
+        subarray_network_config_.frequency_GHz;
+    subarray_network_config_.latency_cycles = 3;     // Read latency
+    subarray_network_config_.topology = "crossbar";
+
+    // Bank network: Similar to DRAM but with NVM characteristics
+    bank_network_config_.link_width_bits = 16;       // 16-bit paths
+    bank_network_config_.frequency_GHz = 1.5;
+    bank_network_config_.bandwidth_GBs =
+        (bank_network_config_.link_width_bits / 8.0) *
+        bank_network_config_.frequency_GHz;
+    bank_network_config_.latency_cycles = 6;         // Moderate latency
+    bank_network_config_.topology = "bus";
+
+    // Bank group network
+    bg_network_config_.link_width_bits = 32;
+    bg_network_config_.frequency_GHz = 1.5;
+    bg_network_config_.bandwidth_GBs =
+        (bg_network_config_.link_width_bits / 8.0) *
+        bg_network_config_.frequency_GHz;
+    bg_network_config_.latency_cycles = 12;
+    bg_network_config_.topology = "bus";
+
+    // Chip network
+    chip_network_config_.link_width_bits = 16;
+    chip_network_config_.frequency_GHz = 1.5;
+    chip_network_config_.bandwidth_GBs =
+        (chip_network_config_.link_width_bits / 8.0) *
+        chip_network_config_.frequency_GHz;
+    chip_network_config_.latency_cycles = 25;
+    chip_network_config_.topology = "point-to-point";
+}
+
+void InternalDRAMNetwork::configurePCMNetwork() {
+    // PCM: Phase Change Memory with high write latency
+    // Write >> Read due to crystallization/amorphization
+
+    // Subarray network: Moderate width
+    subarray_network_config_.link_width_bits = 64;   // Moderate width
+    subarray_network_config_.frequency_GHz = 1.2;    // PCM frequency
+    subarray_network_config_.bandwidth_GBs =
+        (subarray_network_config_.link_width_bits / 8.0) *
+        subarray_network_config_.frequency_GHz;
+    subarray_network_config_.latency_cycles = 4;     // Read latency
+    subarray_network_config_.topology = "crossbar";
+
+    // Bank network: Similar organization to DRAM
+    bank_network_config_.link_width_bits = 16;       // 16-bit paths
+    bank_network_config_.frequency_GHz = 1.2;
+    bank_network_config_.bandwidth_GBs =
+        (bank_network_config_.link_width_bits / 8.0) *
+        bank_network_config_.frequency_GHz;
+    bank_network_config_.latency_cycles = 8;         // Moderate latency
+    bank_network_config_.topology = "bus";
+
+    // Bank group network
+    bg_network_config_.link_width_bits = 32;
+    bg_network_config_.frequency_GHz = 1.2;
+    bg_network_config_.bandwidth_GBs =
+        (bg_network_config_.link_width_bits / 8.0) *
+        bg_network_config_.frequency_GHz;
+    bg_network_config_.latency_cycles = 16;
+    bg_network_config_.topology = "bus";
+
+    // Chip network
+    chip_network_config_.link_width_bits = 16;
+    chip_network_config_.frequency_GHz = 1.2;
+    chip_network_config_.bandwidth_GBs =
+        (chip_network_config_.link_width_bits / 8.0) *
+        chip_network_config_.frequency_GHz;
+    chip_network_config_.latency_cycles = 32;
+    chip_network_config_.topology = "point-to-point";
+}
+
+void InternalDRAMNetwork::configureReRAMNetwork() {
+    // ReRAM: Resistive RAM with moderate asymmetry
+    // Faster writes than PCM, but still slower than reads
+
+    // Subarray network: Moderate width
+    subarray_network_config_.link_width_bits = 64;   // Moderate width
+    subarray_network_config_.frequency_GHz = 1.4;    // ReRAM frequency
+    subarray_network_config_.bandwidth_GBs =
+        (subarray_network_config_.link_width_bits / 8.0) *
+        subarray_network_config_.frequency_GHz;
+    subarray_network_config_.latency_cycles = 3;     // Good read latency
+    subarray_network_config_.topology = "crossbar";
+
+    // Bank network: Similar to STT-MRAM
+    bank_network_config_.link_width_bits = 16;       // 16-bit paths
+    bank_network_config_.frequency_GHz = 1.4;
+    bank_network_config_.bandwidth_GBs =
+        (bank_network_config_.link_width_bits / 8.0) *
+        bank_network_config_.frequency_GHz;
+    bank_network_config_.latency_cycles = 7;         // Moderate latency
+    bank_network_config_.topology = "bus";
+
+    // Bank group network
+    bg_network_config_.link_width_bits = 32;
+    bg_network_config_.frequency_GHz = 1.4;
+    bg_network_config_.bandwidth_GBs =
+        (bg_network_config_.link_width_bits / 8.0) *
+        bg_network_config_.frequency_GHz;
+    bg_network_config_.latency_cycles = 14;
+    bg_network_config_.topology = "bus";
+
+    // Chip network
+    chip_network_config_.link_width_bits = 16;
+    chip_network_config_.frequency_GHz = 1.4;
+    chip_network_config_.bandwidth_GBs =
+        (chip_network_config_.link_width_bits / 8.0) *
+        chip_network_config_.frequency_GHz;
+    chip_network_config_.latency_cycles = 28;
     chip_network_config_.topology = "point-to-point";
 }
 
