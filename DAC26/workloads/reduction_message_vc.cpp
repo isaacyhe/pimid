@@ -83,7 +83,17 @@ public:
         std::cout << "Elements per subarray: " << config.elements_per_subarray << std::endl;
         std::cout << "Total elements: " << (config.num_subarrays * config.elements_per_subarray) << std::endl;
         std::cout << "Virtual Channels: " << config.num_vcs << " VCs" << std::endl;
-        std::cout << "Topology: " << (config.topology == NetworkContentionModel::Topology::H_TREE ? "H-tree" : "LIBCom") << std::endl;
+
+        // Topology description
+        std::string topo_name;
+        if (config.topology == NetworkContentionModel::Topology::H_TREE_BUS_ONLY) {
+            topo_name = "H-tree Bus Only (No Switches)";
+        } else if (config.topology == NetworkContentionModel::Topology::H_TREE) {
+            topo_name = "H-tree with Switches";
+        } else {
+            topo_name = "LIBCom";
+        }
+        std::cout << "Topology: " << topo_name << std::endl;
         std::cout << "Base copy latency: " << config.copy_latency << " cycles" << std::endl;
 
         // H-tree switches info
@@ -93,6 +103,9 @@ public:
                       << " (" << config.num_subarrays << " - 1)" << std::endl;
             std::cout << "Control overhead: " << (num_switches * 2)
                       << " bits (" << num_switches << " switches × 2-bit control)" << std::endl;
+        } else if (config.topology == NetworkContentionModel::Topology::H_TREE_BUS_ONLY) {
+            std::cout << "Architecture: Traditional H-tree bus (all transfers through central port)" << std::endl;
+            std::cout << "No switches: ALUs at subarrays only, no routing logic" << std::endl;
         }
 
         performTreeReduction();
@@ -281,18 +294,22 @@ private:
 
 int main(int argc, char* argv[]) {
     if (argc < 5) {
-        std::cerr << "Usage: " << argv[0] << " <num_subarrays> <elements_per_subarray> <is_libcom> <num_vcs>" << std::endl;
-        std::cerr << "Example: " << argv[0] << " 32 1024 0 1   # 32 SA, baseline H-tree, 1 VC" << std::endl;
-        std::cerr << "Example: " << argv[0] << " 32 1024 0 2   # 32 SA, baseline H-tree, 2 VCs" << std::endl;
-        std::cerr << "Example: " << argv[0] << " 32 1024 0 4   # 32 SA, baseline H-tree, 4 VCs" << std::endl;
-        std::cerr << "Example: " << argv[0] << " 32 1024 1 1   # 32 SA, LIBCom, 1 VC" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <num_subarrays> <elements_per_subarray> <topology> <num_vcs>" << std::endl;
+        std::cerr << "  topology: 0 = H-tree bus only (no switches, baseline)" << std::endl;
+        std::cerr << "            1 = H-tree with switches" << std::endl;
+        std::cerr << "            2 = LIBCom" << std::endl;
+        std::cerr << "Example: " << argv[0] << " 32 1024 0 1   # 32 SA, bus only (baseline), 1 VC" << std::endl;
+        std::cerr << "Example: " << argv[0] << " 32 1024 1 1   # 32 SA, H-tree switches, 1 VC" << std::endl;
+        std::cerr << "Example: " << argv[0] << " 32 1024 1 2   # 32 SA, H-tree switches, 2 VCs" << std::endl;
+        std::cerr << "Example: " << argv[0] << " 32 1024 1 4   # 32 SA, H-tree switches, 4 VCs" << std::endl;
+        std::cerr << "Example: " << argv[0] << " 32 1024 2 1   # 32 SA, LIBCom, 1 VC" << std::endl;
         return 1;
     }
 
     ReductionConfig config;
     config.num_subarrays = std::atoi(argv[1]);
     config.elements_per_subarray = std::atoi(argv[2]);
-    bool is_libcom = (std::atoi(argv[3]) == 1);
+    int topology_type = std::atoi(argv[3]);
     config.num_vcs = std::atoi(argv[4]);
 
     if ((config.num_subarrays & (config.num_subarrays - 1)) != 0) {
@@ -304,23 +321,39 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    if (topology_type < 0 || topology_type > 2) {
+        std::cerr << "Error: topology must be 0 (bus only), 1 (H-tree switches), or 2 (LIBCom)" << std::endl;
+        return 1;
+    }
+
     config.read_latency = 1;
     config.write_latency = 1;
     config.compute_latency = 1;
 
-    if (is_libcom) {
-        config.copy_latency = 1;
-        config.topology = NetworkContentionModel::Topology::LIBCOM;
-    } else {
-        int htree_latency = 0;
-        int n = config.num_subarrays;
-        while (n > 1) { htree_latency++; n >>= 1; }
+    int htree_latency = 0;
+    int n = config.num_subarrays;
+    while (n > 1) { htree_latency++; n >>= 1; }
+
+    std::string config_name;
+    if (topology_type == 0) {
+        // Traditional H-tree bus: All through central port (2× tree height)
+        config.copy_latency = 2 + (2 * htree_latency);
+        config.topology = NetworkContentionModel::Topology::H_TREE_BUS_ONLY;
+        config_name = "H-tree Bus Only (No Switches - Baseline)";
+    } else if (topology_type == 1) {
+        // H-tree with switches
         config.copy_latency = 2 + htree_latency;
         config.topology = NetworkContentionModel::Topology::H_TREE;
+        config_name = "H-tree with Switches";
+    } else {
+        // LIBCom
+        config.copy_latency = 1;
+        config.topology = NetworkContentionModel::Topology::LIBCOM;
+        config_name = "LIBCom";
     }
 
     std::cout << "\n=== DAC'26 Tree Reduction Benchmark (VC-Aware) ===" << std::endl;
-    std::cout << "Configuration: " << (is_libcom ? "LIBCom" : "Baseline H-tree") << std::endl;
+    std::cout << "Configuration: " << config_name << std::endl;
     std::cout << "Virtual Channels: " << config.num_vcs << std::endl;
 
     ReductionMessageVC workload(config);

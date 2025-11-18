@@ -1,0 +1,236 @@
+=========================================
+DAC'26 Baseline Topology Comparison
+=========================================
+Timestamp: Tue Nov 18 22:55:48 UTC 2025
+
+=========================================
+BANK 3: 128KB with 32 Subarrays
+Critical Test Case for Topology Comparison
+=========================================
+
+=========================================
+Bank: Bank3-128KB | Topology: H-tree Bus Only (Baseline) | VCs: 1
+=========================================
+
+=== DAC'26 Tree Reduction Benchmark (VC-Aware) ===
+Configuration: H-tree Bus Only (No Switches - Baseline)
+Virtual Channels: 1
+
+=== Tree Reduction with Virtual Channels ===
+Subarrays: 32
+Elements per subarray: 1024
+Total elements: 32768
+Virtual Channels: 1 VCs
+Topology: H-tree Bus Only (No Switches)
+Base copy latency: 12 cycles
+Architecture: Traditional H-tree bus (all transfers through central port)
+No switches: ALUs at subarrays only, no routing logic
+
+=== Reduction Tree ===
+Number of levels: 5
+
+Level 1:
+  Concurrent transfers: 16
+  Level completion cycle: 1064
+  Active subarrays remaining: 16
+  Contention blocked cycles: 210
+
+Level 2:
+  Concurrent transfers: 8
+  Level completion cycle: 2144
+  Active subarrays remaining: 8
+  Contention blocked cycles: 506
+
+Level 3:
+  Concurrent transfers: 4
+  Level completion cycle: 3232
+  Active subarrays remaining: 4
+  Contention blocked cycles: 702
+
+Level 4:
+  Concurrent transfers: 2
+  Level completion cycle: 4324
+  Active subarrays remaining: 2
+  Contention blocked cycles: 812
+
+Level 5:
+  Concurrent transfers: 1
+  Level completion cycle: 5418
+  Active subarrays remaining: 1
+  Contention blocked cycles: 870
+
+✓ Reduction complete - final result in subarray 0
+
+=== Reduction Results (with Virtual Channels) ===
+
+Timing:
+  Total cycles: 5418
+  Compute cycles: 31744 (585.9%)
+  Transfer cycles (actual): 1242 (22.9%)
+  Transfer cycles (base): 372
+  Contention overhead: 870 cycles (16.1%)
+
+Virtual Channel Impact:
+  VCs configured: 1
+  Blocked cycles (VC): 870
+  Avg contention level: 28.06
+
+Communication:
+  Inter-subarray transfers: 31
+  Elements transferred: 31744
+  H-tree traversals (Baseline): 31
+
+Energy:
+  Total energy (relative): 31744.00
+  Avg energy per transfer: 1024.00
+
+Validation:
+  Expected tree levels: 5
+  Expected transfers: 31
+  Actual transfers: 31
+  Expected final sum: 32768.00
+  Actual final sum: 32768.00
+  ✓ Reduction validated
+
+
+=========================================
+Bank: Bank3-128KB | Topology: H-tree with Switches (31 switches) | VCs: 1
+=========================================
+
+=== DAC'26 Tree Reduction Benchmark (VC-Aware) ===
+Configuration: H-tree with Switches
+Virtual Channels: 1
+
+=== Tree Reduction with Virtual Channels ===
+Subarrays: 32
+Elements per subarray: 1024
+Total elements: 32768
+Virtual Channels: 1 VCs
+Topology: H-tree with Switches
+Base copy latency: 7 cycles
+H-tree switches: 31 (32 - 1)
+Control overhead: 62 bits (31 switches × 2-bit control)
+
+=== Reduction Tree ===
+Number of levels: 5
+
+Level 1:
+  Concurrent transfers: 16
+  Level completion cycle: 1059
+  Active subarrays remaining: 16
+  Contention blocked cycles: 210
+
+Level 2:
+  Concurrent transfers: 8
+  Level completion cycle: 2134
+  Active subarrays remaining: 8
+  Contention blocked cycles: 506
+
+Level 3:
+  Concurrent transfers: 4
+  Level completion cycle: 3217
+  Active subarrays remaining: 4
+  Contention blocked cycles: 702
+
+Level 4:
+  Concurrent transfers: 2
+  Level completion cycle: 4304
+  Active subarrays remaining: 2
+  Contention blocked cycles: 812
+
+Level 5:
+  Concurrent transfers: 1
+  Level completion cycle: 5393
+  Active subarrays remaining: 1
+  Contention blocked cycles: 870
+
+✓ Reduction complete - final result in subarray 0
+
+=== Reduction Results (with Virtual Channels) ===
+
+Timing:
+  Total cycles: 5393
+  Compute cycles: 31744 (588.6%)
+  Transfer cycles (actual): 1087 (20.2%)
+  Transfer cycles (base): 217
+  Contention overhead: 870 cycles (16.1%)
+
+Virtual Channel Impact:
+  VCs configured: 1
+  Blocked cycles (VC): 870
+  Avg contention level: 28.06
+
+Communication:
+  Inter-subarray transfers: 31
+  Elements transferred: 31744
+  H-tree traversals (Baseline): 31
+
+Energy:
+  Total energy (relative): 31744.00
+  Avg energy per transfer: 1024.00
+
+Validation:
+  Expected tree levels: 5
+  Expected transfers: 31
+  Actual transfers: 31
+  Expected final sum: 32768.00
+  Actual final sum: 32768.00
+  ✓ Reduction validated
+
+
+=========================================
+Bank: Bank3-128KB | Topology: H-tree with Switches (31 switches, 2 VCs) | VCs: 2
+=========================================
+
+=== DAC'26 Tree Reduction Benchmark (VC-Aware) ===
+Configuration: H-tree with Switches
+Virtual Channels: 2
+
+=== Tree Reduction with Virtual Channels ===
+Subarrays: 32
+Elements per subarray: 1024
+Total elements: 32768
+Virtual Channels: 2 VCs
+Topology: H-tree with Switches
+Base copy latency: 7 cycles
+H-tree switches: 31 (32 - 1)
+Control overhead: 62 bits (31 switches × 2-bit control)
+
+=== Reduction Tree ===
+Number of levels: 5
+
+Level 1:
+  Concurrent transfers: 16
+  Level completion cycle: 1057
+  Active subarrays remaining: 16
+  Contention blocked cycles: 182
+
+Level 2:
+  Concurrent transfers: 8
+  Level completion cycle: 2130
+  Active subarrays remaining: 8
+  Contention blocked cycles: 462
+
+Level 3:
+  Concurrent transfers: 4
+  Level completion cycle: 3211
+  Active subarrays remaining: 4
+  Contention blocked cycles: 650
+
+Level 4:
+  Concurrent transfers: 2
+  Level completion cycle: 4296
+  Active subarrays remaining: 2
+  Contention blocked cycles: 756
+
+Level 5:
+  Concurrent transfers: 1
+  Level completion cycle: 5383
+  Active subarrays remaining: 1
+  Contention blocked cycles: 812
+
+✓ Reduction complete - final result in subarray 0
+
+=== Reduction Results (with Virtual Channels) ===
+
+Timing:

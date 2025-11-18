@@ -92,8 +92,9 @@ struct PhysicalLink {
 class NetworkContentionModel {
 public:
     enum class Topology {
-        H_TREE,
-        LIBCOM
+        H_TREE_BUS_ONLY,  // Traditional H-tree: all transfers through central port (no switches)
+        H_TREE,           // H-tree with switches at each node
+        LIBCOM            // Direct crossbar with LIBCom switches
     };
 
     NetworkContentionModel(int num_subarrays, int num_vcs, Topology topo)
@@ -172,8 +173,12 @@ public:
             total_contention += pair.second;
         }
 
-        int num_switches = (topology_ == Topology::H_TREE) ?
-                           (num_subarrays_ - 1) : 0;
+        int num_switches = 0;
+        if (topology_ == Topology::H_TREE) {
+            num_switches = num_subarrays_ - 1;
+        } else if (topology_ == Topology::H_TREE_BUS_ONLY) {
+            num_switches = 1;  // Central port only
+        }
 
         return num_switches > 0 ? total_contention / num_switches : 0.0;
     }
@@ -248,8 +253,29 @@ private:
             return 1;
         }
 
-        // H-tree: Base latency = log2(N) + 2 (subarray accesses)
         int tree_height = static_cast<int>(std::ceil(std::log2(num_subarrays_)));
+
+        if (topology_ == Topology::H_TREE_BUS_ONLY) {
+            // Traditional H-tree: All transfers must go through central port
+            // Path: src → up to root → down to dst
+            // Latency: 2 × tree_height + 2 (subarray accesses)
+            int base_latency = 2 * tree_height + 2;
+
+            // ALL transfers go through the central port (massive contention)
+            // Mark this with a special switch path to the root
+            t.switch_path = {0};  // Central port bottleneck
+
+            // Check for contention at central port
+            int contention_penalty = computeContentionPenalty(t);
+
+            total_transfers_++;
+            total_contention_sum_ += contention_penalty;
+            blocked_cycles_ += contention_penalty;
+
+            return base_latency + contention_penalty;
+        }
+
+        // H-tree with switches: Base latency = log2(N) + 2 (subarray accesses)
         int base_latency = tree_height + 2;
 
         // Compute switch path
