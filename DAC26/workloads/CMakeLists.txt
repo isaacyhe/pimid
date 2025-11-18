@@ -32,6 +32,9 @@ add_executable(spmv_shared spmv_shared.cpp)
 add_executable(reduction_message reduction_message.cpp)
 add_executable(reduction_shared reduction_shared.cpp)
 
+# Reduction with Virtual Channel support (VC-aware)
+add_executable(reduction_message_vc reduction_message_vc.cpp)
+
 # Histogram - Message Passing and Shared Memory
 add_executable(histogram_message histogram_message.cpp)
 add_executable(histogram_shared histogram_shared.cpp)
