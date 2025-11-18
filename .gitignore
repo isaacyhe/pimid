@@ -43,6 +43,12 @@ test/benchmarks/workloads/bfs/bfs_pimid_omp
 # Test configuration files
 test/benchmarks/workloads/*/test_config.yaml
 
+# DAC26 compiled workload binaries
+DAC26/workloads/*_shared
+DAC26/workloads/*_message
+DAC26/workloads/*_message_vc
+DAC26/workloads/*_workload
+
 # Compiled executables
 *.o
 *.exe

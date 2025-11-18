@@ -1,0 +1,92 @@
+# Bank 3: 128KB with 32 Subarrays - H-tree with 2 Virtual Channels
+# DAC'26 Evaluation: Impact of Virtual Channels on H-tree performance
+
+memory:
+  type: "SRAM"
+  organization:
+    capacity: 131072       # 128 KB
+    num_banks: 1
+    num_subarrays: 32      # 32 × 4KB subarrays
+    num_bank_groups: 1
+    num_chips: 1
+
+    subarray_size_bytes: 4096      # 4 KB
+    words_per_subarray: 1024       # 1024 × 32-bit words
+    word_size_bits: 32
+
+  timing:
+    access_latency_cycles: 1       # Subarray access: 1 cycle
+    clock_frequency_mhz: 500       # 500 MHz
+    cycle_time_ns: 2               # 2 ns per cycle
+
+  technology:
+    node_nm: 22
+    line_size: 32
+
+# Network Configuration: H-tree with 2 VCs
+network:
+  topology: "H_TREE"
+  model: "GARNET"
+
+  # H-tree parameters
+  num_switches: 31                 # 32 subarrays → 31 switches
+  htree_latency_cycles: 5          # log₂(32) = 5 cycles
+  control_overhead_bits: 62        # 31 switches × 2-bit control
+
+  # Virtual Networks and Channels
+  virtual_networks: 2              # VN0: Read, VN1: Write
+  virtual_channels_per_vn: 2       # 2 VCs per VN (reduces head-of-line blocking)
+
+  # Router configuration
+  router_pipeline: "MINIMAL"
+  router_latency: 1
+  enable_router_bypass: true
+
+  # Buffer configuration
+  input_buffer_depth: 4           # 2× depth for 2 VCs
+  output_buffer_depth: 4
+
+  # Link parameters
+  subarray_network:
+    link_width_bits: 128          # Wide on-chip paths
+    frequency_GHz: 0.5            # 500 MHz
+    latency_cycles: 5             # H-tree latency
+
+# Operations Configuration
+operations:
+  read:
+    latency_cycles: 1
+    energy_relative: 1.0
+
+  write:
+    latency_cycles: 1
+    energy_relative: 1.0
+
+  # Inter-subarray operations
+  copy:
+    latency_cycles: 7             # 2× subarray (2) + H-tree (5)
+    energy_relative: 1.0
+    description: "Read + H-tree + Write"
+    contention_reduction: 0.067   # 6.7% reduction with 2 VCs (from simulation)
+
+  move:
+    latency_cycles: 7
+    energy_relative: 1.0
+    description: "Read + H-tree + Write"
+    contention_reduction: 0.067
+
+# Virtual Channel Benefits (from simulation)
+vc_analysis:
+  blocked_cycles_1vc: 870          # Baseline with 1 VC
+  blocked_cycles_2vc: 812          # With 2 VCs
+  blocked_cycles_4vc: 702          # With 4 VCs
+  improvement_2vc: "6.7% reduction in blocking"
+  improvement_4vc: "19.3% reduction in blocking"
+
+# Metrics
+metrics:
+  track_htree_traversals: true
+  track_intersubarray_comm: true
+  track_energy: true
+  track_cycles: true
+  track_vc_contention: true
