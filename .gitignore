@@ -17,7 +17,8 @@ cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
-Makefile
+**/build/Makefile
+**/cmake_build/Makefile
 
 # IDE
 .vscode/
