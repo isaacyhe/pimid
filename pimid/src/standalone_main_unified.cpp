@@ -144,9 +144,11 @@ public:
         std::cout << "\nDevice -> Host:" << std::endl;
         std::cout << "  Total bytes: " << total_d2h_bytes << std::endl;
         std::cout << "  Total time: " << total_d2h_time_ns / 1000.0 << " us" << std::endl;
-        if (total_d2h_time_ns > 0) {
+        if (total_d2h_time_ns > 0 && total_d2h_bytes > 0) {
             double bandwidth = (total_d2h_bytes / (1024.0 * 1024.0)) / (total_d2h_time_ns / 1e9);
             std::cout << "  Bandwidth: " << bandwidth << " MB/s" << std::endl;
+        } else if (total_d2h_bytes == 0) {
+            std::cout << "  Bandwidth: N/A (no data transferred)" << std::endl;
         }
     }
 
@@ -180,8 +182,12 @@ void vectorAdd(const float* a, const float* b, float* c, size_t n) {
     auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
     std::cout << "[PIM Kernel] Computation completed in " << duration.count() << " us" << std::endl;
-    std::cout << "[PIM Kernel] Throughput: " << (n / (duration.count() / 1e6)) / 1e6
-              << " M ops/sec" << std::endl;
+    if (n > 0 && duration.count() > 0) {
+        std::cout << "[PIM Kernel] Throughput: " << (n / (duration.count() / 1e6)) / 1e6
+                  << " M ops/sec" << std::endl;
+    } else {
+        std::cout << "[PIM Kernel] Throughput: N/A (empty array)" << std::endl;
+    }
 }
 
 } // namespace CoSim
