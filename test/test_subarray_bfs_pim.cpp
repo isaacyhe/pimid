@@ -208,9 +208,13 @@ private:
             return reram->getSubarrayReadLatency();
         } else if (auto dram = std::dynamic_pointer_cast<DRAMModel>(model_)) {
             // DRAM subarray read = tRCD + tCAS (simplified)
-            return 13.32;  // ns (DDR4-2400)
+            // DDR4-2400: tRCD=17 cycles @ 1.2GHz = 14.17ns, tCAS=17 cycles = 14.17ns
+            // Simplified model uses effective latency
+            const double DDR4_2400_SUBARRAY_READ_NS = 13.32;  // ns (DDR4-2400)
+            return DDR4_2400_SUBARRAY_READ_NS;
         }
-        return 10.0;
+        const double DEFAULT_SUBARRAY_READ_NS = 10.0;
+        return DEFAULT_SUBARRAY_READ_NS;
     }
 
     double getSubarrayWriteLatency() {
@@ -224,9 +228,12 @@ private:
             return reram->getSubarrayWriteLatency();
         } else if (auto dram = std::dynamic_pointer_cast<DRAMModel>(model_)) {
             // DRAM write = tRCD + tCAS + tWR (simplified)
-            return 15.0;  // ns
+            // DDR4-2400: tWR=15 cycles @ 1.2GHz = 12.5ns
+            const double DDR4_2400_SUBARRAY_WRITE_NS = 15.0;  // ns
+            return DDR4_2400_SUBARRAY_WRITE_NS;
         }
-        return 10.0;
+        const double DEFAULT_SUBARRAY_WRITE_NS = 10.0;
+        return DEFAULT_SUBARRAY_WRITE_NS;
     }
 };
 

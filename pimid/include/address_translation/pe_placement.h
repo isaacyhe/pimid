@@ -45,13 +45,13 @@ struct MemoryHierarchy {
  */
 struct PEBusConstraints {
     uint64_t data_bus_width_bits;      // Width of data bus in bits
-    uint64_t max_bandwidth_gbps;        // Maximum bandwidth in GB/s
+    double max_bandwidth_gbps;          // Maximum bandwidth in GB/s
     uint64_t row_buffer_size_bytes;     // Row buffer size (for subarray level)
     uint32_t shared_bus_pes;            // Number of PEs sharing this bus
     bool has_dedicated_bus;             // True if PE has dedicated data path
 
     // Default constructor - values should be overridden from DRAM architecture
-    PEBusConstraints() : data_bus_width_bits(0), max_bandwidth_gbps(0),
+    PEBusConstraints() : data_bus_width_bits(0), max_bandwidth_gbps(0.0),
                          row_buffer_size_bytes(0), shared_bus_pes(1),
                          has_dedicated_bus(false) {}
 };

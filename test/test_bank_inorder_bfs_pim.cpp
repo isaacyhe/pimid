@@ -284,9 +284,12 @@ private:
         } else if (auto reram = std::dynamic_pointer_cast<ReRAMModel>(model_)) {
             return reram->getSubarrayReadLatency();
         } else if (auto dram = std::dynamic_pointer_cast<DRAMModel>(model_)) {
-            return 13.32;  // DDR4
+            // DDR4-2400: tRCD + tCAS = effective read latency
+            const double DDR4_2400_SUBARRAY_READ_NS = 13.32;  // ns
+            return DDR4_2400_SUBARRAY_READ_NS;
         }
-        return 10.0;
+        const double DEFAULT_SUBARRAY_READ_NS = 10.0;
+        return DEFAULT_SUBARRAY_READ_NS;
     }
 
     double getSubarrayWriteLatency() {
@@ -299,9 +302,12 @@ private:
         } else if (auto reram = std::dynamic_pointer_cast<ReRAMModel>(model_)) {
             return reram->getSubarrayWriteLatency();
         } else if (auto dram = std::dynamic_pointer_cast<DRAMModel>(model_)) {
-            return 15.0;  // DDR4
+            // DDR4-2400: Write latency including tWR
+            const double DDR4_2400_SUBARRAY_WRITE_NS = 15.0;  // ns
+            return DDR4_2400_SUBARRAY_WRITE_NS;
         }
-        return 10.0;
+        const double DEFAULT_SUBARRAY_WRITE_NS = 10.0;
+        return DEFAULT_SUBARRAY_WRITE_NS;
     }
 
     double getInnerBankDatapath() {
@@ -314,9 +320,12 @@ private:
         } else if (auto reram = std::dynamic_pointer_cast<ReRAMModel>(model_)) {
             return reram->getInnerBankReadLatency();
         } else if (auto dram = std::dynamic_pointer_cast<DRAMModel>(model_)) {
-            return 6.65;  // DDR4 H-tree + global I/O
+            // DDR4-2400: H-tree + global I/O latency
+            const double DDR4_2400_INNER_BANK_NS = 6.65;  // ns
+            return DDR4_2400_INNER_BANK_NS;
         }
-        return 5.0;
+        const double DEFAULT_INNER_BANK_NS = 5.0;
+        return DEFAULT_INNER_BANK_NS;
     }
 };
 

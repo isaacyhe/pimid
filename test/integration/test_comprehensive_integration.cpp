@@ -152,7 +152,7 @@ int main(int argc, char** argv) {
     std::cout << "PIMID Comprehensive Integration Tests" << std::endl;
     std::cout << "========================================" << std::endl;
 
-    std::string config_file = "config/memory_config.yaml";
+    std::string config_file = "../../../config/memory_config.yaml";
     if (argc > 1) {
         config_file = argv[1];
     }

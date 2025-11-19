@@ -213,24 +213,24 @@ int main() {
     // All should have: VN=2, VC_per_VN=1, router_pipeline=MINIMAL
     std::vector<DRAMConfigTest> test_cases = {
         // DDR Family
-        {"DDR3", "../pimid/configs/dram/ddr3_htree.yaml", 16, 4, 2, 8, 2, 1, "MINIMAL", 1, 2, 2},
-        {"DDR4", "../pimid/configs/dram/ddr4_htree.yaml", 16, 4, 4, 8, 2, 1, "MINIMAL", 1, 2, 2},
-        {"DDR4-RVRR", "../pimid/configs/dram/ddr4_rvrr_htree.yaml", 16, 4, 4, 8, 2, 1, "MINIMAL", 1, 2, 2},
-        {"DDR4-VRR", "../pimid/configs/dram/ddr4_vrr_htree.yaml", 16, 4, 4, 8, 2, 1, "MINIMAL", 1, 2, 2},
-        {"DDR5", "../pimid/configs/dram/ddr5_htree.yaml", 32, 4, 8, 8, 2, 1, "MINIMAL", 1, 2, 2},
-        {"DDR5-RVRR", "../pimid/configs/dram/ddr5_rvrr_htree.yaml", 32, 4, 8, 8, 2, 1, "MINIMAL", 1, 2, 2},
-        {"DDR5-VRR", "../pimid/configs/dram/ddr5_vrr_htree.yaml", 32, 4, 8, 8, 2, 1, "MINIMAL", 1, 2, 2},
+        {"DDR3", "../../pimid/configs/dram/ddr3_htree.yaml", 16, 4, 2, 8, 2, 1, "MINIMAL", 1, 2, 2},
+        {"DDR4", "../../pimid/configs/dram/ddr4_htree.yaml", 16, 4, 4, 8, 2, 1, "MINIMAL", 1, 2, 2},
+        {"DDR4-RVRR", "../../pimid/configs/dram/ddr4_rvrr_htree.yaml", 16, 4, 4, 8, 2, 1, "MINIMAL", 1, 2, 2},
+        {"DDR4-VRR", "../../pimid/configs/dram/ddr4_vrr_htree.yaml", 16, 4, 4, 8, 2, 1, "MINIMAL", 1, 2, 2},
+        {"DDR5", "../../pimid/configs/dram/ddr5_htree.yaml", 32, 4, 8, 8, 2, 1, "MINIMAL", 1, 2, 2},
+        {"DDR5-RVRR", "../../pimid/configs/dram/ddr5_rvrr_htree.yaml", 32, 4, 8, 8, 2, 1, "MINIMAL", 1, 2, 2},
+        {"DDR5-VRR", "../../pimid/configs/dram/ddr5_vrr_htree.yaml", 32, 4, 8, 8, 2, 1, "MINIMAL", 1, 2, 2},
 
         // Mobile DRAM
-        {"LPDDR5", "../pimid/configs/dram/lpddr5_htree.yaml", 16, 4, 4, 8, 2, 1, "MINIMAL", 1, 2, 2},
+        {"LPDDR5", "../../pimid/configs/dram/lpddr5_htree.yaml", 16, 4, 4, 8, 2, 1, "MINIMAL", 1, 2, 2},
 
         // Graphics DRAM
-        {"GDDR6", "../pimid/configs/dram/gddr6_htree.yaml", 16, 4, 4, 2, 2, 1, "MINIMAL", 1, 2, 2},
+        {"GDDR6", "../../pimid/configs/dram/gddr6_htree.yaml", 16, 4, 4, 2, 2, 1, "MINIMAL", 1, 2, 2},
 
         // High-Bandwidth Memory
-        {"HBM", "../pimid/configs/dram/hbm_htree.yaml", 16, 2, 4, 8, 2, 1, "MINIMAL", 1, 2, 2},
-        {"HBM2", "../pimid/configs/dram/hbm2_htree.yaml", 16, 4, 4, 8, 2, 1, "MINIMAL", 1, 2, 2},
-        {"HBM3", "../pimid/configs/dram/hbm3_htree.yaml", 32, 4, 4, 8, 2, 1, "MINIMAL", 1, 2, 2},
+        {"HBM", "../../pimid/configs/dram/hbm_htree.yaml", 16, 2, 4, 8, 2, 1, "MINIMAL", 1, 2, 2},
+        {"HBM2", "../../pimid/configs/dram/hbm2_htree.yaml", 16, 4, 4, 8, 2, 1, "MINIMAL", 1, 2, 2},
+        {"HBM3", "../../pimid/configs/dram/hbm3_htree.yaml", 32, 4, 4, 8, 2, 1, "MINIMAL", 1, 2, 2},
     };
 
     int passed = 0;
