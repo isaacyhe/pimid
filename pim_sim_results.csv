@@ -1,0 +1,2 @@
+config_name,granularity,num_pes,local_data_bytes,remote_data_bytes,local_fraction,compute_time_us,local_access_time_us,remote_access_time_us,network_time_us,total_time_us,speedup,bottleneck,local_bw_GBs,remote_bw_GBs,effective_bw_GBs
+PIM Simulation,Bank,64,536870912,536870912,0.500,1000000.00,447392.43,1062333.32,106233.33,1168566.65,0.000,RemoteBW,1.20,9.60,0.92

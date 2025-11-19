@@ -69,4 +69,3 @@ test/test_*
 !test/test_*.py
 ext/
 /DAC26/workloads_pimid/reduction_shared_pimid
-pim_sim_results.csv
