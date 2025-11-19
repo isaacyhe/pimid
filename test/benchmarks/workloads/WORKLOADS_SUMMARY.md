@@ -2,231 +2,232 @@
 
 This directory contains workloads for PIMID benchmarking and PIM architecture evaluation.
 
-## Workload Collections
+## Available Workloads
 
-### 1. DAC26 Workloads (`dac26/`)
+### BFS - Breadth-First Search
+- **Location:** `bfs/`
+- **Type:** Graph traversal algorithm
+- **Versions:** Device-side PIM, Host baseline
+- **Format:** CSR (Compressed Sparse Row)
 
-**16 PIMID-integrated workloads** (8 benchmarks × 2 programming models) with actual energy and timing simulation.
+### GEMM - Matrix Multiplication
+- **Location:** `gemm/`
+- **Type:** Dense linear algebra
+- **Versions:** Message passing, Shared memory
+- **Format:** Block-based matrix multiplication
 
-**Benchmarks**:
-- BFS (Breadth-First Search) - Graph traversal
-- GEMM (Matrix Multiplication) - Dense linear algebra
-- SpMV (Sparse Matrix-Vector) - Sparse linear algebra
-- Reduction - Tree reduction primitive
-- Dot Product - Vector primitive
-- Histogram - Data analytics
-- Prefix Sum - Parallel scan
-- Stencil 1D - Scientific computing
+### Reduction - Tree Reduction
+- **Location:** `reduction/`
+- **Type:** Parallel primitive
+- **Versions:** Message passing, Shared memory
+- **Pattern:** Hierarchical tree reduction
 
-**Programming Models**:
-- Message Passing: Explicit inter-subarray transfers
-- Shared Memory: Remote memory accesses and atomics
+### SpMV - Sparse Matrix-Vector Multiply
+- **Location:** `spmv/`
+- **Type:** Sparse linear algebra
+- **Versions:** Message passing, Shared memory
+- **Format:** CSR sparse matrices
 
-**Key Results**:
-- Energy savings: 45% with LIBCom interconnect
-- Performance: Up to 4× speedup for communication-intensive workloads
-- Validation: 90 configurations tested
+### Dot Product
+- **Location:** `dotproduct/`
+- **Type:** Vector primitive
+- **Versions:** Message passing, Shared memory
+- **Pattern:** Parallel reduction
 
-See `dac26/README.md` for complete documentation.
+### Histogram
+- **Location:** `histogram/`
+- **Type:** Data analytics
+- **Versions:** Message passing, Shared memory
+- **Pattern:** Local construction with merge
 
-### 2. MPICH Examples (`mpich_examples/`)
+### Prefix Sum
+- **Location:** `prefixsum/`
+- **Type:** Parallel scan primitive
+- **Versions:** Message passing, Shared memory
+- **Pattern:** Hierarchical scan
 
-Basic MPICH workloads for testing distributed PIM execution.
-
-### 3. BFS (Breadth-First Search)
-- **Location:** `workloads/bfs/`
-- **Algorithm:** Parallel graph traversal using CSR format
-- **Versions:**
-  - Device-side: `device/bfs_pim.c` (with PIM annotations)
-  - Host baseline: `host/bfs_baseline.c` (pure host execution)
+### Stencil 1D
+- **Location:** `stencil1d/`
+- **Type:** Scientific computing
+- **Versions:** Message passing, Shared memory
+- **Pattern:** Nearest-neighbor communication
 
 ## Directory Structure
 
 ```
 workloads/
 ├── WORKLOADS_SUMMARY.md    # This file
-├── dac26/                  # DAC26 PIMID-integrated workloads (16 total)
-│   ├── README.md           # Complete documentation
-│   ├── Makefile            # Unified build system
-│   ├── message_passing/    # 8 message passing workloads
-│   │   ├── bfs_message_pimid.cpp
-│   │   ├── gemm_message_pimid.cpp
-│   │   ├── spmv_message_pimid.cpp
-│   │   ├── reduction_message_pimid.cpp
-│   │   ├── dotproduct_message_pimid.cpp
-│   │   ├── histogram_message_pimid.cpp
-│   │   ├── prefixsum_message_pimid.cpp
-│   │   └── stencil1d_message_pimid.cpp
-│   └── shared_memory/      # 8 shared memory workloads
-│       ├── bfs_shared_pimid.cpp
-│       ├── gemm_shared_pimid.cpp
-│       ├── spmv_shared_pimid.cpp
-│       ├── reduction_shared_pimid.cpp
-│       ├── dotproduct_shared_pimid.cpp
-│       ├── histogram_shared_pimid.cpp
-│       ├── prefixsum_shared_pimid.cpp
-│       └── stencil1d_shared_pimid.cpp
-├── mpich_examples/         # Basic MPICH workloads
-│   ├── vector_dotproduct.c
-│   ├── graph_pagerank.c
-│   └── matrix_multiply.c
-└── bfs/                    # Legacy BFS with PIM annotations
-    ├── README.md
-    ├── Makefile
-    ├── device/             # Device-side version
-    │   ├── bfs_pim.c
-    │   └── Makefile
-    └── host/               # Host-only baseline
-        ├── bfs_baseline.c
-        └── Makefile
+├── bfs/                    # Breadth-First Search
+│   ├── README.md
+│   ├── Makefile
+│   ├── bfs.cpp
+│   ├── device/
+│   │   ├── bfs_pim.c
+│   │   └── Makefile
+│   └── host/
+│       ├── bfs_baseline.c
+│       └── Makefile
+├── gemm/                   # Matrix Multiplication
+│   ├── README.md
+│   ├── Makefile
+│   ├── gemm_message.cpp
+│   └── gemm_shared.cpp
+├── reduction/              # Tree Reduction
+│   ├── README.md
+│   ├── Makefile
+│   ├── reduction_message.cpp
+│   └── reduction_shared.cpp
+├── spmv/                   # Sparse Matrix-Vector
+│   ├── README.md
+│   ├── Makefile
+│   ├── spmv_message.cpp
+│   └── spmv_shared.cpp
+├── dotproduct/             # Dot Product
+│   ├── README.md
+│   ├── Makefile
+│   ├── dotproduct_message.cpp
+│   └── dotproduct_shared.cpp
+├── histogram/              # Histogram
+│   ├── README.md
+│   ├── Makefile
+│   ├── histogram_message.cpp
+│   └── histogram_shared.cpp
+├── prefixsum/              # Prefix Sum
+│   ├── README.md
+│   ├── Makefile
+│   ├── prefixsum_message.cpp
+│   └── prefixsum_shared.cpp
+├── stencil1d/              # 1D Stencil
+│   ├── README.md
+│   ├── Makefile
+│   ├── stencil1d_message.cpp
+│   └── stencil1d_shared.cpp
+└── mpich_examples/         # Basic MPICH examples
+    ├── vector_dotproduct.c
+    ├── graph_pagerank.c
+    └── matrix_multiply.c
 ```
 
-## Key Features
+## Programming Models
 
-### Device-Side Versions
-- **PIM Annotations:** `#pragma pim offload begin/end`
-- **Toggleable:** `USE_PIM` macro (1 = device, 0 = host)
-- **Ready for PIMID:** Compatible with PIMID simulator
-- **Offloading:** Computation offloaded to PIM device PEs
+### Message Passing
+- **Approach:** Explicit inter-subarray data transfers
+- **Communication:** Network transfers between subarrays
+- **Best For:** Communication-intensive workloads
+- **Benefit:** Shows topology-dependent performance (2.6-4.0× speedup with LIBCom)
 
-### Host-Only Baselines
-- **Pure host execution:** No PIM annotations
-- **Identical algorithms:** Fair performance comparison
-- **Benchmarking:** Reference for speedup calculations
+### Shared Memory
+- **Approach:** Remote memory accesses
+- **Communication:** Read/write to remote subarray memory
+- **Best For:** Irregular access patterns
+- **Benefit:** Simpler programming model, topology-independent
 
-## Building
+## Building Workloads
 
-### Prerequisites
-- MPICH 3.0 or higher
-- GCC with C99 support
-
-### Build commands
+### Individual Workload
 ```bash
-cd workloads/bfs
-make all           # Build both versions
-make run-compare   # Run both for comparison
+cd <workload_name>/
+make                # Build both versions
+make message        # Build message passing only
+make shared         # Build shared memory only
 ```
 
-### Verification
+### Example
 ```bash
-cd workloads/bfs
-./verify_build.sh  # Checks MPICH and builds both versions
+cd reduction/
+make                # Builds reduction_message and reduction_shared
 ```
 
-## Running
+## Running Workloads
 
-### Quick test (4 processes, 1000 nodes)
+All workloads use the same command-line interface:
+
 ```bash
-cd workloads/bfs
-make run-device    # Device version
-make run-host      # Host baseline
-make run-compare   # Both versions
+./<workload>_message <num_subarrays> <problem_size> <is_libcom>
+./<workload>_shared <num_subarrays> <problem_size> <is_libcom>
 ```
 
-### Custom configuration
+Parameters:
+- `num_subarrays`: Number of PIM subarrays (8, 16, 32, etc.)
+- `problem_size`: Workload-specific size parameter
+- `is_libcom`: 0 = H-tree baseline, 1 = LIBCom interconnect
+
+### Examples
+
 ```bash
-# Device version
-cd workloads/bfs/device
-mpirun -np 8 ./bfs_pim 10000
+# Reduction with H-tree
+./reduction_message 8 1024 0
 
-# Host baseline
-cd workloads/bfs/host
-mpirun -np 8 ./bfs_baseline 10000
+# GEMM with LIBCom
+./gemm_shared 16 128 1
+
+# SpMV with H-tree
+./spmv_message 8 256 0
 ```
 
-## PIMID Integration
+## Technology Configuration
 
-### Using device-side version with PIMID simulator
+All workloads use consistent technology parameters:
+- **Process Technology:** 45nm (configurable)
+- **Operating Frequency:** 1GHz (configurable)
+- **Temperature:** 350K (~77°C)
+- **Memory:** SRAM-like subarrays (4KB each)
+
+Energy and timing values are computed using:
+- **CACTI:** Memory access energy and timing
+- **McPAT:** Compute energy estimation
+- **Analytical Models:** Network latency and energy
+
+## Key Results
+
+### Energy Savings (LIBCom vs H-tree)
+- **Communication-intensive workloads:** Up to 45% energy savings
+- **Compute-intensive workloads:** Minimal difference (~1-2%)
+
+### Performance Speedup (LIBCom vs H-tree, Message Passing)
+- **BFS:** Up to 4.0× speedup
+- **SpMV:** Up to 3.9× speedup
+- **Reduction:** Up to 3.2× speedup
+- **Prefix Sum:** Up to 2.9× speedup
+- **Stencil 1D:** Up to 2.6× speedup
+
+### Shared Memory Model
+- **All workloads:** ~1.0× speedup (topology-independent)
+- **Reason:** Remote accesses hide interconnect topology
+
+## Prerequisites
+
+- **C++17 compiler** (g++, clang++)
+- **Standard libraries** (pthread, math)
+- **PIMID infrastructure** (CACTI, McPAT wrappers)
+
+## Clean All Workloads
+
 ```bash
-pimid-gcc -o bfs_pim bfs_pim.c
-pimid-sim --config pim.cfg mpirun -np 4 ./bfs_pim 10000
+# From workloads directory
+for dir in gemm reduction spmv dotproduct histogram prefixsum stencil1d; do
+    (cd $dir && make clean)
+done
 ```
 
-### How PIM annotations work
-- **Standard compilation:** Annotations are ignored (host-only execution)
-- **PIMID compilation:** Annotations recognized, code offloaded to device
-- **Host-device split:** Separate ZSim instances communicate via sockets
+## Build All Workloads
 
-## Performance Metrics
-
-Both versions report:
-- BFS traversal levels
-- Nodes visited count
-- Execution time (seconds)
-- Throughput (million edges/sec)
-
-## Comparison Benchmarking
-
-To compare device vs host performance:
-
-1. Build both versions: `make all`
-2. Run comparison: `make run-compare`
-3. Analyze output metrics:
-   - Execution time difference
-   - Throughput comparison
-   - Scalability analysis
-
-## Design Decisions
-
-### Why Two Versions?
-
-1. **Fair comparison:** Identical algorithms, only PIM annotations differ
-2. **Baseline reference:** Host-only version provides speedup baseline
-3. **Debugging:** Host version easier to debug and profile
-4. **Portability:** Host version runs anywhere with MPICH
-
-### Graph Format
-
-- **CSR (Compressed Sparse Row):** Memory-efficient for sparse graphs
-- **MPI-friendly:** Easy to partition across processes
-- **PIM-optimized:** Sequential memory access patterns
-
-### MPI Design
-
-- **Node-based partitioning:** Each process owns subset of nodes
-- **Frontier synchronization:** MPI_Allreduce for global frontier
-- **Visited array exchange:** MPI_Allreduce with logical OR
-
-## Future Work
-
-Planned additional workloads:
-- Matrix multiplication (dense/sparse)
-- Heat diffusion (stencil computation)
-- Jacobi iteration (iterative solver)
-- SpMV (Sparse Matrix-Vector multiplication)
-
-Each with device and host versions for comparison.
-
-## Requirements
-
-### Minimum
-- MPICH 3.0+
-- GCC 4.9+ (C99)
-- 4+ CPU cores for meaningful parallelism
-
-### Recommended
-- MPICH 3.3+
-- GCC 7.0+
-- PIMID simulator for device-side execution
-
-## Troubleshooting
-
-### mpicc not found
-Install MPICH:
-- Ubuntu/Debian: `sudo apt-get install mpich`
-- RHEL/CentOS: `sudo yum install mpich mpich-devel`
-- macOS: `brew install mpich`
-
-### Build errors
-Run verification script:
 ```bash
-cd workloads/bfs
-./verify_build.sh
+# From workloads directory
+for dir in gemm reduction spmv dotproduct histogram prefixsum stencil1d; do
+    (cd $dir && make)
+done
 ```
 
-### Runtime errors
-Check MPI installation:
-```bash
-mpicc --version
-mpirun --version
-```
+## Notes
+
+- Workloads integrate directly with PIMID's analytical models (CACTI, McPAT)
+- No hardcoded energy or timing values
+- Technology-aware parameter computation
+- Values automatically adapt to technology node and frequency
+
+## References
+
+- **CACTI:** Memory access energy and timing
+- **McPAT:** Power modeling framework
+- **LIBCom:** Library communication interconnect (DAC'26)

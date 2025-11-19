@@ -1,18 +1,20 @@
 /**
- * @file reduction_message_pimid.cpp
- * @brief Tree Reduction workload with MESSAGE PASSING model - PIMID integrated
+ * @file dotproduct_message_pimid.cpp
+ * @brief Dot Product workload with MESSAGE PASSING model - PIMID integrated
  *
  * This version uses PIMID simulator for accurate energy and timing modeling
  * Technology: 45nm
  * Frequency: 1GHz
  *
+ * Source: BLAS Level 1 (DDOT operation)
+ *
  * Message Passing Model:
- * - Data distributed across subarrays
- * - Hierarchical tree reduction with explicit inter-subarray transfers
- * - Each level halves the number of active subarrays
+ * - Each subarray has local portions of vectors A and B
+ * - Compute local partial sums independently
+ * - Reduce partial sums via tree reduction with explicit transfers
  */
 
-#include "pim_simulator.h"
+#include "../../../DAC26/pimid_adapter/pim_simulator.h"
 #include <iostream>
 #include <vector>
 #include <cstdint>
@@ -21,28 +23,36 @@
 
 using namespace dac26;
 
-struct ReductionConfig {
+struct DotProductConfig {
     int num_subarrays;
-    int elements_per_subarray;
+    int vector_length;
     Topology topology;
 };
 
-class ReductionMessagePIMID {
+class DotProductMessagePIMID {
 private:
-    ReductionConfig config;
+    DotProductConfig config;
     std::shared_ptr<PIMSimulator> simulator;
 
-    std::vector<std::vector<double>> subarray_data;
+    std::vector<double> vector_a;
+    std::vector<double> vector_b;
+    std::vector<double> partial_sums;  // Per-subarray partial sums
     std::vector<bool> active_subarrays;
+    std::vector<int> element_assignment;
 
 public:
-    ReductionMessagePIMID(const ReductionConfig& cfg) : config(cfg) {
-        subarray_data.resize(config.num_subarrays);
+    DotProductMessagePIMID(const DotProductConfig& cfg) : config(cfg) {
+        vector_a.resize(config.vector_length);
+        vector_b.resize(config.vector_length);
+        partial_sums.resize(config.num_subarrays, 0.0);
         active_subarrays.resize(config.num_subarrays, true);
+        element_assignment.resize(config.vector_length);
 
-        // Initialize each subarray with local data
-        for (int i = 0; i < config.num_subarrays; i++) {
-            subarray_data[i].resize(config.elements_per_subarray, 1.0);
+        // Initialize vectors
+        for (int i = 0; i < config.vector_length; i++) {
+            vector_a[i] = 1.0 + (i % 100) / 100.0;
+            vector_b[i] = 2.0 + (i % 50) / 50.0;
+            element_assignment[i] = i % config.num_subarrays;
         }
 
         // Initialize PIMID simulator
@@ -57,25 +67,47 @@ public:
     }
 
     void execute() {
-        std::cout << "\n=== Tree Reduction Workload (MESSAGE PASSING - PIMID) ===" << std::endl;
+        std::cout << "\n=== Dot Product Workload (MESSAGE PASSING - PIMID) ===" << std::endl;
+        std::cout << "Vector length: " << config.vector_length << std::endl;
         std::cout << "Subarrays: " << config.num_subarrays << std::endl;
-        std::cout << "Elements per subarray: " << config.elements_per_subarray << std::endl;
-        std::cout << "Total elements: " << (config.num_subarrays * config.elements_per_subarray) << std::endl;
         std::cout << "Programming model: MESSAGE PASSING" << std::endl;
 
         simulator->resetStats();
-        performTreeReduction();
+        computeLocalPartialSums();
+        reducePartialSums();
         printMetrics();
     }
 
 private:
-    void performTreeReduction() {
+    void computeLocalPartialSums() {
+        std::cout << "\nPhase 1: Local partial sum computation (independent)" << std::endl;
+
+        for (int sa = 0; sa < config.num_subarrays; sa++) {
+            int local_macs = 0;
+
+            // Each subarray computes LOCAL partial sum
+            for (int i = 0; i < config.vector_length; i++) {
+                if (element_assignment[i] == sa) {
+                    // Local reads (no inter-subarray communication)
+                    simulator->simulateMemoryAccess(true, true, 2 * sizeof(double));
+
+                    // Multiply-accumulate
+                    simulator->simulateCompute(1);
+                    partial_sums[sa] += vector_a[i] * vector_b[i];
+                    local_macs++;
+                }
+            }
+
+            std::cout << "  Subarray " << sa << ": " << local_macs << " MACs, partial sum = "
+                      << partial_sums[sa] << std::endl;
+        }
+    }
+
+    void reducePartialSums() {
+        std::cout << "\nPhase 2: Tree reduction of partial sums" << std::endl;
+
         int num_levels = static_cast<int>(std::ceil(std::log2(config.num_subarrays)));
-
-        std::cout << "\n=== Reduction Tree ===" << std::endl;
-        std::cout << "Number of levels: " << num_levels << std::endl;
-
-        int active_count = config.num_subarrays;
+        std::cout << "Reduction tree levels: " << num_levels << std::endl;
 
         for (int level = 0; level < num_levels; level++) {
             std::cout << "\nLevel " << (level + 1) << ":" << std::endl;
@@ -83,7 +115,6 @@ private:
             int stride = 1 << (level + 1);
             int half_stride = 1 << level;
 
-            // Process pairs at this level
             for (int i = 0; i < config.num_subarrays; i += stride) {
                 int dst_subarray = i;
                 int src_subarray = i + half_stride;
@@ -92,7 +123,7 @@ private:
                     active_subarrays[dst_subarray] &&
                     active_subarrays[src_subarray]) {
 
-                    // Transfer and reduce
+                    // Transfer and reduce partial sum
                     transferAndReduce(src_subarray, dst_subarray);
 
                     active_subarrays[src_subarray] = false;
@@ -100,32 +131,26 @@ private:
                 }
             }
 
-            active_count = (active_count + 1) / 2;
-            std::cout << "  Transfers: " << transfers_this_level << std::endl;
-            std::cout << "  Active subarrays remaining: " << active_count << std::endl;
+            std::cout << "  Partial sum transfers: " << transfers_this_level << std::endl;
         }
 
-        std::cout << "\n✓ Reduction complete - final result in subarray 0" << std::endl;
+        std::cout << "\n✓ Final result in subarray 0: " << partial_sums[0] << std::endl;
     }
 
     void transferAndReduce(int src_subarray, int dst_subarray) {
         assert(src_subarray != dst_subarray);
 
-        // Transfer elements from src to dst using PIMID
-        uint64_t transfer_bytes = config.elements_per_subarray * sizeof(double);
-        simulator->simulateNetworkTransfer(src_subarray, dst_subarray, transfer_bytes);
+        // Transfer partial sum from src to dst using PIMID
+        simulator->simulateNetworkTransfer(src_subarray, dst_subarray, sizeof(double));
 
-        // Reduction computation (element-wise sum)
-        simulator->simulateCompute(config.elements_per_subarray);
+        // Reduction (addition)
+        simulator->simulateCompute(1);
 
-        // Perform reduction
-        for (int i = 0; i < config.elements_per_subarray; i++) {
-            subarray_data[dst_subarray][i] += subarray_data[src_subarray][i];
-        }
+        partial_sums[dst_subarray] += partial_sums[src_subarray];
     }
 
     void printMetrics() {
-        std::cout << "\n=== Reduction Results (MESSAGE PASSING - PIMID) ===" << std::endl;
+        std::cout << "\n=== Dot Product Results (MESSAGE PASSING - PIMID) ===" << std::endl;
 
         const SimulationResults& results = simulator->getResults();
 
@@ -138,13 +163,11 @@ private:
                   << " (" << (100.0 * results.network_cycles / results.total_cycles) << "%)" << std::endl;
 
         std::cout << "\nComputation:" << std::endl;
-        std::cout << "  Elements processed: " << (config.num_subarrays * config.elements_per_subarray) << std::endl;
-        std::cout << "  Compute operations: " << results.compute_ops << std::endl;
+        std::cout << "  Total MAC operations: " << results.compute_ops << std::endl;
 
         std::cout << "\nCommunication (Message Passing):" << std::endl;
         int expected_transfers = config.num_subarrays - 1;
-        std::cout << "  Inter-subarray transfers: " << expected_transfers << std::endl;
-        std::cout << "  Elements transferred: " << (expected_transfers * config.elements_per_subarray) << std::endl;
+        std::cout << "  Partial sum transfers: " << expected_transfers << std::endl;
 
         std::cout << "\nEnergy (PIMID-based):" << std::endl;
         std::cout << "  Total energy: " << results.total_energy_pJ << " pJ" << std::endl;
@@ -165,51 +188,46 @@ private:
         std::cout << "  Execution time: " << (results.execution_time_ns / 1000.0) << " us" << std::endl;
 
         // Validation
-        int num_levels = static_cast<int>(std::ceil(std::log2(config.num_subarrays)));
-        double expected_sum = config.num_subarrays * config.elements_per_subarray * 1.0;
-        double actual_sum = 0.0;
-        for (int i = 0; i < config.elements_per_subarray; i++) {
-            actual_sum += subarray_data[0][i];
+        std::cout << "\nValidation:" << std::endl;
+        double expected_result = 0.0;
+        for (int i = 0; i < config.vector_length; i++) {
+            expected_result += vector_a[i] * vector_b[i];
         }
 
-        std::cout << "\nValidation:" << std::endl;
-        std::cout << "  Expected tree levels: " << num_levels << std::endl;
         std::cout << "  Expected transfers: " << expected_transfers << std::endl;
-        std::cout << "  Expected final sum: " << expected_sum << std::endl;
-        std::cout << "  Actual final sum: " << actual_sum << std::endl;
+        std::cout << "  Expected result: " << expected_result << std::endl;
+        std::cout << "  Actual result: " << partial_sums[0] << std::endl;
+        std::cout << "  Difference: " << std::abs(expected_result - partial_sums[0]) << std::endl;
 
-        if (std::abs(actual_sum - expected_sum) < 1e-6) {
-            std::cout << "  ✓ Reduction validated" << std::endl;
+        if (std::abs(expected_result - partial_sums[0]) < 1e-6) {
+            std::cout << "  ✓ Dot product validated" << std::endl;
         } else {
-            std::cout << "  ✗ Validation failed!" << std::endl;
+            std::cout << "  ✗ Dot product validation failed!" << std::endl;
         }
     }
 };
 
 int main(int argc, char* argv[]) {
     if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <num_subarrays> <elements_per_subarray> <is_libcom>" << std::endl;
-        std::cerr << "Example: " << argv[0] << " 32 1024 0   # 32 subarrays, 1024 elements, baseline" << std::endl;
-        std::cerr << "Example: " << argv[0] << " 32 1024 1   # 32 subarrays, 1024 elements, LIBCom" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <num_subarrays> <vector_length> <is_libcom>" << std::endl;
+        std::cerr << "Example: " << argv[0] << " 8 2048 0   # 8 subarrays, 2048 elements, baseline" << std::endl;
+        std::cerr << "Example: " << argv[0] << " 8 2048 1   # 8 subarrays, 2048 elements, LIBCom" << std::endl;
         return 1;
     }
 
-    ReductionConfig config;
+    DotProductConfig config;
     config.num_subarrays = std::atoi(argv[1]);
-    config.elements_per_subarray = std::atoi(argv[2]);
+    config.vector_length = std::atoi(argv[2]);
     bool is_libcom = (std::atoi(argv[3]) == 1);
     config.topology = is_libcom ? Topology::LIBCOM : Topology::HTREE_BASELINE;
 
-    if ((config.num_subarrays & (config.num_subarrays - 1)) != 0) {
-        std::cerr << "Warning: num_subarrays should be power of 2 for balanced tree" << std::endl;
-    }
-
-    std::cout << "\n=== DAC'26 Tree Reduction Benchmark (Message Passing - PIMID) ===" << std::endl;
+    std::cout << "\n=== DAC'26 Dot Product Benchmark (Message Passing - PIMID) ===" << std::endl;
     std::cout << "Configuration: " << (is_libcom ? "LIBCom" : "Baseline H-tree") << std::endl;
+    std::cout << "Source: BLAS Level 1 (DDOT)" << std::endl;
     std::cout << "Programming Model: MESSAGE PASSING" << std::endl;
     std::cout << "Technology: 45nm, 1GHz" << std::endl;
 
-    ReductionMessagePIMID workload(config);
+    DotProductMessagePIMID workload(config);
     workload.execute();
 
     return 0;

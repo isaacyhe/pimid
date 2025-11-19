@@ -16,7 +16,7 @@
  * - Demonstrates nearest-neighbor communication pattern
  */
 
-#include "pim_simulator.h"
+#include "../../../DAC26/pimid_adapter/pim_simulator.h"
 #include <iostream>
 #include <vector>
 #include <cstdint>
