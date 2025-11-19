@@ -158,7 +158,7 @@ private:
 
         std::cout << "\nComputation:" << std::endl;
         std::cout << "  Total MAC operations: " << metrics.mac_ops << std::endl;
-        std::cout << "  Expected MACs: " << (2ULL * config.matrix_size * config.matrix_size * config.matrix_size) << std::endl;
+        std::cout << "  Expected MACs: " << (1ULL * config.matrix_size * config.matrix_size * config.matrix_size) << std::endl;
 
         std::cout << "\nCommunication (Message Passing):" << std::endl;
         std::cout << "  Inter-subarray block transfers: " << metrics.intersubarray_transfers << std::endl;
@@ -179,7 +179,7 @@ private:
 
         // Validation
         std::cout << "\nValidation:" << std::endl;
-        std::cout << "  MAC operations: " << (metrics.mac_ops == 2ULL * config.matrix_size * config.matrix_size * config.matrix_size ? "✓" : "✗") << std::endl;
+        std::cout << "  MAC operations: " << (metrics.mac_ops == 1ULL * config.matrix_size * config.matrix_size * config.matrix_size ? "✓" : "✗") << std::endl;
         std::cout << "  Block transfers tracked: ✓" << std::endl;
     }
 };
