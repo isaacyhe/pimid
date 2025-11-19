@@ -17,7 +17,8 @@ cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
-Makefile
+**/build/Makefile
+**/cmake_build/Makefile
 
 # IDE
 .vscode/
@@ -67,3 +68,4 @@ test/test_*
 !test/test_*.sh
 !test/test_*.py
 ext/
+/DAC26/workloads_pimid/reduction_shared_pimid
