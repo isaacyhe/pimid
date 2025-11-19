@@ -69,3 +69,7 @@ test/test_*
 !test/test_*.py
 ext/
 /DAC26/workloads_pimid/reduction_shared_pimid
+
+# Benchmark results
+benchmark_results/
+benchmark_run.log
