@@ -88,7 +88,9 @@ public:
             filename = filename.substr(0, dot);
         }
 
-        // Split by underscore: bfs_<placement>_<pe_type>_<memory>_<size>_deg<degree>
+        // Split by underscore
+        // Expected format: <workload>_<placement>_<pe_type>_<memory>.yaml
+        // Example: bfs_bank_inorder_dram.yaml
         std::vector<std::string> parts;
         size_t start = 0;
         size_t end = filename.find('_');
@@ -99,31 +101,34 @@ public:
         }
         parts.push_back(filename.substr(start));
 
-        // Parse components
-        if (parts.size() >= 6) {
-            // parts[0] = "bfs"
-            // parts[1] = placement (subarray/bank/rank)
-            // parts[2] = pe_type part 1 (simple/inorder)
-            // parts[3] = pe_type part 2 (alu) or memory tech
-            // parts[4] = memory tech or size
-            // parts[5] = size or degX
+        // Parse components based on actual filename format
+        if (parts.size() >= 4) {
+            // parts[0] = workload (e.g., "bfs", "gemm", "spmv")
+            // parts[1] = placement (e.g., "bank", "subarray")
+            // parts[2] = pe_type (e.g., "inorder", "simple", "ooo")
+            // parts[3] = memory tech (e.g., "dram", "sram", "reram")
 
+            config.workload_type = parts[0];
             config.placement_level = parts[1];
 
-            // Handle PE type (simple_alu vs inorder vs ooo)
-            if (parts[2] == "simple" && parts.size() > 3 && parts[3] == "alu") {
-                config.pe_type = "simple_alu";
-                config.memory_tech = parts[4];
-                // parts[5] is size, parts[6] is degX
-            } else if (parts[2] == "inorder") {
+            // Convert placement to uppercase
+            for (char& c : config.placement_level) {
+                c = std::toupper(c);
+            }
+
+            // Handle PE type
+            if (parts[2] == "inorder") {
                 config.pe_type = "in_order_core";
-                config.memory_tech = parts[3];
-                // parts[4] is size, parts[5] is degX
+            } else if (parts[2] == "simple") {
+                config.pe_type = "simple_alu";
             } else if (parts[2] == "ooo") {
                 config.pe_type = "out_of_order_core";
-                config.memory_tech = parts[3];
-                // parts[4] is size, parts[5] is degX
+            } else {
+                config.pe_type = "in_order_core";  // default
             }
+
+            // Memory technology
+            config.memory_tech = parts[3];
 
             // Convert memory tech to uppercase
             for (char& c : config.memory_tech) {
@@ -131,10 +136,13 @@ public:
             }
         }
 
-        // Default values
-        config.name = "BFS_Bank_InOrder_" + config.memory_tech;
-        config.description = "BFS with bank-level In-Order Core PE";
-        config.workload_type = "bfs";
+        // Default values - use parsed workload type
+        std::string workload_upper = config.workload_type;
+        for (char& c : workload_upper) {
+            c = std::toupper(c);
+        }
+        config.name = workload_upper + "_" + config.placement_level + "_" + config.pe_type + "_" + config.memory_tech;
+        config.description = config.workload_type + " with " + config.placement_level + "-level " + config.pe_type + " PE";
 
         // Workload defaults
         config.num_vertices = 256 * 1024;  // 256K
@@ -160,8 +168,10 @@ public:
         config.summary_format = "table";
 
         std::cout << "  Technology: " << config.memory_tech << std::endl;
-        std::cout << "  Workload: BFS (" << config.num_vertices << " vertices, degree "
+        std::cout << "  Workload: " << config.workload_type << " (" << config.num_vertices << " vertices, degree "
                   << config.avg_degree << ")" << std::endl;
+        std::cout << "  PE Type: " << config.pe_type << std::endl;
+        std::cout << "  Placement: " << config.placement_level << std::endl;
 
         return config;
     }
