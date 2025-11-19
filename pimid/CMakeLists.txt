@@ -253,7 +253,7 @@ endif()
 # PIM Simulator command-line tool (config-driven simulation)
 # NOTE: Standalone tool, doesn't link against pimid_lib to avoid external dependencies
 add_executable(pimid_sim
-    tools/pimid_sim.cpp
+    ../test/tools/pimid_sim.cpp
     memory/dram_architecture.cpp
 )
 target_compile_options(pimid_sim PRIVATE -std=c++17)
