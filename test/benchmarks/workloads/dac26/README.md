@@ -298,7 +298,7 @@ All shared memory workloads show **identical performance** for both topologies (
 
 ### Architecture
 
-The workloads use the `PIMSimulator` class from `pimid/workload_support/`:
+The workloads use the `PIMSimulator` class from `DAC26/pimid_adapter/`:
 
 ```cpp
 #include "pim_simulator.h"
@@ -435,7 +435,7 @@ These workloads have been validated against:
 
 ### Source Code
 - Original workloads: `/home/user/pimid-dev/DAC26/workloads_pimid/`
-- PIMID adapter: `/home/user/pimid-dev/pimid/workload_support/`
+- PIMID adapter: `/home/user/pimid-dev/DAC26/pimid_adapter/`
 
 ## Contact & Support
 

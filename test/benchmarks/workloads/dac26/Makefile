@@ -3,15 +3,17 @@
 
 # Paths
 PIMID_ROOT = ../../../..
-WORKLOAD_SUPPORT = $(PIMID_ROOT)/pimid/workload_support
+DAC26_ADAPTER = $(PIMID_ROOT)/DAC26/pimid_adapter
 POWER_MODELS = $(PIMID_ROOT)/pimid/power_models
 MEMORY_MODELS = $(PIMID_ROOT)/pimid/memory_models
 BUILD_DIR = $(PIMID_ROOT)/build
+PIMID_INCLUDE = $(PIMID_ROOT)/pimid/include
 
 # Compiler settings
 CXX = g++
 CXXFLAGS = -std=c++17 -O3 -Wall -Wextra
-INCLUDES = -I$(WORKLOAD_SUPPORT)/include \
+INCLUDES = -I$(DAC26_ADAPTER) \
+           -I$(PIMID_INCLUDE) \
            -I$(POWER_MODELS)/include \
            -I$(MEMORY_MODELS)/include \
            -I$(PIMID_ROOT)/pimid/external/ramulator/src \
@@ -35,8 +37,11 @@ SHM_WORKLOADS = bfs_shared gemm_shared spmv_shared reduction_shared \
 
 # Object files
 SIMULATOR_OBJ = pim_simulator.o
-POWER_MODEL_OBJ = $(BUILD_DIR)/pimid/power_models/src/power_model.o
-MEMORY_MODEL_OBJ = $(BUILD_DIR)/pimid/memory_models/src/memory_model.o
+CACTI_WRAPPER_OBJ = cacti_wrapper.o
+MCPAT_MODEL_OBJ = mcpat_model.o
+POWER_MODEL_OBJ = power_model.o
+
+ALL_OBJS = $(SIMULATOR_OBJ) $(CACTI_WRAPPER_OBJ) $(MCPAT_MODEL_OBJ) $(POWER_MODEL_OBJ)
 
 # Targets
 .PHONY: all message shared clean help test
@@ -48,18 +53,30 @@ message: $(MSG_WORKLOADS)
 shared: $(SHM_WORKLOADS)
 
 # Build simulator object
-$(SIMULATOR_OBJ): $(WORKLOAD_SUPPORT)/src/pim_simulator.cpp
+$(SIMULATOR_OBJ): $(DAC26_ADAPTER)/pim_simulator.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# Build CACTI wrapper object
+$(CACTI_WRAPPER_OBJ): $(MEMORY_MODELS)/src/cacti_wrapper.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# Build McPAT model object
+$(MCPAT_MODEL_OBJ): $(POWER_MODELS)/src/mcpat_model.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
+# Build power model object
+$(POWER_MODEL_OBJ): $(POWER_MODELS)/src/power_model.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 # Message passing workloads
-$(MSG_WORKLOADS): %: $(MSG_DIR)/%_pimid.cpp $(SIMULATOR_OBJ)
+$(MSG_WORKLOADS): %: $(MSG_DIR)/%_pimid.cpp $(ALL_OBJS)
 	@echo "Building $@..."
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(SIMULATOR_OBJ) $(LDFLAGS) $(LIBS) -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ALL_OBJS) $(LDFLAGS) $(LIBS) -o $@
 
 # Shared memory workloads
-$(SHM_WORKLOADS): %: $(SHM_DIR)/%_pimid.cpp $(SIMULATOR_OBJ)
+$(SHM_WORKLOADS): %: $(SHM_DIR)/%_pimid.cpp $(ALL_OBJS)
 	@echo "Building $@..."
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(SIMULATOR_OBJ) $(LDFLAGS) $(LIBS) -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ALL_OBJS) $(LDFLAGS) $(LIBS) -o $@
 
 # Testing
 test: all

@@ -148,6 +148,7 @@ private:
     void computeEnergyParameters();
 
     uint32_t computeHTreeLatency(uint32_t num_subarrays) const;
+    double computeHTreeWireEnergy(uint32_t num_subarrays) const;
     double scaleTechnologyNode(double base_value_45nm) const;
     double scaleFrequency(double base_value_1ghz) const;
 };
