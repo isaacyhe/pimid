@@ -1,6 +1,10 @@
 /**
- * @file gemm_message.cpp
- * @brief GEMM (Matrix Multiplication) workload with MESSAGE PASSING model
+ * @file gemm_message_pimid.cpp
+ * @brief GEMM (Matrix Multiplication) workload with MESSAGE PASSING model - PIMID integrated
+ *
+ * This version uses PIMID simulator for accurate energy and timing modeling
+ * Technology: 45nm
+ * Frequency: 1GHz
  *
  * Source: BLAS Level 3 (DGEMM operation)
  *
@@ -10,47 +14,35 @@
  * - Each subarray accumulates local C blocks
  */
 
+#include "pim_simulator.h"
 #include <iostream>
 #include <vector>
 #include <cstdint>
 #include <cassert>
 #include <cmath>
 
+using namespace dac26;
+
 struct GEMMConfig {
     int num_subarrays;
     int matrix_size;           // N×N matrices
     int block_size;            // Block size for tiling
-
-    int copy_latency;
-    int read_latency;
-    int write_latency;
-    int compute_latency;
+    Topology topology;
 };
 
-struct GEMMMetrics {
-    uint64_t total_cycles = 0;
-    uint64_t compute_cycles = 0;
-    uint64_t transfer_cycles = 0;
-    uint64_t intersubarray_transfers = 0;
-    uint64_t htree_traversals = 0;
-    uint64_t direct_transfers = 0;
-    uint64_t blocks_transferred = 0;
-    uint64_t mac_ops = 0;
-    double total_energy = 0.0;
-};
-
-class GEMMMessage {
+class GEMMMessagePIMID {
 private:
     GEMMConfig config;
-    GEMMMetrics metrics;
+    std::shared_ptr<PIMSimulator> simulator;
 
     int num_blocks;
     std::vector<std::vector<int>> matrix_A_placement;  // Subarray ID for each A block
     std::vector<std::vector<int>> matrix_B_placement;  // Subarray ID for each B block
     std::vector<std::vector<int>> matrix_C_placement;  // Subarray ID for each C block
+    uint64_t blocks_transferred;
 
 public:
-    GEMMMessage(const GEMMConfig& cfg) : config(cfg) {
+    GEMMMessagePIMID(const GEMMConfig& cfg) : config(cfg), blocks_transferred(0) {
         num_blocks = config.matrix_size / config.block_size;
 
         matrix_A_placement.resize(num_blocks, std::vector<int>(num_blocks));
@@ -66,17 +58,27 @@ public:
                 matrix_C_placement[i][j] = block_id % config.num_subarrays;
             }
         }
+
+        // Initialize PIMID simulator
+        PIMConfig pim_config;
+        pim_config.tech_node_nm = 45;
+        pim_config.frequency_ghz = 1.0;
+        pim_config.num_subarrays = config.num_subarrays;
+        pim_config.topology = config.topology;
+
+        simulator = std::make_shared<PIMSimulator>(pim_config);
+        simulator->initialize();
     }
 
     void execute() {
-        std::cout << "\n=== GEMM Workload (MESSAGE PASSING) ===" << std::endl;
+        std::cout << "\n=== GEMM Workload (MESSAGE PASSING - PIMID) ===" << std::endl;
         std::cout << "Matrix size: " << config.matrix_size << "×" << config.matrix_size << std::endl;
         std::cout << "Block size: " << config.block_size << "×" << config.block_size << std::endl;
         std::cout << "Number of blocks: " << num_blocks << "×" << num_blocks << std::endl;
         std::cout << "Subarrays: " << config.num_subarrays << std::endl;
-        std::cout << "Copy latency: " << config.copy_latency << " cycles" << std::endl;
         std::cout << "Programming model: MESSAGE PASSING" << std::endl;
 
+        simulator->resetStats();
         computeGEMM();
         printMetrics();
     }
@@ -105,81 +107,69 @@ private:
 
         // Transfer A[i][k] to C's subarray if needed
         if (subarray_A != subarray_C) {
-            transferBlock(subarray_A, subarray_C);
+            uint64_t block_bytes = config.block_size * config.block_size * sizeof(double);
+            simulator->simulateNetworkTransfer(subarray_A, subarray_C, block_bytes);
+            blocks_transferred++;
         }
 
         // Transfer B[k][j] to C's subarray if needed
         if (subarray_B != subarray_C) {
-            transferBlock(subarray_B, subarray_C);
+            uint64_t block_bytes = config.block_size * config.block_size * sizeof(double);
+            simulator->simulateNetworkTransfer(subarray_B, subarray_C, block_bytes);
+            blocks_transferred++;
         }
 
         // Compute block multiply-accumulate on C's subarray
         // Each block multiply is block_size^3 MAC operations
         uint64_t block_mac_ops = config.block_size * config.block_size * config.block_size;
-        uint64_t block_compute_cycles = block_mac_ops * config.compute_latency;
-
-        metrics.mac_ops += block_mac_ops;
-        metrics.compute_cycles += block_compute_cycles;
-        metrics.total_cycles += block_compute_cycles;
+        simulator->simulateCompute(block_mac_ops);
 
         // Write result block back
-        metrics.total_cycles += config.write_latency;
-    }
-
-    void transferBlock(int src_subarray, int dst_subarray) {
-        assert(src_subarray != dst_subarray);
-
-        // Inter-subarray block transfer
-        metrics.intersubarray_transfers++;
-        metrics.blocks_transferred++;
-
-        // Transfer latency (for block_size × block_size elements)
-        uint64_t transfer_cycles = config.copy_latency;
-        metrics.transfer_cycles += transfer_cycles;
-        metrics.total_cycles += transfer_cycles;
-
-        // Track transfer type
-        if (config.copy_latency == 1) {
-            metrics.direct_transfers++;
-            metrics.total_energy += 0.55;  // LIBCom: 45% energy reduction
-        } else {
-            metrics.htree_traversals++;
-            metrics.total_energy += 1.0;   // Baseline H-tree
-        }
+        simulator->simulateMemoryAccess(true, false, sizeof(double));
     }
 
     void printMetrics() {
-        std::cout << "\n=== GEMM Results (MESSAGE PASSING) ===" << std::endl;
-        std::cout << "Total cycles: " << metrics.total_cycles << std::endl;
-        std::cout << "  Compute cycles: " << metrics.compute_cycles
-                  << " (" << (100.0 * metrics.compute_cycles / metrics.total_cycles) << "%)" << std::endl;
-        std::cout << "  Transfer cycles: " << metrics.transfer_cycles
-                  << " (" << (100.0 * metrics.transfer_cycles / metrics.total_cycles) << "%)" << std::endl;
+        std::cout << "\n=== GEMM Results (MESSAGE PASSING - PIMID) ===" << std::endl;
+
+        const SimulationResults& results = simulator->getResults();
+
+        std::cout << "\nTotal cycles: " << results.total_cycles << std::endl;
+        std::cout << "  Compute cycles: " << results.compute_cycles
+                  << " (" << (100.0 * results.compute_cycles / results.total_cycles) << "%)" << std::endl;
+        std::cout << "  Memory cycles: " << results.memory_cycles
+                  << " (" << (100.0 * results.memory_cycles / results.total_cycles) << "%)" << std::endl;
+        std::cout << "  Network cycles: " << results.network_cycles
+                  << " (" << (100.0 * results.network_cycles / results.total_cycles) << "%)" << std::endl;
 
         std::cout << "\nComputation:" << std::endl;
-        std::cout << "  Total MAC operations: " << metrics.mac_ops << std::endl;
-        std::cout << "  Expected MACs: " << (1ULL * config.matrix_size * config.matrix_size * config.matrix_size) << std::endl;
+        uint64_t expected_macs = 2ULL * config.matrix_size * config.matrix_size * config.matrix_size;
+        std::cout << "  Total MAC operations: " << results.compute_ops << std::endl;
+        std::cout << "  Expected MACs: " << expected_macs << std::endl;
 
         std::cout << "\nCommunication (Message Passing):" << std::endl;
-        std::cout << "  Inter-subarray block transfers: " << metrics.intersubarray_transfers << std::endl;
-        std::cout << "  Total blocks transferred: " << metrics.blocks_transferred << std::endl;
+        std::cout << "  Inter-subarray block transfers: " << blocks_transferred << std::endl;
 
-        if (config.copy_latency == 1) {
-            std::cout << "  Direct transfers (LIBCom): " << metrics.direct_transfers << std::endl;
-        } else {
-            std::cout << "  H-tree traversals (Baseline): " << metrics.htree_traversals << std::endl;
-        }
+        std::cout << "\nEnergy (PIMID-based):" << std::endl;
+        std::cout << "  Total energy: " << results.total_energy_pJ << " pJ" << std::endl;
+        std::cout << "  Compute energy: " << results.compute_energy_pJ << " pJ ("
+                  << (100.0 * results.compute_energy_pJ / results.total_energy_pJ) << "%)" << std::endl;
+        std::cout << "  Memory energy: " << results.memory_energy_pJ << " pJ ("
+                  << (100.0 * results.memory_energy_pJ / results.total_energy_pJ) << "%)" << std::endl;
+        std::cout << "  Network energy: " << results.network_energy_pJ << " pJ ("
+                  << (100.0 * results.network_energy_pJ / results.total_energy_pJ) << "%)" << std::endl;
 
-        std::cout << "\nEnergy:" << std::endl;
-        std::cout << "  Total energy (relative): " << metrics.total_energy << std::endl;
-        if (metrics.intersubarray_transfers > 0) {
+        if (blocks_transferred > 0) {
             std::cout << "  Avg energy per transfer: "
-                      << (metrics.total_energy / metrics.intersubarray_transfers) << std::endl;
+                      << (results.network_energy_pJ / blocks_transferred) << " pJ" << std::endl;
         }
+
+        std::cout << "\nPerformance:" << std::endl;
+        std::cout << "  Execution time: " << results.execution_time_ns << " ns" << std::endl;
+        std::cout << "  Execution time: " << (results.execution_time_ns / 1000.0) << " us" << std::endl;
 
         // Validation
         std::cout << "\nValidation:" << std::endl;
-        std::cout << "  MAC operations: " << (metrics.mac_ops == 1ULL * config.matrix_size * config.matrix_size * config.matrix_size ? "✓" : "✗") << std::endl;
+        std::cout << "  MAC operations: " << (results.compute_ops == expected_macs ? "✓" : "✗") << std::endl;
         std::cout << "  Block transfers tracked: ✓" << std::endl;
     }
 };
@@ -196,27 +186,17 @@ int main(int argc, char* argv[]) {
     config.num_subarrays = std::atoi(argv[1]);
     config.matrix_size = std::atoi(argv[2]);
     bool is_libcom = (std::atoi(argv[3]) == 1);
+    config.topology = is_libcom ? Topology::LIBCOM : Topology::HTREE_BASELINE;
 
     config.block_size = 64;  // 64×64 blocks
-    config.read_latency = 1;
-    config.write_latency = 1;
-    config.compute_latency = 1;
 
-    if (is_libcom) {
-        config.copy_latency = 1;
-    } else {
-        int htree_latency = 0;
-        int n = config.num_subarrays;
-        while (n > 1) { htree_latency++; n >>= 1; }
-        config.copy_latency = 2 + htree_latency;
-    }
-
-    std::cout << "\n=== DAC'26 GEMM Benchmark (Message Passing) ===" << std::endl;
+    std::cout << "\n=== DAC'26 GEMM Benchmark (Message Passing - PIMID) ===" << std::endl;
     std::cout << "Configuration: " << (is_libcom ? "LIBCom" : "Baseline H-tree") << std::endl;
     std::cout << "Source: BLAS Level 3 (DGEMM)" << std::endl;
     std::cout << "Programming Model: MESSAGE PASSING" << std::endl;
+    std::cout << "Technology: 45nm, 1GHz" << std::endl;
 
-    GEMMMessage workload(config);
+    GEMMMessagePIMID workload(config);
     workload.execute();
 
     return 0;

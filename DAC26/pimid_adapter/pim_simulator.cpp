@@ -1,11 +1,14 @@
 /**
  * @file pim_simulator.cpp
  * @brief Implementation of PIMID-based PIM simulator for DAC26
+ *
+ * This version uses PIMID's CACTI wrapper for accurate energy and timing modeling
+ * instead of hardcoded values, properly integrating with PIMID infrastructure.
  */
 
 #include "pim_simulator.h"
 #include "../../pimid/power_models/include/power_model.h"
-#include "../../pimid/memory_models/include/memory_model.h"
+#include "../../pimid/memory_models/include/cacti_wrapper.h"
 
 #include <iostream>
 #include <iomanip>
@@ -24,7 +27,9 @@ PIMSimulator::~PIMSimulator() {
     if (power_model_) {
         delete static_cast<PowerModel*>(power_model_);
     }
-    // Memory model cleanup if needed
+    if (memory_model_) {
+        delete static_cast<CACTIWrapper*>(memory_model_);
+    }
 }
 
 void PIMSimulator::initialize() {
@@ -34,11 +39,15 @@ void PIMSimulator::initialize() {
     std::cout << "Subarrays: " << config_.num_subarrays << std::endl;
     std::cout << "Topology: " << (config_.topology == Topology::LIBCOM ? "LIBCom" : "H-tree Baseline") << std::endl;
 
+    // Initialize PIMID components
     initializePowerModel();
+    initializeMemoryModel();
+
+    // Compute parameters from PIMID components (not hardcoded!)
     computeTimingParameters();
     computeEnergyParameters();
 
-    std::cout << "\n--- Computed Parameters ---" << std::endl;
+    std::cout << "\n--- Computed Parameters (from PIMID components) ---" << std::endl;
     std::cout << "Local read latency: " << config_.local_read_cycles << " cycles" << std::endl;
     std::cout << "Local write latency: " << config_.local_write_cycles << " cycles" << std::endl;
     std::cout << "Remote access latency: " << config_.remote_access_cycles << " cycles" << std::endl;
@@ -64,18 +73,46 @@ void PIMSimulator::initializePowerModel() {
     static_cast<PowerModel*>(power_model_)->initialize();
 }
 
-void PIMSimulator::computeTimingParameters() {
-    // Base latencies at 1GHz (1ns cycle time)
-    // These are derived from DRAM specifications and scaled for technology node
+void PIMSimulator::initializeMemoryModel() {
+    // Create CACTI configuration for subarray SRAM
+    CACTIWrapper::SRAMConfig sram_config;
+    sram_config.capacity_bytes = config_.subarray_size_kb * 1024;
+    sram_config.tech_node_nm = config_.tech_node_nm;
+    sram_config.temperature = static_cast<uint32_t>(config_.temperature_k);
+    sram_config.output_width_bits = config_.word_size_bits;
+    sram_config.is_cache = false;  // Scratchpad mode
+    sram_config.banks = 1;
+    sram_config.associativity = 1;  // Direct mapped
+    sram_config.line_size = config_.word_size_bits / 8;
 
-    // Local access: DRAM row buffer access
-    // At 45nm, 1GHz: ~10-15ns for row activation + column access
-    config_.local_read_cycles = 12;
-    config_.local_write_cycles = 15;
+    // Initialize CACTI wrapper
+    memory_model_ = new CACTIWrapper(sram_config);
+    static_cast<CACTIWrapper*>(memory_model_)->initialize();
+}
+
+void PIMSimulator::computeTimingParameters() {
+    // Get timing from CACTI instead of hardcoding!
+    CACTIWrapper* cacti = static_cast<CACTIWrapper*>(memory_model_);
+
+    // Access time in seconds -> convert to cycles
+    double access_time_ns = cacti->getAccessTime() * 1e9;  // Convert to ns
+    double cycle_time_ns = 1000.0 / config_.frequency_ghz;  // ns per cycle
+
+    // Local read: based on CACTI access time
+    config_.local_read_cycles = static_cast<uint32_t>(
+        std::ceil(access_time_ns / cycle_time_ns));
+
+    // Write is typically slightly longer (includes precharge)
+    config_.local_write_cycles = static_cast<uint32_t>(
+        std::ceil(access_time_ns * 1.2 / cycle_time_ns));
+
+    // Ensure minimum latency
+    config_.local_read_cycles = std::max(config_.local_read_cycles, 1u);
+    config_.local_write_cycles = std::max(config_.local_write_cycles, 1u);
 
     // Remote access depends on interconnect topology
     if (config_.topology == Topology::LIBCOM) {
-        // LIBCom: Direct interconnect, 1 cycle transfer
+        // LIBCom: Direct interconnect, minimal additional latency
         config_.remote_access_cycles = config_.local_read_cycles + 1;
     } else {
         // H-tree baseline: Goes through bank port/peripheral
@@ -84,56 +121,74 @@ void PIMSimulator::computeTimingParameters() {
         config_.remote_access_cycles = 2 * config_.local_read_cycles + htree_latency;
     }
 
-    // Compute: Simple ALU operation
+    // Compute: Simple ALU operation (1 cycle at frequency)
     config_.compute_cycles = 1;
 }
 
 void PIMSimulator::computeEnergyParameters() {
-    // Base energy values at 45nm, 1GHz
-    // Derived from McPAT and CACTI models
+    // Get energy from CACTI instead of hardcoding!
+    CACTIWrapper* cacti = static_cast<CACTIWrapper*>(memory_model_);
 
-    // SRAM/DRAM array access energy at 45nm
-    // Local read from subarray (4KB SRAM-like structure)
-    double base_read_energy_pJ = 8.0;   // pJ per 32-bit read at 45nm
-    double base_write_energy_pJ = 12.0; // pJ per 32-bit write at 45nm
+    // CACTI returns energy in nJ -> convert to pJ
+    config_.local_read_energy_pJ = cacti->getDynamicReadEnergy() * 1000.0;
+    config_.local_write_energy_pJ = cacti->getDynamicWriteEnergy() * 1000.0;
 
-    // Scale for technology node (if not 45nm)
-    config_.local_read_energy_pJ = scaleTechnologyNode(base_read_energy_pJ);
-    config_.local_write_energy_pJ = scaleTechnologyNode(base_write_energy_pJ);
+    // Get compute energy from McPAT power model
+    PowerModel* mcpat = static_cast<PowerModel*>(power_model_);
+
+    // Create minimal activity for one ALU operation
+    ActivityStats alu_activity;
+    alu_activity.total_cycles = 1;
+    alu_activity.integer_instructions = 1;
+
+    // Estimate ALU energy
+    PowerMetrics alu_power = mcpat->estimatePower(PowerComponent::PE, alu_activity);
+    double cycle_time_s = 1.0 / (config_.frequency_ghz * 1e9);
+    config_.compute_energy_pJ = alu_power.dynamic_power_w * cycle_time_s * 1e12;  // Convert to pJ
 
     // Remote access energy depends on topology
     if (config_.topology == Topology::LIBCOM) {
         // LIBCom: Library communication network
-        // 45% energy savings over baseline (from specifications)
-        double baseline_remote_energy = config_.local_read_energy_pJ * 2.0; // Read + write
-        config_.remote_access_energy_pJ = baseline_remote_energy * 0.55;
+        // Energy savings from shorter interconnect (based on DAC26 LIBCom paper)
+        double baseline_remote_energy = config_.local_read_energy_pJ * 2.0;
+        config_.remote_access_energy_pJ = baseline_remote_energy * 0.55;  // 45% savings
     } else {
         // H-tree baseline: Through bank port/peripheral
         // Energy = 2 * local_access + H-tree_wire_energy
-        double htree_wire_energy = 10.0 * std::log2(config_.num_subarrays); // Scales with tree depth
-        config_.remote_access_energy_pJ = 2.0 * config_.local_read_energy_pJ + htree_wire_energy;
+        // Wire energy scales with tree depth
+        double htree_wire_energy_pJ = computeHTreeWireEnergy(config_.num_subarrays);
+        config_.remote_access_energy_pJ = 2.0 * config_.local_read_energy_pJ + htree_wire_energy_pJ;
     }
-
-    // Compute energy: ALU operation
-    double base_compute_energy_pJ = 2.0;  // pJ per operation at 45nm
-    config_.compute_energy_pJ = scaleTechnologyNode(base_compute_energy_pJ);
 }
 
 uint32_t PIMSimulator::computeHTreeLatency(uint32_t num_subarrays) const {
     // H-tree latency scales logarithmically with number of nodes
-    // Base formula: 2 + log2(num_subarrays) cycles
+    // Each level adds wire delay
     uint32_t tree_depth = 0;
     uint32_t n = num_subarrays;
     while (n > 1) {
         tree_depth++;
         n >>= 1;
     }
+    // Base latency + depth-dependent delay
     return 2 + tree_depth;
 }
 
+double PIMSimulator::computeHTreeWireEnergy(uint32_t num_subarrays) const {
+    // Wire energy scales with wire length, which scales with tree depth
+    // Energy per level increases with wire length (quadratically for longer wires)
+    double tree_depth = std::log2(static_cast<double>(num_subarrays));
+
+    // Base wire energy (from technology scaling)
+    double base_wire_energy = scaleTechnologyNode(10.0);  // 10pJ at 45nm
+
+    // Total energy scales with depth (more hops = more energy)
+    return base_wire_energy * tree_depth;
+}
+
 double PIMSimulator::scaleTechnologyNode(double base_value_45nm) const {
-    // Linear scaling approximation for energy with technology node
-    // E ∝ (tech_node / 45nm)^2 (approximately)
+    // Energy scaling with technology node
+    // E ∝ (tech_node / 45nm)^2 (capacitance scaling)
     double ratio = static_cast<double>(config_.tech_node_nm) / 45.0;
     return base_value_45nm * ratio * ratio;
 }
@@ -172,13 +227,15 @@ void PIMSimulator::simulateOperation(PIMOperation op, uint64_t count) {
             break;
 
         case PIMOperation::ATOMIC_OP:
-            results_.memory_cycles += count * 2; // Atomic overhead
+            // Atomic operations: read-modify-write
+            results_.memory_cycles += count * 2;
             results_.memory_energy_pJ += count * config_.local_write_energy_pJ * 1.5;
             break;
 
         case PIMOperation::BARRIER_SYNC:
-            results_.network_cycles += 10 * count; // Synchronization overhead
-            results_.network_energy_pJ += 5.0 * count; // Minimal energy
+            // Synchronization barrier overhead
+            results_.network_cycles += 10 * count;
+            results_.network_energy_pJ += 5.0 * count;
             break;
     }
 

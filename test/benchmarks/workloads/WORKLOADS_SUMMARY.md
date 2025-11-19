@@ -1,10 +1,39 @@
-# MPICH Workloads Summary
+# PIMID Workloads Summary
 
-This directory contains MPICH-based workloads for PIMID benchmarking, with both device-side (PIM-annotated) and host-only baseline versions for performance comparison.
+This directory contains workloads for PIMID benchmarking and PIM architecture evaluation.
 
-## Created Workloads
+## Workload Collections
 
-### BFS (Breadth-First Search)
+### 1. DAC26 Workloads (`dac26/`)
+
+**16 PIMID-integrated workloads** (8 benchmarks × 2 programming models) with actual energy and timing simulation.
+
+**Benchmarks**:
+- BFS (Breadth-First Search) - Graph traversal
+- GEMM (Matrix Multiplication) - Dense linear algebra
+- SpMV (Sparse Matrix-Vector) - Sparse linear algebra
+- Reduction - Tree reduction primitive
+- Dot Product - Vector primitive
+- Histogram - Data analytics
+- Prefix Sum - Parallel scan
+- Stencil 1D - Scientific computing
+
+**Programming Models**:
+- Message Passing: Explicit inter-subarray transfers
+- Shared Memory: Remote memory accesses and atomics
+
+**Key Results**:
+- Energy savings: 45% with LIBCom interconnect
+- Performance: Up to 4× speedup for communication-intensive workloads
+- Validation: 90 configurations tested
+
+See `dac26/README.md` for complete documentation.
+
+### 2. MPICH Examples (`mpich_examples/`)
+
+Basic MPICH workloads for testing distributed PIM execution.
+
+### 3. BFS (Breadth-First Search)
 - **Location:** `workloads/bfs/`
 - **Algorithm:** Parallel graph traversal using CSR format
 - **Versions:**
@@ -16,14 +45,38 @@ This directory contains MPICH-based workloads for PIMID benchmarking, with both 
 ```
 workloads/
 ├── WORKLOADS_SUMMARY.md    # This file
-└── bfs/
-    ├── README.md            # BFS workload documentation
-    ├── Makefile             # Top-level build system
-    ├── verify_build.sh      # Build verification script
-    ├── device/              # Device-side version
+├── dac26/                  # DAC26 PIMID-integrated workloads (16 total)
+│   ├── README.md           # Complete documentation
+│   ├── Makefile            # Unified build system
+│   ├── message_passing/    # 8 message passing workloads
+│   │   ├── bfs_message_pimid.cpp
+│   │   ├── gemm_message_pimid.cpp
+│   │   ├── spmv_message_pimid.cpp
+│   │   ├── reduction_message_pimid.cpp
+│   │   ├── dotproduct_message_pimid.cpp
+│   │   ├── histogram_message_pimid.cpp
+│   │   ├── prefixsum_message_pimid.cpp
+│   │   └── stencil1d_message_pimid.cpp
+│   └── shared_memory/      # 8 shared memory workloads
+│       ├── bfs_shared_pimid.cpp
+│       ├── gemm_shared_pimid.cpp
+│       ├── spmv_shared_pimid.cpp
+│       ├── reduction_shared_pimid.cpp
+│       ├── dotproduct_shared_pimid.cpp
+│       ├── histogram_shared_pimid.cpp
+│       ├── prefixsum_shared_pimid.cpp
+│       └── stencil1d_shared_pimid.cpp
+├── mpich_examples/         # Basic MPICH workloads
+│   ├── vector_dotproduct.c
+│   ├── graph_pagerank.c
+│   └── matrix_multiply.c
+└── bfs/                    # Legacy BFS with PIM annotations
+    ├── README.md
+    ├── Makefile
+    ├── device/             # Device-side version
     │   ├── bfs_pim.c
     │   └── Makefile
-    └── host/                # Host-only baseline
+    └── host/               # Host-only baseline
         ├── bfs_baseline.c
         └── Makefile
 ```

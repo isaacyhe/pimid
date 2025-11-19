@@ -156,7 +156,7 @@ private:
 
         std::cout << "\nComputation:" << std::endl;
         std::cout << "  Total MAC operations: " << metrics.mac_ops << std::endl;
-        std::cout << "  Expected MACs: " << (2ULL * config.matrix_size * config.matrix_size * config.matrix_size) << std::endl;
+        std::cout << "  Expected MACs: " << (1ULL * config.matrix_size * config.matrix_size * config.matrix_size) << std::endl;
         std::cout << "  Atomic accumulations: " << metrics.atomic_ops << std::endl;
 
         std::cout << "\nCommunication (Shared Memory):" << std::endl;
@@ -172,7 +172,7 @@ private:
 
         // Validation
         std::cout << "\nValidation:" << std::endl;
-        std::cout << "  MAC operations: " << (metrics.mac_ops == 2ULL * config.matrix_size * config.matrix_size * config.matrix_size ? "✓" : "✗") << std::endl;
+        std::cout << "  MAC operations: " << (metrics.mac_ops == 1ULL * config.matrix_size * config.matrix_size * config.matrix_size ? "✓" : "✗") << std::endl;
         std::cout << "  Atomic operations tracked: ✓" << std::endl;
     }
 };

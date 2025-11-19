@@ -1,0 +1,200 @@
+=========================================
+DAC'26 LIBCom vs Baseline H-tree
+Complete Benchmark Suite
+=========================================
+Timestamp: Wed Nov 19 01:57:14 UTC 2025
+
+
+####################################
+# GEMM: Matrix Multiplication
+####################################
+
+=========================================
+gemm - Bank1-32KB (8 subarrays)
+=========================================
+
+--- Message Passing - Baseline (H-tree) ---
+
+=== DAC'26 GEMM Benchmark (Message Passing) ===
+Configuration: Baseline H-tree
+Source: BLAS Level 3 (DGEMM)
+Programming Model: MESSAGE PASSING
+
+=== GEMM Workload (MESSAGE PASSING) ===
+Matrix size: 512×512
+Block size: 64×64
+Number of blocks: 8×8
+Subarrays: 8
+Copy latency: 5 cycles
+Programming model: MESSAGE PASSING
+
+Blocked matrix multiplication: C = A × B
+✓ GEMM computation complete
+
+=== GEMM Results (MESSAGE PASSING) ===
+Total cycles: 134220480
+  Compute cycles: 134217728 (99.9979%)
+  Transfer cycles: 2240 (0.0016689%)
+
+Computation:
+  Total MAC operations: 134217728
+  Expected MACs: 134217728
+
+Communication (Message Passing):
+  Inter-subarray block transfers: 448
+  Total blocks transferred: 448
+  H-tree traversals (Baseline): 448
+
+Energy:
+  Total energy (relative): 448
+  Avg energy per transfer: 1
+
+Validation:
+  MAC operations: ✓
+  Block transfers tracked: ✓
+
+--- Message Passing - LIBCom ---
+
+=== DAC'26 GEMM Benchmark (Message Passing) ===
+Configuration: LIBCom
+Source: BLAS Level 3 (DGEMM)
+Programming Model: MESSAGE PASSING
+
+=== GEMM Workload (MESSAGE PASSING) ===
+Matrix size: 512×512
+Block size: 64×64
+Number of blocks: 8×8
+Subarrays: 8
+Copy latency: 1 cycles
+Programming model: MESSAGE PASSING
+
+Blocked matrix multiplication: C = A × B
+✓ GEMM computation complete
+
+=== GEMM Results (MESSAGE PASSING) ===
+Total cycles: 134218688
+  Compute cycles: 134217728 (99.9993%)
+  Transfer cycles: 448 (0.000333784%)
+
+Computation:
+  Total MAC operations: 134217728
+  Expected MACs: 134217728
+
+Communication (Message Passing):
+  Inter-subarray block transfers: 448
+  Total blocks transferred: 448
+  Direct transfers (LIBCom): 448
+
+Energy:
+  Total energy (relative): 246.4
+  Avg energy per transfer: 0.55
+
+Validation:
+  MAC operations: ✓
+  Block transfers tracked: ✓
+
+--- Shared Memory - Baseline (H-tree) ---
+
+=== DAC'26 GEMM Benchmark (Shared Memory) ===
+Configuration: Baseline H-tree
+Source: BLAS Level 3 (DGEMM)
+Programming Model: SHARED MEMORY
+
+=== GEMM Workload (SHARED MEMORY) ===
+Matrix size: 512×512
+Block size: 64×64
+Number of blocks: 8×8
+Subarrays: 8
+Copy latency: 5 cycles
+Programming model: SHARED MEMORY
+
+Blocked matrix multiplication: C = A × B (shared memory)
+  Subarray 0: processed 8 C blocks
+  Subarray 1: processed 8 C blocks
+  Subarray 2: processed 8 C blocks
+  Subarray 3: processed 8 C blocks
+  Subarray 4: processed 8 C blocks
+  Subarray 5: processed 8 C blocks
+  Subarray 6: processed 8 C blocks
+  Subarray 7: processed 8 C blocks
+
+Synchronization barrier
+✓ GEMM computation complete
+
+=== GEMM Results (SHARED MEMORY) ===
+Total cycles: 134219786
+  Compute cycles: 134217728 (99.9985%)
+  Sync cycles: 10 (7.45047e-06%)
+
+Computation:
+  Total MAC operations: 134217728
+  Expected MACs: 134217728
+  Atomic accumulations: 512
+
+Communication (Shared Memory):
+  Inter-subarray transfers: 0 (shared memory model)
+  Remote memory accesses: 896
+
+Energy:
+  Total energy (relative): 896
+  Avg energy per remote access: 1
+
+Validation:
+  MAC operations: ✓
+  Atomic operations tracked: ✓
+
+--- Shared Memory - LIBCom ---
+
+=== DAC'26 GEMM Benchmark (Shared Memory) ===
+Configuration: LIBCom
+Source: BLAS Level 3 (DGEMM)
+Programming Model: SHARED MEMORY
+
+=== GEMM Workload (SHARED MEMORY) ===
+Matrix size: 512×512
+Block size: 64×64
+Number of blocks: 8×8
+Subarrays: 8
+Copy latency: 1 cycles
+Programming model: SHARED MEMORY
+
+Blocked matrix multiplication: C = A × B (shared memory)
+  Subarray 0: processed 8 C blocks
+  Subarray 1: processed 8 C blocks
+  Subarray 2: processed 8 C blocks
+  Subarray 3: processed 8 C blocks
+  Subarray 4: processed 8 C blocks
+  Subarray 5: processed 8 C blocks
+  Subarray 6: processed 8 C blocks
+  Subarray 7: processed 8 C blocks
+
+Synchronization barrier
+✓ GEMM computation complete
+
+=== GEMM Results (SHARED MEMORY) ===
+Total cycles: 134219786
+  Compute cycles: 134217728 (99.9985%)
+  Sync cycles: 10 (7.45047e-06%)
+
+Computation:
+  Total MAC operations: 134217728
+  Expected MACs: 134217728
+  Atomic accumulations: 512
+
+Communication (Shared Memory):
+  Inter-subarray transfers: 0 (shared memory model)
+  Remote memory accesses: 896
+
+Energy:
+  Total energy (relative): 492.8
+  Avg energy per remote access: 0.55
+
+Validation:
+  MAC operations: ✓
+  Atomic operations tracked: ✓
+
+
+=========================================
+gemm - Bank2-64KB (16 subarrays)
+=========================================
+
