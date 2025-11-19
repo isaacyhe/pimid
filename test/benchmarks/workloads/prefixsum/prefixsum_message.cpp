@@ -16,7 +16,7 @@
  * - Adjust local results based on predecessors' sums
  */
 
-#include "pim_simulator.h"
+#include "../../../DAC26/pimid_adapter/pim_simulator.h"
 #include <iostream>
 #include <vector>
 #include <cstdint>
