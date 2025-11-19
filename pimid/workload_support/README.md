@@ -25,7 +25,7 @@ The main interface for workload developers.
 
 ```cpp
 #include "pim_simulator.h"
-using namespace dac26;
+using namespace pim;
 
 int main() {
     // Configure simulator
@@ -243,8 +243,6 @@ auto energy = mcpat->computeEnergy(activity_stats);
 auto network_latency = garnet->routePacket(src, dst);
 ```
 
-See `DAC26_INTEGRATION_ANALYSIS.md` for detailed improvement plan.
-
 ## Building Against This Library
 
 ### Makefile Example
@@ -270,7 +268,7 @@ target_link_libraries(my_workload pthread m)
 
 ## Example Workloads
 
-See `test/benchmarks/workloads/dac26/` for 16 complete example workloads:
+Example workloads demonstrate both programming models:
 
 **Message Passing**:
 - BFS, GEMM, SpMV, Reduction
@@ -310,15 +308,12 @@ The simulator has been validated against:
 To add features or fix bugs:
 
 1. Modify `include/pim_simulator.h` and `src/pim_simulator.cpp`
-2. Test with existing workloads in `test/benchmarks/workloads/dac26/`
+2. Test with existing workloads
 3. Add new test cases if needed
 4. Update this README
 
 ## References
 
-- **Usage Examples**: `test/benchmarks/workloads/dac26/`
-- **Integration Analysis**: `DAC26_INTEGRATION_ANALYSIS.md`
-- **Experimental Results**: `DAC26/ALL_WORKLOADS_ANALYSIS_CORRECTED.md`
 - **PIMID Documentation**: `docs/`
 
 ## License

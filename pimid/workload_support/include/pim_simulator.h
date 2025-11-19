@@ -1,22 +1,22 @@
 /**
  * @file pim_simulator.h
- * @brief PIMID-based PIM simulator adapter for DAC26 workloads
+ * @brief PIMID-based PIM simulator adapter
  *
  * This adapter wraps PIMID components to provide energy and timing
- * simulation for DAC26 benchmark workloads.
+ * simulation for PIM benchmark workloads.
  *
  * Technology: 45nm
  * Frequency: 1GHz
  */
 
-#ifndef DAC26_PIM_SIMULATOR_H
-#define DAC26_PIM_SIMULATOR_H
+#ifndef PIMID_PIM_SIMULATOR_H
+#define PIMID_PIM_SIMULATOR_H
 
 #include <cstdint>
 #include <string>
 #include <memory>
 
-namespace dac26 {
+namespace pim {
 
 /**
  * PIM operation types
@@ -152,6 +152,6 @@ private:
     double scaleFrequency(double base_value_1ghz) const;
 };
 
-} // namespace dac26
+} // namespace pim
 
-#endif // DAC26_PIM_SIMULATOR_H
+#endif // PIMID_PIM_SIMULATOR_H

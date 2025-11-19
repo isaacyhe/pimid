@@ -1,10 +1,9 @@
 /**
  * @file pim_simulator.cpp
- * @brief Implementation of PIMID-based PIM simulator for DAC26
+ * @brief Implementation of PIMID-based PIM simulator
  *
  * NOTE: This is an analytical model version with explicit timing/energy constants.
  * Future work: Replace analytical models with actual PIMID component queries.
- * See /home/user/pimid-dev/DAC26_INTEGRATION_ANALYSIS.md for improvement plan.
  */
 
 #include "pim_simulator.h"
@@ -17,7 +16,7 @@
 #include <cmath>
 #include <algorithm>
 
-namespace dac26 {
+namespace pim {
 
 // ============================================================================
 // ANALYTICAL MODEL CONSTANTS
@@ -101,7 +100,7 @@ void PIMSimulator::initialize() {
 void PIMSimulator::initializePowerModel() {
     // TODO: Integrate actual PIMID power model when ready
     // For now, using analytical models with explicit constants
-    // See constants at top of file and DAC26_INTEGRATION_ANALYSIS.md
+    // See constants at top of file
 
     // Future implementation will create actual McPAT model:
     // TechnologyParams tech_params;
@@ -309,4 +308,4 @@ void PIMSimulator::printResults() const {
     std::cout << "================================\n" << std::endl;
 }
 
-} // namespace dac26
+} // namespace pim
