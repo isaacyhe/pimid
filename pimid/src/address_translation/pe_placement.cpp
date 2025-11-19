@@ -193,7 +193,7 @@ PEAddressConstraints PEPlacementManager::calculateAddressConstraints(
             constraints.accessible_limit = constraints.accessible_base +
                                           constraints.accessible_size_bytes;
             constraints.can_access_remote = true;   // Can access other banks
-            constraints.remote_access_penalty = 50; // Cycles
+            constraints.remote_access_penalty = hierarchy_.cross_bank_penalty_cycles;
             break;
 
         case PEPlacementLevel::CHIP:
@@ -204,7 +204,7 @@ PEAddressConstraints PEPlacementManager::calculateAddressConstraints(
             constraints.accessible_limit = constraints.accessible_base +
                                           constraints.accessible_size_bytes;
             constraints.can_access_remote = true;
-            constraints.remote_access_penalty = 100; // Cycles
+            constraints.remote_access_penalty = hierarchy_.cross_chip_penalty_cycles;
             break;
 
         case PEPlacementLevel::RANK:
@@ -214,7 +214,7 @@ PEAddressConstraints PEPlacementManager::calculateAddressConstraints(
             constraints.accessible_limit = constraints.accessible_base +
                                           constraints.accessible_size_bytes;
             constraints.can_access_remote = true;
-            constraints.remote_access_penalty = 200; // Cross-rank penalty
+            constraints.remote_access_penalty = hierarchy_.cross_rank_penalty_cycles;
             break;
 
         case PEPlacementLevel::LOGIC_DIE:
@@ -223,7 +223,7 @@ PEAddressConstraints PEPlacementManager::calculateAddressConstraints(
             constraints.accessible_size_bytes = RANK_SIZE * hierarchy_.num_ranks;
             constraints.accessible_limit = constraints.accessible_size_bytes;
             constraints.can_access_remote = true;
-            constraints.remote_access_penalty = 150; // Logic die to DRAM
+            constraints.remote_access_penalty = hierarchy_.logic_to_dram_penalty_cycles;
             break;
     }
 

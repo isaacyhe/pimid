@@ -78,7 +78,7 @@ void NearestPEScheduler::printStats() const {
     std::cout << "\nTasks per PE:" << std::endl;
     uint32_t total_pes = pe_manager_->getTotalPEs();
 
-    for (uint32_t i = 0; i < total_pes && i < 256; i++) {
+    for (uint32_t i = 0; i < total_pes; i++) {
         if (stats_.tasks_per_pe[i] > 0) {
             std::cout << "  PE " << i << ": " << stats_.tasks_per_pe[i]
                       << " tasks";
