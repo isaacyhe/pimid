@@ -102,6 +102,7 @@ set(PIMID_SOURCES
     src/config/config_manager.cpp
     src/config/config_schema.cpp
     src/config/config_validator.cpp
+    config/src/network_config_parser.cpp
 
     # Host engine
     src/host_engine/host_engine.cpp
