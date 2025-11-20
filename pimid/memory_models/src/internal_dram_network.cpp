@@ -19,6 +19,7 @@ InternalDRAMNetwork::InternalDRAMNetwork(
       num_banks_per_bg_(0),
       num_bg_per_chip_(0),
       num_chips_per_rank_(0),
+      use_custom_switch_config_(false),
       external_network_model_(network_model),
       garnet_subarray_network_(nullptr),
       garnet_bank_network_(nullptr),
@@ -1204,6 +1205,22 @@ int InternalDRAMNetwork::getNumberOfSwitchesAtLevel(int level, int num_channels,
         return 0;
     }
 
+    // If using custom configuration, return custom values
+    if (use_custom_switch_config_) {
+        const NetworkLevelConfig* config = nullptr;
+        switch (level) {
+            case 0: config = &custom_switch_config_.l0_config; break;
+            case 1: config = &custom_switch_config_.l1_config; break;
+            case 2: config = &custom_switch_config_.l2_config; break;
+            case 3: config = &custom_switch_config_.l3_config; break;
+            case 4: config = &custom_switch_config_.l4_config; break;
+            case 5: config = &custom_switch_config_.l5_config; break;
+        }
+        if (config && !config->use_default) {
+            return config->num_switches;
+        }
+    }
+
     // Calculate the number of each type of unit in the hierarchy
     int num_ranks = num_channels * ranks_per_channel;
     int num_chips = num_ranks * num_chips_per_rank_;
@@ -1224,6 +1241,207 @@ int InternalDRAMNetwork::getNumberOfSwitchesAtLevel(int level, int num_channels,
             return 1;
         default:
             return 0;
+    }
+}
+
+//=============================================================================
+// Custom Topology Configuration Functions
+//=============================================================================
+
+void InternalDRAMNetwork::setCustomSwitchHierarchy(const SwitchHierarchyConfig& config) {
+    custom_switch_config_ = config;
+    use_custom_switch_config_ = true;
+
+    std::cout << "[InternalDRAMNetwork] Custom switch hierarchy configured:" << std::endl;
+
+    auto print_level = [](const std::string& name, const NetworkLevelConfig& cfg) {
+        if (!cfg.use_default) {
+            std::cout << "  " << name << ":" << std::endl;
+            std::cout << "    Topology: " << getTopologyName(cfg.topology) << std::endl;
+            std::cout << "    Switches: " << cfg.num_switches << std::endl;
+            std::cout << "    Ports per switch: " << cfg.ports_per_switch << std::endl;
+            std::cout << "    Endpoints: " << cfg.num_endpoints << std::endl;
+        }
+    };
+
+    print_level("L0 (BG internal)", config.l0_config);
+    print_level("L1 (BG to chip)", config.l1_config);
+    print_level("L2 (Chip level)", config.l2_config);
+    print_level("L3 (Rank level)", config.l3_config);
+    print_level("L4 (Channel level)", config.l4_config);
+    print_level("L5 (System level)", config.l5_config);
+}
+
+SwitchHierarchyConfig InternalDRAMNetwork::getSwitchHierarchyConfig(int num_channels, int ranks_per_channel) const {
+    SwitchHierarchyConfig config;
+    config.num_channels = num_channels;
+    config.ranks_per_channel = ranks_per_channel;
+
+    // Calculate hierarchy
+    int num_ranks = num_channels * ranks_per_channel;
+    int num_chips = num_ranks * num_chips_per_rank_;
+    int num_bgs = num_chips * num_bg_per_chip_;
+    int num_banks = num_bgs * num_banks_per_bg_;
+
+    // L0: BG internal (banks within BG)
+    config.l0_config.level = 0;
+    config.l0_config.topology = TopologyType::CROSSBAR;
+    config.l0_config.num_switches = num_bgs;
+    config.l0_config.num_endpoints = num_banks_per_bg_;
+    config.l0_config.ports_per_switch = calculatePortsPerSwitch(
+        config.l0_config.topology, config.l0_config.num_endpoints, 1);
+
+    // L1: BG to chip (BGs within chip)
+    config.l1_config.level = 1;
+    config.l1_config.topology = TopologyType::BUS;
+    config.l1_config.num_switches = num_bgs;
+    config.l1_config.num_endpoints = num_bg_per_chip_;
+    config.l1_config.ports_per_switch = calculatePortsPerSwitch(
+        config.l1_config.topology, config.l1_config.num_endpoints, 1);
+
+    // L2: Chip level (chips within rank)
+    config.l2_config.level = 2;
+    config.l2_config.topology = TopologyType::BUS;
+    config.l2_config.num_switches = num_chips;
+    config.l2_config.num_endpoints = num_chips_per_rank_;
+    config.l2_config.ports_per_switch = calculatePortsPerSwitch(
+        config.l2_config.topology, config.l2_config.num_endpoints, 1);
+
+    // L3: Rank level (ranks within channel)
+    config.l3_config.level = 3;
+    config.l3_config.topology = TopologyType::BUS;
+    config.l3_config.num_switches = num_ranks;
+    config.l3_config.num_endpoints = ranks_per_channel;
+    config.l3_config.ports_per_switch = calculatePortsPerSwitch(
+        config.l3_config.topology, config.l3_config.num_endpoints, 1);
+
+    // L4: Channel level (channels to system)
+    config.l4_config.level = 4;
+    config.l4_config.topology = TopologyType::CROSSBAR;
+    config.l4_config.num_switches = num_channels;
+    config.l4_config.num_endpoints = num_channels;
+    config.l4_config.ports_per_switch = calculatePortsPerSwitch(
+        config.l4_config.topology, config.l4_config.num_endpoints, 1);
+
+    // L5: System level (root switch)
+    config.l5_config.level = 5;
+    config.l5_config.topology = TopologyType::CROSSBAR;
+    config.l5_config.num_switches = 1;
+    config.l5_config.num_endpoints = num_channels;
+    config.l5_config.ports_per_switch = calculatePortsPerSwitch(
+        config.l5_config.topology, config.l5_config.num_endpoints, 1);
+
+    // If custom config exists, overlay it
+    if (use_custom_switch_config_) {
+        if (!custom_switch_config_.l0_config.use_default) config.l0_config = custom_switch_config_.l0_config;
+        if (!custom_switch_config_.l1_config.use_default) config.l1_config = custom_switch_config_.l1_config;
+        if (!custom_switch_config_.l2_config.use_default) config.l2_config = custom_switch_config_.l2_config;
+        if (!custom_switch_config_.l3_config.use_default) config.l3_config = custom_switch_config_.l3_config;
+        if (!custom_switch_config_.l4_config.use_default) config.l4_config = custom_switch_config_.l4_config;
+        if (!custom_switch_config_.l5_config.use_default) config.l5_config = custom_switch_config_.l5_config;
+    }
+
+    return config;
+}
+
+int InternalDRAMNetwork::calculatePortsPerSwitch(TopologyType topology, int num_endpoints, int num_switches) {
+    if (num_switches == 0 || num_endpoints == 0) {
+        return 0;
+    }
+
+    switch (topology) {
+        case TopologyType::BUS:
+            // Bus: 1 switch connects all endpoints
+            return num_endpoints;
+
+        case TopologyType::CROSSBAR:
+            // Crossbar: N×N connections
+            return num_endpoints;
+
+        case TopologyType::MESH_2D: {
+            // 2D Mesh: Each switch has ~4-5 ports (4 directions + local)
+            // Total switches = sqrt(N) × sqrt(N)
+            int sqrt_n = static_cast<int>(std::ceil(std::sqrt(num_endpoints / num_switches)));
+            return 5;  // N, S, E, W, Local
+        }
+
+        case TopologyType::TORUS_2D: {
+            // 2D Torus: Same as mesh but wrap-around
+            return 5;  // N, S, E, W, Local
+        }
+
+        case TopologyType::FAT_TREE: {
+            // Fat-tree: k-port switches, k/2 up, k/2 down
+            // For simplicity, assume balanced tree
+            int endpoints_per_switch = (num_endpoints + num_switches - 1) / num_switches;
+            return endpoints_per_switch + 2;  // Endpoints + up/down links
+        }
+
+        case TopologyType::H_TREE: {
+            // H-tree: Binary tree, log2(N) levels
+            // Each router has 2-4 ports depending on position
+            return 4;  // Parent + 2 children + local (average)
+        }
+
+        case TopologyType::CUSTOM:
+            // User must specify
+            return 0;
+
+        default:
+            return num_endpoints;
+    }
+}
+
+int InternalDRAMNetwork::calculateOptimalSwitchCount(int num_endpoints, int max_ports_per_switch, TopologyType topology) {
+    if (num_endpoints == 0 || max_ports_per_switch == 0) {
+        return 1;
+    }
+
+    switch (topology) {
+        case TopologyType::BUS:
+        case TopologyType::CROSSBAR:
+            // For bus/crossbar, calculate how many switches needed
+            // to keep each under the port limit
+            return (num_endpoints + max_ports_per_switch - 1) / max_ports_per_switch;
+
+        case TopologyType::MESH_2D:
+        case TopologyType::TORUS_2D: {
+            // Mesh/Torus: sqrt(N) × sqrt(N) switches
+            int sqrt_n = static_cast<int>(std::ceil(std::sqrt(num_endpoints)));
+            return sqrt_n * sqrt_n;
+        }
+
+        case TopologyType::FAT_TREE: {
+            // Fat-tree with k-port switches
+            // Number of switches ≈ 5N/k for k-ary fat tree
+            int k = max_ports_per_switch;
+            return (5 * num_endpoints + k - 1) / k;
+        }
+
+        case TopologyType::H_TREE: {
+            // H-tree: Binary tree requires (N-1) internal nodes for N leaves
+            return num_endpoints - 1;
+        }
+
+        case TopologyType::CUSTOM:
+            // Must be specified by user
+            return 1;
+
+        default:
+            return 1;
+    }
+}
+
+std::string InternalDRAMNetwork::getTopologyName(TopologyType topology) {
+    switch (topology) {
+        case TopologyType::BUS:        return "Bus";
+        case TopologyType::CROSSBAR:   return "Crossbar";
+        case TopologyType::MESH_2D:    return "2D Mesh";
+        case TopologyType::TORUS_2D:   return "2D Torus";
+        case TopologyType::FAT_TREE:   return "Fat-Tree";
+        case TopologyType::H_TREE:     return "H-Tree";
+        case TopologyType::CUSTOM:     return "Custom";
+        default:                        return "Unknown";
     }
 }
 

@@ -80,6 +80,56 @@ enum class NetworkLevel {
 };
 
 /**
+ * @brief Topology type for network interconnect
+ */
+enum class TopologyType {
+    BUS,           // Shared bus (1 switch, N ports)
+    CROSSBAR,      // Full crossbar (1 switch, N² complexity)
+    MESH_2D,       // 2D mesh (√N × √N grid)
+    TORUS_2D,      // 2D torus (wrap-around mesh)
+    FAT_TREE,      // Fat-tree (hierarchical with increasing BW upward)
+    H_TREE,        // H-tree (binary tree structure)
+    CUSTOM         // User-defined topology
+};
+
+/**
+ * @brief Configuration for a specific network level
+ */
+struct NetworkLevelConfig {
+    int level;                    // Switch level (0-5)
+    TopologyType topology;        // Topology type for this level
+    int num_switches;             // Number of switches at this level
+    int ports_per_switch;         // Number of ports per switch
+    int num_endpoints;            // Number of endpoints connected at this level
+    bool use_default;             // True to use auto-calculated values
+
+    NetworkLevelConfig()
+        : level(0), topology(TopologyType::CROSSBAR),
+          num_switches(1), ports_per_switch(0),
+          num_endpoints(0), use_default(true) {}
+};
+
+/**
+ * @brief Complete switch hierarchy configuration
+ */
+struct SwitchHierarchyConfig {
+    // Per-level configurations
+    NetworkLevelConfig l0_config;  // BG internal
+    NetworkLevelConfig l1_config;  // BG to chip
+    NetworkLevelConfig l2_config;  // Chip level
+    NetworkLevelConfig l3_config;  // Rank level
+    NetworkLevelConfig l4_config;  // Channel level
+    NetworkLevelConfig l5_config;  // System level
+
+    // Global settings
+    int num_channels;
+    int ranks_per_channel;
+
+    SwitchHierarchyConfig()
+        : num_channels(1), ranks_per_channel(1) {}
+};
+
+/**
  * @brief Internal DRAM Network Model
  *
  * This models the network inside DRAM chips that enables PIM data movement.
@@ -273,6 +323,61 @@ public:
      */
     int getNumberOfSwitchesAtLevel(int level, int num_channels, int ranks_per_channel) const;
 
+    /**
+     * @brief Set custom switch hierarchy configuration
+     *
+     * Allows users to override default topology with custom settings.
+     * Users can specify:
+     * - Number of switches at each level
+     * - Ports per switch
+     * - Topology type (bus, crossbar, mesh, etc.)
+     *
+     * @param config Custom hierarchy configuration
+     */
+    void setCustomSwitchHierarchy(const SwitchHierarchyConfig& config);
+
+    /**
+     * @brief Get current switch hierarchy configuration
+     *
+     * @param num_channels Number of memory channels
+     * @param ranks_per_channel Number of ranks per channel
+     * @return Current hierarchy configuration
+     */
+    SwitchHierarchyConfig getSwitchHierarchyConfig(int num_channels, int ranks_per_channel) const;
+
+    /**
+     * @brief Calculate number of ports per switch for a given topology
+     *
+     * @param topology Topology type
+     * @param num_endpoints Number of endpoints to connect
+     * @param num_switches Number of switches in the topology
+     * @return Ports per switch
+     */
+    static int calculatePortsPerSwitch(TopologyType topology, int num_endpoints, int num_switches);
+
+    /**
+     * @brief Calculate optimal number of switches for target port count
+     *
+     * Given a target maximum port count, calculate how many switches
+     * are needed at a level to keep each switch below that limit.
+     *
+     * Example: 32 banks, max 8 ports/switch → need 4 switches
+     *
+     * @param num_endpoints Number of endpoints at this level
+     * @param max_ports_per_switch Maximum desired ports per switch
+     * @param topology Topology type
+     * @return Optimal number of switches
+     */
+    static int calculateOptimalSwitchCount(int num_endpoints, int max_ports_per_switch, TopologyType topology);
+
+    /**
+     * @brief Get topology name as string
+     *
+     * @param topology Topology type
+     * @return Topology name
+     */
+    static std::string getTopologyName(TopologyType topology);
+
 private:
     // DRAM configuration
     std::string dram_type_;
@@ -280,6 +385,10 @@ private:
     int num_banks_per_bg_;
     int num_bg_per_chip_;
     int num_chips_per_rank_;
+
+    // Custom switch hierarchy configuration (optional)
+    SwitchHierarchyConfig custom_switch_config_;
+    bool use_custom_switch_config_;
 
     // Network configuration for each level
     InternalNetworkLink subarray_network_config_;   // Within bank
