@@ -31,11 +31,23 @@ struct MemoryHierarchy {
     uint64_t chip_size_bytes;
     uint64_t rank_size_bytes;
 
+    // Remote access penalties (in cycles) - configurable per technology
+    uint32_t cross_subarray_penalty_cycles;
+    uint32_t cross_bank_penalty_cycles;
+    uint32_t cross_chip_penalty_cycles;
+    uint32_t cross_rank_penalty_cycles;
+    uint32_t logic_to_dram_penalty_cycles;
+
     MemoryHierarchy() : num_subarrays_per_bank(0), num_banks_per_chip(0),
                         num_chips_per_rank(0), num_ranks(0),
                         has_logic_die(false),
                         subarray_size_bytes(0), bank_size_bytes(0),
-                        chip_size_bytes(0), rank_size_bytes(0) {}
+                        chip_size_bytes(0), rank_size_bytes(0),
+                        cross_subarray_penalty_cycles(50),
+                        cross_bank_penalty_cycles(100),
+                        cross_chip_penalty_cycles(150),
+                        cross_rank_penalty_cycles(200),
+                        logic_to_dram_penalty_cycles(150) {}
 };
 
 /**

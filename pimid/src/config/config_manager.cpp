@@ -26,6 +26,7 @@ void ConfigManager::loadDefaults() {
     config_["simulation.max_cycles"] = "0";
     config_["simulation.warmup_cycles"] = "100000";
     config_["simulation.log_level"] = "INFO";
+    config_["simulation.stats_interval"] = "10000";
 
     // Memory defaults
     config_["memory.technology"] = "DRAM";
@@ -39,11 +40,19 @@ void ConfigManager::loadDefaults() {
     config_["pim.pe_frequency_mhz"] = "1000";
     config_["pim.scheduler"] = "NEAREST_PE";
 
-    // Cache defaults
+    // Cache defaults with associativity and line sizes
     config_["caches.l1i.size_kb"] = "32";
+    config_["caches.l1i.associativity"] = "8";
+    config_["caches.l1i.line_size_bytes"] = "64";
     config_["caches.l1d.size_kb"] = "32";
+    config_["caches.l1d.associativity"] = "8";
+    config_["caches.l1d.line_size_bytes"] = "64";
     config_["caches.l2.size_kb"] = "256";
+    config_["caches.l2.associativity"] = "8";
+    config_["caches.l2.line_size_bytes"] = "64";
     config_["caches.l3.size_kb"] = "8192";
+    config_["caches.l3.associativity"] = "16";
+    config_["caches.l3.line_size_bytes"] = "64";
 
     // Memory hierarchy defaults
     config_["memory_hierarchy.subarray.size_mb"] = "2";
@@ -60,6 +69,73 @@ void ConfigManager::loadDefaults() {
     config_["network.topology"] = "MESH_2D";
     config_["network.num_rows"] = "4";
     config_["network.num_cols"] = "4";
+    config_["network.virtual_channels"] = "4";
+    config_["network.link_width_bytes"] = "8";
+    config_["network.link_latency_cycles"] = "1";
+    config_["network.router_latency_cycles"] = "2";
+    config_["network.input_buffer_depth"] = "8";
+    config_["network.output_buffer_depth"] = "4";
+    config_["network.memory_controller_base_id"] = "1000";
+    config_["network.llc_id"] = "2000";
+
+    // Host/Device synchronization and engine defaults
+    config_["host.sync_interval_cycles"] = "1000";
+    config_["device.sync_interval_cycles"] = "1000";
+    config_["device.default_num_pes"] = "16";
+    config_["device.completion_cycles"] = "100";
+    config_["host.poll_sleep_ms"] = "10";
+
+    // PE timing parameters (for standalone simulations)
+    config_["pe.fetch_decode_ns"] = "2.0";
+    config_["pe.execute_compare_ns"] = "1.0";
+    config_["pe.branch_penalty_ns"] = "3.0";
+    config_["pe.branch_prediction_accuracy"] = "0.5";
+
+    // Address translation defaults
+    config_["address_translation.tlb_entries"] = "64";
+    config_["address_translation.page_fault_penalty_cycles"] = "100";
+    config_["address_translation.bandwidth_utilization_threshold"] = "0.90";
+    config_["address_translation.bottleneck_detection_contentions"] = "100";
+    config_["address_translation.bottleneck_detection_bw_threshold"] = "0.90";
+    config_["address_translation.bottleneck_detection_cycles"] = "1000";
+
+    // Socket communication defaults
+    config_["communication.port"] = "9999";
+    config_["communication.host_address"] = "127.0.0.1";
+    config_["communication.device_delay_seconds"] = "2";
+    config_["communication.max_message_size_mb"] = "100";
+    config_["communication.max_retries"] = "10";
+    config_["communication.retry_delay_seconds"] = "1";
+    config_["communication.bind_address"] = "0.0.0.0";
+
+    // Output defaults
+    config_["output.stats_file"] = "results/stats.txt";
+    config_["output.trace_file"] = "results/trace.out";
+    config_["output.enable_detailed_stats"] = "true";
+    config_["output.enable_tracing"] = "false";
+
+    // PE statistics thresholds
+    config_["pe_stats.utilization_threshold"] = "0.90";
+    config_["pe_stats.contention_threshold"] = "100";
+    config_["pe_stats.penalty_threshold_cycles"] = "1000";
+
+    // Scheduler display limits (use actual num_pes, this is max for display)
+    config_["scheduler.max_display_pes"] = "256";
+    config_["scheduler.load_balanced.bar_length"] = "20";
+    config_["scheduler.load_balanced.busy_penalty"] = "1";
+    config_["scheduler.nearest.penalty_threshold_cycles"] = "100";
+
+    // Remote access penalties (cycles) - technology-dependent defaults
+    config_["memory_access.cross_subarray_penalty_cycles"] = "50";
+    config_["memory_access.cross_bank_penalty_cycles"] = "100";
+    config_["memory_access.cross_chip_penalty_cycles"] = "150";
+    config_["memory_access.cross_rank_penalty_cycles"] = "200";
+    config_["memory_access.logic_to_dram_penalty_cycles"] = "150";
+
+    // Default array sizes for co-simulation tests
+    config_["test.default_array_rows"] = "1024";
+    config_["test.default_array_cols"] = "1024";
+    config_["test.default_cycles"] = "10000";
 }
 
 bool ConfigManager::initialize(const std::string& config_file) {

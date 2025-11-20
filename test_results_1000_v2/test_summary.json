@@ -1,0 +1,102 @@
+{
+  "total_tests": 1000,
+  "passed": 1000,
+  "failed": 0,
+  "timeout": 0,
+  "errors": 0,
+  "pass_rate": 100.0,
+  "duration_seconds": 8.691297769546509,
+  "timestamp": "2025-11-19T13:09:43.297027",
+  "workload_stats": {
+    "gemm_shared": {
+      "total": 56,
+      "passed": 56,
+      "failed": 0
+    },
+    "bfs_message": {
+      "total": 56,
+      "passed": 56,
+      "failed": 0
+    },
+    "reduction_message": {
+      "total": 54,
+      "passed": 54,
+      "failed": 0
+    },
+    "dotproduct_shared": {
+      "total": 63,
+      "passed": 63,
+      "failed": 0
+    },
+    "dotproduct_message": {
+      "total": 59,
+      "passed": 59,
+      "failed": 0
+    },
+    "gemm_message": {
+      "total": 53,
+      "passed": 53,
+      "failed": 0
+    },
+    "stencil1d_shared": {
+      "total": 105,
+      "passed": 105,
+      "failed": 0
+    },
+    "prefixsum_shared": {
+      "total": 52,
+      "passed": 52,
+      "failed": 0
+    },
+    "stencil1d_message": {
+      "total": 103,
+      "passed": 103,
+      "failed": 0
+    },
+    "spmv_shared": {
+      "total": 41,
+      "passed": 41,
+      "failed": 0
+    },
+    "spmv_message": {
+      "total": 61,
+      "passed": 61,
+      "failed": 0
+    },
+    "histogram_message": {
+      "total": 57,
+      "passed": 57,
+      "failed": 0
+    },
+    "histogram_shared": {
+      "total": 53,
+      "passed": 53,
+      "failed": 0
+    },
+    "bfs_shared": {
+      "total": 79,
+      "passed": 79,
+      "failed": 0
+    },
+    "reduction_shared": {
+      "total": 48,
+      "passed": 48,
+      "failed": 0
+    },
+    "prefixsum_message": {
+      "total": 60,
+      "passed": 60,
+      "failed": 0
+    }
+  },
+  "architecture_stats": {
+    "baseline": {
+      "total": 485,
+      "passed": 485
+    },
+    "libcom": {
+      "total": 515,
+      "passed": 515
+    }
+  }
+}

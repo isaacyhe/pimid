@@ -53,6 +53,10 @@ struct StandaloneConfig {
     std::string description;
     std::string mode;  // "standalone", "host-device", "trace-driven"
 
+    // Configuration files
+    std::string config_file;
+    std::string memory_config_file;
+
     // Memory configuration
     std::string memory_tech;
     int num_banks;
@@ -84,6 +88,8 @@ struct StandaloneConfig {
         name("PIMID_Simulation"),
         description("PIM Simulation"),
         mode("standalone"),
+        config_file("config/pimid_config.yaml"),
+        memory_config_file(""),
         memory_tech("SRAM"),
         num_banks(4),
         subarrays_per_bank(4),
@@ -108,6 +114,7 @@ class SimpleYAMLParser {
 public:
     static StandaloneConfig parseConfigFile(const std::string& filename) {
         StandaloneConfig config;
+        config.config_file = filename;  // Store the config file path
 
         std::ifstream file(filename);
         if (!file.is_open()) {
@@ -140,6 +147,7 @@ public:
             if (key == "name") config.name = value;
             else if (key == "description") config.description = value;
             else if (key == "mode") config.mode = value;
+            else if (key == "memory_config") config.memory_config_file = value;
             else if (key == "technology") config.memory_tech = value;
             else if (key == "num_banks") config.num_banks = std::stoi(value);
             else if (key == "subarrays_per_bank") config.subarrays_per_bank = std::stoi(value);
@@ -292,17 +300,22 @@ private:
         std::cout << "Initializing Memory Model..." << std::endl;
         std::cout << "  Technology: " << config_.memory_tech << std::endl;
 
+        // Determine config file to use for memory model
+        // Priority: 1) explicit memory config, 2) main config file, 3) default
+        std::string memory_config_file = config_.memory_config_file.empty() ?
+            config_.config_file : config_.memory_config_file;
+
         try {
             if (config_.memory_tech == "SRAM") {
-                memory_model_ = std::make_shared<SRAMModel>("config.yaml");
+                memory_model_ = std::make_shared<SRAMModel>(memory_config_file);
             } else if (config_.memory_tech == "DRAM") {
-                memory_model_ = std::make_shared<DRAMModel>("config.yaml");
+                memory_model_ = std::make_shared<DRAMModel>(memory_config_file);
             } else if (config_.memory_tech == "STT_MRAM" || config_.memory_tech == "STTMRAM") {
-                memory_model_ = std::make_shared<STTMRAMModel>("config.yaml");
+                memory_model_ = std::make_shared<STTMRAMModel>(memory_config_file);
             } else if (config_.memory_tech == "PCM") {
-                memory_model_ = std::make_shared<PCMModel>("config.yaml");
+                memory_model_ = std::make_shared<PCMModel>(memory_config_file);
             } else if (config_.memory_tech == "ReRAM" || config_.memory_tech == "RERAM") {
-                memory_model_ = std::make_shared<ReRAMModel>("config.yaml");
+                memory_model_ = std::make_shared<ReRAMModel>(memory_config_file);
             } else {
                 std::cerr << "  Error: Unknown memory technology: " << config_.memory_tech << std::endl;
                 return false;
@@ -310,6 +323,7 @@ private:
 
             memory_model_->initialize();
             std::cout << "  Memory model initialized successfully" << std::endl;
+            std::cout << "  Config file used: " << memory_config_file << std::endl;
             return true;
 
         } catch (const std::exception& e) {
