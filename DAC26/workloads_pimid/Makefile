@@ -12,6 +12,7 @@ LIBS = -lpimid_power -lpimid_memory -lpthread
 # Source files
 ADAPTER_SRC = ../pimid_adapter/pim_simulator.cpp
 PIMID_POWER_SRC = ../../pimid/power_models/src/power_model.cpp ../../pimid/power_models/src/mcpat_model.cpp
+PIMID_MEMORY_SRC = ../../pimid/memory_models/src/cacti_wrapper.cpp
 
 # Workload sources
 WORKLOADS_SHARED = reduction_shared_pimid spmv_shared_pimid gemm_shared_pimid bfs_shared_pimid \
@@ -25,6 +26,7 @@ WORKLOADS = $(WORKLOADS_SHARED) $(WORKLOADS_MESSAGE)
 # Object files
 ADAPTER_OBJ = ../pimid_adapter/pim_simulator.o
 POWER_OBJS = power_model.o mcpat_model.o
+MEMORY_OBJS = cacti_wrapper.o
 
 all: $(WORKLOADS)
 
@@ -39,55 +41,59 @@ power_model.o: ../../pimid/power_models/src/power_model.cpp
 mcpat_model.o: ../../pimid/power_models/src/mcpat_model.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
+# Build PIMID memory model objects
+cacti_wrapper.o: ../../pimid/memory_models/src/cacti_wrapper.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+
 # Build workloads
-reduction_shared_pimid: reduction_shared_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+reduction_shared_pimid: reduction_shared_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 spmv_shared_pimid: spmv_shared_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 gemm_shared_pimid: gemm_shared_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 bfs_shared_pimid: bfs_shared_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 histogram_shared_pimid: histogram_shared_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 dotproduct_shared_pimid: dotproduct_shared_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 prefixsum_shared_pimid: prefixsum_shared_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 stencil1d_shared_pimid: stencil1d_shared_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 # Build message passing workloads
 reduction_message_pimid: reduction_message_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 spmv_message_pimid: spmv_message_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 gemm_message_pimid: gemm_message_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 bfs_message_pimid: bfs_message_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 histogram_message_pimid: histogram_message_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 dotproduct_message_pimid: dotproduct_message_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 prefixsum_message_pimid: prefixsum_message_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 stencil1d_message_pimid: stencil1d_message_pimid.cpp $(ADAPTER_OBJ) $(POWER_OBJS)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) -o $@ -lm
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $< $(ADAPTER_OBJ) $(POWER_OBJS) $(MEMORY_OBJS) -o $@ -lm
 
 # Phony targets
 .PHONY: all clean test

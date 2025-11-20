@@ -30,6 +30,7 @@ struct BFSConfig {
     int num_vertices;
     int avg_degree;
     Topology topology;
+    MemoryTech memory_tech = MemoryTech::SRAM;
 };
 
 class BFSMessagePIMID {
@@ -70,6 +71,7 @@ public:
         pim_config.frequency_ghz = 1.0;
         pim_config.num_subarrays = config.num_subarrays;
         pim_config.topology = config.topology;
+        pim_config.memory_tech = config.memory_tech;
 
         simulator = std::make_shared<PIMSimulator>(pim_config);
         simulator->initialize();
@@ -248,9 +250,10 @@ private:
 
 int main(int argc, char* argv[]) {
     if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <num_subarrays> <num_vertices> <is_libcom>" << std::endl;
-        std::cerr << "Example: " << argv[0] << " 8 64 0   # 8 subarrays, 64 vertices, baseline" << std::endl;
-        std::cerr << "Example: " << argv[0] << " 8 64 1   # 8 subarrays, 64 vertices, LIBCom" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <num_subarrays> <num_vertices> <is_libcom> [mem_tech]" << std::endl;
+        std::cerr << "Example: " << argv[0] << " 8 64 0     # 8 subarrays, 64 vertices, baseline, SRAM" << std::endl;
+        std::cerr << "Example: " << argv[0] << " 8 64 1 1   # 8 subarrays, 64 vertices, LIBCom, DRAM" << std::endl;
+        std::cerr << "Memory Tech (optional): 0=SRAM, 1=DRAM, 2=STT-MRAM, 3=PCM, 4=ReRAM" << std::endl;
         return 1;
     }
 
@@ -259,6 +262,14 @@ int main(int argc, char* argv[]) {
     config.num_vertices = std::atoi(argv[2]);
     bool is_libcom = (std::atoi(argv[3]) == 1);
     config.topology = is_libcom ? Topology::LIBCOM : Topology::HTREE_BASELINE;
+
+    // Optional memory technology parameter (default: SRAM)
+    if (argc >= 5) {
+        int mem_tech = std::atoi(argv[4]);
+        if (mem_tech >= 0 && mem_tech <= 4) {
+            config.memory_tech = static_cast<MemoryTech>(mem_tech);
+        }
+    }
 
     config.avg_degree = 8;
 

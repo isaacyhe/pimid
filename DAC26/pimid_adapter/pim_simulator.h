@@ -41,6 +41,17 @@ enum class Topology {
 };
 
 /**
+ * Memory technology type
+ */
+enum class MemoryTech {
+    SRAM,
+    DRAM,
+    STT_MRAM,
+    PCM,
+    RERAM
+};
+
+/**
  * Simulation results
  */
 struct SimulationResults {
@@ -83,6 +94,9 @@ struct PIMConfig {
     uint32_t num_subarrays = 8;
     uint64_t subarray_size_kb = 4;        // 4KB per subarray
     uint32_t word_size_bits = 32;
+
+    // Memory technology
+    MemoryTech memory_tech = MemoryTech::SRAM;
 
     // Interconnect configuration
     Topology topology = Topology::HTREE_BASELINE;

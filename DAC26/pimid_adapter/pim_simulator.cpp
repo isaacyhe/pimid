@@ -33,10 +33,14 @@ PIMSimulator::~PIMSimulator() {
 }
 
 void PIMSimulator::initialize() {
+    // Memory technology name mapping
+    const char* mem_tech_names[] = {"SRAM", "DRAM", "STT-MRAM", "PCM", "ReRAM"};
+
     std::cout << "\n=== Initializing PIMID Simulator ===" << std::endl;
     std::cout << "Technology: " << config_.tech_node_nm << "nm" << std::endl;
     std::cout << "Frequency: " << config_.frequency_ghz << " GHz" << std::endl;
     std::cout << "Subarrays: " << config_.num_subarrays << std::endl;
+    std::cout << "Memory Tech: " << mem_tech_names[static_cast<int>(config_.memory_tech)] << std::endl;
     std::cout << "Topology: " << (config_.topology == Topology::LIBCOM ? "LIBCom" : "H-tree Baseline") << std::endl;
 
     // Initialize PIMID components
@@ -74,37 +78,79 @@ void PIMSimulator::initializePowerModel() {
 }
 
 void PIMSimulator::initializeMemoryModel() {
-    // Create CACTI configuration for subarray SRAM
-    CACTIWrapper::SRAMConfig sram_config;
-    sram_config.capacity_bytes = config_.subarray_size_kb * 1024;
-    sram_config.tech_node_nm = config_.tech_node_nm;
-    sram_config.temperature = static_cast<uint32_t>(config_.temperature_k);
-    sram_config.output_width_bits = config_.word_size_bits;
-    sram_config.is_cache = false;  // Scratchpad mode
-    sram_config.banks = 1;
-    sram_config.associativity = 1;  // Direct mapped
-    sram_config.line_size = config_.word_size_bits / 8;
+    // Create CACTI configuration for subarray memory
+    // Only SRAM uses CACTI; others use technology-specific models
+    if (config_.memory_tech == MemoryTech::SRAM) {
+        CACTIWrapper::SRAMConfig sram_config;
+        sram_config.capacity_bytes = config_.subarray_size_kb * 1024;
+        sram_config.tech_node_nm = config_.tech_node_nm;
+        sram_config.temperature = static_cast<uint32_t>(config_.temperature_k);
+        sram_config.output_width_bits = config_.word_size_bits;
+        sram_config.is_cache = false;  // Scratchpad mode
+        sram_config.banks = 1;
+        sram_config.associativity = 1;  // Direct mapped
+        sram_config.line_size = config_.word_size_bits / 8;
 
-    // Initialize CACTI wrapper
-    memory_model_ = new CACTIWrapper(sram_config);
-    static_cast<CACTIWrapper*>(memory_model_)->initialize();
+        // Initialize CACTI wrapper
+        memory_model_ = new CACTIWrapper(sram_config);
+        static_cast<CACTIWrapper*>(memory_model_)->initialize();
+    } else {
+        // For other memory technologies, we'll use direct timing/energy parameters
+        // Memory model pointer is null, but we'll set timing/energy directly
+        memory_model_ = nullptr;
+    }
 }
 
 void PIMSimulator::computeTimingParameters() {
-    // Get timing from CACTI instead of hardcoding!
-    CACTIWrapper* cacti = static_cast<CACTIWrapper*>(memory_model_);
-
-    // Access time in seconds -> convert to cycles
-    double access_time_ns = cacti->getAccessTime() * 1e9;  // Convert to ns
     double cycle_time_ns = 1000.0 / config_.frequency_ghz;  // ns per cycle
+    double access_time_ns;
+    double write_time_ns;
 
-    // Local read: based on CACTI access time
+    // Technology-specific timing parameters (from literature and models)
+    switch (config_.memory_tech) {
+        case MemoryTech::SRAM:
+            if (memory_model_) {
+                // Get timing from CACTI
+                CACTIWrapper* cacti = static_cast<CACTIWrapper*>(memory_model_);
+                access_time_ns = cacti->getAccessTime() * 1e9;  // Convert to ns
+                write_time_ns = access_time_ns * 1.2;
+            } else {
+                // Fallback SRAM timing (45nm, 4KB subarray)
+                access_time_ns = 2.5;
+                write_time_ns = 2.5;
+            }
+            break;
+
+        case MemoryTech::DRAM:
+            // DDR4 DRAM timing (from Ramulator/JEDEC specs)
+            access_time_ns = 13.32;  // tCL = 13.32ns typical
+            write_time_ns = 15.0;    // Write latency slightly higher
+            break;
+
+        case MemoryTech::STT_MRAM:
+            // STT-MRAM timing (from NVSim/literature)
+            access_time_ns = 7.0;    // Read latency
+            write_time_ns = 25.0;    // Write latency (MTJ switching)
+            break;
+
+        case MemoryTech::PCM:
+            // Phase-Change Memory timing
+            access_time_ns = 8.0;    // Read latency
+            write_time_ns = 100.0;   // Write latency (very slow!)
+            break;
+
+        case MemoryTech::RERAM:
+            // Resistive RAM timing
+            access_time_ns = 5.0;    // Read latency
+            write_time_ns = 12.0;    // Write latency
+            break;
+    }
+
+    // Convert to cycles
     config_.local_read_cycles = static_cast<uint32_t>(
         std::ceil(access_time_ns / cycle_time_ns));
-
-    // Write is typically slightly longer (includes precharge)
     config_.local_write_cycles = static_cast<uint32_t>(
-        std::ceil(access_time_ns * 1.2 / cycle_time_ns));
+        std::ceil(write_time_ns / cycle_time_ns));
 
     // Ensure minimum latency
     config_.local_read_cycles = std::max(config_.local_read_cycles, 1u);
@@ -126,12 +172,45 @@ void PIMSimulator::computeTimingParameters() {
 }
 
 void PIMSimulator::computeEnergyParameters() {
-    // Get energy from CACTI instead of hardcoding!
-    CACTIWrapper* cacti = static_cast<CACTIWrapper*>(memory_model_);
+    // Technology-specific energy parameters (from literature and models)
+    switch (config_.memory_tech) {
+        case MemoryTech::SRAM:
+            if (memory_model_) {
+                // Get energy from CACTI
+                CACTIWrapper* cacti = static_cast<CACTIWrapper*>(memory_model_);
+                config_.local_read_energy_pJ = cacti->getDynamicReadEnergy() * 1000.0;
+                config_.local_write_energy_pJ = cacti->getDynamicWriteEnergy() * 1000.0;
+            } else {
+                // Fallback SRAM energy (45nm, 4KB)
+                config_.local_read_energy_pJ = 100.0;   // pJ per access
+                config_.local_write_energy_pJ = 120.0;  // pJ per access
+            }
+            break;
 
-    // CACTI returns energy in nJ -> convert to pJ
-    config_.local_read_energy_pJ = cacti->getDynamicReadEnergy() * 1000.0;
-    config_.local_write_energy_pJ = cacti->getDynamicWriteEnergy() * 1000.0;
+        case MemoryTech::DRAM:
+            // DDR4 DRAM energy (from DRAMPower/Ramulator)
+            config_.local_read_energy_pJ = 500.0;   // pJ per access
+            config_.local_write_energy_pJ = 600.0;  // pJ per access
+            break;
+
+        case MemoryTech::STT_MRAM:
+            // STT-MRAM energy (from NVSim)
+            config_.local_read_energy_pJ = 150.0;   // pJ per read
+            config_.local_write_energy_pJ = 800.0;  // pJ per write (MTJ switching)
+            break;
+
+        case MemoryTech::PCM:
+            // PCM energy
+            config_.local_read_energy_pJ = 200.0;    // pJ per read
+            config_.local_write_energy_pJ = 2500.0;  // pJ per write (very high!)
+            break;
+
+        case MemoryTech::RERAM:
+            // ReRAM energy (best among NVMs)
+            config_.local_read_energy_pJ = 120.0;   // pJ per read
+            config_.local_write_energy_pJ = 350.0;  // pJ per write
+            break;
+    }
 
     // Get compute energy from McPAT power model
     PowerModel* mcpat = static_cast<PowerModel*>(power_model_);

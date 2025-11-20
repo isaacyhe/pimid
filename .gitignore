@@ -73,3 +73,7 @@ ext/
 # Benchmark results
 benchmark_results/
 benchmark_run.log
+
+# Test results (detailed results, configs, but keep summaries)
+test_results*/all_results*.json
+test_results*/configs/
