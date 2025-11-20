@@ -1133,4 +1133,98 @@ std::shared_ptr<NetworkModel> createGarnetHTreeForDRAM(
     return garnet;
 }
 
+//=============================================================================
+// Switch Calculation Functions
+//=============================================================================
+
+int InternalDRAMNetwork::getNumberOfSwitchLevels() const {
+    /**
+     * Network hierarchy based on DRAM organization:
+     * L0: Banks in a BG share one L0 switch → 1 per BG
+     * L1: Each BG has 1 L1 switch connecting all its banks → 1 per BG
+     * L2: Each chip has 1 L2 switch connecting all its BGs → 1 per chip
+     * L3: Each rank has 1 L3 switch connecting all its chips → 1 per rank
+     * L4: Each MC has 1 L4 switch connecting ranks in one channel → 1 per channel
+     * L5: One root switch connecting all channels → 1 total
+     *
+     * Total: 6 levels (L0 through L5)
+     */
+    return 6;
+}
+
+int InternalDRAMNetwork::getTotalNumberOfSwitches(int num_channels, int ranks_per_channel) const {
+    // Calculate the number of each type of unit in the hierarchy
+    int num_ranks = num_channels * ranks_per_channel;
+    int num_chips = num_ranks * num_chips_per_rank_;
+    int num_bgs = num_chips * num_bg_per_chip_;
+
+    // Calculate switches at each level
+    int l0_switches = num_bgs;  // 1 per BG
+    int l1_switches = num_bgs;  // 1 per BG
+    int l2_switches = num_chips;  // 1 per chip
+    int l3_switches = num_ranks;  // 1 per rank
+    int l4_switches = num_channels;  // 1 per channel
+    int l5_switches = 1;  // 1 root switch
+
+    // Total switches
+    int total_switches = l0_switches + l1_switches + l2_switches +
+                        l3_switches + l4_switches + l5_switches;
+
+    std::cout << "[InternalDRAMNetwork] Switch hierarchy calculation:" << std::endl;
+    std::cout << "  Configuration:" << std::endl;
+    std::cout << "    Channels: " << num_channels << std::endl;
+    std::cout << "    Ranks per channel: " << ranks_per_channel << std::endl;
+    std::cout << "    Chips per rank: " << num_chips_per_rank_ << std::endl;
+    std::cout << "    Bank groups per chip: " << num_bg_per_chip_ << std::endl;
+    std::cout << "    Banks per BG: " << num_banks_per_bg_ << std::endl;
+    std::cout << std::endl;
+    std::cout << "  Hierarchy totals:" << std::endl;
+    std::cout << "    Total ranks: " << num_ranks << std::endl;
+    std::cout << "    Total chips: " << num_chips << std::endl;
+    std::cout << "    Total bank groups: " << num_bgs << std::endl;
+    std::cout << "    Total banks: " << (num_bgs * num_banks_per_bg_) << std::endl;
+    std::cout << std::endl;
+    std::cout << "  Switch counts by level:" << std::endl;
+    std::cout << "    L0 (BG level): " << l0_switches << " switches" << std::endl;
+    std::cout << "    L1 (BG level): " << l1_switches << " switches" << std::endl;
+    std::cout << "    L2 (Chip level): " << l2_switches << " switches" << std::endl;
+    std::cout << "    L3 (Rank level): " << l3_switches << " switches" << std::endl;
+    std::cout << "    L4 (Channel level): " << l4_switches << " switches" << std::endl;
+    std::cout << "    L5 (System level): " << l5_switches << " switch" << std::endl;
+    std::cout << "    TOTAL: " << total_switches << " switches across "
+              << getNumberOfSwitchLevels() << " levels" << std::endl;
+
+    return total_switches;
+}
+
+int InternalDRAMNetwork::getNumberOfSwitchesAtLevel(int level, int num_channels, int ranks_per_channel) const {
+    if (level < 0 || level > 5) {
+        std::cerr << "[InternalDRAMNetwork] ERROR: Invalid switch level " << level
+                  << " (valid range: 0-5)" << std::endl;
+        return 0;
+    }
+
+    // Calculate the number of each type of unit in the hierarchy
+    int num_ranks = num_channels * ranks_per_channel;
+    int num_chips = num_ranks * num_chips_per_rank_;
+    int num_bgs = num_chips * num_bg_per_chip_;
+
+    switch (level) {
+        case 0:  // L0: BG level (internal to BG)
+            return num_bgs;
+        case 1:  // L1: BG level (connecting to chip level)
+            return num_bgs;
+        case 2:  // L2: Chip level
+            return num_chips;
+        case 3:  // L3: Rank level
+            return num_ranks;
+        case 4:  // L4: Channel level
+            return num_channels;
+        case 5:  // L5: System level (root)
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 } // namespace pimid

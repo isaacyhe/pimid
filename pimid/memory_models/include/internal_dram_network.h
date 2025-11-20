@@ -231,6 +231,48 @@ public:
      */
     void enableGarnetSimulation(bool enable = true);
 
+    /**
+     * @brief Calculate the number of switch levels in the network hierarchy
+     *
+     * Based on the DRAM hierarchy:
+     * - L0: Banks in a BG share one L0 switch (1 per BG)
+     * - L1: Each BG has 1 L1 switch connecting all its banks (1 per BG)
+     * - L2: Each chip has 1 L2 switch connecting all its BGs (1 per chip)
+     * - L3: Each rank has 1 L3 switch connecting all its chips (1 per rank)
+     * - L4: Each MC has 1 L4 switch connecting ranks in one channel (1 per channel)
+     * - L5: One root switch connecting all channels (1 per system)
+     *
+     * @return Number of switch levels (typically 6: L0-L5)
+     */
+    int getNumberOfSwitchLevels() const;
+
+    /**
+     * @brief Calculate the total number of switches across all levels
+     *
+     * Switch count per level:
+     * - L0 switches = num_channels × ranks_per_channel × chips_per_rank × bgs_per_chip
+     * - L1 switches = num_channels × ranks_per_channel × chips_per_rank × bgs_per_chip
+     * - L2 switches = num_channels × ranks_per_channel × chips_per_rank
+     * - L3 switches = num_channels × ranks_per_channel
+     * - L4 switches = num_channels
+     * - L5 switches = 1
+     *
+     * @param num_channels Number of memory channels in the system
+     * @param ranks_per_channel Number of ranks per channel
+     * @return Total number of switches
+     */
+    int getTotalNumberOfSwitches(int num_channels, int ranks_per_channel) const;
+
+    /**
+     * @brief Get the number of switches at a specific level
+     *
+     * @param level Switch level (0-5)
+     * @param num_channels Number of memory channels in the system
+     * @param ranks_per_channel Number of ranks per channel
+     * @return Number of switches at that level
+     */
+    int getNumberOfSwitchesAtLevel(int level, int num_channels, int ranks_per_channel) const;
+
 private:
     // DRAM configuration
     std::string dram_type_;
