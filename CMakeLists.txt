@@ -18,6 +18,12 @@ add_subdirectory(pimid)
 enable_testing()
 add_subdirectory(test)
 
+# Examples (optional - external model integration)
+if(EXISTS "${CMAKE_SOURCE_DIR}/examples/external_model_integration")
+    message(STATUS "Building external model integration examples...")
+    add_subdirectory(examples/external_model_integration)
+endif()
+
 # Summary
 message(STATUS "")
 message(STATUS "PIMID Root Configuration Summary:")

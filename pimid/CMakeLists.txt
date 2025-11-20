@@ -48,6 +48,9 @@ endif()
 # Build external models
 message(STATUS "Building external models...")
 
+# External model integration system
+add_subdirectory(external_models)
+
 # Ramulator2 for DRAM modeling
 if(EXISTS "${PROJECT_SOURCE_DIR}/external/ramulator/CMakeLists.txt")
     message(STATUS "  - Ramulator2 DRAM simulator")
