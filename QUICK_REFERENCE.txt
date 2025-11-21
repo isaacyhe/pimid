@@ -1,0 +1,120 @@
+================================================================================
+MESSAGE PASSING vs SHARED MEMORY - QUICK REFERENCE GUIDE
+================================================================================
+
+OVERALL WINNER: MESSAGE PASSING
+  • 27.8% faster execution time
+  • 55.1% better energy efficiency
+  • 252% less network energy overhead
+
+================================================================================
+WHEN TO USE EACH ARCHITECTURE
+================================================================================
+
+USE MESSAGE PASSING FOR:
+  ✓ Energy-constrained systems (55% overall energy advantage)
+  ✓ BFS workloads (1,872% faster!)
+  ✓ Histogram operations (152% faster)
+  ✓ Prefix Sum operations (255% faster)
+  ✓ SRAM-based systems (146% energy advantage)
+  ✓ DDR4/DDR5 memory (26-82% performance advantage)
+  ✓ GDDR6 memory (64% performance advantage)
+  ✓ Small PIM granularity (single/multi-subarray)
+  ✓ Applications where network overhead matters
+
+USE SHARED MEMORY FOR:
+  ✓ Reduction operations (83% faster)
+  ✓ HBM memory systems (32% faster)
+  ✓ HBM3 memory systems (12% faster)
+  ✓ Sparse matrix operations (SpMV - 8% faster)
+  ✓ Dense matrix multiplication (GEMM - 3% faster)
+  ✓ BANK or RANK level PIM (5-12% faster)
+  ✓ Performance-critical applications (with energy trade-off)
+
+================================================================================
+KEY METRICS COMPARISON
+================================================================================
+
+Execution Time:     MP: 202.5M ns    SM: 258.9M ns    Winner: MP (27.8%)
+Total Energy:       MP: 3.28B pJ     SM: 5.09B pJ     Winner: MP (55.1%)
+Network Energy:     MP: 1.09B pJ     SM: 3.85B pJ     Winner: MP (252%)
+Network % of Total: MP: 33.3%        SM: 75.6%        Difference: 42.3%
+
+================================================================================
+PERFORMANCE BY MEMORY TECHNOLOGY
+================================================================================
+
+Technology      Performance Winner    Energy Winner    Best Choice
+-----------     ------------------    -------------    -----------
+SRAM            MP (24%)              MP (146%)        MESSAGE PASSING ✓✓✓
+DDR4_VRR        MP (112%)             MP (80%)         MESSAGE PASSING ✓✓✓
+DDR5            MP (27%)              MP (82%)         MESSAGE PASSING ✓✓
+GDDR6           MP (64%)              MP (92%)         MESSAGE PASSING ✓✓
+HBM             SM (32%)              MP (2%)          SHARED MEMORY* ✓
+HBM3            SM (12%)              MP (5%)          SHARED MEMORY* ✓
+DDR5_VRR        SM (16%)              SM (10%)         SHARED MEMORY ✓
+
+* Performance priority; energy-constrained systems should still use MP
+
+================================================================================
+PERFORMANCE BY WORKLOAD
+================================================================================
+
+Workload        Performance Winner    Energy Winner    Best Choice
+--------        ------------------    -------------    -----------
+BFS             MP (1,872%)           MP (381%)        MESSAGE PASSING ✓✓✓
+Prefix Sum      MP (255%)             MP (129%)        MESSAGE PASSING ✓✓✓
+Histogram       MP (152%)             MP (97%)         MESSAGE PASSING ✓✓✓
+Stencil1D       MP (125%)             MP (22%)         MESSAGE PASSING ✓✓
+Reduction       SM (83%)              SM (44%)         SHARED MEMORY ✓✓
+SpMV            SM (8%)               MP (49%)         MESSAGE PASSING* ✓
+GEMM            SM (3%)               MP (68%)         MESSAGE PASSING* ✓
+
+* Energy priority; performance-critical systems could use SM
+
+================================================================================
+CRITICAL INSIGHT: NETWORK ENERGY
+================================================================================
+
+The BIGGEST difference between architectures is network energy consumption:
+
+  Shared Memory: 75.6% of total energy spent on network
+  Message Passing: 33.3% of total energy spent on network
+  
+  → Shared memory has 42.3% MORE network overhead
+  → This explains the dramatic energy advantage of message passing
+  → Network optimization is 3x more important for shared memory
+
+================================================================================
+RECOMMENDATIONS
+================================================================================
+
+1. DEFAULT CHOICE: MESSAGE PASSING
+   - Better overall performance (28% faster)
+   - Much better energy efficiency (55% better)
+   - Lower network overhead (252% better)
+   - Wins on 71% of memory technologies
+   - Wins on 63% of workload types
+
+2. WHEN TO CHOOSE SHARED MEMORY:
+   - Using HBM/HBM3 memory AND performance is priority
+   - Running reduction-heavy workloads
+   - Performance matters more than energy
+
+3. HYBRID SYSTEMS:
+   - Consider supporting both architectures
+   - Use message passing for graph algorithms, histograms, prefix sums
+   - Use shared memory for reductions, SpMV, GEMM
+   - Can achieve best of both worlds
+
+================================================================================
+GENERATED FILES
+================================================================================
+
+Full Analysis:      /home/user/pimid-dev/architecture_analysis_v2.json
+Summary Report:     /home/user/pimid-dev/architecture_comparison_summary.txt
+Detailed Insights:  /home/user/pimid-dev/detailed_insights.txt
+Comprehensive Doc:  /home/user/pimid-dev/FINAL_ARCHITECTURE_COMPARISON.md
+Quick Reference:    /home/user/pimid-dev/QUICK_REFERENCE.txt
+
+================================================================================
