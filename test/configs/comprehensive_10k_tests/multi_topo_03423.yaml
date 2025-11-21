@@ -1,0 +1,42 @@
+simulation:
+  name: multi_topo_03423
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: DDR4
+  channels: 4
+  ranks_per_channel: 2
+  chips_per_rank: 16
+  bg_per_chip: 4
+  banks_per_bg: 4
+  subarrays_per_bank: 32
+  network:
+    custom_topology:
+      enabled: true
+      l0:
+        use_default: false
+        topology: MESH_2D
+        num_switches: 4
+        ports_per_switch: 5
+        num_endpoints: 4
+      l1:
+        use_default: true
+      l2:
+        use_default: true
+      l3:
+        use_default: false
+        topology: TORUS_2D
+        num_switches: 4
+        ports_per_switch: 5
+        num_endpoints: 2
+      l4:
+        use_default: true
+      l5:
+        use_default: true
+pim:
+  enabled: true
+  num_pes: 128
+  pe_placement: chip
+  scheduling_policy: load_balanced
+  core_model: simple

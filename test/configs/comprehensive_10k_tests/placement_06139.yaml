@@ -1,0 +1,38 @@
+simulation:
+  name: placement_06139
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: HBM3
+  channels: 32
+  ranks_per_channel: 2
+  chips_per_rank: 4
+  bg_per_chip: 8
+  banks_per_bg: 4
+  subarrays_per_bank: 32
+  network:
+    custom_topology:
+      enabled: true
+      l0:
+        use_default: true
+      l1:
+        use_default: true
+      l2:
+        use_default: true
+      l3:
+        use_default: true
+      l4:
+        use_default: false
+        topology: CROSSBAR
+        num_switches: 1
+        ports_per_switch: 32
+        num_endpoints: 32
+      l5:
+        use_default: true
+pim:
+  enabled: true
+  num_pes: 64
+  pe_placement: rank
+  scheduling_policy: data_aware
+  core_model: in-order

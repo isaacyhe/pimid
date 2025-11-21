@@ -1,0 +1,19 @@
+simulation:
+  name: comprehensive_09229
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: LPDDR5
+  channels: 8
+  ranks_per_channel: 2
+  chips_per_rank: 8
+  bg_per_chip: 8
+  banks_per_bg: 4
+  subarrays_per_bank: 32
+pim:
+  enabled: true
+  num_pes: 256
+  pe_placement: chip
+  scheduling_policy: load_balanced
+  core_model: simple

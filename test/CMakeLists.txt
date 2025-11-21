@@ -138,3 +138,10 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_error_handling.cpp)
     target_link_libraries(test_error_handling pimid_lib)
     add_test(NAME ErrorHandlingTest COMMAND test_error_handling)
 endif()
+
+# Config-based network topology test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/config_based_topology_test.cpp)
+    add_executable(config_based_topology_test tools/config_based_topology_test.cpp)
+    target_link_libraries(config_based_topology_test pimid_lib pimid_external_models yaml-cpp)
+    add_test(NAME ConfigBasedTopologyTest COMMAND config_based_topology_test ${CMAKE_SOURCE_DIR}/test/configs/example_custom_topology.yaml)
+endif()

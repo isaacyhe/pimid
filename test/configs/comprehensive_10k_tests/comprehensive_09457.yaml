@@ -1,0 +1,46 @@
+simulation:
+  name: comprehensive_09457
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: HBM3
+  channels: 32
+  ranks_per_channel: 2
+  chips_per_rank: 4
+  bg_per_chip: 8
+  banks_per_bg: 4
+  subarrays_per_bank: 32
+  network:
+    custom_topology:
+      enabled: true
+      l0:
+        use_default: true
+      l1:
+        use_default: true
+      l2:
+        use_default: false
+        topology: H_TREE
+        num_switches: 3
+        ports_per_switch: 4
+        num_endpoints: 4
+      l3:
+        use_default: false
+        topology: MESH_2D
+        num_switches: 4
+        ports_per_switch: 5
+        num_endpoints: 2
+      l4:
+        use_default: false
+        topology: FAT_TREE
+        num_switches: 32
+        ports_per_switch: 4
+        num_endpoints: 32
+      l5:
+        use_default: true
+pim:
+  enabled: true
+  num_pes: 1024
+  pe_placement: chip
+  scheduling_policy: data_aware
+  core_model: simple

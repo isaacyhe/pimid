@@ -1,0 +1,38 @@
+simulation:
+  name: coremodel_04342
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: DDR5
+  channels: 4
+  ranks_per_channel: 2
+  chips_per_rank: 8
+  bg_per_chip: 8
+  banks_per_bg: 4
+  subarrays_per_bank: 32
+  network:
+    custom_topology:
+      enabled: true
+      l0:
+        use_default: true
+      l1:
+        use_default: true
+      l2:
+        use_default: false
+        topology: FAT_TREE
+        num_switches: 8
+        ports_per_switch: 4
+        num_endpoints: 8
+      l3:
+        use_default: true
+      l4:
+        use_default: true
+      l5:
+        use_default: true
+pim:
+  enabled: true
+  num_pes: 64
+  pe_placement: chip
+  scheduling_policy: nearest
+  core_model: simple

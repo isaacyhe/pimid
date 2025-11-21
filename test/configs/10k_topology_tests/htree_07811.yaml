@@ -1,0 +1,45 @@
+simulation:
+  name: htree_07811
+  mode: standalone
+  duration_cycles: 10000
+memory:
+  dram_type: HBM3
+  channels: 16
+  ranks_per_channel: 2
+  chips_per_rank: 2
+  bg_per_chip: 8
+  banks_per_bg: 4
+  subarrays_per_bank: 16
+  network:
+    custom_topology:
+      enabled: true
+      l0:
+        use_default: false
+        topology: H_TREE
+        num_switches: 3
+        ports_per_switch: 4
+        num_endpoints: 4
+      l1:
+        use_default: true
+      l2:
+        use_default: false
+        topology: H_TREE
+        num_switches: 1
+        ports_per_switch: 4
+        num_endpoints: 2
+      l3:
+        use_default: true
+      l4:
+        use_default: true
+      l5:
+        use_default: true
+external_models:
+  network:
+    enabled: false
+  memory:
+    enabled: false
+pim:
+  enabled: true
+  num_pes: 128
+  pe_placement: bank
+  scheduling_policy: nearest

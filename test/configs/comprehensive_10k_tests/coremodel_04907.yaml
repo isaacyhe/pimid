@@ -1,0 +1,19 @@
+simulation:
+  name: coremodel_04907
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: GDDR6
+  channels: 4
+  ranks_per_channel: 2
+  chips_per_rank: 8
+  bg_per_chip: 4
+  banks_per_bg: 4
+  subarrays_per_bank: 16
+pim:
+  enabled: true
+  num_pes: 16384
+  pe_placement: subarray
+  scheduling_policy: data_aware
+  core_model: in-order
