@@ -1,0 +1,38 @@
+simulation:
+  name: placement_06746
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: DDR5
+  channels: 2
+  ranks_per_channel: 1
+  chips_per_rank: 8
+  bg_per_chip: 8
+  banks_per_bg: 4
+  subarrays_per_bank: 16
+  network:
+    custom_topology:
+      enabled: true
+      l0:
+        use_default: true
+      l1:
+        use_default: false
+        topology: FAT_TREE
+        num_switches: 32
+        ports_per_switch: 4
+        num_endpoints: 32
+      l2:
+        use_default: true
+      l3:
+        use_default: true
+      l4:
+        use_default: true
+      l5:
+        use_default: true
+pim:
+  enabled: true
+  num_pes: 128
+  pe_placement: chip
+  scheduling_policy: data_aware
+  core_model: in-order

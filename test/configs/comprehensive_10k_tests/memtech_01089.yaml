@@ -1,0 +1,19 @@
+simulation:
+  name: memtech_01089
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: DDR4
+  channels: 4
+  ranks_per_channel: 2
+  chips_per_rank: 16
+  bg_per_chip: 4
+  banks_per_bg: 4
+  subarrays_per_bank: 32
+pim:
+  enabled: true
+  num_pes: 256
+  pe_placement: chip
+  scheduling_policy: data_aware
+  core_model: out-of-order

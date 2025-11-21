@@ -1,0 +1,46 @@
+simulation:
+  name: multi_topo_03686
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: DDR5
+  channels: 2
+  ranks_per_channel: 1
+  chips_per_rank: 8
+  bg_per_chip: 8
+  banks_per_bg: 4
+  subarrays_per_bank: 16
+  network:
+    custom_topology:
+      enabled: true
+      l0:
+        use_default: true
+      l1:
+        use_default: false
+        topology: FAT_TREE
+        num_switches: 32
+        ports_per_switch: 4
+        num_endpoints: 32
+      l2:
+        use_default: false
+        topology: TORUS_2D
+        num_switches: 9
+        ports_per_switch: 5
+        num_endpoints: 8
+      l3:
+        use_default: false
+        topology: MESH_2D
+        num_switches: 1
+        ports_per_switch: 5
+        num_endpoints: 1
+      l4:
+        use_default: true
+      l5:
+        use_default: true
+pim:
+  enabled: true
+  num_pes: 16
+  pe_placement: chip
+  scheduling_policy: load_balanced
+  core_model: out-of-order

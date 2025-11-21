@@ -52,8 +52,9 @@ class TestRunner:
         try:
             start_time = time.time()
 
-            # Run pimid binary with config
-            cmd = [self.pimid_binary, "--config", str(config_file)]
+            # Run pimid binary with config and workload
+            cmd = [self.pimid_binary, "--config", str(config_file),
+                   "--workload", "build/test/workloads/test_pim_workloads"]
 
             process = subprocess.run(
                 cmd,
