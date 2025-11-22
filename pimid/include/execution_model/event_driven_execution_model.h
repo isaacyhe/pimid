@@ -3,7 +3,6 @@
 
 #include "execution_model/execution_model.h"
 #include "common/event_queue.h"
-#include "plugin/pe_plugin.h"
 #include <queue>
 #include <unordered_map>
 
@@ -18,9 +17,9 @@ namespace pimid {
  *
  * Features:
  * - Task-based execution (no instruction-level simulation)
- * - Analytical performance models (Roofline, etc.)
+ * - Analytical performance models (Roofline, Configurable IPC)
  * - Event-driven timing (skip idle cycles)
- * - Configurable core models via PE plugins
+ * - Configurable core models via CoreModel struct
  * - 100-1000x faster than execution-driven
  *
  * Use Cases:
@@ -61,11 +60,6 @@ public:
     // -------------------------------------------------------------------------
 
     /**
-     * @brief Register PE plugin for analytical modeling
-     */
-    void registerPEPlugin(std::shared_ptr<plugin::IPEPlugin> pe_plugin);
-
-    /**
      * @brief Set number of cores/PEs
      */
     void setNumCores(uint32_t num_cores);
@@ -75,10 +69,14 @@ public:
      */
     enum class PerformanceModel {
         ROOFLINE,          // Roofline model (compute vs memory bound)
-        CONFIGURABLE_IPC,  // Configurable IPC from config file
-        PLUGIN_BASED       // Use PE plugin for latency estimation
+        CONFIGURABLE_IPC   // Configurable IPC from config file
     };
     void setPerformanceModel(PerformanceModel model);
+
+    /**
+     * @brief Set core model parameters
+     */
+    void setCoreModel(const CoreModel& model);
 
     /**
      * @brief Get event queue (for external event scheduling)
@@ -94,9 +92,6 @@ private:
 
     // Event queue for discrete event simulation
     std::shared_ptr<EventQueue> event_queue_;
-
-    // PE plugin for analytical modeling
-    std::shared_ptr<plugin::IPEPlugin> pe_plugin_;
 
     // Memory model integration
     std::shared_ptr<MemoryModel> memory_model_;
@@ -125,6 +120,9 @@ private:
         uint32_t vector_width;   // SIMD width
         uint32_t pipeline_depth;
         std::string name;
+
+        CoreModel() : frequency_mhz(1000.0), ipc(1.0), vector_width(1),
+                      pipeline_depth(5), name("GenericCore") {}
     };
     CoreModel core_model_;
 
@@ -139,7 +137,6 @@ private:
     // Analytical model implementations
     Cycle rooflineModel(const Task& task) const;
     Cycle configurableIPCModel(const Task& task) const;
-    Cycle pluginBasedModel(const Task& task) const;
 
     // Memory access pattern generators
     std::vector<MemoryAccess> generateSequentialAccesses(

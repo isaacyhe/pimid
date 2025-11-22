@@ -240,11 +240,6 @@ void EventDrivenExecutionModel::registerMemoryCallback(
 // Event-Driven Specific Methods
 // -------------------------------------------------------------------------
 
-void EventDrivenExecutionModel::registerPEPlugin(std::shared_ptr<plugin::IPEPlugin> pe_plugin) {
-    pe_plugin_ = pe_plugin;
-    std::cout << "Registered PE plugin for analytical modeling" << std::endl;
-}
-
 void EventDrivenExecutionModel::setNumCores(uint32_t num_cores) {
     num_cores_ = num_cores;
     core_busy_.resize(num_cores, false);
@@ -260,10 +255,15 @@ void EventDrivenExecutionModel::setPerformanceModel(PerformanceModel model) {
         case PerformanceModel::CONFIGURABLE_IPC:
             std::cout << "Configurable IPC" << std::endl;
             break;
-        case PerformanceModel::PLUGIN_BASED:
-            std::cout << "Plugin-based" << std::endl;
-            break;
     }
+}
+
+void EventDrivenExecutionModel::setCoreModel(const CoreModel& model) {
+    core_model_ = model;
+    std::cout << "Set core model: " << model.name
+              << " (freq=" << model.frequency_mhz << " MHz, IPC=" << model.ipc
+              << ", vector_width=" << model.vector_width
+              << ", pipeline_depth=" << model.pipeline_depth << ")" << std::endl;
 }
 
 // -------------------------------------------------------------------------
@@ -286,10 +286,8 @@ Cycle EventDrivenExecutionModel::estimateTaskLatency(const Task& task) const {
             return rooflineModel(task);
         case PerformanceModel::CONFIGURABLE_IPC:
             return configurableIPCModel(task);
-        case PerformanceModel::PLUGIN_BASED:
-            return pluginBasedModel(task);
         default:
-            return task.num_ops;  // Fallback: 1 cycle per op
+            return configurableIPCModel(task);  // Fallback to configurable IPC
     }
 }
 
@@ -399,24 +397,14 @@ Cycle EventDrivenExecutionModel::rooflineModel(const Task& task) const {
 
 Cycle EventDrivenExecutionModel::configurableIPCModel(const Task& task) const {
     // Simple IPC-based model
-    Cycle cycles = std::ceil(task.num_ops / core_model_.ipc);
+    // Account for vector width when computing effective throughput
+    double effective_ipc = core_model_.ipc * core_model_.vector_width;
+    Cycle cycles = std::ceil(task.num_ops / effective_ipc);
 
     // Add pipeline fill/drain overhead
     cycles += core_model_.pipeline_depth;
 
     return cycles;
-}
-
-Cycle EventDrivenExecutionModel::pluginBasedModel(const Task& task) const {
-    if (!pe_plugin_) {
-        // Fallback to configurable IPC model
-        return configurableIPCModel(task);
-    }
-
-    // Use PE plugin to estimate latency
-    // PE plugin should provide operation-specific latencies
-    // For now, use simple approach
-    return task.num_ops;  // TODO: Query plugin for operation latencies
 }
 
 // -------------------------------------------------------------------------
