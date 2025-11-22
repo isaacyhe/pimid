@@ -7,6 +7,7 @@
 #include "address_translation/address_translator.h"
 #include "scheduler/scheduler.h"
 #include "network_model.h"
+#include "execution_model/execution_model.h"
 #include <memory>
 #include <vector>
 
@@ -52,7 +53,11 @@ private:
     std::unique_ptr<PEPlacementManager> pe_placement_;
     std::unique_ptr<PEScheduler> scheduler_;
 
-    // ZSim integration for PEs (placeholder)
+    // Execution model (ZSim or Event-Driven) - NEW!
+    std::shared_ptr<IExecutionModel> execution_model_;
+    ExecutionModelType execution_model_type_;
+
+    // Legacy ZSim integration for PEs (placeholder) - DEPRECATED, use execution_model_
     void* zsim_instance_;
 
     // Address translation
