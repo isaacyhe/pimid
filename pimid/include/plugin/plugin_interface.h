@@ -40,6 +40,10 @@ struct PluginMetadata {
     PluginMetadata()
         : name(""), version("1.0.0"), author(""), description(""),
           type(PluginType::CUSTOM) {}
+
+    PluginMetadata(const std::string& n, const std::string& v, const std::string& a,
+                   const std::string& d, PluginType t)
+        : name(n), version(v), author(a), description(d), type(t) {}
 };
 
 /**

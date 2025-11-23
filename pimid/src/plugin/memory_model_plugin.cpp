@@ -32,15 +32,13 @@ namespace plugin {
  * This serves as a template for users to create their own memory models.
  */
 CustomMemoryModelPlugin::CustomMemoryModelPlugin()
-    : MemoryModelPluginBase(PluginMetadata{
+    : MemoryModelPluginBase(PluginMetadata(
         "CustomMemory",                     // name
         "1.0.0",                            // version
         "PIMID Team",                       // author
         "Template for custom memory models",// description
-        PluginType::MEMORY_MODEL,           // type
-        {},                                 // dependencies
-        {}                                  // parameters
-    }),
+        PluginType::MEMORY_MODEL            // type
+    )),
     read_latency_(50),      // Default: 50 cycles
     write_latency_(100),    // Default: 100 cycles
     bandwidth_(25600),      // Default: 25.6 GB/s

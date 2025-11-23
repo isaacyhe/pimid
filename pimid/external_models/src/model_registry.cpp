@@ -7,6 +7,7 @@
 #include <map>
 #include <string>
 #include <memory>
+#include <vector>
 #include <iostream>
 #include <dlfcn.h>  // For dynamic loading
 

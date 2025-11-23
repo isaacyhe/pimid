@@ -29,15 +29,13 @@ namespace plugin {
  * This serves as a template for users to create their own schedulers.
  */
 CustomSchedulerPlugin::CustomSchedulerPlugin()
-    : SchedulerPluginBase(PluginMetadata{
+    : SchedulerPluginBase(PluginMetadata(
         "CustomScheduler",              // name
         "1.0.0",                         // version
         "PIMID Team",                    // author
         "Template for custom schedulers",// description
-        PluginType::SCHEDULER,           // type
-        {},                              // dependencies
-        {}                               // parameters
-    }) {}
+        PluginType::SCHEDULER            // type
+    )) {}
 
 /**
  * @brief Initialize the custom scheduler plugin
@@ -139,15 +137,13 @@ bool CustomSchedulerPlugin::isOptimalForWorkload(const std::string& workload_typ
  * Minimizes data movement by placing tasks near their data.
  */
 DataLocalitySchedulerPlugin::DataLocalitySchedulerPlugin()
-    : SchedulerPluginBase(PluginMetadata{
+    : SchedulerPluginBase(PluginMetadata(
         "DataLocalityScheduler",         // name
         "1.0.0",                          // version
         "PIMID Team",                     // author
         "Optimizes for data locality",    // description
-        PluginType::SCHEDULER,            // type
-        {},                               // dependencies
-        {}                                // parameters
-    }),
+        PluginType::SCHEDULER            // type
+    )),
     cache_line_size_(64),
     consider_bank_conflicts_(false) {}
 
@@ -239,15 +235,13 @@ bool DataLocalitySchedulerPlugin::isOptimalForWorkload(const std::string& worklo
  * acceptable performance levels.
  */
 EnergyAwareSchedulerPlugin::EnergyAwareSchedulerPlugin()
-    : SchedulerPluginBase(PluginMetadata{
+    : SchedulerPluginBase(PluginMetadata(
         "EnergyAwareScheduler",          // name
         "1.0.0",                          // version
         "PIMID Team",                     // author
         "Minimizes energy consumption",   // description
-        PluginType::SCHEDULER,            // type
-        {},                               // dependencies
-        {}                                // parameters
-    }),
+        PluginType::SCHEDULER            // type
+    )),
     energy_weight_(0.6),
     performance_weight_(0.4),
     prefer_nearby_pes_(true) {}
