@@ -47,4 +47,4 @@ pim:
   num_pes: 524288
   pe_placement: subarray
   scheduling_policy: data_aware
-  core_model: in-order
+  core_type: in-order

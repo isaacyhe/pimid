@@ -63,17 +63,17 @@
 
 ### 3. Replacement Implementation Quality
 
-#### 3.1 CoreModel Struct
+#### 3.1 CoreType Struct
 - ✅ Contains all necessary parameters:
   ```cpp
-  struct CoreModel {
+  struct CoreType {
       double frequency_mhz;      // Operating frequency
       double ipc;                // Instructions per cycle
       uint32_t vector_width;     // SIMD width
       uint32_t pipeline_depth;   // Pipeline stages
       std::string name;          // Core identifier
 
-      CoreModel() : frequency_mhz(1000.0), ipc(1.0), vector_width(1),
+      CoreType() : frequency_mhz(1000.0), ipc(1.0), vector_width(1),
                     pipeline_depth(5), name("GenericCore") {}
   };
   ```
@@ -81,8 +81,8 @@
 - ✅ All parameters are well-documented
 
 #### 3.2 New Methods
-- ✅ `void setCoreModel(const CoreModel& model)` - Properly implemented
-  - Takes CoreModel by const reference (efficient)
+- ✅ `void setCoreType(const CoreType& model)` - Properly implemented
+  - Takes CoreType by const reference (efficient)
   - Logs all parameter values for debugging
   - Updates internal `core_model_` member
 
@@ -114,7 +114,7 @@
   - No changes required
   - Remains independent
 
-- ✅ Event-Driven Execution Model: Now uses CoreModel directly
+- ✅ Event-Driven Execution Model: Now uses CoreType directly
   - Cleaner architecture
   - No plugin indirection
   - More performant (no virtual function overhead)
@@ -139,7 +139,7 @@
 ### 5. Code Quality
 
 #### 5.1 Syntax Verification
-- ✅ Compiled test program with CoreModel struct
+- ✅ Compiled test program with CoreType struct
 - ✅ Compiled test program with PerformanceModel enum
 - ✅ All syntax is valid C++17
 - ✅ No compiler warnings for MY changes
@@ -155,7 +155,7 @@
 - ✅ Follows existing code style
 - ✅ Consistent naming conventions
 - ✅ Proper use of const
-- ✅ Efficient parameter passing (const reference for CoreModel)
+- ✅ Efficient parameter passing (const reference for CoreType)
 - ✅ Clear, descriptive variable names
 
 ### 6. Pre-existing Issues Found
@@ -180,7 +180,7 @@
 
 #### 7.2 Core Model Configuration
 - ✅ Default values are sensible
-- ✅ Can be configured via `setCoreModel()`
+- ✅ Can be configured via `setCoreType()`
 - ✅ All parameters are used in latency calculation
 - ✅ Logging provides visibility into configuration
 
@@ -195,8 +195,8 @@
 #### 8.1 Unit Testing Recommendations
 ```cpp
 // Recommended unit tests:
-1. Test CoreModel default constructor
-2. Test CoreModel parameter setting via setCoreModel()
+1. Test CoreType default constructor
+2. Test CoreType parameter setting via setCoreType()
 3. Test configurableIPCModel() with various vector widths
 4. Test rooflineModel() behavior unchanged
 5. Test setPerformanceModel() with ROOFLINE
@@ -223,21 +223,21 @@
 
 #### 9.1 Positive Impacts
 - ✅ **Eliminated virtual function overhead** from PE plugin calls
-- ✅ **Direct member access** to CoreModel parameters (no indirection)
+- ✅ **Direct member access** to CoreType parameters (no indirection)
 - ✅ **Smaller binary** (PE plugin code removed)
 - ✅ **Faster compilation** (fewer template instantiations)
 
 #### 9.2 Functional Improvements
 - ✅ **Better IPC calculation**: Now accounts for vector width
 - ✅ **More accurate latency estimation**: `effective_ipc = ipc * vector_width`
-- ✅ **Simpler configuration**: Direct CoreModel setting vs plugin registration
+- ✅ **Simpler configuration**: Direct CoreType setting vs plugin registration
 
 ### 10. Breaking Changes Analysis
 
 #### 10.1 API Changes
 - ❌ **BREAKING:** `registerPEPlugin()` method removed
   - **Impact:** Users who called this method will get compilation error
-  - **Migration:** Use `setCoreModel()` instead
+  - **Migration:** Use `setCoreType()` instead
   - **Severity:** Low (feature was minimally used)
 
 - ❌ **BREAKING:** `PerformanceModel::PLUGIN_BASED` enum value removed
@@ -255,19 +255,19 @@
 #### 11.1 Memory Safety
 - ✅ No new memory allocations
 - ✅ No new pointers (removed `std::shared_ptr<IPEPlugin>`)
-- ✅ CoreModel uses value semantics (no ownership issues)
+- ✅ CoreType uses value semantics (no ownership issues)
 - ✅ No potential for null pointer dereferences from plugin
 
 #### 11.2 Exception Safety
-- ✅ CoreModel constructor is noexcept (trivial initialization)
-- ✅ `setCoreModel()` takes parameter by const reference (no throwing copy)
+- ✅ CoreType constructor is noexcept (trivial initialization)
+- ✅ `setCoreType()` takes parameter by const reference (no throwing copy)
 - ✅ No new exception paths introduced
 
 ### 12. Maintainability
 
 #### 12.1 Code Complexity
 - ✅ **REDUCED:** Removed entire plugin abstraction layer
-- ✅ **SIMPLIFIED:** Direct CoreModel usage vs plugin indirection
+- ✅ **SIMPLIFIED:** Direct CoreType usage vs plugin indirection
 - ✅ **CLEARER:** Performance model options reduced from 3 to 2
 
 #### 12.2 Documentation Quality
@@ -288,9 +288,9 @@
 |------|--------|--------|-------|
 | 6 | Removed `#include "plugin/pe_plugin.h"` | ✅ CORRECT | No longer needed |
 | 20-22 | Updated documentation | ✅ CORRECT | Reflects new architecture |
-| 66-79 | Removed `registerPEPlugin()`, removed `PLUGIN_BASED`, added `setCoreModel()` | ✅ CORRECT | Clean API |
+| 66-79 | Removed `registerPEPlugin()`, removed `PLUGIN_BASED`, added `setCoreType()` | ✅ CORRECT | Clean API |
 | 99 | Removed `pe_plugin_` member | ✅ CORRECT | No longer needed |
-| 124-126 | Added CoreModel default constructor | ✅ CORRECT | Proper initialization |
+| 124-126 | Added CoreType default constructor | ✅ CORRECT | Proper initialization |
 | 139 | Removed `pluginBasedModel()` declaration | ✅ CORRECT | Method removed |
 
 **Overall:** ✅ **ALL CHANGES CORRECT**
@@ -303,7 +303,7 @@
 |------|--------|--------|-------|
 | 243-246 | Removed `registerPEPlugin()` implementation | ✅ CORRECT | Method deleted |
 | 248-267 | Modified `setPerformanceModel()` | ✅ CORRECT | Removed PLUGIN_BASED case |
-| 261-267 | Added `setCoreModel()` implementation | ✅ CORRECT | Good logging |
+| 261-267 | Added `setCoreType()` implementation | ✅ CORRECT | Good logging |
 | 283-291 | Modified `estimateTaskLatency()` | ✅ CORRECT | Safe fallback |
 | 398-408 | Enhanced `configurableIPCModel()` | ✅ CORRECT | Vector width accounted |
 | 410-420 | Removed `pluginBasedModel()` implementation | ✅ CORRECT | Method deleted |
@@ -329,7 +329,7 @@
 **Summary of Findings:**
 1. ✅ All PE plugin code successfully removed
 2. ✅ No lingering references in source code
-3. ✅ Replacement implementation (CoreModel) is complete and correct
+3. ✅ Replacement implementation (CoreType) is complete and correct
 4. ✅ Code quality is high
 5. ✅ Documentation is comprehensive
 6. ✅ Architecture is cleaner and simpler
@@ -341,8 +341,8 @@
 1. ✅ **APPROVE** changes for commit
 2. ✅ Commit with detailed message referencing this audit
 3. ⚠️ Address pre-existing build issues in separate commit
-4. 📝 Consider adding unit tests for CoreModel in future work
-5. 📝 Consider adding configuration file support for CoreModel parameters
+4. 📝 Consider adding unit tests for CoreType in future work
+5. 📝 Consider adding configuration file support for CoreType parameters
 
 **Risk Assessment:** ✅ **LOW RISK**
 - Changes are well-isolated

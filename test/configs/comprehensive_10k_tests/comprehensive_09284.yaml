@@ -16,4 +16,4 @@ pim:
   num_pes: 16
   pe_placement: chip
   scheduling_policy: round_robin
-  core_model: in-order
+  core_type: in-order

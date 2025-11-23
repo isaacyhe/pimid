@@ -43,4 +43,4 @@ pim:
   num_pes: 8
   pe_placement: chip
   scheduling_policy: load_balanced
-  core_model: out-of-order
+  core_type: out-of-order

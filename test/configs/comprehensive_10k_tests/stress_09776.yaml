@@ -55,4 +55,4 @@ pim:
   num_pes: 131072
   pe_placement: subarray
   scheduling_policy: nearest
-  core_model: in-order
+  core_type: in-order

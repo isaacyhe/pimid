@@ -19,7 +19,7 @@ namespace pimid {
  * - Task-based execution (no instruction-level simulation)
  * - Analytical performance models (Roofline, Configurable IPC)
  * - Event-driven timing (skip idle cycles)
- * - Configurable core models via CoreModel struct
+ * - Configurable core types via CoreType struct
  * - 100-1000x faster than execution-driven
  *
  * Use Cases:
@@ -74,9 +74,9 @@ public:
     void setPerformanceModel(PerformanceModel model);
 
     /**
-     * @brief Set core model parameters
+     * @brief Set core type parameters
      */
-    void setCoreModel(const CoreModel& model);
+    void setCoreType(const CoreType& type);
 
     /**
      * @brief Get event queue (for external event scheduling)
@@ -114,17 +114,17 @@ private:
     bool initialized_;
 
     // Analytical models
-    struct CoreModel {
+    struct CoreType {
         double frequency_mhz;
         double ipc;              // Instructions per cycle
         uint32_t vector_width;   // SIMD width
         uint32_t pipeline_depth;
         std::string name;
 
-        CoreModel() : frequency_mhz(1000.0), ipc(1.0), vector_width(1),
-                      pipeline_depth(5), name("GenericCore") {}
+        CoreType() : frequency_mhz(1000.0), ipc(1.0), vector_width(1),
+                     pipeline_depth(5), name("GenericCore") {}
     };
-    CoreModel core_model_;
+    CoreType core_type_;
 
     // Internal methods
     void loadConfiguration(const std::string& config_file);

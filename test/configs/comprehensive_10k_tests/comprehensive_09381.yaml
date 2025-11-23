@@ -47,4 +47,4 @@ pim:
   num_pes: 512
   pe_placement: chip
   scheduling_policy: nearest
-  core_model: simple
+  core_type: simple

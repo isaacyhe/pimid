@@ -42,17 +42,17 @@ bool EventDrivenExecutionModel::initialize(const std::string& config_file,
         // Initialize core busy states
         core_busy_.resize(num_cores_, false);
 
-        // Setup default core model
-        core_model_.name = (domain == SimulationDomain::HOST) ? "Host CPU" : "PIM PE";
-        core_model_.frequency_mhz = (domain == SimulationDomain::HOST) ? 2400.0 : 1000.0;
-        core_model_.ipc = (domain == SimulationDomain::HOST) ? 2.0 : 1.0;
-        core_model_.vector_width = (domain == SimulationDomain::HOST) ? 8 : 4;  // AVX-256 vs smaller SIMD
-        core_model_.pipeline_depth = (domain == SimulationDomain::HOST) ? 14 : 5;
+        // Setup default core type
+        core_type_.name = (domain == SimulationDomain::HOST) ? "Host CPU" : "PIM PE";
+        core_type_.frequency_mhz = (domain == SimulationDomain::HOST) ? 2400.0 : 1000.0;
+        core_type_.ipc = (domain == SimulationDomain::HOST) ? 2.0 : 1.0;
+        core_type_.vector_width = (domain == SimulationDomain::HOST) ? 8 : 4;  // AVX-256 vs smaller SIMD
+        core_type_.pipeline_depth = (domain == SimulationDomain::HOST) ? 14 : 5;
 
         initialized_ = true;
         std::cout << "Event-Driven model initialized with " << num_cores_
-                  << " cores (IPC=" << core_model_.ipc << ", freq="
-                  << core_model_.frequency_mhz << " MHz)" << std::endl;
+                  << " cores (IPC=" << core_type_.ipc << ", freq="
+                  << core_type_.frequency_mhz << " MHz)" << std::endl;
 
         return true;
     }
@@ -211,7 +211,7 @@ ExecutionStats EventDrivenExecutionModel::getStats() const {
         // Utilization: fraction of core-cycles actually doing work
         uint64_t total_core_cycles = stats.total_cycles * num_cores_;
         stats.utilization = static_cast<double>(stats.total_instructions) /
-                           (total_core_cycles * core_model_.ipc);
+                           (total_core_cycles * core_type_.ipc);
     }
 
     return stats;
@@ -258,12 +258,12 @@ void EventDrivenExecutionModel::setPerformanceModel(PerformanceModel model) {
     }
 }
 
-void EventDrivenExecutionModel::setCoreModel(const CoreModel& model) {
-    core_model_ = model;
-    std::cout << "Set core model: " << model.name
-              << " (freq=" << model.frequency_mhz << " MHz, IPC=" << model.ipc
-              << ", vector_width=" << model.vector_width
-              << ", pipeline_depth=" << model.pipeline_depth << ")" << std::endl;
+void EventDrivenExecutionModel::setCoreType(const CoreType& type) {
+    core_type_ = type;
+    std::cout << "Set core type: " << type.name
+              << " (freq=" << type.frequency_mhz << " MHz, IPC=" << type.ipc
+              << ", vector_width=" << type.vector_width
+              << ", pipeline_depth=" << type.pipeline_depth << ")" << std::endl;
 }
 
 // -------------------------------------------------------------------------
@@ -378,13 +378,13 @@ Cycle EventDrivenExecutionModel::rooflineModel(const Task& task) const {
     // Roofline model: performance bounded by either compute or memory
 
     // Compute time (assuming ideal pipeline utilization)
-    double ops_per_cycle = core_model_.ipc * core_model_.vector_width;
+    double ops_per_cycle = core_type_.ipc * core_type_.vector_width;
     Cycle compute_cycles = std::ceil(task.num_ops / ops_per_cycle);
 
     // Memory time (assuming memory bandwidth limit)
     // Typical DRAM bandwidth: ~25 GB/s for DDR4, ~300 GB/s for HBM2
     double memory_bandwidth_gbps = (domain_ == SimulationDomain::HOST) ? 25.0 : 300.0;
-    double bytes_per_cycle = (memory_bandwidth_gbps * 1000.0) / core_model_.frequency_mhz;
+    double bytes_per_cycle = (memory_bandwidth_gbps * 1000.0) / core_type_.frequency_mhz;
 
     uint64_t total_bytes = task.input_size + task.output_size;
     Cycle memory_cycles = std::ceil(total_bytes / bytes_per_cycle);
@@ -398,11 +398,11 @@ Cycle EventDrivenExecutionModel::rooflineModel(const Task& task) const {
 Cycle EventDrivenExecutionModel::configurableIPCModel(const Task& task) const {
     // Simple IPC-based model
     // Account for vector width when computing effective throughput
-    double effective_ipc = core_model_.ipc * core_model_.vector_width;
+    double effective_ipc = core_type_.ipc * core_type_.vector_width;
     Cycle cycles = std::ceil(task.num_ops / effective_ipc);
 
     // Add pipeline fill/drain overhead
-    cycles += core_model_.pipeline_depth;
+    cycles += core_type_.pipeline_depth;
 
     return cycles;
 }

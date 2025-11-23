@@ -4,7 +4,7 @@ Generate 10,000 comprehensive test configuration files covering:
 - All network topologies
 - All memory technologies
 - All PIM placement levels
-- All core models
+- All core types
 - All scheduling policies
 - Various PE counts and configurations
 """
@@ -50,8 +50,8 @@ DRAM_CONFIGS = [
 # PIM placement levels
 PIM_PLACEMENTS = ["subarray", "bank", "chip", "rank"]
 
-# Core models for PEs
-CORE_MODELS = ["in-order", "out-of-order", "simple"]
+# Core types for PEs
+CORE_TYPES = ["in-order", "out-of-order", "simple"]
 
 # Scheduling policies
 SCHEDULING_POLICIES = ["nearest", "round_robin", "load_balanced", "priority_based", "data_aware"]
@@ -147,7 +147,7 @@ def generate_test_config(test_id, test_name, dram_config, pim_config, topo_confi
             "num_pes": pim_config["num_pes"],
             "pe_placement": pim_config["placement"],
             "scheduling_policy": pim_config["scheduling_policy"],
-            "core_model": pim_config["core_model"]
+            "core_type": pim_config["core_type"]
         }
     }
 
@@ -231,7 +231,7 @@ def generate_test_suite():
         dram = random.choice(DRAM_CONFIGS)
         placement = random.choice(PIM_PLACEMENTS)
         scheduling = random.choice(SCHEDULING_POLICIES)
-        core_model = random.choice(CORE_MODELS)
+        core_type = random.choice(CORE_TYPES)
         pe_multiplier = random.choice(PE_COUNT_MULTIPLIERS)
 
         num_pes = calculate_pe_count(dram, placement, pe_multiplier)
@@ -242,7 +242,7 @@ def generate_test_suite():
             "pim": {
                 "placement": placement,
                 "scheduling_policy": scheduling,
-                "core_model": core_model,
+                "core_type": core_type,
                 "num_pes": num_pes
             },
             "topology": None
@@ -255,7 +255,7 @@ def generate_test_suite():
         dram = random.choice(DRAM_CONFIGS)
         placement = random.choice(PIM_PLACEMENTS)
         scheduling = random.choice(SCHEDULING_POLICIES)
-        core_model = random.choice(CORE_MODELS)
+        core_type = random.choice(CORE_TYPES)
         topology = random.choice(TOPOLOGIES)
         level = random.choice(["l0", "l1", "l2", "l3", "l4", "l5"])
         max_ports = random.choice(PORT_CONFIGS)
@@ -268,7 +268,7 @@ def generate_test_suite():
             "pim": {
                 "placement": placement,
                 "scheduling_policy": scheduling,
-                "core_model": core_model,
+                "core_type": core_type,
                 "num_pes": num_pes
             },
             "topology": {
@@ -284,7 +284,7 @@ def generate_test_suite():
         dram = random.choice(DRAM_CONFIGS)
         placement = random.choice(PIM_PLACEMENTS)
         scheduling = random.choice(SCHEDULING_POLICIES)
-        core_model = random.choice(CORE_MODELS)
+        core_type = random.choice(CORE_TYPES)
 
         # Select 2-4 levels to customize
         num_levels = random.randint(2, 4)
@@ -303,21 +303,21 @@ def generate_test_suite():
             "pim": {
                 "placement": placement,
                 "scheduling_policy": scheduling,
-                "core_model": core_model,
+                "core_type": core_type,
                 "num_pes": num_pes
             },
             "topology": topo_config
         })
         test_id += 1
 
-    # Category 4: All core models with various configurations (1000 tests)
+    # Category 4: All core types with various configurations (1000 tests)
     print("[4/10] Generating core model variations (1000 tests)...")
     for i in range(1000):
         dram = random.choice(DRAM_CONFIGS)
         placement = random.choice(PIM_PLACEMENTS)
         scheduling = random.choice(SCHEDULING_POLICIES)
         # Cycle through all core models
-        core_model = CORE_MODELS[i % len(CORE_MODELS)]
+        core_type = CORE_TYPES[i % len(CORE_TYPES)]
 
         num_pes = calculate_pe_count(dram, placement)
 
@@ -335,7 +335,7 @@ def generate_test_suite():
             "pim": {
                 "placement": placement,
                 "scheduling_policy": scheduling,
-                "core_model": core_model,
+                "core_type": core_type,
                 "num_pes": num_pes
             },
             "topology": topo_config
@@ -349,7 +349,7 @@ def generate_test_suite():
         placement = random.choice(PIM_PLACEMENTS)
         # Cycle through all scheduling policies
         scheduling = SCHEDULING_POLICIES[i % len(SCHEDULING_POLICIES)]
-        core_model = random.choice(CORE_MODELS)
+        core_type = random.choice(CORE_TYPES)
 
         num_pes = calculate_pe_count(dram, placement)
 
@@ -368,7 +368,7 @@ def generate_test_suite():
             "pim": {
                 "placement": placement,
                 "scheduling_policy": scheduling,
-                "core_model": core_model,
+                "core_type": core_type,
                 "num_pes": num_pes
             },
             "topology": topo_config
@@ -382,7 +382,7 @@ def generate_test_suite():
         # Cycle through all placements
         placement = PIM_PLACEMENTS[i % len(PIM_PLACEMENTS)]
         scheduling = random.choice(SCHEDULING_POLICIES)
-        core_model = random.choice(CORE_MODELS)
+        core_type = random.choice(CORE_TYPES)
         pe_multiplier = random.choice(PE_COUNT_MULTIPLIERS)
 
         num_pes = calculate_pe_count(dram, placement, pe_multiplier)
@@ -400,7 +400,7 @@ def generate_test_suite():
             "pim": {
                 "placement": placement,
                 "scheduling_policy": scheduling,
-                "core_model": core_model,
+                "core_type": core_type,
                 "num_pes": num_pes
             },
             "topology": topo_config if topo_config else None
@@ -414,7 +414,7 @@ def generate_test_suite():
         dram = random.choice(hbm_configs)
         placement = random.choice(PIM_PLACEMENTS)
         scheduling = random.choice(SCHEDULING_POLICIES)
-        core_model = random.choice(CORE_MODELS)
+        core_type = random.choice(CORE_TYPES)
 
         num_pes = calculate_pe_count(dram, placement)
 
@@ -432,7 +432,7 @@ def generate_test_suite():
             "pim": {
                 "placement": placement,
                 "scheduling_policy": scheduling,
-                "core_model": core_model,
+                "core_type": core_type,
                 "num_pes": num_pes
             },
             "topology": topo_config
@@ -446,7 +446,7 @@ def generate_test_suite():
         dram = random.choice(ddr_configs)
         placement = random.choice(PIM_PLACEMENTS)
         scheduling = random.choice(SCHEDULING_POLICIES)
-        core_model = random.choice(CORE_MODELS)
+        core_type = random.choice(CORE_TYPES)
 
         num_pes = calculate_pe_count(dram, placement)
 
@@ -464,7 +464,7 @@ def generate_test_suite():
             "pim": {
                 "placement": placement,
                 "scheduling_policy": scheduling,
-                "core_model": core_model,
+                "core_type": core_type,
                 "num_pes": num_pes
             },
             "topology": topo_config
@@ -477,7 +477,7 @@ def generate_test_suite():
         dram = random.choice(DRAM_CONFIGS)
         placement = random.choice(PIM_PLACEMENTS)
         scheduling = random.choice(SCHEDULING_POLICIES)
-        core_model = random.choice(CORE_MODELS)
+        core_type = random.choice(CORE_TYPES)
         pe_multiplier = random.choice(PE_COUNT_MULTIPLIERS)
 
         num_pes = calculate_pe_count(dram, placement, pe_multiplier)
@@ -499,7 +499,7 @@ def generate_test_suite():
             "pim": {
                 "placement": placement,
                 "scheduling_policy": scheduling,
-                "core_model": core_model,
+                "core_type": core_type,
                 "num_pes": num_pes
             },
             "topology": topo_config
@@ -514,7 +514,7 @@ def generate_test_suite():
         dram = random.choice(high_end_configs if high_end_configs else DRAM_CONFIGS)
         placement = random.choice(PIM_PLACEMENTS)
         scheduling = random.choice(SCHEDULING_POLICIES)
-        core_model = random.choice(CORE_MODELS)
+        core_type = random.choice(CORE_TYPES)
         # Higher PE multipliers for stress testing
         pe_multiplier = random.choice([4, 8])
 
@@ -542,7 +542,7 @@ def generate_test_suite():
             "pim": {
                 "placement": placement,
                 "scheduling_policy": scheduling,
-                "core_model": core_model,
+                "core_type": core_type,
                 "num_pes": num_pes
             },
             "topology": topo_config
@@ -578,7 +578,7 @@ def generate_test_suite():
             "file": filename,
             "dram_type": test_case["dram"]["type"],
             "pim_placement": test_case["pim"]["placement"],
-            "core_model": test_case["pim"]["core_model"],
+            "core_type": test_case["pim"]["core_type"],
             "scheduling_policy": test_case["pim"]["scheduling_policy"],
             "category": test_case["name"].split('_')[0]
         })
@@ -611,7 +611,7 @@ def generate_test_suite():
         f.write("1. **Memory technology sweep** (1400 tests): All memory techs with various PIM configs\n")
         f.write("2. **Single-level topology** (1500 tests): One topology level varied\n")
         f.write("3. **Multi-level topology** (1200 tests): 2-4 topology levels varied\n")
-        f.write("4. **Core model variations** (1000 tests): All core models tested\n")
+        f.write("4. **Core model variations** (1000 tests): All core types tested\n")
         f.write("5. **Scheduling policies** (1000 tests): All scheduling policies tested\n")
         f.write("6. **PIM placement levels** (1000 tests): All placement levels tested\n")
         f.write("7. **HBM-specific tests** (600 tests): HBM2/HBM3 focused\n")
@@ -643,7 +643,7 @@ def generate_test_suite():
     # Calculate statistics
     dram_types = {}
     placements = {}
-    core_models = {}
+    core_types = {}
     schedulings = {}
     for test in test_cases:
         dram_type = test["dram"]["type"]
@@ -652,8 +652,8 @@ def generate_test_suite():
         placement = test["pim"]["placement"]
         placements[placement] = placements.get(placement, 0) + 1
 
-        core_model = test["pim"]["core_model"]
-        core_models[core_model] = core_models.get(core_model, 0) + 1
+        core_type = test["pim"]["core_type"]
+        core_types[core_type] = core_types.get(core_type, 0) + 1
 
         scheduling = test["pim"]["scheduling_policy"]
         schedulings[scheduling] = schedulings.get(scheduling, 0) + 1
@@ -667,7 +667,7 @@ def generate_test_suite():
         print(f"  {placement}: {count} tests")
 
     print(f"\nCore Models:")
-    for model, count in sorted(core_models.items()):
+    for model, count in sorted(core_types.items()):
         print(f"  {model}: {count} tests")
 
     print(f"\nScheduling Policies:")

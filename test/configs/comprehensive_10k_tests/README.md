@@ -15,7 +15,7 @@ testing covering all dimensions:
 1. **Memory technology sweep** (1400 tests): All memory techs with various PIM configs
 2. **Single-level topology** (1500 tests): One topology level varied
 3. **Multi-level topology** (1200 tests): 2-4 topology levels varied
-4. **Core model variations** (1000 tests): All core models tested
+4. **Core model variations** (1000 tests): All core types tested
 5. **Scheduling policies** (1000 tests): All scheduling policies tested
 6. **PIM placement levels** (1000 tests): All placement levels tested
 7. **HBM-specific tests** (600 tests): HBM2/HBM3 focused

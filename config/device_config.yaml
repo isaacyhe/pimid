@@ -225,7 +225,7 @@ zsim:
   # ZSim options
   options:
     cache_model: "timing"
-    core_model: "simple"
+    core_type: "simple"
 
 #==============================================================================
 # PERFORMANCE MONITORING

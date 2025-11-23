@@ -16,4 +16,4 @@ pim:
   num_pes: 64
   pe_placement: rank
   scheduling_policy: data_aware
-  core_model: in-order
+  core_type: in-order

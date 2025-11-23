@@ -51,4 +51,4 @@ pim:
   num_pes: 128
   pe_placement: chip
   scheduling_policy: data_aware
-  core_model: in-order
+  core_type: in-order

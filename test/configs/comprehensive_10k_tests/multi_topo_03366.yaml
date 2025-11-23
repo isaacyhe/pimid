@@ -47,4 +47,4 @@ pim:
   num_pes: 8
   pe_placement: rank
   scheduling_policy: data_aware
-  core_model: simple
+  core_type: simple

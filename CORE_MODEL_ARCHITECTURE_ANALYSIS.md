@@ -2,12 +2,12 @@
 
 ## Executive Summary
 
-**Question**: zsim feeds traces to other models in PIMID - would event-driven core models work for PIMID through the PE plugin system?
+**Question**: zsim feeds traces to other models in PIMID - would event-driven core types work for PIMID through the PE plugin system?
 
 **Short Answer**:
-- ✅ **YES** - Event-driven core models can work with PIMID
+- ✅ **YES** - Event-driven core types can work with PIMID
 - ⚠️ **BUT** - The current PE plugin system focuses on **PE architecture specification**, not **simulation methodology**
-- 🔧 **Needs Extension** - To fully support event-driven core models, we need to extend the plugin interface
+- 🔧 **Needs Extension** - To fully support event-driven core types, we need to extend the plugin interface
 
 ---
 

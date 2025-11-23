@@ -11,7 +11,7 @@ PIMID provides a **modular plugin system** for extending the PIM simulator with 
 
 ## The 4 Main Plugin Types (As Requested)
 
-### 1. Core Models (PE_TYPE - Processing Element Architectures)
+### 1. Core Types (PE_TYPE - Processing Element Architectures)
 **Purpose**: Define custom Processing Element architectures
 - Custom accelerator designs
 - PE with specialized instruction sets
