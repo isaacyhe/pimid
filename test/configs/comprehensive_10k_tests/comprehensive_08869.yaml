@@ -43,4 +43,4 @@ pim:
   num_pes: 8192
   pe_placement: bank
   scheduling_policy: round_robin
-  core_model: simple
+  core_type: simple

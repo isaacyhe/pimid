@@ -51,4 +51,4 @@ pim:
   num_pes: 32
   pe_placement: chip
   scheduling_policy: nearest
-  core_model: out-of-order
+  core_type: out-of-order

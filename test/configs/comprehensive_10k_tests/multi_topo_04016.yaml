@@ -39,4 +39,4 @@ pim:
   num_pes: 1
   pe_placement: rank
   scheduling_policy: data_aware
-  core_model: out-of-order
+  core_type: out-of-order

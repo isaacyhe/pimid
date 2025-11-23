@@ -16,4 +16,4 @@ pim:
   num_pes: 131072
   pe_placement: subarray
   scheduling_policy: load_balanced
-  core_model: in-order
+  core_type: in-order

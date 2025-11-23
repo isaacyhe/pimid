@@ -58,7 +58,7 @@ This directory contains a comprehensive analysis of the PIMID plugin system arch
 
 ## The 4 Main Plugin Types (As Requested)
 
-### 1. Core Models (PE_TYPE)
+### 1. Core Types (PE_TYPE)
 - **Definition**: Custom Processing Element architectures
 - **Header**: `pimid/include/plugin/plugin_interface.h`
 - **Status**: Framework ready, awaiting implementations
@@ -191,7 +191,7 @@ pimid-dev/
 
 You now have access to comprehensive documentation covering:
 - All 8 plugin types (definition, status, location)
-- The 4 main plugin types in detail (core models, schedulers, memory, network)
+- The 4 main plugin types in detail (core types, schedulers, memory, network)
 - Complete architecture overview
 - File locations and build instructions
 - Working examples and best practices

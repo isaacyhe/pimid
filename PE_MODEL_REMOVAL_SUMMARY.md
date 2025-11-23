@@ -9,7 +9,7 @@ This document summarizes the removal of the PE (Processing Element) plugin model
 The PE plugin system was determined to be unnecessary because:
 1. Each execution model (ZSim and Event-Driven) already has its own core type system
 2. The PE plugin was minimally used and added complexity without significant value
-3. The Event-Driven model's `CoreModel` struct already contains all necessary parameters
+3. The Event-Driven model's `CoreType` struct already contains all necessary parameters
 4. ZSim has its own comprehensive core modeling (OoOCore, SimpleCore, etc.)
 
 ## Changes Made
@@ -24,12 +24,12 @@ The PE plugin system was determined to be unnecessary because:
 - `Cycle pluginBasedModel(const Task& task) const` - Plugin-based latency model removed
 
 **Added:**
-- `void setCoreModel(const CoreModel& model)` - New method to set core model parameters directly
-- Default constructor for `CoreModel` struct with sensible defaults (1 GHz, IPC=1.0, vector_width=1, pipeline_depth=5)
+- `void setCoreType(const CoreType& type)` - New method to set core type parameters directly
+- Default constructor for `CoreType` struct with sensible defaults (1 GHz, IPC=1.0, vector_width=1, pipeline_depth=5)
 
 **Modified:**
 - Updated documentation to remove references to PE plugins
-- Changed feature description from "Configurable core models via PE plugins" to "Configurable core models via CoreModel struct"
+- Changed feature description from "Configurable core types via PE plugins" to "Configurable core types via CoreType struct"
 
 ### 2. Event-Driven Execution Model Implementation (`event_driven_execution_model.cpp`)
 
@@ -39,12 +39,12 @@ The PE plugin system was determined to be unnecessary because:
 - `PerformanceModel::PLUGIN_BASED` case from `setPerformanceModel()` switch statement
 
 **Added:**
-- `setCoreModel()` method implementation with detailed logging
+- `setCoreType()` method implementation with detailed logging
 - Improved `configurableIPCModel()` to account for vector width when computing effective throughput
 
 **Modified:**
 - `estimateTaskLatency()` now only calls `rooflineModel()` or `configurableIPCModel()`
-- `configurableIPCModel()` now uses `effective_ipc = core_model_.ipc * core_model_.vector_width` for better accuracy
+- `configurableIPCModel()` now uses `effective_ipc = core_type_.ipc * core_type_.vector_width` for better accuracy
 
 ### 3. Deleted Files
 
@@ -64,13 +64,13 @@ EventDrivenExecutionModel
     │   ├── ScalarPEPlugin
     │   ├── VectorPEPlugin
     │   └── MatrixPEPlugin
-    └── CoreModel (internal use)
+    └── CoreType (internal use)
 ```
 
 ### After:
 ```
 EventDrivenExecutionModel
-    └── CoreModel (direct configuration)
+    └── CoreType (direct configuration)
         ├── frequency_mhz
         ├── ipc
         ├── vector_width
@@ -85,7 +85,7 @@ EventDrivenExecutionModel
 - Never used PE plugins
 
 ### Event-Driven Execution Model
-- Simplified to use `CoreModel` struct directly
+- Simplified to use `CoreType` struct directly
 - Two performance models remain: ROOFLINE and CONFIGURABLE_IPC
 - More accurate IPC calculation accounting for vector width
 
@@ -100,15 +100,15 @@ EventDrivenExecutionModel
 3. PE plugin files deleted
 
 **Migration Path:**
-- Users who were using `registerPEPlugin()` should instead use `setCoreModel()` to configure core parameters directly
-- Users who used `PLUGIN_BASED` performance model should use `CONFIGURABLE_IPC` instead and set appropriate core model parameters
+- Users who were using `registerPEPlugin()` should instead use `setCoreType()` to configure core parameters directly
+- Users who used `PLUGIN_BASED` performance model should use `CONFIGURABLE_IPC` instead and set appropriate core type parameters
 
-## Core Model Parameters
+## Core Type Parameters
 
-The `CoreModel` struct contains all necessary parameters for analytical performance modeling:
+The `CoreType` struct contains all necessary parameters for analytical performance modeling:
 
 ```cpp
-struct CoreModel {
+struct CoreType {
     double frequency_mhz;        // Operating frequency in MHz
     double ipc;                  // Instructions per cycle
     uint32_t vector_width;       // SIMD width (1 = scalar)
@@ -127,7 +127,7 @@ struct CoreModel {
 ## Testing & Verification
 
 ### Syntax Verification
-✅ CoreModel struct compiles correctly with default constructor
+✅ CoreType struct compiles correctly with default constructor
 ✅ PerformanceModel enum compiles with ROOFLINE and CONFIGURABLE_IPC
 ✅ No references to deleted PE plugin files in source code
 ✅ Only documentation files reference PE plugins (for historical context)
@@ -169,9 +169,9 @@ struct CoreModel {
 
 ## Future Enhancements
 
-1. Add configuration file support for CoreModel parameters
+1. Add configuration file support for CoreType parameters
 2. Create presets for common core types (ARM Cortex-A, Intel Core, etc.)
-3. Add validation for CoreModel parameters (e.g., frequency > 0, ipc > 0)
+3. Add validation for CoreType parameters (e.g., frequency > 0, ipc > 0)
 4. Consider adding specialized models for specific architectures
 
 ## Conclusion

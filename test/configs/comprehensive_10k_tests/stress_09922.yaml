@@ -55,4 +55,4 @@ pim:
   num_pes: 512
   pe_placement: chip
   scheduling_policy: round_robin
-  core_model: simple
+  core_type: simple

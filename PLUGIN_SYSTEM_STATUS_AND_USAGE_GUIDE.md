@@ -3,7 +3,7 @@
 ## Executive Summary
 
 This document provides a **comprehensive review** of the 4 main plugin types requested:
-1. **Core Models (PE_TYPE)** - Processing Element architectures
+1. **Core Types (PE_TYPE)** - Processing Element architectures
 2. **Schedulers (SCHEDULER)** - Task scheduling algorithms
 3. **Memory Models (MEMORY_MODEL)** - Memory technology plugins
 4. **Network Models (NETWORK_TOPOLOGY)** - Network-on-chip topologies
@@ -21,7 +21,7 @@ This document provides a **comprehensive review** of the 4 main plugin types req
 | **Schedulers** | ✅ Defined | ❌ Empty TODO | **Not Usable** |
 | **Memory Models** | ✅ Defined | ❌ Empty TODO | **Not Usable** |
 | **Network Models** | ✅ Defined | ✅ Implemented | **Usable** |
-| **Core Models (PE)** | ⚠️ Enum only | ❌ No interface | **Not Usable** |
+| **Core Types (PE)** | ⚠️ Enum only | ❌ No interface | **Not Usable** |
 
 ### After (What I Implemented)
 
@@ -30,11 +30,11 @@ This document provides a **comprehensive review** of the 4 main plugin types req
 | **Schedulers** | ✅ Defined | ✅ **Implemented** | 3 plugins | **✅ Fully Usable** |
 | **Memory Models** | ✅ Defined | ✅ **Implemented** | 1 template | **✅ Fully Usable** |
 | **Network Models** | ✅ Defined | ✅ Implemented | GarnetModel | **✅ Fully Usable** |
-| **Core Models (PE)** | ✅ **Created** | ✅ **Implemented** | 3 plugins | **✅ Fully Usable** |
+| **Core Types (PE)** | ✅ **Created** | ✅ **Implemented** | 3 plugins | **✅ Fully Usable** |
 
 ---
 
-## 1. Core Models (PE_TYPE) - Processing Element Plugins
+## 1. Core Types (PE_TYPE) - Processing Element Plugins
 
 ### Status: ✅ **FULLY IMPLEMENTED** (Created from scratch)
 
@@ -495,7 +495,7 @@ mkdir build && cd build && cmake .. && make
 
 | Plugin Type | Ease of Adding | Existing Examples | Documentation |
 |-------------|----------------|-------------------|---------------|
-| **Core Models (PE)** | ⭐⭐⭐⭐⭐ Very Easy | 3 plugins | ✅ Complete |
+| **Core Types (PE)** | ⭐⭐⭐⭐⭐ Very Easy | 3 plugins | ✅ Complete |
 | **Schedulers** | ⭐⭐⭐⭐⭐ Very Easy | 3 plugins | ✅ Complete |
 | **Memory Models** | ⭐⭐⭐⭐⭐ Very Easy | 1 template + 6 existing | ✅ Complete |
 | **Network Models** | ⭐⭐⭐⭐ Easy | 1 (GarnetModel) | ✅ Complete |
@@ -530,7 +530,7 @@ mkdir build && cd build && cmake .. && make
 
 ## Recommendations
 
-### For Core Models (PE_TYPE)
+### For Core Types (PE_TYPE)
 - ✅ **Ready to use** - 3 example plugins provided
 - Use `ScalarPEPlugin` for simple processing elements
 - Use `VectorPEPlugin` for SIMD workloads
@@ -570,7 +570,7 @@ mkdir build && cd build && cmake .. && make
 
 **All 4 plugin types are now fully implemented and ready to use!**
 
-- ✅ Core Models (PE_TYPE) - **Created from scratch, 3 examples**
+- ✅ Core Types (PE_TYPE) - **Created from scratch, 3 examples**
 - ✅ Schedulers - **Fully implemented, 3 examples**
 - ✅ Memory Models - **Fully implemented, 1 template + 6 existing**
 - ✅ Network Models - **Already working, 8 topologies**

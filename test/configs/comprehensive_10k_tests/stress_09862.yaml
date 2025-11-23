@@ -55,4 +55,4 @@ pim:
   num_pes: 32768
   pe_placement: bank
   scheduling_policy: data_aware
-  core_model: simple
+  core_type: simple

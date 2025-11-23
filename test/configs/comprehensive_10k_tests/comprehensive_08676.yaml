@@ -43,4 +43,4 @@ pim:
   num_pes: 64
   pe_placement: rank
   scheduling_policy: priority_based
-  core_model: in-order
+  core_type: in-order

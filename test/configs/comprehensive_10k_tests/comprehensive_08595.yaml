@@ -51,4 +51,4 @@ pim:
   num_pes: 2097152
   pe_placement: subarray
   scheduling_policy: priority_based
-  core_model: simple
+  core_type: simple

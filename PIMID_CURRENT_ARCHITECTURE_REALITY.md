@@ -268,7 +268,7 @@ The infrastructure is there, but not utilized yet!
 
 ### 3. "Event-Driven" Terminology
 
-When I proposed "event-driven core models," I meant:
+When I proposed "event-driven core types," I meant:
 - Use the existing EventQueue infrastructure
 - Replace cycle-by-cycle loop with event-based jumps
 - Still analytical (no instruction execution)

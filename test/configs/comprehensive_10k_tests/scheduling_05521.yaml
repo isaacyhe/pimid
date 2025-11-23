@@ -16,4 +16,4 @@ pim:
   num_pes: 4096
   pe_placement: bank
   scheduling_policy: round_robin
-  core_model: out-of-order
+  core_type: out-of-order

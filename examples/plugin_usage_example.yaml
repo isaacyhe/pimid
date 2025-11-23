@@ -2,7 +2,7 @@
 # PIMID Plugin System - Complete Usage Example
 # ============================================================================
 # This configuration demonstrates how to use all 4 main plugin types:
-#   1. Core Models (PE_TYPE) - Processing Element architectures
+#   1. Core Types (PE_TYPE) - Processing Element architectures
 #   2. Schedulers - Task scheduling algorithms
 #   3. Memory Models - Memory technology plugins
 #   4. Network Models - Network-on-chip topologies

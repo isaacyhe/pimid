@@ -51,4 +51,4 @@ pim:
   num_pes: 2048
   pe_placement: bank
   scheduling_policy: data_aware
-  core_model: out-of-order
+  core_type: out-of-order

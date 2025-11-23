@@ -16,4 +16,4 @@ pim:
   num_pes: 32768
   pe_placement: bank
   scheduling_policy: nearest
-  core_model: in-order
+  core_type: in-order

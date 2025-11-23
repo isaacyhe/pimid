@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-✅ **VERIFIED**: The ALU core model can work as Processing Elements (PEs) in DRAM subarrays.
+✅ **VERIFIED**: The ALU core type can work as Processing Elements (PEs) in DRAM subarrays.
 
 The newly implemented ALU core is **IDEAL** for modeling PIM PEs at any DRAM hierarchy level (subarray, bank, chip, rank) because:
 

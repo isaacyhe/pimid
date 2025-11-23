@@ -165,7 +165,7 @@ Low Detail ←──────────────────────
 
 ### What "Event-Driven" Means in Our Context
 
-When I said "event-driven core models would be faster," I meant **analytical/task-based models**, not gem5-style simulation!
+When I said "event-driven core types would be faster," I meant **analytical/task-based models**, not gem5-style simulation!
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -476,7 +476,7 @@ The term **"event-driven"** means different things:
 - They mean: gem5 uses discrete event simulation for TIMING ✅
 - They DON'T mean: gem5 doesn't execute instructions ❌
 
-**When I said "event-driven core models for PIMID":**
+**When I said "event-driven core types for PIMID":**
 - I meant: Analytical task-based models (no instruction execution)
 - I did NOT mean: Just using event queues for timing
 

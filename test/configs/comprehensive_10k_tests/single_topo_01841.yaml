@@ -35,4 +35,4 @@ pim:
   num_pes: 32768
   pe_placement: subarray
   scheduling_policy: round_robin
-  core_model: in-order
+  core_type: in-order

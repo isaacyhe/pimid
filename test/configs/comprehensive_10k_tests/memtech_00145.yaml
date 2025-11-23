@@ -16,4 +16,4 @@ pim:
   num_pes: 128
   pe_placement: rank
   scheduling_policy: round_robin
-  core_model: simple
+  core_type: simple

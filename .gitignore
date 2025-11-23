@@ -77,3 +77,15 @@ benchmark_run.log
 # Test results (detailed results, configs, but keep summaries)
 test_results*/all_results*.json
 test_results*/configs/
+
+# Test artifacts and results
+test_configs/
+test_configs_scale/
+benchmark_test_results/
+comprehensive_benchmark_results/
+test_results/
+test_results_execution_models/
+results/
+*.log
+quick_test_output.log
+benchmark_test_results.log

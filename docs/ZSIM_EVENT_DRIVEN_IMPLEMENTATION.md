@@ -224,7 +224,7 @@ From MultiPIM's integration pattern, we implement:
 
 1. **Configuration-Based Setup**
    - ZSim config files for host and device
-   - Separate core models for CPU and PIM
+   - Separate core types for CPU and PIM
    - Memory model specification
 
 2. **PIM Mode Support**

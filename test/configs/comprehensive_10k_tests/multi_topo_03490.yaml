@@ -47,4 +47,4 @@ pim:
   num_pes: 65536
   pe_placement: subarray
   scheduling_policy: data_aware
-  core_model: simple
+  core_type: simple

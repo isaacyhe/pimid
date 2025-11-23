@@ -47,4 +47,4 @@ pim:
   num_pes: 256
   pe_placement: chip
   scheduling_policy: priority_based
-  core_model: out-of-order
+  core_type: out-of-order

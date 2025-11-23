@@ -43,4 +43,4 @@ pim:
   num_pes: 4096
   pe_placement: bank
   scheduling_policy: priority_based
-  core_model: in-order
+  core_type: in-order

@@ -35,4 +35,4 @@ pim:
   num_pes: 1024
   pe_placement: bank
   scheduling_policy: nearest
-  core_model: simple
+  core_type: simple

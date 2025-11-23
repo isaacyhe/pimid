@@ -47,4 +47,4 @@ pim:
   num_pes: 32
   pe_placement: chip
   scheduling_policy: data_aware
-  core_model: simple
+  core_type: simple

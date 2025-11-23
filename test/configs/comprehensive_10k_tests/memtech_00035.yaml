@@ -16,4 +16,4 @@ pim:
   num_pes: 2097152
   pe_placement: subarray
   scheduling_policy: load_balanced
-  core_model: simple
+  core_type: simple
