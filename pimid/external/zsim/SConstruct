@@ -4,6 +4,15 @@ from os.path import join as joinpath
 useIcc = False
 #useIcc = True
 
+# Command-line options for user control
+AddOption('--pin-version',
+          dest='pin_version',
+          type='string',
+          nargs=1,
+          action='store',
+          metavar='VERSION',
+          help='Manually specify PIN version (2 or 3). If not specified, version is auto-detected.')
+
 def buildSim(cppFlags, dir, type, pgo=None):
     ''' Build the simulator with a specific base buid dir and config type'''
 
@@ -39,8 +48,31 @@ def buildSim(cppFlags, dir, type, pgo=None):
     if "PINPATH" in os.environ:
         PINPATH = os.environ["PINPATH"]
     else:
-       print("ERROR: You need to define the $PINPATH environment variable with Pin's path")
+       print("=" * 80)
+       print("ERROR: PIN not found!")
+       print("=" * 80)
+       print("You need to define the $PINPATH environment variable with Pin's path")
+       print("")
+       print("Example:")
+       print("  export PINPATH=/path/to/pin-3.28-98749-g6643ecee5-gcc-linux")
+       print("  scons -j$(nproc)")
+       print("")
+       print("Download PIN from:")
+       print("  https://www.intel.com/content/www/us/en/developer/articles/tool/pin-a-binary-instrumentation-tool-downloads.html")
+       print("=" * 80)
        sys.exit(1)
+
+    # Verify PINPATH exists
+    if not os.path.exists(PINPATH):
+        print("=" * 80)
+        print("ERROR: PIN directory does not exist!")
+        print("=" * 80)
+        print("PINPATH is set to:", PINPATH)
+        print("But this directory does not exist.")
+        print("")
+        print("Please verify your PINPATH and try again.")
+        print("=" * 80)
+        sys.exit(1)
 
     ROOT = Dir('.').abspath
 
@@ -55,17 +87,89 @@ def buildSim(cppFlags, dir, type, pgo=None):
     # NOTE (yyf 17 Sep 2020): Enforce to use older ABI when compiled with gcc-5 or newer.
     env["CPPFLAGS"] += " -fabi-version=2 -D_GLIBCXX_USE_CXX11_ABI=0"
 
+    # Check if user manually specified PIN version
+    user_pin_version = GetOption('pin_version')
+    detected_pin_version = None
+
     # Pin 2.12+ kits have changed the layout of includes, detect whether we need
     # source/include/ or source/include/pin/
     # Pin 3.x uses source/include/pin/ structure
     pinInclDir = joinpath(PINPATH, "source/include/")
-    if not os.path.exists(joinpath(pinInclDir, "pin.H")):
-        pinInclDir = joinpath(pinInclDir, "pin")
-        if not os.path.exists(joinpath(pinInclDir, "pin.H")):
-            print("ERROR: Could not find pin.H in", PINPATH)
-            print("Checked:", joinpath(PINPATH, "source/include/pin.H"))
-            print("    and:", joinpath(PINPATH, "source/include/pin/pin.H"))
+
+    if user_pin_version:
+        # User manually specified version
+        if user_pin_version == '2':
+            print("User specified PIN 2.x")
+            detected_pin_version = "2.x (user-specified)"
+            # Force PIN 2.x paths
+            if not os.path.exists(joinpath(pinInclDir, "pin.H")):
+                print("=" * 80)
+                print("ERROR: PIN 2.x headers not found!")
+                print("=" * 80)
+                print("You specified --pin-version=2, but PIN 2.x structure not detected.")
+                print("Checked:", joinpath(pinInclDir, "pin.H"))
+                print("")
+                print("Either:")
+                print("  1. Remove --pin-version=2 to use auto-detection")
+                print("  2. Verify you have PIN 2.x installed at:", PINPATH)
+                print("=" * 80)
+                sys.exit(1)
+        elif user_pin_version == '3':
+            print("User specified PIN 3.x")
+            detected_pin_version = "3.x (user-specified)"
+            # Force PIN 3.x paths
+            pinInclDir = joinpath(pinInclDir, "pin")
+            if not os.path.exists(joinpath(pinInclDir, "pin.H")):
+                print("=" * 80)
+                print("ERROR: PIN 3.x headers not found!")
+                print("=" * 80)
+                print("You specified --pin-version=3, but PIN 3.x structure not detected.")
+                print("Checked:", joinpath(pinInclDir, "pin.H"))
+                print("")
+                print("Either:")
+                print("  1. Remove --pin-version=3 to use auto-detection")
+                print("  2. Verify you have PIN 3.x installed at:", PINPATH)
+                print("=" * 80)
+                sys.exit(1)
+        else:
+            print("=" * 80)
+            print("ERROR: Invalid PIN version specified!")
+            print("=" * 80)
+            print("You specified: --pin-version=" + user_pin_version)
+            print("Valid options are: 2 or 3")
+            print("")
+            print("Example:")
+            print("  scons --pin-version=3")
+            print("  scons --pin-version=2")
+            print("=" * 80)
             sys.exit(1)
+    else:
+        # Auto-detection mode
+        if os.path.exists(joinpath(pinInclDir, "pin.H")):
+            # PIN 2.x detected
+            detected_pin_version = "2.x (auto-detected)"
+            print("Auto-detected PIN 2.x")
+        else:
+            pinInclDir = joinpath(pinInclDir, "pin")
+            if os.path.exists(joinpath(pinInclDir, "pin.H")):
+                # PIN 3.x detected
+                detected_pin_version = "3.x (auto-detected)"
+                print("Auto-detected PIN 3.x")
+            else:
+                print("=" * 80)
+                print("ERROR: Could not detect PIN version!")
+                print("=" * 80)
+                print("Could not find pin.H in", PINPATH)
+                print("Checked:")
+                print("  PIN 2.x location:", joinpath(PINPATH, "source/include/pin.H"))
+                print("  PIN 3.x location:", joinpath(PINPATH, "source/include/pin/pin.H"))
+                print("")
+                print("Please verify:")
+                print("  1. PINPATH is correct:", PINPATH)
+                print("  2. PIN is properly installed")
+                print("  3. Or manually specify version: scons --pin-version=2 or --pin-version=3")
+                print("=" * 80)
+                sys.exit(1)
 
     # Pin 2.14 changes location of XED
     xedName = "xed2"  # used below
@@ -73,7 +177,27 @@ def buildSim(cppFlags, dir, type, pgo=None):
     if not os.path.exists(xedPath):
         xedName = "xed"
         xedPath = joinpath(PINPATH, "extras/" + xedName + "-intel64/include")
-        assert os.path.exists(xedPath)
+        if not os.path.exists(xedPath):
+            print("=" * 80)
+            print("ERROR: XED library not found!")
+            print("=" * 80)
+            print("Could not find XED headers in", PINPATH)
+            print("Checked:")
+            print("  PIN 2.x location:", joinpath(PINPATH, "extras/xed2-intel64/include"))
+            print("  PIN 3.x location:", joinpath(PINPATH, "extras/xed-intel64/include"))
+            print("")
+            print("Please verify PIN installation is complete.")
+            print("=" * 80)
+            sys.exit(1)
+
+    # Print detected configuration
+    print("-" * 80)
+    print("PIN Configuration:")
+    print("  PINPATH:", PINPATH)
+    print("  Version:", detected_pin_version)
+    print("  Headers:", pinInclDir)
+    print("  XED Library:", xedName + "-intel64")
+    print("-" * 80)
 
     env["CPPPATH"] = [xedPath, joinpath(xedPath, "xed"),  # Pin 3.x has xed subdir
             pinInclDir, joinpath(pinInclDir, "gen"),
