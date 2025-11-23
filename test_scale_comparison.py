@@ -211,11 +211,16 @@ class ScaleComparisonTester:
         print("="*80)
         print("EXECUTION MODEL SCALE COMPARISON TEST")
         print("="*80)
-        print("\nComparing ZSim vs Event-Driven at scales: 10K, 20K, 50K, 100K PEs")
+        print("\nComparing ZSim vs Event-Driven at realistic scales")
+        print("16 PEs (bank-level), 64, 256, 1024 PEs (subarray-level)")
         print("Using small workloads for fast testing\n")
 
-        # Scales to test
-        scales = [10000, 20000, 50000, 100000]
+        # Scales to test (realistic: 1 PE per bank or per subarray)
+        # 16 = bank-level (16 banks)
+        # 64 = 4 banks × 16 subarrays or 64 banks
+        # 256 = 16 banks × 16 subarrays
+        # 1024 = 16 banks × 64 subarrays or 4 ranks × 16 banks × 16 subarrays
+        scales = [16, 64, 256, 1024]
 
         # Execution models
         models = ["zsim", "event_driven"]
@@ -270,7 +275,7 @@ class ScaleComparisonTester:
         print("RESULTS BY SCALE")
         print(f"{'─'*80}\n")
 
-        for scale in [10000, 20000, 50000, 100000]:
+        for scale in [16, 64, 256, 1024]:
             scale_results = [r for r in self.results if r.scale == scale]
             scale_passed = sum(1 for r in scale_results if r.success)
 

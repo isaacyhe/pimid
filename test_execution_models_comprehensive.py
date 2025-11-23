@@ -216,12 +216,12 @@ class ExecutionModelTester:
         """Generate comprehensive test configurations"""
         configs = []
 
-        # Scales to test (10K to 100K PEs)
+        # Scales to test (realistic PE counts: 1 PE per bank or per subarray)
         scales = [
-            (10000, "10K"),
-            (20000, "20K"),
-            (50000, "50K"),
-            (100000, "100K"),
+            (16, "16pe"),      # Bank-level: 1 PE per bank (16 banks)
+            (64, "64pe"),      # 4 banks × 16 subarrays or 64 banks
+            (256, "256pe"),    # 16 banks × 16 subarrays
+            (1024, "1024pe"),  # 16 banks × 64 subarrays
         ]
 
         # Execution models to test
@@ -287,8 +287,11 @@ class ExecutionModelTester:
                     for mem_tech in memory_techs:
                         for placement in pe_placements:
                             # Skip invalid combinations
-                            if placement == "subarray" and scale > 50000:
-                                # Too many subarrays for typical configurations
+                            if placement == "bank" and scale > 64:
+                                # Can't have more than 64 banks typically
+                                continue
+                            if placement == "subarray" and scale <= 16:
+                                # Subarray placement needs more PEs than banks
                                 continue
 
                             test_id += 1
@@ -316,7 +319,7 @@ class ExecutionModelTester:
         print(f"\n{'#'*80}")
         print(f"# COMPREHENSIVE EXECUTION MODEL TEST SUITE")
         print(f"# Total configurations: {len(configs)}")
-        print(f"# Testing scales: 10K, 20K, 50K, 100K PEs")
+        print(f"# Testing scales: 16, 64, 256, 1024 PEs (realistic)")
         print(f"# Execution models: ZSim (Simple, ALU), Event-Driven")
         print(f"# Workloads: BFS, GEMM, SpMV, DotProduct, Reduction, Histogram")
         print(f"# Memory technologies: DRAM, SRAM, ReRAM")

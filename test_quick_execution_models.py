@@ -73,20 +73,21 @@ def run_quick_tests():
     print("with small workloads for rapid feedback...\n")
 
     # Test configurations: (name, exec_model, num_pes, workload, params)
+    # Realistic PE counts: 16 (bank-level), 64, 256, 1024 (subarray-level)
     tests = [
-        # 10K scale tests
-        ("quick_10k_zsim_bfs", "zsim", 10000, "bfs", {"num_vertices": 64, "avg_degree": 4}),
-        ("quick_10k_event_bfs", "event_driven", 10000, "bfs", {"num_vertices": 64, "avg_degree": 4}),
+        # 16 PEs (bank-level: 1 PE per bank, 16 banks)
+        ("quick_16pe_zsim_bfs", "zsim", 16, "bfs", {"num_vertices": 64, "avg_degree": 4}),
+        ("quick_16pe_event_bfs", "event_driven", 16, "bfs", {"num_vertices": 64, "avg_degree": 4}),
 
-        ("quick_10k_zsim_gemm", "zsim", 10000, "gemm", {"matrix_size": 32}),
-        ("quick_10k_event_gemm", "event_driven", 10000, "gemm", {"matrix_size": 32}),
+        ("quick_16pe_zsim_gemm", "zsim", 16, "gemm", {"matrix_size": 32}),
+        ("quick_16pe_event_gemm", "event_driven", 16, "gemm", {"matrix_size": 32}),
 
-        # 50K scale tests
-        ("quick_50k_zsim_dotprod", "zsim", 50000, "dot_product", {"vector_length": 256}),
-        ("quick_50k_event_dotprod", "event_driven", 50000, "dot_product", {"vector_length": 256}),
+        # 256 PEs (subarray-level: 16 banks × 16 subarrays)
+        ("quick_256pe_zsim_dotprod", "zsim", 256, "dot_product", {"vector_length": 256}),
+        ("quick_256pe_event_dotprod", "event_driven", 256, "dot_product", {"vector_length": 256}),
 
-        # 100K scale tests
-        ("quick_100k_event_reduction", "event_driven", 100000, "reduction", {"elements_per_subarray": 256}),
+        # 1024 PEs (subarray-level: 16 banks × 64 subarrays)
+        ("quick_1024pe_event_reduction", "event_driven", 1024, "reduction", {"elements_per_subarray": 256}),
     ]
 
     results = []

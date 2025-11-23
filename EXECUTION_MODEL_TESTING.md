@@ -5,7 +5,7 @@ This document describes the comprehensive test suite for verifying different exe
 ## Overview
 
 The test suite validates both execution models with:
-- **Scales**: 10K, 20K, 50K, 100K processing elements
+- **Scales**: 16, 64, 256, 1024 processing elements (realistic: 1 PE per bank or subarray)
 - **Execution Models**: ZSim (execution-driven) and Event-Driven (analytical)
 - **Workloads**: BFS, GEMM, SpMV, DotProduct, Reduction, Histogram
 - **Memory Technologies**: DRAM, SRAM, ReRAM, STT-MRAM, PCM
@@ -27,6 +27,7 @@ chmod +x test_quick_execution_models.py
 **Features**:
 - Runs 7 quick tests (~5 minutes)
 - Tests both ZSim and Event-Driven models
+- Scales: 16 PEs (bank-level), 256, 1024 PEs (subarray-level)
 - Validates basic functionality
 - Uses minimal workload sizes
 
@@ -48,7 +49,7 @@ chmod +x test_scale_comparison.py
 ```
 
 **Features**:
-- Tests at 10K, 20K, 50K, 100K PE scales
+- Tests at 16, 64, 256, 1024 PE scales (realistic hardware configurations)
 - Compares execution time between models
 - Tests multiple workloads and memory technologies
 - Generates detailed comparison reports
@@ -60,12 +61,12 @@ chmod +x test_scale_comparison.py
 
 **Example Output**:
 ```
-Scale: 10,000 PEs
+Scale: 16 PEs (bank-level: 1 PE per bank)
   ZSim avg time: 145.2ms (16 tests)
   Event-Driven avg time: 12.3ms (16 tests)
   Speedup (Event/ZSim): 11.8x
 
-Scale: 50,000 PEs
+Scale: 256 PEs (subarray-level: 16 banks × 16 subarrays)
   ZSim avg time: 687.4ms (16 tests)
   Event-Driven avg time: 18.7ms (16 tests)
   Speedup (Event/ZSim): 36.7x
@@ -94,11 +95,11 @@ chmod +x test_execution_models_comprehensive.py
 
 **Features**:
 - Tests all combinations of:
-  - 4 scales (10K, 20K, 50K, 100K PEs)
+  - 4 scales (16, 64, 256, 1024 PEs - realistic configurations)
   - 3 execution model configurations
   - 6 workloads
   - 3 memory technologies
-  - 2 PE placements
+  - 2 PE placements (bank-level, subarray-level)
 - Generates hundreds of test configurations
 - Detailed comparison and analysis
 
@@ -139,14 +140,17 @@ chmod +x test_execution_models_comprehensive.py
 | Reduction | elements_per_subarray | 256 |
 | Histogram | num_elements | 512 |
 
-### Scale Configurations
+### Scale Configurations (Realistic)
 
-| Scale | PEs | Description |
-|-------|-----|-------------|
-| 10K | 10,000 | Small-scale PIM system |
-| 20K | 20,000 | Medium-scale PIM system |
-| 50K | 50,000 | Large-scale PIM system |
-| 100K | 100,000 | Very large-scale PIM system |
+| Scale | PEs | Description | Configuration |
+|-------|-----|-------------|---------------|
+| 16 | 16 | Bank-level PIM | 1 PE per bank (16 banks) |
+| 64 | 64 | Small subarray-level | 4 banks × 16 subarrays or 64 banks |
+| 256 | 256 | Medium subarray-level | 16 banks × 16 subarrays |
+| 1024 | 1024 | Large subarray-level | 16 banks × 64 subarrays |
+
+**Note**: These are realistic PE counts based on actual DRAM architecture.
+At most, there is 1 PE per subarray (the finest granularity).
 
 ---
 

@@ -38,11 +38,11 @@ cd ..
   - ALU cores (no cache)
 - ✅ **Event-Driven (analytical)** - Fast roofline model
 
-### Scales
-- ✅ 10,000 PEs (small-scale PIM)
-- ✅ 20,000 PEs (medium-scale)
-- ✅ 50,000 PEs (large-scale)
-- ✅ 100,000 PEs (very large-scale)
+### Scales (Realistic: 1 PE per bank or per subarray)
+- ✅ 16 PEs (bank-level: 1 PE per bank, 16 banks)
+- ✅ 64 PEs (4 banks × 16 subarrays, or 64 banks)
+- ✅ 256 PEs (16 banks × 16 subarrays)
+- ✅ 1024 PEs (16 banks × 64 subarrays)
 
 ### Workloads (with small inputs for speed)
 - ✅ BFS (64-128 vertices)
@@ -64,17 +64,17 @@ cd ..
 ## 📊 Example Results
 
 ```
-Scale: 10,000 PEs
+Scale: 16 PEs (bank-level)
   ZSim avg time: 145.2ms (16 tests)
   Event-Driven avg time: 12.3ms (16 tests)
   Speedup (Event/ZSim): 11.8x
 
-Scale: 50,000 PEs
+Scale: 256 PEs (subarray-level)
   ZSim avg time: 687.4ms (16 tests)
   Event-Driven avg time: 18.7ms (16 tests)
   Speedup (Event/ZSim): 36.7x
 
-Scale: 100,000 PEs
+Scale: 1024 PEs (subarray-level)
   ZSim avg time: 1342.5ms (16 tests)
   Event-Driven avg time: 25.4ms (16 tests)
   Speedup (Event/ZSim): 52.9x
