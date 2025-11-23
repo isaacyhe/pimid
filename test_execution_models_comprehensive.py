@@ -51,7 +51,7 @@ class ExecutionModelTester:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         self.results: List[TestResult] = []
-        self.pimid_binary = Path("/home/user/pimid-dev/build/pimid/pimid")
+        self.pimid_binary = Path("/home/user/pimid-dev/build/test/benchmarks/benchmark_runner")
 
     def create_config_file(self, config: TestConfig) -> Path:
         """Create YAML configuration file for test"""

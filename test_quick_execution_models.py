@@ -16,50 +16,82 @@ from pathlib import Path
 
 def create_test_config(name: str, exec_model: str, num_pes: int, workload: str, params: dict) -> Path:
     """Create a test configuration file"""
+
+    # Determine placement level based on num_pes
+    placement_level = "BANK" if num_pes <= 64 else "SUBARRAY"
+
     config = {
-        "simulation": {
+        "benchmark": {
             "name": name,
-            "mode": "standalone",
-            "host_execution_model": "event_driven",
-            "device_execution_model": exec_model,
+            "description": f"Test {workload} with {exec_model} execution model",
+            "workload_type": workload,
         },
+        "workload": {},
         "memory": {
             "technology": "DRAM",
-            "dram_type": "DDR4",
-            "channels": 1,
-            "ranks_per_channel": 1,
-            "banks_per_rank": 16,
-        },
-        "pim": {
-            "enabled": True,
-            "num_pes": num_pes,
-            "pe_placement": "bank",
+            "config_file": "configs/memory/dram_config.yaml",
+            "hierarchy": {
+                "num_banks": min(num_pes, 16),
+                "num_subarrays_per_bank": max(1, num_pes // 16) if num_pes > 16 else 1,
+            },
+            "timing": {
+                "subarray_read_ns": 13.32,
+                "subarray_write_ns": 15.0,
+                "inner_bank_htree_ns": 6.65,
+            }
         },
         "processing_element": {
-            "type": "Simple" if exec_model == "zsim" else "analytical",
-            "frequency_mhz": 1000.0,
+            "type": "simple_alu" if exec_model == "zsim" else "in_order_core",
+            "placement_level": placement_level,
+            "num_pes": num_pes,
+            "pipeline": {
+                "stages": 5,
+                "fetch_decode_ns": 2.0,
+                "execute_alu_ns": 1.0,
+            }
         },
-        "workload": {
-            "name": workload,
-            "params": params,
+        "simulation": {
+            "max_cycles": 10000000,
+            "enable_power_modeling": False,
+            "enable_detailed_stats": False,
+        },
+        "output": {
+            "stats_file": f"results/{name}_stats.txt",
+            "summary_format": "table",
         }
     }
 
-    if exec_model == "event_driven":
-        config["event_driven"] = {
-            "performance_model": "roofline",
-            "device": {
-                "num_cores": num_pes,
-                "frequency_mhz": 1000.0,
-                "ipc": 1.0,
-            }
+    # Add workload-specific parameters
+    if workload == "bfs":
+        config["workload"]["graph"] = {
+            "num_vertices": params.get("num_vertices", 64),
+            "avg_degree": params.get("avg_degree", 4),
+            "topology": "random"
+        }
+        config["workload"]["bfs"] = {
+            "root_vertex": 0,
+            "traversal_mode": "level_synchronous"
+        }
+    elif workload == "gemm":
+        config["workload"]["matrix"] = {
+            "size": params.get("matrix_size", 32),
+            "type": "dense"
+        }
+    elif workload == "dot_product":
+        config["workload"]["vector"] = {
+            "length": params.get("vector_length", 256)
+        }
+    elif workload == "reduction":
+        config["workload"]["reduction"] = {
+            "elements_per_subarray": params.get("elements_per_subarray", 256),
+            "operation": "sum"
         }
 
     config_file = Path(f"test_configs/{name}.yaml")
     config_file.parent.mkdir(exist_ok=True)
 
     with open(config_file, 'w') as f:
-        yaml.dump(config, f)
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
     return config_file
 
@@ -91,7 +123,7 @@ def run_quick_tests():
     ]
 
     results = []
-    pimid_binary = Path("/home/user/pimid-dev/build/pimid/pimid")
+    pimid_binary = Path("/home/user/pimid-dev/build/test/benchmarks/benchmark_runner")
 
     for test_name, exec_model, num_pes, workload, params in tests:
         print(f"\n{'─'*80}")

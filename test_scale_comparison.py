@@ -37,7 +37,7 @@ class ScaleComparisonTester:
 
     def __init__(self):
         self.results: List[ScaleTestResult] = []
-        self.pimid_binary = Path("/home/user/pimid-dev/build/pimid/pimid")
+        self.pimid_binary = Path("/home/user/pimid-dev/build/test/benchmarks/benchmark_runner")
         self.config_dir = Path("test_configs_scale")
         self.config_dir.mkdir(exist_ok=True)
 
