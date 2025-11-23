@@ -89,3 +89,4 @@ results/
 *.log
 quick_test_output.log
 benchmark_test_results.log
+pimid/external/zsim/.sconsign.dblite
