@@ -1,0 +1,125 @@
+{
+  "total_tests": 1000,
+  "passed": 948,
+  "failed": 52,
+  "timeout": 0,
+  "errors": 0,
+  "pass_rate": 94.8,
+  "duration_seconds": 24.363027572631836,
+  "timestamp": "2025-11-23T04:47:11.342371",
+  "execution_model": "ZSim",
+  "workload_stats": {
+    "bfs_message": {
+      "total": 104,
+      "passed": 104,
+      "failed": 0
+    },
+    "gemm_message": {
+      "total": 100,
+      "passed": 100,
+      "failed": 0
+    },
+    "spmv_message": {
+      "total": 103,
+      "passed": 103,
+      "failed": 0
+    },
+    "dotproduct_message": {
+      "total": 104,
+      "passed": 104,
+      "failed": 0
+    },
+    "reduction_message": {
+      "total": 51,
+      "passed": 51,
+      "failed": 0
+    },
+    "histogram_message": {
+      "total": 43,
+      "passed": 43,
+      "failed": 0
+    },
+    "prefixsum_message": {
+      "total": 39,
+      "passed": 39,
+      "failed": 0
+    },
+    "reduction_shared": {
+      "total": 52,
+      "passed": 0,
+      "failed": 52
+    },
+    "gemm_shared": {
+      "total": 50,
+      "passed": 50,
+      "failed": 0
+    },
+    "dotproduct_shared": {
+      "total": 43,
+      "passed": 43,
+      "failed": 0
+    },
+    "spmv_shared": {
+      "total": 49,
+      "passed": 49,
+      "failed": 0
+    },
+    "bfs_shared": {
+      "total": 47,
+      "passed": 47,
+      "failed": 0
+    },
+    "stencil1d_message": {
+      "total": 66,
+      "passed": 66,
+      "failed": 0
+    },
+    "histogram_shared": {
+      "total": 44,
+      "passed": 44,
+      "failed": 0
+    },
+    "stencil1d_shared": {
+      "total": 56,
+      "passed": 56,
+      "failed": 0
+    },
+    "prefixsum_shared": {
+      "total": 49,
+      "passed": 49,
+      "failed": 0
+    }
+  },
+  "architecture_stats": {
+    "baseline": {
+      "total": 505,
+      "passed": 480
+    },
+    "libcom": {
+      "total": 495,
+      "passed": 468
+    }
+  },
+  "memory_tech_stats": {
+    "SRAM": {
+      "total": 199,
+      "passed": 199
+    },
+    "DRAM": {
+      "total": 24,
+      "passed": 24
+    },
+    "STT-MRAM": {
+      "total": 14,
+      "passed": 14
+    },
+    "PCM": {
+      "total": 21,
+      "passed": 21
+    },
+    "ReRAM": {
+      "total": 14,
+      "passed": 14
+    }
+  }
+}
