@@ -56,6 +56,34 @@ bool PluginBase::getConfigValueAs<bool>(const std::string& key,
     return default_value;
 }
 
+template<>
+uint32_t PluginBase::getConfigValueAs<uint32_t>(const std::string& key,
+                                                  const uint32_t& default_value) const {
+    auto it = config_.find(key);
+    if (it == config_.end()) {
+        return default_value;
+    }
+    try {
+        return static_cast<uint32_t>(std::stoul(it->second));
+    } catch (...) {
+        return default_value;
+    }
+}
+
+template<>
+uint64_t PluginBase::getConfigValueAs<uint64_t>(const std::string& key,
+                                                  const uint64_t& default_value) const {
+    auto it = config_.find(key);
+    if (it == config_.end()) {
+        return default_value;
+    }
+    try {
+        return std::stoull(it->second);
+    } catch (...) {
+        return default_value;
+    }
+}
+
 //=============================================================================
 // PluginRegistry Implementation
 //=============================================================================

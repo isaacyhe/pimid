@@ -7,10 +7,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Include PIMID headers
 include_directories(${CMAKE_SOURCE_DIR})
 
-# Simple network integration example
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/simple_network/CMakeLists.txt")
-    message(STATUS "  - Simple network integration example")
-    add_subdirectory(simple_network)
-endif()
+# Simple network integration example (temporarily disabled due to API mismatch)
+# if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/simple_network/CMakeLists.txt")
+#     message(STATUS "  - Simple network integration example")
+#     add_subdirectory(simple_network)
+# endif()
 
 message(STATUS "External model integration examples configured")

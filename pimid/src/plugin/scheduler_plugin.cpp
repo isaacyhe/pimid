@@ -111,8 +111,10 @@ std::map<std::string, std::string> CustomSchedulerPlugin::getParameterDescriptio
 std::unique_ptr<PEScheduler> CustomSchedulerPlugin::createScheduler(
     PEPlacementManager* pe_manager) {
 
-    // Create a default scheduler (users can override this)
-    return std::make_unique<PEScheduler>(pe_manager);
+    // Template plugin - users should override this to return their concrete scheduler
+    // PEScheduler is abstract, so we return nullptr as this is just a template
+    (void)pe_manager;  // Suppress unused parameter warning
+    return nullptr;
 }
 
 /**
@@ -213,8 +215,10 @@ std::map<std::string, std::string> DataLocalitySchedulerPlugin::getParameterDesc
 std::unique_ptr<PEScheduler> DataLocalitySchedulerPlugin::createScheduler(
     PEPlacementManager* pe_manager) {
 
-    // Create scheduler optimized for data locality
-    return std::make_unique<PEScheduler>(pe_manager);
+    // Template plugin - users should override this to return their data-locality scheduler
+    // PEScheduler is abstract, so we return nullptr as this is just a template
+    (void)pe_manager;  // Suppress unused parameter warning
+    return nullptr;
 }
 
 bool DataLocalitySchedulerPlugin::isOptimalForWorkload(const std::string& workload_type) const {
@@ -328,8 +332,10 @@ std::map<std::string, std::string> EnergyAwareSchedulerPlugin::getParameterDescr
 std::unique_ptr<PEScheduler> EnergyAwareSchedulerPlugin::createScheduler(
     PEPlacementManager* pe_manager) {
 
-    // Create energy-aware scheduler
-    return std::make_unique<PEScheduler>(pe_manager);
+    // Template plugin - users should override this to return their energy-aware scheduler
+    // PEScheduler is abstract, so we return nullptr as this is just a template
+    (void)pe_manager;  // Suppress unused parameter warning
+    return nullptr;
 }
 
 bool EnergyAwareSchedulerPlugin::isOptimalForWorkload(const std::string& workload_type) const {
