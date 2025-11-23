@@ -14,6 +14,7 @@
 
 #include "plugin/memory_model_plugin.h"
 #include "memory_models/include/memory_model.h"
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 
@@ -36,7 +37,9 @@ CustomMemoryModelPlugin::CustomMemoryModelPlugin()
         "1.0.0",                            // version
         "PIMID Team",                       // author
         "Template for custom memory models",// description
-        PluginType::MEMORY_MODEL            // type
+        PluginType::MEMORY_MODEL,           // type
+        {},                                 // dependencies
+        {}                                  // parameters
     }),
     read_latency_(50),      // Default: 50 cycles
     write_latency_(100),    // Default: 100 cycles

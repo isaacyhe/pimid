@@ -34,7 +34,9 @@ CustomSchedulerPlugin::CustomSchedulerPlugin()
         "1.0.0",                         // version
         "PIMID Team",                    // author
         "Template for custom schedulers",// description
-        PluginType::SCHEDULER            // type
+        PluginType::SCHEDULER,           // type
+        {},                              // dependencies
+        {}                               // parameters
     }) {}
 
 /**
@@ -142,7 +144,9 @@ DataLocalitySchedulerPlugin::DataLocalitySchedulerPlugin()
         "1.0.0",                          // version
         "PIMID Team",                     // author
         "Optimizes for data locality",    // description
-        PluginType::SCHEDULER             // type
+        PluginType::SCHEDULER,            // type
+        {},                               // dependencies
+        {}                                // parameters
     }),
     cache_line_size_(64),
     consider_bank_conflicts_(false) {}
@@ -240,7 +244,9 @@ EnergyAwareSchedulerPlugin::EnergyAwareSchedulerPlugin()
         "1.0.0",                          // version
         "PIMID Team",                     // author
         "Minimizes energy consumption",   // description
-        PluginType::SCHEDULER             // type
+        PluginType::SCHEDULER,            // type
+        {},                               // dependencies
+        {}                                // parameters
     }),
     energy_weight_(0.6),
     performance_weight_(0.4),
