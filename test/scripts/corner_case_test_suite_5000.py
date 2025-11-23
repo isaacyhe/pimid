@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Long Simulation PIMID Test Suite - 5000 Test Configurations
-Focus: Longer-running simulations with DRAM and all PIM granularity levels
-Uses the PIMID binary simulator as the only entry point with proper YAML configs
+Comprehensive PIMID Corner Case Testing Suite - 5000 Test Configurations
+Focus: Corner cases, edge cases, boundary conditions
+Coverage: All 5 memory technologies + All 6 PIM granularity levels with DRAM
+Uses the PIMID binary simulator as the only entry point
 """
 
 import os
@@ -15,18 +16,27 @@ from pathlib import Path
 import itertools
 
 # Set random seed for reproducibility
-random.seed(20251120)
+random.seed(2025)
 
 # Base directories
 BASE_DIR = Path("/home/user/pimid-dev")
 WORKLOAD_DIR = BASE_DIR / "DAC26/workloads_pimid"
-RESULTS_DIR = BASE_DIR / "test_results_long_sim_5000"
+RESULTS_DIR = BASE_DIR / "test/results/test_results_corner_cases_5000"
 CONFIG_DIR = RESULTS_DIR / "configs"
 PIMID_BINARY = BASE_DIR / "build/pimid/pimid"
 
 # Create directories
 RESULTS_DIR.mkdir(exist_ok=True)
 CONFIG_DIR.mkdir(exist_ok=True)
+
+# Memory technologies (0=SRAM, 1=DRAM, 2=STT-MRAM, 3=PCM, 4=ReRAM)
+MEMORY_TECHS = {
+    0: {'name': 'SRAM', 'abbr': 'sram', 'yaml': 'SRAM'},
+    1: {'name': 'DRAM', 'abbr': 'dram', 'yaml': 'DRAM'},
+    2: {'name': 'STT-MRAM', 'abbr': 'sttmram', 'yaml': 'STT_MRAM'},
+    3: {'name': 'PCM', 'abbr': 'pcm', 'yaml': 'PCM'},
+    4: {'name': 'ReRAM', 'abbr': 'reram', 'yaml': 'RERAM'},
+}
 
 # PIM Granularity levels (6 levels for DRAM-based PIM)
 PIM_GRANULARITIES = {
@@ -38,250 +48,288 @@ PIM_GRANULARITIES = {
     'SUBARRAY': {'name': 'Subarray-PIM', 'level': 'SUBARRAY'},
 }
 
-# Workload definitions with LARGER sizes for longer simulations
+# Workload definitions with their parameter ranges
 WORKLOADS = {
     'bfs_message': {
         'binary': 'bfs_message_pimid',
         'params': ['num_subarrays', 'num_vertices', 'is_libcom', 'mem_tech'],
         'size_param': 'num_vertices',
-        # Larger sizes for longer simulations
-        'sizes': [1024, 2048, 4096, 8192, 16384, 32768],
+        'sizes': [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
         'supports_mem_tech': True,
     },
     'bfs_shared': {
         'binary': 'bfs_shared_pimid',
         'params': ['num_subarrays', 'num_vertices', 'is_libcom'],
         'size_param': 'num_vertices',
-        'sizes': [1024, 2048, 4096, 8192, 16384, 32768],
+        'sizes': [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
         'supports_mem_tech': False,
     },
     'gemm_message': {
         'binary': 'gemm_message_pimid',
         'params': ['num_subarrays', 'matrix_size', 'is_libcom'],
         'size_param': 'matrix_size',
-        # Larger matrix sizes for longer compute
-        'sizes': [256, 384, 512, 768, 1024, 1536, 2048],
+        'sizes': [32, 64, 96, 128, 192, 256, 384, 512, 768, 1024],
         'supports_mem_tech': False,
     },
     'gemm_shared': {
         'binary': 'gemm_shared_pimid',
         'params': ['num_subarrays', 'matrix_size', 'is_libcom'],
         'size_param': 'matrix_size',
-        'sizes': [256, 384, 512, 768, 1024, 1536, 2048],
+        'sizes': [32, 64, 96, 128, 192, 256, 384, 512, 768, 1024],
         'supports_mem_tech': False,
     },
     'spmv_message': {
         'binary': 'spmv_message_pimid',
         'params': ['num_subarrays', 'matrix_size', 'is_libcom'],
         'size_param': 'matrix_size',
-        'sizes': [256, 384, 512, 768, 1024, 1536, 2048],
+        'sizes': [32, 64, 96, 128, 192, 256, 384, 512, 768, 1024],
         'supports_mem_tech': False,
     },
     'spmv_shared': {
         'binary': 'spmv_shared_pimid',
         'params': ['num_subarrays', 'matrix_size', 'is_libcom'],
         'size_param': 'matrix_size',
-        'sizes': [256, 384, 512, 768, 1024, 1536, 2048],
+        'sizes': [32, 64, 96, 128, 192, 256, 384, 512, 768, 1024],
         'supports_mem_tech': False,
     },
     'dotproduct_message': {
         'binary': 'dotproduct_message_pimid',
         'params': ['num_subarrays', 'vector_length', 'is_libcom'],
         'size_param': 'vector_length',
-        # Larger vectors for longer simulations
-        'sizes': [8192, 16384, 32768, 65536, 131072],
+        'sizes': [256, 512, 1024, 2048, 4096, 8192, 16384, 32768],
         'supports_mem_tech': False,
     },
     'dotproduct_shared': {
         'binary': 'dotproduct_shared_pimid',
         'params': ['num_subarrays', 'vector_length', 'is_libcom'],
         'size_param': 'vector_length',
-        'sizes': [8192, 16384, 32768, 65536, 131072],
+        'sizes': [256, 512, 1024, 2048, 4096, 8192, 16384, 32768],
         'supports_mem_tech': False,
     },
     'reduction_message': {
         'binary': 'reduction_message_pimid',
         'params': ['num_subarrays', 'elements_per_subarray', 'is_libcom'],
         'size_param': 'elements_per_subarray',
-        'sizes': [2048, 4096, 8192, 16384, 32768],
+        'sizes': [128, 256, 512, 1024, 2048, 4096, 8192],
         'supports_mem_tech': False,
     },
     'reduction_shared': {
         'binary': 'reduction_shared_pimid',
         'params': ['num_subarrays', 'elements_per_subarray', 'is_libcom'],
         'size_param': 'elements_per_subarray',
-        'sizes': [2048, 4096, 8192, 16384, 32768],
+        'sizes': [128, 256, 512, 1024, 2048, 4096, 8192],
         'supports_mem_tech': False,
     },
     'histogram_message': {
         'binary': 'histogram_message_pimid',
         'params': ['num_subarrays', 'num_elements', 'is_libcom'],
         'size_param': 'num_elements',
-        'sizes': [4096, 8192, 16384, 32768, 65536],
+        'sizes': [256, 512, 1024, 2048, 4096, 8192, 16384],
         'supports_mem_tech': False,
     },
     'histogram_shared': {
         'binary': 'histogram_shared_pimid',
         'params': ['num_subarrays', 'num_elements', 'is_libcom'],
         'size_param': 'num_elements',
-        'sizes': [4096, 8192, 16384, 32768, 65536],
+        'sizes': [256, 512, 1024, 2048, 4096, 8192, 16384],
         'supports_mem_tech': False,
     },
     'prefixsum_message': {
         'binary': 'prefixsum_message_pimid',
         'params': ['num_subarrays', 'num_elements', 'is_libcom'],
         'size_param': 'num_elements',
-        'sizes': [2048, 4096, 8192, 16384, 32768],
+        'sizes': [128, 256, 512, 1024, 2048, 4096, 8192],
         'supports_mem_tech': False,
     },
     'prefixsum_shared': {
         'binary': 'prefixsum_shared_pimid',
         'params': ['num_subarrays', 'num_elements', 'is_libcom'],
         'size_param': 'num_elements',
-        'sizes': [2048, 4096, 8192, 16384, 32768],
+        'sizes': [128, 256, 512, 1024, 2048, 4096, 8192],
         'supports_mem_tech': False,
     },
     'stencil1d_message': {
         'binary': 'stencil1d_message_pimid',
         'params': ['num_subarrays', 'num_points', 'num_iters', 'is_libcom'],
         'size_param': 'num_points',
-        'sizes': [2050, 4098, 8194, 16386],
+        'sizes': [258, 514, 1026, 2050, 4098],
         'extra_param': 'num_iters',
-        # More iterations for longer simulations
-        'extra_values': [100, 200, 500, 1000, 2000],
+        'extra_values': [5, 10, 20, 50, 100, 200, 500],
         'supports_mem_tech': False,
     },
     'stencil1d_shared': {
         'binary': 'stencil1d_shared_pimid',
         'params': ['num_subarrays', 'num_points', 'num_iters', 'is_libcom'],
         'size_param': 'num_points',
-        'sizes': [2050, 4098, 8194, 16386],
+        'sizes': [258, 514, 1026, 2050, 4098],
         'extra_param': 'num_iters',
-        'extra_values': [100, 200, 500, 1000, 2000],
+        'extra_values': [5, 10, 20, 50, 100, 200, 500],
         'supports_mem_tech': False,
     },
 }
 
-# Parameter ranges for comprehensive testing
-NUM_SUBARRAYS = [1, 2, 4, 8, 16, 32, 64]  # Added 64 for larger-scale tests
+# Corner case parameters
+NUM_SUBARRAYS = [1, 2, 4, 8, 16, 32]
+NUM_SUBARRAYS_EXTREME = [1, 32]  # Min and max for corner cases
 IS_LIBCOM = [0, 1]  # 0 = baseline, 1 = LIBCom
 
-def generate_long_sim_configs(num_tests=5000):
-    """Generate 5000 test configurations focusing on longer DRAM-based simulations"""
+def generate_corner_case_configs(num_tests=5000):
+    """Generate 5000 corner case test configurations with focus on boundary conditions"""
 
-    print(f"Generating {num_tests} long simulation test configurations...")
-    print("\nLong Simulation Coverage:")
-    print("  - DRAM memory technology only")
-    print("  - All 6 PIM granularity levels")
-    print("  - Larger problem sizes for extended runtime")
-    print("  - Higher iteration counts for iterative workloads")
-    print("  - All 16 workload types")
-    print("  - Systematic and random sampling\n")
+    print(f"Generating {num_tests} corner case test configurations...")
+    print("\nCorner Case Coverage:")
+    print("  - All 5 memory technologies: SRAM, DRAM, STT-MRAM, PCM, ReRAM")
+    print("  - All 6 PIM granularity levels for DRAM-based tests")
+    print("  - Boundary conditions: min/max subarrays, min/max sizes")
+    print("  - Extreme parameter combinations")
+    print("  - Edge cases for all 16 workload types\n")
 
     configs = []
 
     # ========================================================================
-    # Phase 1: Systematic coverage of all PIM levels × all workloads (2000 tests)
+    # Phase 1: All Memory Technologies × All PIM Granularities (1500 tests)
     # ========================================================================
-    print("Phase 1: Systematic PIM level × workload coverage (2000 tests)...")
+    print("Phase 1: Memory Tech × PIM Granularity combinations (1500 tests)...")
 
-    systematic_combinations = []
-    for pim_level_name in PIM_GRANULARITIES.keys():
-        for workload_name, workload_info in WORKLOADS.items():
-            for num_subs in NUM_SUBARRAYS:
-                for is_lib in IS_LIBCOM:
-                    # Select larger sizes (upper half of size range)
-                    size_options = workload_info['sizes'][len(workload_info['sizes'])//2:]
-                    size = random.choice(size_options)
-
-                    combo = {
-                        'workload': workload_name,
-                        'num_subarrays': num_subs,
-                        'size': size,
-                        'is_libcom': is_lib,
-                        'pim_granularity': pim_level_name,
-                        'mem_tech': 1,  # DRAM
-                    }
-
-                    # Handle stencil1d with more iterations
-                    if 'extra_param' in workload_info:
-                        # Select from upper half of iteration range
-                        iter_options = workload_info['extra_values'][len(workload_info['extra_values'])//2:]
-                        combo['extra_param'] = random.choice(iter_options)
-
-                    systematic_combinations.append(combo)
-
-    # Sample 2000 from systematic combinations
-    num_systematic = min(2000, len(systematic_combinations))
-    systematic_sample = random.sample(systematic_combinations, num_systematic)
-
-    for combo in systematic_sample:
-        configs.append((len(configs), combo))
+    mem_pim_count = 0
+    for mem_tech in range(5):  # All 5 memory techs
+        for pim_level_name, pim_info in PIM_GRANULARITIES.items():
+            for workload_name in ['bfs_message']:  # Use BFS as it supports mem_tech
+                workload_info = WORKLOADS[workload_name]
+                for num_subs in NUM_SUBARRAYS_EXTREME:  # Min and max
+                    for is_lib in IS_LIBCOM:
+                        for size in [workload_info['sizes'][0], workload_info['sizes'][-1]]:  # Min and max
+                            if mem_pim_count >= 1500:
+                                break
+                            configs.append((len(configs), {
+                                'workload': workload_name,
+                                'num_subarrays': num_subs,
+                                'size': size,
+                                'is_libcom': is_lib,
+                                'mem_tech': mem_tech,
+                                'pim_granularity': pim_level_name,
+                            }))
+                            mem_pim_count += 1
+                        if mem_pim_count >= 1500:
+                            break
+                    if mem_pim_count >= 1500:
+                        break
+                if mem_pim_count >= 1500:
+                    break
+            if mem_pim_count >= 1500:
+                break
+        if mem_pim_count >= 1500:
+            break
 
     # ========================================================================
-    # Phase 2: Maximum size tests across all PIM levels (1000 tests)
+    # Phase 2: Extreme Corner Cases - Minimum Configurations (1000 tests)
     # ========================================================================
-    print("Phase 2: Maximum size configurations (1000 tests)...")
+    print("Phase 2: Minimum configuration corner cases (1000 tests)...")
 
-    max_size_count = 0
-    for _ in range(1000):
-        workload_name = random.choice(list(WORKLOADS.keys()))
-        workload_info = WORKLOADS[workload_name]
-        pim_level_name = random.choice(list(PIM_GRANULARITIES.keys()))
+    min_corner_count = 0
+    for workload_name, workload_info in WORKLOADS.items():
+        for _ in range(67):  # Distribute evenly across workloads
+            if min_corner_count >= 1000:
+                break
 
-        config = {
-            'workload': workload_name,
-            'num_subarrays': random.choice(NUM_SUBARRAYS),
-            'size': workload_info['sizes'][-1],  # MAXIMUM size
-            'is_libcom': random.choice(IS_LIBCOM),
-            'pim_granularity': pim_level_name,
-            'mem_tech': 1,  # DRAM
-        }
+            mem_tech = random.choice(range(5))
+            pim_level_name = random.choice(list(PIM_GRANULARITIES.keys()))
 
-        if 'extra_param' in workload_info:
-            config['extra_param'] = workload_info['extra_values'][-1]  # MAXIMUM iterations
+            config = {
+                'workload': workload_name,
+                'num_subarrays': 1,  # MINIMUM
+                'size': workload_info['sizes'][0],  # MINIMUM size
+                'is_libcom': random.choice(IS_LIBCOM),
+                'pim_granularity': pim_level_name,
+            }
 
-        configs.append((len(configs), config))
-        max_size_count += 1
+            if workload_name == 'bfs_message':
+                config['mem_tech'] = mem_tech
 
-    # ========================================================================
-    # Phase 3: High parallelism tests (many subarrays) (1000 tests)
-    # ========================================================================
-    print("Phase 3: High parallelism configurations (1000 tests)...")
+            if 'extra_param' in workload_info:
+                config['extra_param'] = workload_info['extra_values'][0]  # MINIMUM iterations
 
-    high_par_count = 0
-    for _ in range(1000):
-        workload_name = random.choice(list(WORKLOADS.keys()))
-        workload_info = WORKLOADS[workload_name]
-        pim_level_name = random.choice(list(PIM_GRANULARITIES.keys()))
-
-        # Focus on higher subarray counts
-        high_subarray_options = [16, 32, 64]
-
-        config = {
-            'workload': workload_name,
-            'num_subarrays': random.choice(high_subarray_options),
-            'size': random.choice(workload_info['sizes']),
-            'is_libcom': random.choice(IS_LIBCOM),
-            'pim_granularity': pim_level_name,
-            'mem_tech': 1,  # DRAM
-        }
-
-        if 'extra_param' in workload_info:
-            config['extra_param'] = random.choice(workload_info['extra_values'])
-
-        configs.append((len(configs), config))
-        high_par_count += 1
+            configs.append((len(configs), config))
+            min_corner_count += 1
+        if min_corner_count >= 1000:
+            break
 
     # ========================================================================
-    # Phase 4: Mixed configurations for comprehensive coverage (1000 tests)
+    # Phase 3: Extreme Corner Cases - Maximum Configurations (1000 tests)
     # ========================================================================
-    print("Phase 4: Mixed long simulation configurations (1000 tests)...")
+    print("Phase 3: Maximum configuration corner cases (1000 tests)...")
+
+    max_corner_count = 0
+    for workload_name, workload_info in WORKLOADS.items():
+        for _ in range(67):  # Distribute evenly across workloads
+            if max_corner_count >= 1000:
+                break
+
+            mem_tech = random.choice(range(5))
+            pim_level_name = random.choice(list(PIM_GRANULARITIES.keys()))
+
+            config = {
+                'workload': workload_name,
+                'num_subarrays': 32,  # MAXIMUM
+                'size': workload_info['sizes'][-1],  # MAXIMUM size
+                'is_libcom': random.choice(IS_LIBCOM),
+                'pim_granularity': pim_level_name,
+            }
+
+            if workload_name == 'bfs_message':
+                config['mem_tech'] = mem_tech
+
+            if 'extra_param' in workload_info:
+                config['extra_param'] = workload_info['extra_values'][-1]  # MAXIMUM iterations
+
+            configs.append((len(configs), config))
+            max_corner_count += 1
+        if max_corner_count >= 1000:
+            break
+
+    # ========================================================================
+    # Phase 4: Mixed Corner Cases - Boundary Combinations (1000 tests)
+    # ========================================================================
+    print("Phase 4: Mixed boundary corner cases (1000 tests)...")
 
     mixed_count = 0
     while mixed_count < 1000:
         workload_name = random.choice(list(WORKLOADS.keys()))
         workload_info = WORKLOADS[workload_name]
+        mem_tech = random.choice(range(5))
+        pim_level_name = random.choice(list(PIM_GRANULARITIES.keys()))
+
+        # Mix min/max parameters
+        config = {
+            'workload': workload_name,
+            'num_subarrays': random.choice(NUM_SUBARRAYS_EXTREME),
+            'size': random.choice([workload_info['sizes'][0], workload_info['sizes'][-1]]),
+            'is_libcom': random.choice(IS_LIBCOM),
+            'pim_granularity': pim_level_name,
+        }
+
+        if workload_name == 'bfs_message':
+            config['mem_tech'] = mem_tech
+
+        if 'extra_param' in workload_info:
+            config['extra_param'] = random.choice([
+                workload_info['extra_values'][0],
+                workload_info['extra_values'][-1]
+            ])
+
+        configs.append((len(configs), config))
+        mixed_count += 1
+
+    # ========================================================================
+    # Phase 5: Stress Test Corner Cases - All Memory Techs (500 tests)
+    # ========================================================================
+    print("Phase 5: Memory technology stress tests (500 tests)...")
+
+    stress_count = 0
+    while stress_count < 500:
+        workload_name = random.choice(list(WORKLOADS.keys()))
+        workload_info = WORKLOADS[workload_name]
+        mem_tech = stress_count % 5  # Cycle through all 5 memory technologies
         pim_level_name = random.choice(list(PIM_GRANULARITIES.keys()))
 
         config = {
@@ -290,147 +338,72 @@ def generate_long_sim_configs(num_tests=5000):
             'size': random.choice(workload_info['sizes']),
             'is_libcom': random.choice(IS_LIBCOM),
             'pim_granularity': pim_level_name,
-            'mem_tech': 1,  # DRAM
         }
+
+        if workload_name == 'bfs_message':
+            config['mem_tech'] = mem_tech
 
         if 'extra_param' in workload_info:
             config['extra_param'] = random.choice(workload_info['extra_values'])
 
         configs.append((len(configs), config))
-        mixed_count += 1
+        stress_count += 1
 
-    print(f"Generated {len(configs)} long simulation configurations\n")
+    print(f"Generated {len(configs)} corner case configurations\n")
     return configs
 
 def generate_pimid_config(test_id, config):
-    """Generate comprehensive YAML config file for PIMID simulator"""
+    """Generate YAML config file for PIMID simulator with PIM granularity"""
 
+    mem_tech = config.get('mem_tech', 1)  # Default to DRAM
+    mem_tech_name = MEMORY_TECHS[mem_tech]['yaml']
     pim_granularity = config.get('pim_granularity', 'BANK')
-    num_pes = config['num_subarrays']
 
-    yaml_content = f"""# PIMID Long Simulation Test Configuration - Test {test_id:04d}
-# Auto-generated for long-running DRAM-based PIM simulations
+    yaml_content = f"""# PIMID Corner Case Test Configuration - Test {test_id:04d}
+# Auto-generated for comprehensive corner case testing
 
 simulation:
-  name: "LongSim_Test_{test_id:04d}"
-  description: "Long simulation: {config['workload']} with DRAM at {pim_granularity} granularity"
+  name: "CornerCase_Test_{test_id:04d}"
+  description: "Corner case: {config['workload']} with {mem_tech_name} at {pim_granularity} granularity"
   mode: "standalone"
 
-# Memory configuration - DRAM only for this test suite
+# Memory configuration
 memory:
-  technology: "DRAM"
-  dram_type: "DDR4"
-  capacity: "16GB"
-  channels: 4
-  ranks_per_channel: 2
-  banks_per_rank: 16
+  technology: "{mem_tech_name}"
 
-# Memory hierarchy configuration
-memory_hierarchy:
-  subarray:
-    size_mb: 2
-  bank:
-    size_mb: 32
-  chip:
-    size_gb: 2
-  rank:
-    size_gb: 16
-
-# PIM configuration with specific granularity level
+# PIM configuration with granularity level
 pim:
   granularity: {pim_granularity}
-  num_pes: {num_pes}
-  pe_frequency_mhz: 1000
-  pe_num_cores: 1
-  pe_has_l1_cache: true
-  pe_l1_size_kb: 32
-  addressing_mode: "UNIFIED"
-  scheduler: "NEAREST_PE"
+  num_pes: {config['num_subarrays']}
 
-# Simulation control - higher cycle limit for longer simulations
+# Simulation control
 simulation_control:
-  max_cycles: 1000000000000
-  warmup_cycles: 100000
+  max_cycles: 100000000000
   enable_power_modeling: true
 
-# Cache hierarchy
-caches:
-  l1i:
-    size_kb: 32
-    associativity: 8
-    line_size_bytes: 64
-  l1d:
-    size_kb: 32
-    associativity: 8
-    line_size_bytes: 64
-  l2:
-    size_kb: 256
-    associativity: 8
-    line_size_bytes: 64
-  l3:
-    size_kb: 8192
-    associativity: 16
-    line_size_bytes: 64
-
-# Network-on-chip configuration
-network:
-  enabled: true
-  topology: "MESH_2D"
-  num_rows: 4
-  num_cols: 4
-  routing: "XY"
-  link_width_bytes: 8
-  link_latency_cycles: 1
-  router_latency_cycles: 2
-  virtual_channels: 4
-
-# Power modeling
-power:
-  enabled: true
-  tech_node_nm: 22
-  device_type: "HP"
-  temperature_k: 350
-  frequency_ghz: 2.0
-  model_host: true
-  model_device: true
-  model_memory: true
-  model_network: true
-
-# Output configuration
+# Output
 output:
-  stats_file: "long_sim_{test_id:04d}_stats.txt"
+  stats_file: "corner_test_{test_id:04d}_stats.txt"
   log_level: "ERROR"
-  enable_detailed_stats: true
-  enable_tracing: false
-
-# Statistics collection
-statistics:
-  collect_memory_stats: true
-  collect_network_stats: true
-  collect_power_stats: true
-  collect_scheduler_stats: true
-  output_formats:
-    - "TXT"
-    - "JSON"
 """
 
-    config_file = CONFIG_DIR / f"long_sim_{test_id:04d}.yaml"
+    config_file = CONFIG_DIR / f"corner_test_{test_id:04d}.yaml"
     with open(config_file, 'w') as f:
         f.write(yaml_content)
 
     return config_file
 
 def run_test(test_id, config):
-    """Run a single long simulation test using PIMID binary with proper config"""
+    """Run a single corner case test configuration using PIMID binary"""
 
     workload_name = config['workload']
     workload_info = WORKLOADS[workload_name]
     workload_binary = WORKLOAD_DIR / workload_info['binary']
 
-    # Generate comprehensive PIMID config file
+    # Generate PIMID config file
     config_file = generate_pimid_config(test_id, config)
 
-    # Build pimid command - binary is the ONLY entry point
+    # Build pimid command
     cmd = [
         str(PIMID_BINARY),
         '--mode', 'standalone',
@@ -442,23 +415,23 @@ def run_test(test_id, config):
     cmd.append(str(config['num_subarrays']))
     cmd.append(str(config['size']))
 
-    # Handle stencil1d extra parameter (iterations)
+    # Handle stencil1d extra parameter
     if 'extra_param' in config:
         cmd.append(str(config['extra_param']))
 
     cmd.append(str(config['is_libcom']))
 
-    # Add memory tech parameter if supported (DRAM = 1)
-    if 'mem_tech' in config and workload_name == 'bfs_message':
+    # Add memory tech parameter if supported
+    if 'mem_tech' in config:
         cmd.append(str(config['mem_tech']))
 
-    # Run with longer timeout for longer simulations
+    # Run with timeout
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=600,  # 10 minute timeout per test (longer simulations)
+            timeout=300,  # 5 minute timeout per test
             cwd=str(BASE_DIR)
         )
 
@@ -482,7 +455,7 @@ def run_test(test_id, config):
             'status': 'timeout',
             'returncode': -1,
             'stdout': '',
-            'stderr': 'Test exceeded 10 minute timeout',
+            'stderr': 'Test exceeded 5 minute timeout',
         }
     except Exception as e:
         return {
@@ -548,9 +521,8 @@ def main():
     """Main test execution"""
 
     print("=" * 80)
-    print("PIMID LONG SIMULATION TEST SUITE - 5000 CONFIGURATIONS")
-    print("Extended runtime simulations with DRAM and all PIM granularity levels")
-    print("Using pimid binary as sole entry point with comprehensive YAML configs")
+    print("PIMID CORNER CASE TEST SUITE - 5000 CONFIGURATIONS")
+    print("Testing boundary conditions, extreme cases, all memory techs & PIM levels")
     print("=" * 80)
     print()
 
@@ -567,11 +539,11 @@ def main():
     start_time = time.time()
 
     # Generate configurations
-    configs = generate_long_sim_configs(5000)
+    configs = generate_corner_case_configs(5000)
 
     # Run tests
     print("\n" + "=" * 80)
-    print("Running Long Simulation Tests")
+    print("Running Corner Case Tests")
     print("=" * 80)
 
     results = []
@@ -580,21 +552,21 @@ def main():
     timeout_count = 0
     errors = 0
 
+    # Statistics by memory technology
+    mem_tech_stats = {i: {'total': 0, 'passed': 0} for i in range(5)}
     # Statistics by PIM granularity
     pim_granularity_stats = {name: {'total': 0, 'passed': 0} for name in PIM_GRANULARITIES.keys()}
 
     for i, (test_id, config) in enumerate(configs):
         workload_name = config['workload']
         arch = "LIBCom" if config['is_libcom'] else "Baseline"
+        mem_tech_str = MEMORY_TECHS[config.get('mem_tech', 1)]['name']
         pim_level_str = config.get('pim_granularity', 'BANK')
 
         print(f"\n[{i+1:4d}/5000] Test {test_id:04d}: {workload_name}")
         print(f"  Params: subarrays={config['num_subarrays']}, "
               f"size={config['size']}, arch={arch}")
-        if 'extra_param' in config:
-            print(f"  Iterations={config['extra_param']}, PIM Level={pim_level_str}")
-        else:
-            print(f"  PIM Level={pim_level_str}")
+        print(f"  Memory={mem_tech_str}, PIM Level={pim_level_str}")
 
         result = run_test(test_id, config)
         results.append(result)
@@ -607,6 +579,9 @@ def main():
         # Update counters
         if result['status'] == 'completed':
             passed += 1
+            if 'mem_tech' in config:
+                mem_tech_stats[config['mem_tech']]['total'] += 1
+                mem_tech_stats[config['mem_tech']]['passed'] += 1
             if 'pim_granularity' in config:
                 pim_granularity_stats[config['pim_granularity']]['total'] += 1
                 pim_granularity_stats[config['pim_granularity']]['passed'] += 1
@@ -619,6 +594,8 @@ def main():
                 print()
         elif result['status'] == 'failed':
             failed += 1
+            if 'mem_tech' in config:
+                mem_tech_stats[config['mem_tech']]['total'] += 1
             if 'pim_granularity' in config:
                 pim_granularity_stats[config['pim_granularity']]['total'] += 1
             print(f"  ✗ FAILED (code {result['returncode']})")
@@ -647,7 +624,7 @@ def main():
             print(f"  ════════════════════════════════════\n")
 
     # Save detailed results
-    results_file = RESULTS_DIR / 'long_sim_results_5000.json'
+    results_file = RESULTS_DIR / 'corner_case_results_5000.json'
     print(f"\nSaving detailed results to {results_file}...")
     with open(results_file, 'w') as f:
         json.dump(results, f, indent=2)
@@ -689,37 +666,22 @@ def main():
 
     summary['architecture_stats'] = arch_stats
 
+    # Memory technology statistics
+    summary['memory_tech_stats'] = {
+        MEMORY_TECHS[i]['name']: stats for i, stats in mem_tech_stats.items()
+    }
+
     # PIM granularity statistics
     summary['pim_granularity_stats'] = pim_granularity_stats
 
-    # Calculate average simulation metrics
-    total_energy_sum = 0
-    total_cycles_sum = 0
-    metric_count = 0
-    for result in results:
-        if result['status'] == 'completed' and 'metrics' in result:
-            m = result['metrics']
-            if m['total_energy_pj'] is not None:
-                total_energy_sum += m['total_energy_pj']
-            if m['total_cycles'] is not None:
-                total_cycles_sum += m['total_cycles']
-                metric_count += 1
-
-    if metric_count > 0:
-        summary['avg_energy_pj'] = total_energy_sum / metric_count
-        summary['avg_cycles'] = total_cycles_sum / metric_count
-    else:
-        summary['avg_energy_pj'] = 0
-        summary['avg_cycles'] = 0
-
     # Save summary
-    summary_file = RESULTS_DIR / 'long_sim_summary_5000.json'
+    summary_file = RESULTS_DIR / 'corner_case_summary_5000.json'
     with open(summary_file, 'w') as f:
         json.dump(summary, f, indent=2)
 
     # Print final summary
     print("\n" + "=" * 80)
-    print("Long Simulation Test Summary")
+    print("Corner Case Test Summary")
     print("=" * 80)
     print(f"Total tests:    {len(results)}")
     print(f"Passed:         {passed} ({passed/len(results)*100:.1f}%)")
@@ -727,9 +689,6 @@ def main():
     print(f"Timeout:        {timeout_count} ({timeout_count/len(results)*100:.1f}%)")
     print(f"Errors:         {errors} ({errors/len(results)*100:.1f}%)")
     print(f"Duration:       {(time.time() - start_time)/60:.1f} minutes")
-    if metric_count > 0:
-        print(f"Avg Energy:     {summary['avg_energy_pj']:.0f} pJ")
-        print(f"Avg Cycles:     {summary['avg_cycles']:.0f}")
     print()
 
     # Print per-workload stats
@@ -745,6 +704,14 @@ def main():
     for arch, stats in arch_stats.items():
         pass_rate = (stats['passed'] / stats['total'] * 100) if stats['total'] > 0 else 0
         print(f"  {arch:10s}: {stats['passed']:4d}/{stats['total']:4d} passed ({pass_rate:5.1f}%)")
+
+    print()
+    print("Per-Memory-Technology Statistics:")
+    print("-" * 80)
+    for mem_tech, stats in summary['memory_tech_stats'].items():
+        if stats['total'] > 0:
+            pass_rate = (stats['passed'] / stats['total'] * 100) if stats['total'] > 0 else 0
+            print(f"  {mem_tech:10s}: {stats['passed']:4d}/{stats['total']:4d} passed ({pass_rate:5.1f}%)")
 
     print()
     print("Per-PIM-Granularity Statistics:")
