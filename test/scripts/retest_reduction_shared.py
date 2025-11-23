@@ -12,7 +12,7 @@ from pathlib import Path
 
 BASE_DIR = Path("/home/user/pimid-dev")
 PIMID_BINARY = BASE_DIR / "build/pimid/pimid"
-RESULTS_DIR = BASE_DIR / "test_results_zsim_1000"
+RESULTS_DIR = BASE_DIR / "test/results/test_results_zsim_1000"
 
 # Load original results
 with open(RESULTS_DIR / 'all_results_zsim_1000.json', 'r') as f:

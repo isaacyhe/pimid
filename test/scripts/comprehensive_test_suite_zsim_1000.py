@@ -19,7 +19,7 @@ random.seed(2025)
 # Base directories
 BASE_DIR = Path("/home/user/pimid-dev")
 WORKLOAD_DIR = BASE_DIR / "DAC26/workloads_pimid"
-RESULTS_DIR = BASE_DIR / "test_results_zsim_1000"
+RESULTS_DIR = BASE_DIR / "test/results/test_results_zsim_1000"
 CONFIG_DIR = RESULTS_DIR / "configs"
 PIMID_BINARY = BASE_DIR / "build/pimid/pimid"
 
