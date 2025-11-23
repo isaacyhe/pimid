@@ -92,6 +92,21 @@ scons -j$(nproc)
 
 **Note**: The build system will automatically detect your Pin version and configure accordingly.
 
+**Manual Version Override** (optional):
+If you have multiple PIN versions or want explicit control:
+```bash
+# Force PIN 3.x
+scons --pin-version=3 -j$(nproc)
+
+# Force PIN 2.x
+scons --pin-version=2 -j$(nproc)
+
+# View build options
+scons --help
+```
+
+See [PIN_VERSION_BUILD_OPTIONS.md](PIN_VERSION_BUILD_OPTIONS.md) for detailed documentation.
+
 ### Step 4: Verify Installation
 
 ```bash
