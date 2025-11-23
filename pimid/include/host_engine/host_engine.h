@@ -4,6 +4,7 @@
 #include "common/simulation_engine.h"
 #include "communication/socket_comm.h"
 #include "address_translation/address_translator.h"
+#include "execution_model/execution_model.h"
 #include <memory>
 #include <vector>
 
@@ -72,7 +73,11 @@ private:
     std::vector<HostCoreConfig> core_configs_;
     HostCacheConfig cache_config_;
 
-    // ZSim integration (placeholder)
+    // Execution model (ZSim or Event-Driven) - NEW!
+    std::shared_ptr<IExecutionModel> execution_model_;
+    ExecutionModelType execution_model_type_;
+
+    // Legacy ZSim integration (placeholder) - DEPRECATED, use execution_model_
     void* zsim_instance_;
 
     // Address translation
