@@ -1,0 +1,150 @@
+
+[1m[0;36m╔═══════════════════════════════════════════════════════════╗[0m
+[1m[0;36m║      PIM Granularity Deep Dive: DDR4 Architecture         ║[0m
+[1m[0;36m║      Subarray vs Bank vs Chip vs Rank vs MC vs CPU        ║[0m
+[1m[0;36m╚═══════════════════════════════════════════════════════════╝[0m
+
+[0;36m[1m╔═══════════════════════════════════════════════════════════╗[0m
+[0;36m[1m║        DDR4 DRAM PIM Granularity Comparison               ║[0m
+[0;36m[1m║        Equal Compute Power, Different Data Movement      ║[0m
+[0;36m[1m╚═══════════════════════════════════════════════════════════╝[0m
+
+[1;33mDDR4 Architecture Overview:[0m
+  Memory Controller → Rank → Chip → Bank Group → Bank → Subarray
+  └─ Each level has different data movement cost
+
+[0;35mPhysical Organization:[0m
+  Subarrays per Bank:      4
+  Banks per Bank Group:    4
+  Bank Groups per Chip:    4
+  Chips per Rank:          8
+  Ranks per MC:            2
+
+[0;36m[1mArchitecture Comparison (All have 64 compute units @ 2 GFLOPS each):[0m
+-----------------------------------------------------------------------------------------------------------------------------
+   Architecture       Units      Local Mem      Data Latency      Bandwidth       Energy/Byte            Key Characteristic
+-----------------------------------------------------------------------------------------------------------------------------
+[0;36m   Subarray-PIM[0m          64         512 KB         26.64 ns       153.6 GB/s             1 pJ/B     Lowest latency, highest parallelism
+[0;34m       Bank-PIM[0m          16           2 MB         39.96 ns        76.8 GB/s             2 pJ/B     Good balance of locality
+[0;35m  BankGroup-PIM[0m           4           8 MB            50 ns        38.4 GB/s             3 pJ/B     Moderate granularity
+[1;33m       Chip-PIM[0m           2         128 MB            60 ns        38.4 GB/s             5 pJ/B     Similar to HBM-PIM
+[0;32m       Rank-PIM[0m           2           1 GB            80 ns        76.8 GB/s            10 pJ/B     DIMM-level processing
+[0;34m         MC-PIM[0m           1           4 GB           100 ns        76.8 GB/s            15 pJ/B     Near-memory processing
+[0;31m            CPU[0m           1          32 MB           100 ns        76.8 GB/s            20 pJ/B     Highest latency, data movement
+-----------------------------------------------------------------------------------------------------------------------------
+
+[0;31m[1m⚠️  PORT CONTENTION ANALYSIS (Critical Bottleneck!)[0m
+--------------------------------------------------------------------------------------------------------------------------------------------
+   Architecture    Units per Port    Port BW (GB/s)   Effective BW (GB/s)   Contention Impact                         Bottleneck
+--------------------------------------------------------------------------------------------------------------------------------------------
+[0;36m   Subarray-PIM[0m                 4               1.2                   0.3    Low (4x sharing)           Manageable serialization
+[0;34m       Bank-PIM[0m                 1               1.2                   1.2    None (dedicated)                      No contention
+[0;35m  BankGroup-PIM[0m                 1               2.4                   2.4    None (dedicated)                      No contention
+[1;33m       Chip-PIM[0m                16               1.2                   1.2SEVERE (16x sharing)               CRITICAL BOTTLENECK!
+[0;32m       Rank-PIM[0m                 8               9.6                   9.6 Medium (8x sharing)          Significant serialization
+[0;34m         MC-PIM[0m                 1               9.6                   9.6    None (dedicated)                      No contention
+[0;31m            CPU[0m                 1               9.6                   9.6    None (dedicated)                      No contention
+--------------------------------------------------------------------------------------------------------------------------------------------
+[1;33mNote: Subarray-PIM suffers from 4x port contention (4 subarrays share 1 bank port)[0m
+[1;33m      Chip-PIM suffers from SEVERE contention (16 banks share tiny x8 I/O)[0m
+[1;33m      Bank-PIM has dedicated ports → NO contention![0m
+
+[0;36m[1m
+╔═══════════════════════════════════════════════════════════╗[0m
+[0;36m[1m║              Data Path Visualization                       ║[0m
+[0;36m[1m╚═══════════════════════════════════════════════════════════╝[0m
+
+CPU Access Path (longest):
+  [0;31mCPU Core[0m → LLC → Memory Controller → Rank → Chip → Bank Group → Bank → Subarray
+  └─ Latency: ~100ns, Energy: 20 pJ/byte
+
+MC-PIM Access Path:
+  [0;34mMC Compute[0m → Rank → Chip → Bank Group → Bank → Subarray
+  └─ Latency: ~100ns, Energy: 15 pJ/byte (no system bus)
+
+Rank-PIM Access Path:
+  [0;32mRank Compute[0m → Chip → Bank Group → Bank → Subarray
+  └─ Latency: ~80ns, Energy: 10 pJ/byte (no I/O to MC)
+
+Chip-PIM Access Path:
+  [1;33mChip Compute[0m → Bank Group → Bank → Subarray
+  └─ Latency: ~60ns, Energy: 5 pJ/byte (on-chip only)
+
+Bank-PIM Access Path:
+  [0;34mBank Compute[0m → Subarray (within bank)
+  └─ Latency: ~40ns, Energy: 2 pJ/byte (bank-local)
+
+Subarray-PIM Access Path (shortest):
+  [0;36mSubarray Compute[0m → Local Subarray Data
+  └─ Latency: ~26ns, Energy: 1 pJ/byte (sense amp only)
+
+[1;33mVisualization:[0m
+  Data Movement Distance:
+  [0;36mSubarray ■[0m
+  [0;34mBank     ■■[0m
+  [1;33mChip     ■■■[0m
+  [0;32mRank     ■■■■[0m
+  [0;34mMC       ■■■■■[0m
+  [0;31mCPU      ■■■■■■[0m
+
+[0;36m[1m
+╔═══════════════════════════════════════════════════════════╗[0m
+[0;36m[1m║          Workload: Vector Addition (16 MB data)           ║[0m
+[0;36m[1m╚═══════════════════════════════════════════════════════════╝[0m
+
+Workload: C[i] = A[i] + B[i] for i = 0 to 2097152
+Data size: 48.0 MB (read A, B; write C)
+Compute: 2097152 additions @ 2 GFLOPS per unit
+
+--------------------------------------------------------------------------------------------------------------------------------------------
+   Architecture     Total Time      Data Move        Compute   Total Energy        Eff. BW      Speedup vs CPU  Energy Eff. vs CPU
+--------------------------------------------------------------------------------------------------------------------------------------------
+[0;36m   Subarray-PIM[0m     2621.47 μs     2621.47 μs       16.38 μs        1.69 mJ       19.20 GB/s             2.01x            62.69x
+[0;34m       Bank-PIM[0m     2621.48 μs     2621.48 μs       16.38 μs        6.65 mJ       19.20 GB/s             2.01x            15.91x
+[0;35m  BankGroup-PIM[0m     5242.93 μs     5242.93 μs       16.38 μs       26.37 mJ        9.60 GB/s             1.00x             4.02x
+[1;33m       Chip-PIM[0m    20971.58 μs    20971.58 μs       16.38 μs       52.68 mJ        2.40 GB/s             0.25x             2.01x
+[0;32m       Rank-PIM[0m     2621.52 μs     2621.52 μs       16.38 μs       52.93 mJ       19.20 GB/s             2.01x             2.00x
+[0;34m         MC-PIM[0m     5242.98 μs     5242.98 μs       16.38 μs      105.61 mJ        9.60 GB/s             1.00x             1.00x
+[0;31m            CPU[0m     5259.36 μs     5242.98 μs       16.38 μs      105.86 mJ        9.57 GB/s             1.00x             1.00x
+--------------------------------------------------------------------------------------------------------------------------------------------
+
+[1;33m[1m
+╔═══════════════════════════════════════════════════════════╗[0m
+[1;33m[1m║                    Key Insights                            ║[0m
+[1;33m[1m╚═══════════════════════════════════════════════════════════╝[0m
+
+[0;32m1. Compute Power is EQUAL across all architectures:[0m
+   └─ All have 64 compute units @ 2 GFLOPS = 128 GFLOPS total
+   └─ Pure compute time is IDENTICAL
+
+[0;32m2. Data Movement is DIFFERENT:[0m
+   └─ Subarray-PIM: Data already in subarray (26ns latency)
+   └─ Bank-PIM: Cross-bank access (40ns latency)
+   └─ Chip-PIM: Cross-chip routing (60ns latency)
+   └─ CPU: Through memory controller + system bus (100ns latency)
+
+[0;32m3. Parallelism vs Locality Trade-off:[0m
+   └─ Subarray-PIM: 64 parallel units, but limited local memory (512KB each)
+   └─ Bank-PIM: 16 parallel units, larger local memory (2MB each)
+   └─ CPU: 1 unit, full memory access but high data movement cost
+
+[0;32m4. Energy Efficiency Hierarchy:[0m
+   └─ Subarray: 1 pJ/byte (just sense amp)
+   └─ Bank: 2 pJ/byte (+ bank switching)
+   └─ Chip: 5 pJ/byte (+ on-chip routing)
+   └─ Rank: 10 pJ/byte (+ I/O drivers)
+   └─ CPU: 20 pJ/byte (+ system bus + LLC)
+
+[0;32m5. Best Architecture Depends on Workload:[0m
+   └─ Data fits in subarray? → Subarray-PIM wins
+   └─ Needs bank-level data? → Bank-PIM wins
+   └─ Random access patterns? → Coarser PIM or CPU may be better
+
+[0;35m[1mBottom Line:[0m
+  PIM's advantage comes from REDUCING DATA MOVEMENT, not faster compute!
+  Closer to memory = lower latency + lower energy + higher effective bandwidth
+
+[1m[0;32m✓ TEST COMPLETE
+[0mThis test demonstrates that PIM's advantage comes from data locality,
+not from having faster compute units!
+

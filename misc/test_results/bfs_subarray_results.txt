@@ -1,0 +1,240 @@
+========================================
+Subarray-Level BFS PIM Test
+PE: Simple ALU per subarray
+Subarrays per bank: 4
+Technologies: SRAM, STT-MRAM, PCM, ReRAM, DRAM
+========================================
+[SRAMModel] Initializing SRAM model with CACTI...
+[SRAMModel] Loading configuration from: config.yaml
+YAML parsing error in config.yaml: bad file: config.yaml
+[SRAMModel] Warning: Failed to parse config, using defaults
+[SRAMModel] CACTI not available, using default values
+[SRAMModel] Configuration:
+  Capacity: 256 KB
+  Line Size: 64 bytes
+  Associativity: 8-way
+  Banks: 8
+  Ports (RW): 1
+  Technology: 22 nm
+  Access Time: 2 cycles
+  Area: 2.5 mm^2
+  Read Energy: 0.5 nJ
+  Write Energy: 0.8 nJ
+  Leakage Power: 0.05 W
+[SRAMModel] Using 8MB L3 22nm architecture specs
+[SRAMModel] Inner-bank datapath latency: 2.74 ns
+[SRAMModel] Initialization complete
+[STTMRAMModel] Initializing STT-MRAM model...
+[STTMRAMModel] Loading configuration from: config.yaml
+YAML parsing error in config.yaml: bad file: config.yaml
+[STTMRAMModel] Warning: Failed to parse config, using defaults
+[STTMRAMModel] Using Everspin 256Mb architecture specs
+[STTMRAMModel] Inner-bank read latency: 7.3 ns
+[STTMRAMModel] Inner-bank write latency: 28.5 ns
+[STTMRAMModel] Configuration:
+  Capacity: 256 MB
+  Banks: 8
+  Technology: 22 nm
+  Read Latency: 5 cycles
+  Write Latency: 20 cycles
+  Endurance: 1000000000000000 writes
+  PIM Enabled: Yes
+  Read Energy: 0.2 pJ/byte
+  Write Energy: 4 pJ/byte
+  Leakage Power: 0.01 W
+[STTMRAMModel] Initialization complete
+[PCMModel] Initializing PCM model...
+[PCMModel] Loading configuration from: config.yaml
+[PCMModel] Using default 1GB PCM configuration
+[PCMModel] Using 16MB 90nm architecture specs
+[PCMModel] Inner-bank read latency: 8.65 ns
+[PCMModel] Inner-bank SET write latency: 101.75 ns
+[PCMModel] Inner-bank RESET write latency: 31.75 ns
+[PCMModel] Configuration:
+  Capacity: 1 GB
+  Banks: 16
+  Technology: 90 nm
+  Read Latency: 12 cycles
+  SET Write Latency: 100 cycles (SLOW!)
+  RESET Write Latency: 40 cycles
+  Endurance: 100000000 writes (limited)
+  WARNING: PCM only suitable for read-heavy PIM workloads!
+  Read Energy: 0.5 pJ/byte
+  Write Energy: 15 pJ/byte (30x read!)
+  Leakage Power: 0.0064 W
+[PCMModel] Initialization complete
+[ReRAMModel] Initializing ReRAM model...
+[ReRAMModel] Loading configuration from: config.yaml
+[ReRAMModel] Using default 256MB ReRAM configuration
+[ReRAMModel] Using 2MB 32nm Analog-capable architecture specs
+[ReRAMModel] ANALOG COMPUTE ENABLED!
+[ReRAMModel] Inner-bank read latency: 5.62 ns
+[ReRAMModel] Inner-bank write latency: 11.2 ns
+[ReRAMModel] Analog compute latency: 3 ns (FAST!)
+[ReRAMModel] Configuration:
+  Capacity: 256 MB
+  Banks: 16
+  Technology: 32 nm
+  Read Latency: 7 cycles
+  Write Latency: 15 cycles (fast!)
+  Analog Compute Latency: 3 cycles (VERY fast!)
+  Endurance: 100000000000 writes
+  Analog Capable: Yes
+  Read Energy: 0.18 pJ/byte
+  Write Energy: 1.6 pJ/byte
+  Analog Compute Energy: 0.5 pJ (very low!)
+  Leakage Power: 0.00256 W
+[ReRAMModel] Initialization complete
+[DRAMModel] Initializing DRAM model with Ramulator2...
+[DRAMModel] Loading configuration from: config.yaml
+YAML parsing error in config.yaml: bad file: config.yaml
+[DRAMModel] Warning: Failed to parse config file, using defaults
+Exception creating Ramulator instance: Interface MemorySystem not found in the configuration!
+Falling back to simplified timing model
+[DRAMModel] Using Ramulator2 for cycle-accurate DRAM simulation
+[DRAMModel] Configuration:
+  Standard: DDR4
+  Organization: 4Gb_x8
+  Channels: 1
+  Ranks/Channel: 1
+  Banks/Rank: 8
+  Capacity: 4 GB
+  Bandwidth: 25 GB/s
+  tCL: 17 cycles
+  tRCD: 17 cycles
+  tRP: 17 cycles
+  tRAS: 39 cycles
+[DRAMModel] Initialization complete
+
+--- Simulating BFS on SRAM ---
+Vertices: 262144
+Average degree: 16
+Subarrays per bank: 4
+Subarray read: 2.5 ns
+Subarray write: 2.5 ns
+  Vertex read time: 5 ns
+  Neighbor processing: 124.8 ns
+  Total per vertex: 129.8 ns
+Total subarrays: 32
+Vertices per subarray: 8192
+Total latency: 1.06332 ms
+
+--- Simulating BFS on STT-MRAM ---
+Vertices: 262144
+Average degree: 16
+Subarrays per bank: 4
+Subarray read: 7 ns
+Subarray write: 25 ns
+  Vertex read time: 14 ns
+  Neighbor processing: 628.8 ns
+  Total per vertex: 642.8 ns
+Total subarrays: 32
+Vertices per subarray: 8192
+Total latency: 5.26582 ms
+
+--- Simulating BFS on PCM ---
+Vertices: 262144
+Average degree: 16
+Subarrays per bank: 4
+Subarray read: 8 ns
+Subarray write: 100 ns
+  Vertex read time: 16 ns
+  Neighbor processing: 1860.8 ns
+  Total per vertex: 1876.8 ns
+Total subarrays: 32
+Vertices per subarray: 8192
+Total latency: 15.3747 ms
+
+--- Simulating BFS on ReRAM ---
+Vertices: 262144
+Average degree: 16
+Subarrays per bank: 4
+Subarray read: 5 ns
+Subarray write: 12 ns
+  Vertex read time: 10 ns
+  Neighbor processing: 356.8 ns
+  Total per vertex: 366.8 ns
+Total subarrays: 32
+Vertices per subarray: 8192
+Total latency: 3.00483 ms
+
+--- Simulating BFS on DRAM ---
+Vertices: 262144
+Average degree: 16
+Subarrays per bank: 4
+Subarray read: 13.32 ns
+Subarray write: 15 ns
+  Vertex read time: 26.64 ns
+  Neighbor processing: 671.04 ns
+  Total per vertex: 697.68 ns
+Total subarrays: 32
+Vertices per subarray: 8192
+Total latency: 5.71539 ms
+
+========================================
+SUBARRAY-LEVEL BFS RESULTS
+PE: Simple ALU per subarray
+========================================
+Technology     Latency (ms)  Vertices/sec (M)   Energy/Vtx (nJ)
+---------------------------------------------------------------
+SRAM                   1.06            246.53              0.27  (1.00x)
+STT-MRAM               5.27             49.78              0.60  (0.20x)
+PCM                   15.37             17.05              2.09  (0.07x)
+ReRAM                  3.00             87.24              0.29  (0.35x)
+DRAM                   5.72             45.87              0.03  (0.19x)
+
+--- Detailed Breakdown ---
+
+SRAM:
+  Vertex processing: 5.00 ns
+  Neighbor processing: 124.80 ns
+  Total per vertex: 129.80 ns
+  Operations:
+    Reads:    8912896
+    Writes:   4194304
+    Compares: 4194304
+  Edges/sec: 3944.53 M edges/sec
+
+STT-MRAM:
+  Vertex processing: 14.00 ns
+  Neighbor processing: 628.80 ns
+  Total per vertex: 642.80 ns
+  Operations:
+    Reads:    8912896
+    Writes:   4194304
+    Compares: 4194304
+  Edges/sec: 796.52 M edges/sec
+
+PCM:
+  Vertex processing: 16.00 ns
+  Neighbor processing: 1860.80 ns
+  Total per vertex: 1876.80 ns
+  Operations:
+    Reads:    8912896
+    Writes:   4194304
+    Compares: 4194304
+  Edges/sec: 272.80 M edges/sec
+
+ReRAM:
+  Vertex processing: 10.00 ns
+  Neighbor processing: 356.80 ns
+  Total per vertex: 366.80 ns
+  Operations:
+    Reads:    8912896
+    Writes:   4194304
+    Compares: 4194304
+  Edges/sec: 1395.86 M edges/sec
+
+DRAM:
+  Vertex processing: 26.64 ns
+  Neighbor processing: 671.04 ns
+  Total per vertex: 697.68 ns
+  Operations:
+    Reads:    8912896
+    Writes:   4194304
+    Compares: 4194304
+  Edges/sec: 733.86 M edges/sec
+
+========================================
+TEST COMPLETED!
+========================================
