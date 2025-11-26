@@ -227,6 +227,22 @@ cd /home/user/pimid-dev
 python3 test/scripts/test_quick_execution_models.py
 ```
 
+### ZSim External Models Test (1000 tests, ~26 seconds) ⭐ RECOMMENDED
+
+Tests all combinations of external simulators:
+- **ZSim cores**: Simple, OOO, ALU, Timing, Null
+- **Ramulator DRAM**: DDR3, DDR4, DDR5, HBM2, HBM3
+- **GARNET networks**: MESH_2D, TORUS_2D, FAT_TREE, DRAGONFLY, CROSSBAR, H_TREE
+- **Memory tech**: SRAM, DRAM, STT-MRAM, PCM, ReRAM
+
+```bash
+cd /home/user/pimid-dev
+python3 test/zsim_external_model_test_suite_1000.py
+```
+
+**Status**: ✅ 100% pass rate (1,000/1,000 tests)
+**Results**: `test/results/zsim_external_1000/test_summary.json`
+
 ### Comprehensive Test (1000 tests, ~5 minutes)
 
 ```bash
@@ -244,18 +260,17 @@ python3 test/scripts/comprehensive_audit_suite_zsim_10000.py
 ```
 
 **Status**: ✅ 100% pass rate (10,000/10,000 tests)
-**Results**: `test/results/test_results_zsim_10000/`
-**Report**: `test/reports/COMPREHENSIVE_AUDIT_REPORT_10000.md`
 
 ### Test Coverage
 
 | Test Suite | Tests | Coverage | Pass Rate | Time |
 |------------|-------|----------|-----------|------|
 | Quick smoke tests | 5 | Basic | 100% | ~30s |
+| **ZSim External Models** | **1,000** | **ZSim+Ramulator+GARNET** | **100%** | **~26s** |
 | Comprehensive | 1,000 | All workloads | 100% | ~5min |
-| **Production audit** | **10,000** | **All configs** | **100%** | **~5min** |
+| Production audit | 10,000 | All configs | 100% | ~5min |
 
-See [Test Organization](test/TEST_ORGANIZATION.md) for full details.
+See [docs/README.md](docs/README.md) for full documentation index.
 
 ---
 
@@ -462,20 +477,23 @@ done
 
 ✅ **Key Achievements:**
 - **PIN 3.x Support**: Works on Ubuntu 24.04 (unlike competitors)
-- **10,000 Test Suite**: 100% pass rate, production-ready
+- **External Model Integration**: ZSim + Ramulator + GARNET (not hardcoded!)
+- **10,000+ Test Suite**: 100% pass rate, production-ready
+- **5 ZSim Core Types**: Simple, OOO, ALU, Timing, Null
+- **5 DRAM Types**: DDR3, DDR4, DDR5, HBM2, HBM3
 - **5 Memory Technologies**: SRAM, DRAM, STT-MRAM, PCM, ReRAM
+- **6 Network Topologies**: Mesh, Torus, Fat-tree, Dragonfly, Crossbar, H-tree
 - **16 Workloads**: Message passing + Shared memory models
-- **2 Interconnects**: Baseline H-tree + LIBCom
 
-**Ready to dive deeper?** See [pimid/README.md](pimid/README.md) for complete documentation.
+**Ready to dive deeper?** See [docs/README.md](docs/README.md) for the documentation index.
 
 ---
 
 **Questions or Issues?**
 - Check [Troubleshooting](#-troubleshooting) above
-- Review [test/TEST_ORGANIZATION.md](test/TEST_ORGANIZATION.md)
+- Browse [docs/README.md](docs/README.md) for all documentation
 - See [PIN_VERSION_BUILD_OPTIONS.md](pimid/external/zsim/PIN_VERSION_BUILD_OPTIONS.md)
 
-**Last Updated**: 2025-11-23
-**Version**: 1.0
+**Last Updated**: 2025-11-26
+**Version**: 1.1
 **Status**: ✅ Production Ready
