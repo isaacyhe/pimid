@@ -1,0 +1,44 @@
+simulation:
+  name: external_09930
+  mode: standalone
+  duration_cycles: 10000
+memory:
+  dram_type: HBM2
+  channels: 8
+  ranks_per_channel: 2
+  chips_per_rank: 2
+  bg_per_chip: 4
+  banks_per_bg: 4
+  subarrays_per_bank: 16
+  network:
+    custom_topology:
+      enabled: true
+      l0:
+        use_default: true
+      l1:
+        use_default: false
+        topology: TORUS_2D
+        num_switches: 16
+        ports_per_switch: 5
+        num_endpoints: 16
+      l2:
+        use_default: true
+      l3:
+        use_default: true
+      l4:
+        use_default: true
+      l5:
+        use_default: true
+external_models:
+  network:
+    enabled: false
+    library_path: ./lib/libsimple_network_adapter.so
+    model_name: SimpleNetwork
+    config_file: ./config/network_config.txt
+  memory:
+    enabled: false
+pim:
+  enabled: true
+  num_pes: 128
+  pe_placement: bank
+  scheduling_policy: nearest

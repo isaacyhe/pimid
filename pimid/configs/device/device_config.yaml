@@ -1,0 +1,73 @@
+# Device (PIM) Configuration
+# Memory-side processing element parameters
+
+device:
+  name: "PIM_Device"
+
+  # Memory hierarchy
+  memory_hierarchy:
+    num_subarrays_per_bank: 16
+    num_banks_per_chip: 16
+    num_chips_per_rank: 8
+    num_ranks: 4
+    has_logic_die: false  # Set true for HBM/HMC
+
+  # Processing elements configuration
+  processing_elements:
+    - pe_id: 0
+      placement_level: "RANK"
+      rank_id: 0
+      num_cores: 4
+      frequency_mhz: 1500
+      core_type: "in-order"
+      has_l1_cache: true
+      l1_size_kb: 16
+      # For discrete addressing
+      addr_base: 0x100000000
+      addr_limit: 0x13FFFFFFF
+
+    - pe_id: 1
+      placement_level: "RANK"
+      rank_id: 1
+      num_cores: 4
+      frequency_mhz: 1500
+      core_type: "in-order"
+      has_l1_cache: true
+      l1_size_kb: 16
+      addr_base: 0x140000000
+      addr_limit: 0x17FFFFFFF
+
+    - pe_id: 2
+      placement_level: "RANK"
+      rank_id: 2
+      num_cores: 4
+      frequency_mhz: 1500
+      core_type: "in-order"
+      has_l1_cache: true
+      l1_size_kb: 16
+      addr_base: 0x180000000
+      addr_limit: 0x1BFFFFFFF
+
+    - pe_id: 3
+      placement_level: "RANK"
+      rank_id: 3
+      num_cores: 4
+      frequency_mhz: 1500
+      core_type: "in-order"
+      has_l1_cache: true
+      l1_size_kb: 16
+      addr_base: 0x1C0000000
+      addr_limit: 0x1FFFFFFFF
+
+  # Scheduling policy
+  scheduler:
+    policy: "NEAREST_PE"  # NEAREST_PE | ROUND_ROBIN | LOAD_BALANCED
+    task_queue_depth: 128
+
+  # Address translation for PEs
+  address_translation:
+    page_size_bytes: 4096
+    tlb_entries: 32
+    tlb_associativity: 4
+    tlb_hit_latency: 1
+    page_walk_latency: 15

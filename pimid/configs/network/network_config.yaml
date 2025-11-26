@@ -1,0 +1,100 @@
+# Network Configuration
+# GARNET-based NoC modeling for intra-memory communication
+
+network:
+  name: "PIM_Network"
+  model: "GARNET"
+
+  # Topology
+  topology: "MESH_2D"  # MESH_2D | MESH_3D | TORUS_2D | CROSSBAR | DRAGONFLY
+  num_rows: 4
+  num_cols: 4
+  num_layers: 1  # For 3D topologies
+
+  # Routing algorithm
+  routing: "XY"  # XY | XYZ | ADAPTIVE | WEST_FIRST | MINIMAL
+
+  # Flow control
+  flow_control: "CREDIT_BASED"  # CREDIT_BASED | ON_OFF | VIRTUAL_CHANNEL
+
+  # Virtual channels
+  virtual_channels: 4
+  vcs_per_vnet: 2
+
+  # Router parameters
+  router:
+    num_vnets: 3  # Number of virtual networks
+    router_latency_cycles: 2
+    input_buffer_depth: 8
+    output_buffer_depth: 8
+    routing_algorithm: "table"  # table | algorithmic
+
+  # Link parameters
+  link:
+    link_width_bytes: 16
+    link_latency_cycles: 1
+    link_length_mm: 1.0
+
+  # Network interface
+  network_interface:
+    injection_latency_cycles: 1
+    ejection_latency_cycles: 1
+
+  # Node mapping
+  # Maps memory hierarchy components to network nodes
+  node_mapping:
+    - node_id: 0
+      type: "PE"
+      pe_id: 0
+      position: [0, 0]
+
+    - node_id: 1
+      type: "PE"
+      pe_id: 1
+      position: [0, 1]
+
+    - node_id: 2
+      type: "PE"
+      pe_id: 2
+      position: [1, 0]
+
+    - node_id: 3
+      type: "PE"
+      pe_id: 3
+      position: [1, 1]
+
+    - node_id: 4
+      type: "BANK"
+      bank_id: 0
+      position: [0, 2]
+
+    - node_id: 5
+      type: "BANK"
+      bank_id: 1
+      position: [0, 3]
+
+    - node_id: 6
+      type: "BANK"
+      bank_id: 2
+      position: [1, 2]
+
+    - node_id: 7
+      type: "BANK"
+      bank_id: 3
+      position: [1, 3]
+
+# GARNET-specific configuration
+garnet:
+  config_file: "configs/network/garnet.cfg"
+  enable_fault_model: false
+  enable_power_model: true
+  ni_flit_size_bits: 128
+  flit_size_bits: 128
+
+# Power parameters for network
+power:
+  router_dynamic_power_mw: 50
+  router_leakage_power_mw: 10
+  link_dynamic_power_pj_per_bit: 1.0
+  link_leakage_power_mw: 1.0
+  tech_node_nm: 22

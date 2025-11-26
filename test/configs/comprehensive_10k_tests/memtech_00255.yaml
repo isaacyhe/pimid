@@ -1,0 +1,19 @@
+simulation:
+  name: memtech_00255
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: DDR5
+  channels: 8
+  ranks_per_channel: 2
+  chips_per_rank: 16
+  bg_per_chip: 8
+  banks_per_bg: 4
+  subarrays_per_bank: 32
+pim:
+  enabled: true
+  num_pes: 512
+  pe_placement: chip
+  scheduling_policy: nearest
+  core_type: in-order

@@ -1,0 +1,24 @@
+# Minimal PIMID test configuration
+simulation:
+  name: "MinimalTest"
+  description: "Test pimid with workload binary"
+  mode: "standalone"
+
+# Memory configuration
+memory:
+  technology: "SRAM"
+
+# PIM configuration
+pim:
+  granularity: BANK
+  num_pes: 4
+
+# Simulation control
+simulation_control:
+  max_cycles: 1000000000
+  enable_power_modeling: true
+
+# Output
+output:
+  stats_file: "test_minimal_stats.txt"
+  log_level: "INFO"

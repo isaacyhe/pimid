@@ -1,0 +1,45 @@
+simulation:
+  name: mesh_torus_07386
+  mode: standalone
+  duration_cycles: 10000
+memory:
+  dram_type: HBM3
+  channels: 16
+  ranks_per_channel: 2
+  chips_per_rank: 2
+  bg_per_chip: 8
+  banks_per_bg: 4
+  subarrays_per_bank: 16
+  network:
+    custom_topology:
+      enabled: true
+      l0:
+        use_default: true
+      l1:
+        use_default: true
+      l2:
+        use_default: false
+        topology: MESH_2D
+        num_switches: 4
+        ports_per_switch: 5
+        num_endpoints: 2
+      l3:
+        use_default: true
+      l4:
+        use_default: false
+        topology: MESH_2D
+        num_switches: 16
+        ports_per_switch: 5
+        num_endpoints: 16
+      l5:
+        use_default: true
+external_models:
+  network:
+    enabled: false
+  memory:
+    enabled: false
+pim:
+  enabled: true
+  num_pes: 128
+  pe_placement: bank
+  scheduling_policy: nearest

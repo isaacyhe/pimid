@@ -1,0 +1,42 @@
+simulation:
+  name: comprehensive_08571
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: LPDDR5
+  channels: 8
+  ranks_per_channel: 2
+  chips_per_rank: 8
+  bg_per_chip: 8
+  banks_per_bg: 4
+  subarrays_per_bank: 32
+  network:
+    custom_topology:
+      enabled: true
+      l0:
+        use_default: false
+        topology: CROSSBAR
+        num_switches: 1
+        ports_per_switch: 4
+        num_endpoints: 4
+      l1:
+        use_default: true
+      l2:
+        use_default: false
+        topology: CROSSBAR
+        num_switches: 1
+        ports_per_switch: 8
+        num_endpoints: 8
+      l3:
+        use_default: true
+      l4:
+        use_default: true
+      l5:
+        use_default: true
+pim:
+  enabled: true
+  num_pes: 64
+  pe_placement: rank
+  scheduling_policy: priority_based
+  core_type: in-order

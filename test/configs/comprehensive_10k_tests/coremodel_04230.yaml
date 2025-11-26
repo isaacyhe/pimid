@@ -1,0 +1,38 @@
+simulation:
+  name: coremodel_04230
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: HBM2
+  channels: 8
+  ranks_per_channel: 2
+  chips_per_rank: 2
+  bg_per_chip: 4
+  banks_per_bg: 4
+  subarrays_per_bank: 16
+  network:
+    custom_topology:
+      enabled: true
+      l0:
+        use_default: true
+      l1:
+        use_default: true
+      l2:
+        use_default: false
+        topology: CROSSBAR
+        num_switches: 1
+        ports_per_switch: 2
+        num_endpoints: 2
+      l3:
+        use_default: true
+      l4:
+        use_default: true
+      l5:
+        use_default: true
+pim:
+  enabled: true
+  num_pes: 512
+  pe_placement: bank
+  scheduling_policy: nearest
+  core_type: out-of-order

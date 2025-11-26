@@ -1,0 +1,19 @@
+simulation:
+  name: memtech_00353
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: DDR4
+  channels: 1
+  ranks_per_channel: 1
+  chips_per_rank: 8
+  bg_per_chip: 4
+  banks_per_bg: 4
+  subarrays_per_bank: 16
+pim:
+  enabled: true
+  num_pes: 16
+  pe_placement: chip
+  scheduling_policy: round_robin
+  core_type: simple
