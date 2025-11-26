@@ -49,8 +49,17 @@ cmake ../pimid && make -j$(nproc)
 - ✅ **All PE Scales**: 1, 2, 4, 8, 16, 32, 64 PEs
 - 📊 **Verified**: Production-ready with complete test coverage
 
+### 🔌 **External Simulator Integration** (NEW!)
+Full integration with industry-standard simulators:
+
+| Simulator | Purpose | Models |
+|-----------|---------|--------|
+| **ZSim** | Instruction-level execution | Simple, OOO, ALU, Timing, Null cores |
+| **Ramulator** | Cycle-accurate DRAM | DDR3, DDR4, DDR5, HBM2, HBM3 |
+| **GARNET** | Network-on-chip | Mesh, Torus, Fat-tree, Dragonfly, Crossbar, H-tree |
+
 ### 💾 **Multi-Technology Memory**
-- **DRAM**: via Ramulator integration
+- **DRAM**: via Ramulator integration (DDR3/4/5, HBM2/3)
 - **SRAM**: via CACTI integration
 - **STT-MRAM**: via NVSim integration
 - **PCM & ReRAM**: Non-volatile memory support
@@ -61,11 +70,11 @@ cmake ../pimid && make -j$(nproc)
 - Chip/Rank level (coarse-grained)
 - Logic die level (HBM/HMC)
 
-### 🌐 **Advanced Networking**
-- **GARNET**: Cycle-accurate NoC simulation
-- **Topologies**: Mesh, Torus, Dragonfly, Fat-tree, Crossbar
+### 🌐 **Advanced Networking (GARNET)**
+- **6 Topologies**: MESH_2D, TORUS_2D, FAT_TREE, DRAGONFLY, CROSSBAR, H_TREE
 - **LIBCom**: Low-latency interconnect for banked CIM
 - **Baseline H-tree**: Hierarchical tree topology
+- Cycle-accurate router and link modeling
 
 ### ⚡ **Comprehensive Power Modeling**
 - McPAT integration for system power
@@ -79,21 +88,22 @@ cmake ../pimid && make -j$(nproc)
 | Document | Description |
 |----------|-------------|
 | **[QUICKSTART.md](QUICKSTART.md)** | 5-minute setup guide - **START HERE!** |
-| [pimid/README.md](pimid/README.md) | Complete PIMID documentation |
-| [RECENT_FEATURES.md](RECENT_FEATURES.md) | Latest features and improvements |
-| [Test Organization](test/TEST_ORGANIZATION.md) | Test suite documentation (10K tests) |
-| [PIN 3.x Upgrade](pimid/external/zsim/PIN3_UPGRADE.md) | Ubuntu 24.04 compatibility guide |
-| [PIN Build Options](pimid/external/zsim/PIN_VERSION_BUILD_OPTIONS.md) | Manual PIN version control |
+| **[docs/README.md](docs/README.md)** | 📖 **Documentation Index** - All docs organized |
+| [docs/CONFIGURATION_GUIDE.md](docs/CONFIGURATION_GUIDE.md) | YAML configuration reference |
+| [docs/external_model_integration.md](docs/external_model_integration.md) | ZSim, Ramulator, GARNET integration |
 
 ### 🧪 Testing & Validation
-- [Comprehensive Audit Report](test/reports/COMPREHENSIVE_AUDIT_REPORT_10000.md) - 10,000 tests, 100% pass
-- [Test Results (1K)](test/reports/TEST_RESULTS_ZSIM_1000.md) - Initial validation
-- [Bug Fix Documentation](test/reports/BUGFIX_REDUCTION_SHARED.md) - Issue resolution
+| Test Suite | Tests | Pass Rate | Description |
+|------------|-------|-----------|-------------|
+| Quick Smoke | 5 | 100% | Basic functionality |
+| Comprehensive | 1,000 | 100% | All workloads |
+| **ZSim External Models** | **1,000** | **100%** | **ZSim + Ramulator + GARNET** |
+| Production Audit | 10,000 | 100% | Full parameter sweep |
 
 ### 🔬 Research & Analysis
 - [DAC'26 Integration](DAC26/README.md) - LIBCom vs H-tree evaluation
-- [Workload Summary](test/benchmarks/WORKLOADS_SUMMARY.md) - All 16 workloads
-- [Architecture Comparison](FINAL_ARCHITECTURE_COMPARISON.md) - Design decisions
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - System architecture
+- [docs/GARNET_INTEGRATION.md](docs/GARNET_INTEGRATION.md) - NoC simulation details
 
 ---
 
@@ -151,9 +161,19 @@ python3 test/scripts/comprehensive_audit_suite_zsim_10000.py
 |------------|-------|-----------|------|--------|
 | Quick smoke | 5 | 100% | ~30s | ✅ |
 | Comprehensive | 1,000 | 100% | ~5min | ✅ |
-| **Production audit** | **10,000** | **100%** | **~5min** | ✅ **Production Ready** |
+| **ZSim External Models** | **1,000** | **100%** | **~26s** | ✅ **NEW** |
+| Production audit | 10,000 | 100% | ~5min | ✅ Production Ready |
 
-**Report**: [COMPREHENSIVE_AUDIT_REPORT_10000.md](test/reports/COMPREHENSIVE_AUDIT_REPORT_10000.md)
+### ZSim External Model Test Coverage
+```
+ZSim Cores:    Simple (161), OOO (193), ALU (392), Timing (125), Null (129)
+DRAM Types:    DDR3 (170), DDR4 (189), DDR5 (146), HBM2 (236), HBM3 (259)
+Memory Tech:   SRAM (260), DRAM (242), STT-MRAM (142), PCM (183), ReRAM (173)
+Networks:      MESH_2D (179), TORUS_2D (161), FAT_TREE (174), DRAGONFLY (158), CROSSBAR (176), H_TREE (152)
+Workloads:     All 16 (message passing + shared memory)
+```
+
+**Results**: `test/results/zsim_external_1000/test_summary.json`
 
 ---
 
@@ -212,27 +232,32 @@ scons --pin-version=2 -j$(nproc)  # Force PIN 2.x
 
 ```
 pimid-dev/
-├── QUICKSTART.md              # ⭐ Start here!
-├── RECENT_FEATURES.md         # Latest improvements
-├── pimid/                     # Main PIMID source
-│   ├── README.md             # Complete documentation
-│   ├── src/                  # Core implementation
-│   ├── include/              # Public headers
-│   └── external/             # External simulators
-│       └── zsim/             # ZSim with PIN 3.x support
-│           ├── PIN3_UPGRADE.md
-│           └── PIN_VERSION_BUILD_OPTIONS.md
-├── test/                      # Test infrastructure
-│   ├── TEST_ORGANIZATION.md  # Test documentation
-│   ├── scripts/              # 21 test scripts
-│   ├── reports/              # 12 test reports
-│   ├── results/              # 10 result directories (56K+ tests)
-│   └── benchmarks/           # Workload sources
-├── DAC26/                     # LIBCom research
-│   ├── README.md             # DAC'26 evaluation guide
-│   ├── configs/              # LIBCom configurations
-│   └── workloads_pimid/      # Compiled workloads
-└── build/                     # Build artifacts
+├── QUICKSTART.md                    # ⭐ Start here!
+├── README.md                        # This file
+├── docs/                            # 📖 All documentation
+│   ├── README.md                   # Documentation index
+│   ├── ARCHITECTURE.md             # System design
+│   ├── CONFIGURATION_GUIDE.md      # Config reference
+│   ├── external_model_integration.md  # ZSim/Ramulator/GARNET
+│   └── implementation_reports/     # Dev history (archive)
+├── pimid/                           # Main source code
+│   ├── src/                        # Core implementation
+│   ├── include/                    # Public headers
+│   └── external/                   # External simulators
+│       ├── zsim/                   # ZSim (instruction-level)
+│       ├── ramulator/              # Ramulator (DRAM timing)
+│       └── gem5/                   # gem5/GARNET (NoC)
+├── test/                            # Test infrastructure
+│   ├── zsim_external_model_test_suite_1000.py  # ⭐ NEW: External model tests
+│   ├── scripts/                    # Test scripts
+│   ├── results/                    # Test results
+│   │   └── zsim_external_1000/    # Latest results
+│   └── benchmarks/                 # Workload sources
+├── DAC26/                           # DAC'26 research
+│   ├── configs/                    # LIBCom configurations
+│   └── workloads_pimid/            # 16 compiled workloads
+├── config/                          # Default configurations
+└── build/                           # Build artifacts
 ```
 
 ---
@@ -282,16 +307,21 @@ PIMID is released under the GPL-2.0 License. See [LICENSE](LICENSE) for details.
 ### Why PIMID?
 
 ✅ **Modern Platform Support**: Ubuntu 24.04 (PIN 3.x) - competitors stuck on 18.04
-✅ **Production Validated**: 10,000 tests, 100% pass rate
-✅ **Comprehensive**: 5 memory techs, 16 workloads, 2 topologies
-✅ **Well Documented**: Quick start + detailed guides + troubleshooting
-✅ **Actively Maintained**: Recent improvements and bug fixes
-✅ **Research Ready**: LIBCom integration, energy modeling, scaling studies
+✅ **External Model Integration**: ZSim + Ramulator + GARNET (not hardcoded timing!)
+✅ **Production Validated**: 10,000+ tests, 100% pass rate
+✅ **Comprehensive Coverage**:
+   - 5 ZSim core types (Simple, OOO, ALU, Timing, Null)
+   - 5 DRAM types (DDR3, DDR4, DDR5, HBM2, HBM3)
+   - 5 memory technologies (SRAM, DRAM, STT-MRAM, PCM, ReRAM)
+   - 6 network topologies (Mesh, Torus, Fat-tree, Dragonfly, Crossbar, H-tree)
+   - 16 workloads (message passing + shared memory)
+✅ **Well Documented**: [docs/README.md](docs/README.md) - organized documentation index
+✅ **Research Ready**: LIBCom evaluation, energy modeling, scaling studies
 
 ---
 
 **Ready to start?** See [QUICKSTART.md](QUICKSTART.md) for a 5-minute setup guide!
 
-**Last Updated**: 2025-11-23
-**Version**: 1.0
-**Status**: ✅ Production Ready (10K tests, 100% pass)
+**Last Updated**: 2025-11-26
+**Version**: 1.1
+**Status**: ✅ Production Ready (10K+ tests, 100% pass)
