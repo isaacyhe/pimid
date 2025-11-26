@@ -1,0 +1,418 @@
+# PIMID Memory System Configuration
+# Configuration for memory models (DRAM, SRAM, STT-MRAM)
+
+#==============================================================================
+# MEMORY TECHNOLOGY SELECTION
+#==============================================================================
+technology:
+  # Primary memory technology: DRAM, SRAM, STT_MRAM
+  type: "DRAM"
+
+  # Memory model: ramulator, cacti, nvsim, custom
+  model: "ramulator"
+
+  # Custom memory model plugin (if type is custom)
+  # custom_plugin: "my_memory_model"
+  # plugin_config:
+  #   latency: 100
+  #   bandwidth: 25600
+
+#==============================================================================
+# DRAM CONFIGURATION (when technology = DRAM)
+#==============================================================================
+dram:
+  # DRAM standard: DDR3, DDR4, DDR5, LPDDR4, LPDDR5, HBM, HBM2, HBM3, GDDR6
+  standard: "DDR4"
+
+  # DRAM speed grade
+  speed_grade: "2400"  # MT/s
+
+  # Port width scaling factor (for exploratory studies)
+  # Default: 1.0 (use verified base values)
+  # Set to 2.0 for "what if 2x wider buses?" studies
+  # Set to 0.5 for "what if narrower buses?" studies
+  # Affects all internal datapath widths and bandwidths
+  port_width_scale: 1.0
+
+  # Memory organization
+  organization:
+    channels: 4
+    ranks_per_channel: 2
+    chips_per_rank: 8
+    banks_per_chip: 16
+    bank_groups: 4  # For DDR4/DDR5
+    rows_per_bank: 65536
+    columns_per_row: 1024
+
+  # Timing parameters (in memory clock cycles)
+  timing:
+    # Activate to activate (same bank)
+    tRC: 46
+
+    # Activate to activate (different banks)
+    tRRD: 4
+    tRRD_L: 6  # Same bank group
+    tRRD_S: 4  # Different bank group
+
+    # Activate to precharge
+    tRAS: 32
+
+    # Precharge to activate
+    tRP: 14
+
+    # Activate to read/write
+    tRCD: 14
+
+    # CAS latency
+    tCL: 14
+
+    # Write latency
+    tCWL: 10
+
+    # Read to precharge
+    tRTP: 6
+
+    # Write recovery time
+    tWR: 12
+
+    # Write to read (same rank)
+    tWTR: 6
+    tWTR_L: 6  # Same bank group
+    tWTR_S: 2  # Different bank group
+
+    # Read to write
+    tRTW: 2
+
+    # Burst length
+    tBL: 4
+
+    # Refresh interval
+    tREFI: 7800
+
+    # Refresh cycle time
+    tRFC: 260
+
+  # Power parameters (mA)
+  power:
+    # Operating current
+    IDD0: 60   # Active precharge
+    IDD1: 50   # Active standby
+    IDD2N: 34  # Precharge standby
+    IDD2P: 25  # Precharge power-down (slow exit)
+    IDD3N: 38  # Active standby
+    IDD3P: 30  # Active power-down (slow exit)
+    IDD4R: 140 # Read burst
+    IDD4W: 145 # Write burst
+    IDD5: 175  # Refresh
+
+    # Voltage (V)
+    VDD: 1.2
+
+  # Row buffer management
+  row_buffer:
+    # Policy: open_page, close_page, auto
+    policy: "open_page"
+
+  # Ramulator-specific settings
+  ramulator:
+    config_file: "pimid/external/ramulator/configs/DDR4-config.yaml"
+    enable_trace: false
+    trace_output: "ramulator_trace.txt"
+
+#==============================================================================
+# SRAM CONFIGURATION (when technology = SRAM)
+#==============================================================================
+sram:
+  # SRAM capacity
+  capacity_mb: 16
+
+  # SRAM organization
+  organization:
+    num_arrays: 16
+    rows_per_array: 512
+    columns_per_array: 512
+    bits_per_cell: 8
+    banks: 8
+    read_write_ports: 1
+    read_ports: 0
+    write_ports: 0
+
+  # Cache configuration (if using as cache)
+  cache:
+    line_size_bytes: 64
+    associativity: 8  # 8-way set associative
+
+  # Access timing (ns)
+  timing:
+    read_latency_ns: 1.0
+    write_latency_ns: 1.0
+    access_time_ns: 0.8
+    read_latency_cycles: 1   # Cycles
+    write_latency_cycles: 1  # Cycles
+
+  # Power parameters
+  power:
+    # Technology node (nm)
+    tech_node_nm: 22
+
+    # Operating voltage (V)
+    voltage: 1.0
+
+    # Temperature (C)
+    temperature: 25
+
+    # Energy per access (nJ) - will be overridden by CACTI if available
+    read_energy_nj: 0.1
+    write_energy_nj: 0.15
+    leakage_power_mw: 5.0
+
+  # CACTI settings
+  cacti:
+    config_file: "pimid/external/cacti/cacti_sram.cfg"
+    cache_size_bytes: 16777216  # 16MB
+    line_size_bytes: 64
+    associativity: 8  # 8-way set associative
+    banks: 8
+    read_write_ports: 1
+
+#==============================================================================
+# NVM CONFIGURATION (STT-MRAM, PCM, ReRAM)
+#==============================================================================
+nvm:
+  # NVM type: STT_MRAM, PCM, RERAM
+  type: "STT_MRAM"
+
+  # NVM capacity
+  capacity_mb: 16
+
+  # NVM organization
+  organization:
+    num_arrays: 16
+    rows_per_array: 512
+    columns_per_array: 512
+    bits_per_cell: 8
+    banks: 8
+    read_write_ports: 1
+
+  # Access timing (cycles and ns)
+  timing:
+    read_latency_cycles: 10   # Cycles
+    write_latency_cycles: 50  # Cycles (slower for NVM)
+    read_latency_ns: 5.0
+    write_latency_ns: 20.0
+
+  # Endurance and reliability
+  reliability:
+    write_endurance: 1e15  # Write cycles
+    retention_time_years: 10
+    error_rate: 1e-12
+
+  # Power parameters per technology type
+  # STT-MRAM parameters
+  stt_mram:
+    tech_node_nm: 22
+    voltage: 1.8
+    read_energy_nj: 0.3   # nJ per read
+    write_energy_nj: 5.0  # nJ per write
+    leakage_power_mw: 10  # mW
+    area_mm2: 15.0        # mm^2
+
+  # PCM parameters
+  pcm:
+    tech_node_nm: 22
+    voltage: 1.8
+    read_energy_nj: 1.0   # nJ per read
+    write_energy_nj: 20.0 # nJ per write (high write energy)
+    leakage_power_mw: 20  # mW
+    area_mm2: 12.0        # mm^2
+
+  # ReRAM parameters
+  reram:
+    tech_node_nm: 22
+    voltage: 1.5
+    read_energy_nj: 0.5   # nJ per read
+    write_energy_nj: 8.0  # nJ per write
+    leakage_power_mw: 15  # mW
+    area_mm2: 10.0        # mm^2
+
+  # NVSim settings
+  nvsim:
+    config_file: "pimid/external/nvsim/nvsim_config.cfg"
+    cell_type: "STTRAM"  # STTRAM, PCRAM, RRAM
+    process_tech: 22
+
+#==============================================================================
+# LEGACY STT-MRAM CONFIGURATION (deprecated - use nvm.type = STT_MRAM)
+#==============================================================================
+stt_mram:
+  # STT-MRAM capacity
+  capacity_mb: 16
+
+  # STT-MRAM organization
+  organization:
+    num_arrays: 16
+    rows_per_array: 512
+    columns_per_array: 512
+    bits_per_cell: 8
+
+  # Access timing (ns)
+  timing:
+    read_latency_ns: 5.0
+    write_latency_ns: 20.0
+
+  # Endurance and reliability
+  reliability:
+    write_endurance: 1e15  # Write cycles
+    retention_time_years: 10
+    error_rate: 1e-12
+
+  # Power parameters
+  power:
+    # Technology node (nm)
+    tech_node_nm: 22
+
+    # Operating voltage (V)
+    voltage: 1.8
+
+    # Write energy per bit (pJ)
+    write_energy_pj: 2.5
+
+    # Read energy per bit (pJ)
+    read_energy_pj: 0.5
+
+  # NVSim settings
+  nvsim:
+    config_file: "pimid/external/nvsim/nvsim_sttmram.cfg"
+    cell_type: "STTRAM"
+    process_tech: 22
+
+#==============================================================================
+# MEMORY CONTROLLER SETTINGS
+#==============================================================================
+controller:
+  # Scheduling policy: FCFS, FR-FCFS, PAR-BS, ATLAS, BLISS
+  scheduling_policy: "FR-FCFS"
+
+  # Queue sizes
+  request_queue_size: 64
+  write_buffer_size: 32
+
+  # Request prioritization
+  prioritize_reads: true
+  prioritize_row_hits: true
+
+  # Write batching
+  write_batching: true
+  write_high_watermark: 24
+  write_low_watermark: 8
+
+  # Refresh management
+  refresh_scheme: "rank-level"  # Options: rank-level, bank-level, fine-grain
+  refresh_postponement: false
+
+  # Power management
+  power_down_enabled: false
+  power_down_threshold_cycles: 1000
+
+#==============================================================================
+# MEMORY CHANNEL CONFIGURATION
+#==============================================================================
+channels:
+  # Number of independent memory channels
+  num_channels: 4
+
+  # Channel bandwidth (GB/s per channel)
+  bandwidth_per_channel_gbs: 25.6
+
+  # Channel arbiter: round-robin, priority, FR-FCFS
+  arbiter: "round-robin"
+
+#==============================================================================
+# ADDRESS MAPPING
+#==============================================================================
+address_mapping:
+  # Mapping scheme: linear, XOR, custom
+  scheme: "linear"
+
+  # Bit allocation (from LSB to MSB)
+  # Example: [offset, column, bank, rank, row, channel]
+  bit_allocation:
+    offset: [0, 5]      # Bits 0-5: byte offset (64B cache line)
+    column: [6, 8]      # Bits 6-8: column
+    bank: [9, 12]       # Bits 9-12: bank
+    bankgroup: [13, 14] # Bits 13-14: bank group
+    rank: [15, 15]      # Bit 15: rank
+    row: [16, 31]       # Bits 16-31: row
+    channel: [32, 33]   # Bits 32-33: channel
+
+  # XOR-based mapping (if scheme = XOR)
+  xor_mapping:
+    enabled: false
+    xor_bits: []
+
+#==============================================================================
+# HYBRID MEMORY CONFIGURATION
+#==============================================================================
+hybrid:
+  # Enable hybrid memory (multiple technologies)
+  enabled: false
+
+  # Memory tiers
+  tiers:
+    # - technology: "SRAM"
+    #   capacity_mb: 256
+    #   role: "cache"
+    #
+    # - technology: "DRAM"
+    #   capacity_gb: 16
+    #   role: "main"
+    #
+    # - technology: "STT_MRAM"
+    #   capacity_gb: 64
+    #   role: "storage"
+
+  # Data migration policy
+  migration:
+    policy: "hot_cold"  # Options: hot_cold, threshold, ML-based
+    threshold_accesses: 100
+    migration_granularity: "page"  # Options: cache_line, page, region
+
+#==============================================================================
+# PERFORMANCE MONITORING
+#==============================================================================
+monitoring:
+  # Enable memory performance monitoring
+  enabled: true
+
+  # Metrics to track
+  track_bandwidth: true
+  track_latency: true
+  track_row_buffer_hits: true
+  track_power: true
+  track_refresh_overhead: true
+
+  # Histogram settings
+  latency_histogram:
+    enabled: true
+    min_latency: 0
+    max_latency: 1000
+    bucket_size: 10
+
+#==============================================================================
+# STATISTICS COLLECTION
+#==============================================================================
+statistics:
+  # Detailed statistics collection
+  detailed_stats: true
+
+  # Statistics output file
+  stats_file: "memory_stats.txt"
+
+  # Per-bank statistics
+  per_bank_stats: false
+
+  # Per-rank statistics
+  per_rank_stats: true
+
+  # Per-channel statistics
+  per_channel_stats: true

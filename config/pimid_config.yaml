@@ -1,0 +1,417 @@
+# PIMID Simulator - Main Configuration File
+# This is the primary configuration file for PIMID simulator
+# Version: 1.0.0
+
+#==============================================================================
+# SIMULATION SETTINGS
+#==============================================================================
+simulation:
+  # Simulation mode: co-simulation (host+device) or standalone
+  mode: "co-simulation"  # Options: co-simulation, standalone, host-only, device-only
+
+  # Total simulation cycles (0 = run until completion)
+  max_cycles: 0
+
+  # Warmup cycles before collecting statistics
+  warmup_cycles: 100000
+
+  # Fast-forward mode for non-ROI regions
+  fast_forward: true
+
+  # Debug and logging
+  debug_mode: false
+  log_level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR
+  log_file: "logs/pimid.log"
+
+  # Output directory for results
+  output_dir: "results/"
+
+  # Statistics collection interval (cycles)
+  stats_interval: 10000
+
+#==============================================================================
+# COMPONENT CONFIGURATION FILES
+#==============================================================================
+components:
+  # Host processor configuration
+  host_config: "config/host_config.yaml"
+
+  # PIM device configuration
+  device_config: "config/device_config.yaml"
+
+  # Memory system configuration
+  memory_config: "config/memory_config.yaml"
+
+  # Network-on-chip configuration
+  network_config: "config/network_config.yaml"
+
+  # Power modeling configuration
+  power_config: "config/power_config.yaml"
+
+#==============================================================================
+# COMMUNICATION SETTINGS (for co-simulation)
+#==============================================================================
+communication:
+  # Socket communication port
+  port: 9999
+
+  # Host address for device to connect
+  host_address: "127.0.0.1"
+
+  # Bind address for server
+  bind_address: "0.0.0.0"
+
+  # Device connection delay (seconds)
+  device_delay_seconds: 2
+
+  # Connection timeout (seconds)
+  timeout: 30
+
+  # Maximum message size (MB)
+  max_message_size_mb: 100
+
+  # Maximum retries for failed operations
+  max_retries: 10
+
+  # Retry delay (seconds)
+  retry_delay_seconds: 1
+
+  # Message buffer size (bytes)
+  buffer_size: 4096
+
+  # Enable compression for large messages
+  compression: false
+
+#==============================================================================
+# MEMORY TECHNOLOGY
+#==============================================================================
+memory:
+  # Memory technology: DRAM, SRAM, STT_MRAM
+  technology: "DRAM"
+
+  # DRAM type (if technology is DRAM)
+  dram_type: "DDR4"  # Options: DDR3, DDR4, DDR5, HBM, HBM2, HBM3, LPDDR5
+
+  # Memory capacity (bytes)
+  capacity: "16GB"
+
+  # Number of memory channels
+  channels: 4
+
+  # Number of ranks per channel
+  ranks_per_channel: 2
+
+  # Number of banks per rank
+  banks_per_rank: 16
+
+#==============================================================================
+# MEMORY HIERARCHY CONFIGURATION
+#==============================================================================
+memory_hierarchy:
+  subarray:
+    size_mb: 2
+  bank:
+    size_mb: 32
+  chip:
+    size_gb: 2
+  rank:
+    size_gb: 16
+
+#==============================================================================
+# MEMORY ACCESS PENALTIES (CYCLES)
+#==============================================================================
+memory_access:
+  cross_subarray_penalty_cycles: 50
+  cross_bank_penalty_cycles: 100
+  cross_chip_penalty_cycles: 150
+  cross_rank_penalty_cycles: 200
+  logic_to_dram_penalty_cycles: 150
+
+#==============================================================================
+# PIM CONFIGURATION
+#==============================================================================
+pim:
+  # PE placement level: SUBARRAY, BANK, CHIP, RANK, LOGIC_DIE
+  pe_placement_level: "BANK"
+
+  # Number of PEs per placement level
+  num_pes_per_level: 1
+
+  # PE configuration
+  pe_frequency_mhz: 1000
+  pe_num_cores: 1
+  pe_has_l1_cache: true
+  pe_l1_size_kb: 32
+
+  # Addressing mode: UNIFIED or DISCRETE
+  addressing_mode: "UNIFIED"
+
+  # Task scheduler: NEAREST_PE, ROUND_ROBIN, LOAD_BALANCED, PRIORITY_BASED
+  scheduler: "NEAREST_PE"
+
+#==============================================================================
+# PE TIMING PARAMETERS
+#==============================================================================
+pe:
+  fetch_decode_ns: 2.0
+  execute_compare_ns: 1.0
+  branch_penalty_ns: 3.0
+  branch_prediction_accuracy: 0.5
+
+#==============================================================================
+# CACHE HIERARCHY (Enhanced with associativity and line sizes)
+#==============================================================================
+caches:
+  l1i:
+    size_kb: 32
+    associativity: 8
+    line_size_bytes: 64
+  l1d:
+    size_kb: 32
+    associativity: 8
+    line_size_bytes: 64
+  l2:
+    size_kb: 256
+    associativity: 8
+    line_size_bytes: 64
+  l3:
+    size_kb: 8192
+    associativity: 16
+    line_size_bytes: 64
+
+#==============================================================================
+# OFFLOAD CONFIGURATION
+#==============================================================================
+offload:
+  completion_overhead_cycles: 500
+  offload_overhead_cycles: 1000
+
+#==============================================================================
+# HOST/DEVICE ENGINE CONFIGURATION
+#==============================================================================
+host:
+  sync_interval_cycles: 1000
+  poll_sleep_ms: 10
+
+device:
+  sync_interval_cycles: 1000
+  default_num_pes: 16
+  completion_cycles: 100
+
+#==============================================================================
+# NETWORK-ON-CHIP
+#==============================================================================
+network:
+  # Enable network modeling
+  enabled: true
+
+  # Network topology: MESH_2D, MESH_3D, TORUS_2D, CROSSBAR, DRAGONFLY, FAT_TREE
+  topology: "MESH_2D"
+
+  # Topology dimensions
+  num_rows: 4
+  num_cols: 4
+  num_layers: 1  # For 3D topologies
+
+  # Routing algorithm: XY, XYZ, ADAPTIVE, WEST_FIRST, MINIMAL
+  routing: "XY"
+
+  # Link parameters
+  link_width_bytes: 8
+  link_latency_cycles: 1
+  router_latency_cycles: 2
+
+  # Virtual channels
+  virtual_channels: 4
+
+  # Buffer sizes
+  input_buffer_depth: 8
+  output_buffer_depth: 4
+
+  # Component IDs
+  memory_controller_base_id: 1000
+  llc_id: 2000
+
+#==============================================================================
+# POWER MODELING
+#==============================================================================
+power:
+  # Enable power modeling
+  enabled: true
+
+  # Technology node (nm)
+  tech_node_nm: 22
+
+  # Device type: HP (high-performance), LSTP (low-standby-power), LOP (low-operating-power)
+  device_type: "HP"
+
+  # Operating temperature (Kelvin)
+  temperature_k: 350
+
+  # Operating frequency (GHz)
+  frequency_ghz: 2.0
+
+  # Power components to model
+  model_host: true
+  model_device: true
+  model_memory: true
+  model_network: true
+
+#==============================================================================
+# PLUGINS
+#==============================================================================
+plugins:
+  # Plugin directory for dynamic loading
+  plugin_dir: "plugins/"
+
+  # Auto-discover plugins in plugin directory
+  auto_discover: true
+
+  # Explicitly loaded plugins
+  loaded_plugins:
+    # - name: "custom_memory_model"
+    #   library: "plugins/libcustom_memory.so"
+    #   config:
+    #     latency: 100
+    #     bandwidth: 25600
+
+  # Plugin search paths
+  search_paths:
+    - "plugins/"
+    - "/usr/local/lib/pimid/plugins/"
+    - "~/.pimid/plugins/"
+
+#==============================================================================
+# ADDRESS TRANSLATION
+#==============================================================================
+address_translation:
+  # Page size (bytes)
+  page_size_bytes: 4096
+
+  # TLB entries per PE
+  tlb_entries: 64
+
+  # TLB associativity
+  tlb_associativity: 4
+
+  # TLB hit latency (cycles)
+  tlb_hit_latency: 1
+
+  # Page walk latency (cycles)
+  page_walk_latency: 20
+
+  # Page fault penalty (cycles)
+  page_fault_penalty_cycles: 100
+
+  # Bandwidth utilization threshold
+  bandwidth_utilization_threshold: 0.90
+
+  # Bottleneck detection parameters
+  bottleneck_detection_contentions: 100
+  bottleneck_detection_bw_threshold: 0.90
+  bottleneck_detection_cycles: 1000
+
+#==============================================================================
+# SCHEDULER CONFIGURATION
+#==============================================================================
+scheduler:
+  # Maximum number of PEs to display in statistics
+  max_display_pes: 256
+
+  # Load-balanced scheduler parameters
+  load_balanced:
+    bar_length: 20
+    busy_penalty: 1
+
+  # Nearest-PE scheduler parameters
+  nearest:
+    penalty_threshold_cycles: 100
+
+#==============================================================================
+# PE STATISTICS THRESHOLDS
+#==============================================================================
+pe_stats:
+  utilization_threshold: 0.90
+  contention_threshold: 100
+  penalty_threshold_cycles: 1000
+
+#==============================================================================
+# OUTPUT CONFIGURATION
+#==============================================================================
+output:
+  stats_file: "results/stats.txt"
+  trace_file: "results/trace.out"
+  enable_detailed_stats: true
+  enable_tracing: false
+
+#==============================================================================
+# TEST/BENCHMARK DEFAULTS
+#==============================================================================
+test:
+  default_array_rows: 1024
+  default_array_cols: 1024
+  default_cycles: 10000
+
+#==============================================================================
+# STATISTICS AND OUTPUT
+#==============================================================================
+statistics:
+  # Statistics to collect
+  collect_memory_stats: true
+  collect_network_stats: true
+  collect_power_stats: true
+  collect_scheduler_stats: true
+
+  # Output formats: TXT, JSON, CSV, XML
+  output_formats:
+    - "TXT"
+    - "JSON"
+
+  # Generate detailed reports
+  detailed_reports: true
+
+  # Generate performance graphs
+  generate_graphs: false
+
+  # Histogram buckets for latency distribution
+  latency_histogram_buckets: 100
+
+#==============================================================================
+# ADVANCED SETTINGS
+#==============================================================================
+advanced:
+  # Enable checkpointing
+  checkpointing_enabled: false
+  checkpoint_interval: 1000000
+  checkpoint_dir: "checkpoints/"
+
+  # Enable trace generation
+  trace_generation: false
+  trace_dir: "traces/"
+  trace_format: "BINARY"  # Options: BINARY, TEXT, PROTOBUF
+
+  # Parallel simulation
+  parallel_host_device: true
+  num_threads: 0  # 0 = auto-detect
+
+  # Memory allocation
+  preallocate_memory: true
+  memory_pool_size_mb: 1024
+
+#==============================================================================
+# VALIDATION AND DEBUGGING
+#==============================================================================
+validation:
+  # Validate configuration on load
+  validate_on_load: true
+
+  # Check parameter ranges
+  check_ranges: true
+
+  # Verify file paths exist
+  verify_paths: true
+
+  # Strict mode (fail on warnings)
+  strict_mode: false
+
+# END OF CONFIGURATION

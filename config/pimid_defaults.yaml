@@ -1,0 +1,455 @@
+# PIMID Simulator - Comprehensive Default Configuration
+# This file documents ALL configurable parameters with their default values
+# Version: 2.0.0 (Updated to eliminate hardcoded values)
+
+#==============================================================================
+# SIMULATION SETTINGS
+#==============================================================================
+simulation:
+  # Simulation mode: co-simulation (host+device) or standalone
+  mode: "co-simulation"  # Options: co-simulation, standalone, host-only, device-only
+
+  # Total simulation cycles (0 = run until completion)
+  max_cycles: 0
+
+  # Warmup cycles before collecting statistics
+  warmup_cycles: 100000
+
+  # Statistics collection interval (cycles)
+  stats_interval: 10000
+
+  # Fast-forward mode for non-ROI regions
+  fast_forward: true
+
+  # Debug and logging
+  debug_mode: false
+  log_level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR
+  log_file: "logs/pimid.log"
+
+  # Output directory for results
+  output_dir: "results/"
+
+#==============================================================================
+# COMPONENT CONFIGURATION FILES
+#==============================================================================
+components:
+  # Host processor configuration
+  host_config: "config/host_config.yaml"
+
+  # PIM device configuration
+  device_config: "config/device_config.yaml"
+
+  # Memory system configuration
+  memory_config: "config/memory_config.yaml"
+
+  # Network-on-chip configuration
+  network_config: "config/network_config.yaml"
+
+  # Power modeling configuration
+  power_config: "config/power_config.yaml"
+
+#==============================================================================
+# COMMUNICATION SETTINGS (for co-simulation)
+#==============================================================================
+communication:
+  # Socket communication port (default: 9999)
+  port: 9999
+
+  # Host address for device to connect
+  host_address: "127.0.0.1"
+
+  # Bind address for server
+  bind_address: "0.0.0.0"
+
+  # Device connection delay (seconds)
+  device_delay_seconds: 2
+
+  # Connection timeout (seconds)
+  timeout: 30
+
+  # Maximum message size (MB)
+  max_message_size_mb: 100
+
+  # Maximum retries for failed operations
+  max_retries: 10
+
+  # Retry delay (seconds)
+  retry_delay_seconds: 1
+
+  # Message buffer size (bytes)
+  buffer_size: 4096
+
+  # Enable compression for large messages
+  compression: false
+
+#==============================================================================
+# MEMORY TECHNOLOGY
+#==============================================================================
+memory:
+  # Memory technology: DRAM, SRAM, STT_MRAM, PCM, ReRAM
+  technology: "DRAM"
+
+  # DRAM type (if technology is DRAM)
+  dram_type: "DDR4"  # Options: DDR3, DDR4, DDR5, HBM, HBM2, HBM3, LPDDR5
+
+  # Memory capacity (bytes)
+  capacity: "16GB"
+
+  # Number of memory channels
+  channels: 4
+
+  # Number of ranks per channel
+  ranks_per_channel: 2
+
+  # Number of banks per rank
+  banks_per_rank: 16
+
+#==============================================================================
+# MEMORY HIERARCHY CONFIGURATION
+#==============================================================================
+memory_hierarchy:
+  # Subarray configuration
+  subarray:
+    size_mb: 2
+
+  # Bank configuration
+  bank:
+    size_mb: 32
+
+  # Chip configuration
+  chip:
+    size_gb: 2
+
+  # Rank configuration
+  rank:
+    size_gb: 16
+
+#==============================================================================
+# MEMORY ACCESS PENALTIES (CYCLES)
+# These penalties are technology and placement-level dependent
+# Adjust based on your specific memory technology and system configuration
+#==============================================================================
+memory_access:
+  # Cross-subarray access penalty (within same bank)
+  cross_subarray_penalty_cycles: 50
+
+  # Cross-bank access penalty (within same chip)
+  cross_bank_penalty_cycles: 100
+
+  # Cross-chip access penalty (within same rank)
+  cross_chip_penalty_cycles: 150
+
+  # Cross-rank access penalty
+  cross_rank_penalty_cycles: 200
+
+  # Logic die to DRAM access penalty (for HBM/HMC)
+  logic_to_dram_penalty_cycles: 150
+
+#==============================================================================
+# PIM CONFIGURATION
+#==============================================================================
+pim:
+  # PE placement level: SUBARRAY, BANK, CHIP, RANK, LOGIC_DIE
+  pe_placement_level: "BANK"
+
+  # Number of PEs per placement level
+  num_pes_per_level: 1
+
+  # PE configuration
+  pe_frequency_mhz: 1000
+  pe_num_cores: 1
+  pe_has_l1_cache: true
+  pe_l1_size_kb: 32
+
+  # Addressing mode: UNIFIED or DISCRETE
+  addressing_mode: "UNIFIED"
+
+  # Task scheduler: NEAREST_PE, ROUND_ROBIN, LOAD_BALANCED, PRIORITY_BASED
+  scheduler: "NEAREST_PE"
+
+#==============================================================================
+# PE TIMING PARAMETERS (for standalone simulations)
+#==============================================================================
+pe:
+  # Fetch and decode stage latency (nanoseconds)
+  fetch_decode_ns: 2.0
+
+  # Execute/compare stage latency (nanoseconds)
+  execute_compare_ns: 1.0
+
+  # Branch misprediction penalty (nanoseconds)
+  branch_penalty_ns: 3.0
+
+  # Branch prediction accuracy (0.0 to 1.0)
+  branch_prediction_accuracy: 0.5
+
+#==============================================================================
+# CACHE HIERARCHY CONFIGURATION
+#==============================================================================
+caches:
+  # L1 Instruction Cache
+  l1i:
+    size_kb: 32
+    associativity: 8
+    line_size_bytes: 64
+
+  # L1 Data Cache
+  l1d:
+    size_kb: 32
+    associativity: 8
+    line_size_bytes: 64
+
+  # L2 Cache (Unified)
+  l2:
+    size_kb: 256
+    associativity: 8
+    line_size_bytes: 64
+
+  # L3 Cache (Last Level Cache)
+  l3:
+    size_kb: 8192
+    associativity: 16
+    line_size_bytes: 64
+
+#==============================================================================
+# OFFLOAD OVERHEAD CONFIGURATION
+#==============================================================================
+offload:
+  # Offload completion overhead (cycles)
+  completion_overhead_cycles: 500
+
+  # Offload start overhead (cycles)
+  offload_overhead_cycles: 1000
+
+#==============================================================================
+# NETWORK-ON-CHIP CONFIGURATION
+#==============================================================================
+network:
+  # Enable network modeling
+  enabled: true
+
+  # Network topology: MESH_2D, MESH_3D, TORUS_2D, CROSSBAR, DRAGONFLY, FAT_TREE
+  topology: "MESH_2D"
+
+  # Topology dimensions
+  num_rows: 4
+  num_cols: 4
+  num_layers: 1  # For 3D topologies
+
+  # Virtual channels
+  virtual_channels: 4
+
+  # Link parameters
+  link_width_bytes: 8
+  link_latency_cycles: 1
+
+  # Router parameters
+  router_latency_cycles: 2
+
+  # Buffer depths
+  input_buffer_depth: 8
+  output_buffer_depth: 4
+
+  # Component IDs
+  memory_controller_base_id: 1000
+  llc_id: 2000
+
+  # Routing algorithm: XY, XYZ, ADAPTIVE, WEST_FIRST, MINIMAL
+  routing: "XY"
+
+#==============================================================================
+# HOST/DEVICE ENGINE CONFIGURATION
+#==============================================================================
+host:
+  # Host-device synchronization interval (cycles)
+  sync_interval_cycles: 1000
+
+  # Polling sleep time (milliseconds)
+  poll_sleep_ms: 10
+
+device:
+  # Device-host synchronization interval (cycles)
+  sync_interval_cycles: 1000
+
+  # Default number of PEs (fallback if not specified)
+  default_num_pes: 16
+
+  # Task completion overhead (cycles)
+  completion_cycles: 100
+
+#==============================================================================
+# ADDRESS TRANSLATION CONFIGURATION
+#==============================================================================
+address_translation:
+  # Page size (bytes)
+  page_size_bytes: 4096
+
+  # TLB entries per PE
+  tlb_entries: 64
+
+  # TLB associativity
+  tlb_associativity: 4
+
+  # TLB hit latency (cycles)
+  tlb_hit_latency: 1
+
+  # Page walk latency (cycles)
+  page_walk_latency: 20
+
+  # Page fault penalty (cycles)
+  page_fault_penalty_cycles: 100
+
+  # Bandwidth utilization threshold for warnings (0.0 to 1.0)
+  bandwidth_utilization_threshold: 0.90
+
+  # Bottleneck detection parameters
+  bottleneck_detection_contentions: 100
+  bottleneck_detection_bw_threshold: 0.90
+  bottleneck_detection_cycles: 1000
+
+#==============================================================================
+# SCHEDULER CONFIGURATION
+#==============================================================================
+scheduler:
+  # Maximum number of PEs to display in statistics (for readability)
+  # This is only a display limit, actual scheduling uses actual num_pes
+  max_display_pes: 256
+
+  # Load-balanced scheduler parameters
+  load_balanced:
+    bar_length: 20  # Visual bar length in statistics
+    busy_penalty: 1  # Penalty for busy PEs
+
+  # Nearest-PE scheduler parameters
+  nearest:
+    penalty_threshold_cycles: 100  # Threshold for remote access warnings
+
+#==============================================================================
+# PE STATISTICS THRESHOLDS
+#==============================================================================
+pe_stats:
+  # PE utilization threshold for warnings (0.0 to 1.0)
+  utilization_threshold: 0.90
+
+  # Contention threshold for warnings
+  contention_threshold: 100
+
+  # Penalty threshold for warnings (cycles)
+  penalty_threshold_cycles: 1000
+
+#==============================================================================
+# OUTPUT CONFIGURATION
+#==============================================================================
+output:
+  # Statistics output file
+  stats_file: "results/stats.txt"
+
+  # Trace output file
+  trace_file: "results/trace.out"
+
+  # Enable detailed statistics collection
+  enable_detailed_stats: true
+
+  # Enable execution tracing
+  enable_tracing: false
+
+#==============================================================================
+# TEST/BENCHMARK DEFAULTS
+# Default parameters for co-simulation tests and benchmarks
+#==============================================================================
+test:
+  # Default array dimensions for matrix operations
+  default_array_rows: 1024
+  default_array_cols: 1024
+
+  # Default simulation cycles for tests
+  default_cycles: 10000
+
+#==============================================================================
+# POWER MODELING
+#==============================================================================
+power:
+  # Enable power modeling
+  enabled: true
+
+  # Technology node (nm)
+  tech_node_nm: 22
+
+  # Device type: HP (high-performance), LSTP (low-standby-power), LOP (low-operating-power)
+  device_type: "HP"
+
+  # Operating temperature (Kelvin)
+  temperature_k: 350
+
+  # Operating frequency (GHz)
+  frequency_ghz: 2.0
+
+  # Power components to model
+  model_host: true
+  model_device: true
+  model_memory: true
+  model_network: true
+
+#==============================================================================
+# STATISTICS AND OUTPUT
+#==============================================================================
+statistics:
+  # Statistics to collect
+  collect_memory_stats: true
+  collect_network_stats: true
+  collect_power_stats: true
+  collect_scheduler_stats: true
+
+  # Output formats: TXT, JSON, CSV, XML
+  output_formats:
+    - "TXT"
+    - "JSON"
+
+  # Generate detailed reports
+  detailed_reports: true
+
+  # Generate performance graphs
+  generate_graphs: false
+
+  # Histogram buckets for latency distribution
+  latency_histogram_buckets: 100
+
+#==============================================================================
+# ADVANCED SETTINGS
+#==============================================================================
+advanced:
+  # Enable checkpointing
+  checkpointing_enabled: false
+  checkpoint_interval: 1000000
+  checkpoint_dir: "checkpoints/"
+
+  # Enable trace generation
+  trace_generation: false
+  trace_dir: "traces/"
+  trace_format: "BINARY"  # Options: BINARY, TEXT, PROTOBUF
+
+  # Parallel simulation
+  parallel_host_device: true
+  num_threads: 0  # 0 = auto-detect
+
+  # Memory allocation
+  preallocate_memory: true
+  memory_pool_size_mb: 1024
+
+#==============================================================================
+# VALIDATION AND DEBUGGING
+#==============================================================================
+validation:
+  # Validate configuration on load
+  validate_on_load: true
+
+  # Check parameter ranges
+  check_ranges: true
+
+  # Verify file paths exist
+  verify_paths: true
+
+  # Strict mode (fail on warnings)
+  strict_mode: false
+
+# END OF CONFIGURATION
