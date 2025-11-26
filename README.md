@@ -253,9 +253,6 @@ pimid-dev/
 │   ├── results/                    # Test results
 │   │   └── zsim_external_1000/    # Latest results
 │   └── benchmarks/                 # Workload sources
-├── DAC26/                           # DAC'26 research
-│   ├── configs/                    # LIBCom configurations
-│   └── workloads_pimid/            # 16 compiled workloads
 ├── config/                          # Default configurations
 └── build/                           # Build artifacts
 ```
@@ -316,7 +313,6 @@ PIMID is released under the GPL-2.0 License. See [LICENSE](LICENSE) for details.
    - 6 network topologies (Mesh, Torus, Fat-tree, Dragonfly, Crossbar, H-tree)
    - 16 workloads (message passing + shared memory)
 ✅ **Well Documented**: [docs/README.md](docs/README.md) - organized documentation index
-✅ **Research Ready**: LIBCom evaluation, energy modeling, scaling studies
 
 ---
 
