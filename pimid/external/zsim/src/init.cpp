@@ -31,6 +31,9 @@
 #include <string>
 #include <sys/time.h>
 #include <vector>
+
+// Use std namespace (needed with PIN_CRT to make std types visible)
+using namespace std;
 #include "cache.h"
 #include "cache_arrays.h"
 #include "config.h"

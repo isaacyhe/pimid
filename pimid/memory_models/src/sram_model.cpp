@@ -242,8 +242,17 @@ bool SRAMModel::canAccept(const MemoryRequest& req) {
 void SRAMModel::tick() {
     current_cycle_++;
 
-    // TODO: When CACTI is integrated, update dynamic energy
-    // For now, accumulate energy based on current activity
+#ifdef HAVE_CACTI
+    // Re-query CACTI periodically to update energy models based on temperature
+    // (temperature changes due to activity can affect leakage)
+    if (cacti_wrapper_ && cacti_wrapper_->isValid()) {
+        // Update leakage power based on temperature profile (every 100K cycles)
+        if (current_cycle_ % 100000 == 0) {
+            // CACTI provides activity-based power estimation
+            leakage_power_ = cacti_wrapper_->getLeakagePower() / 1000.0;  // mW to W
+        }
+    }
+#endif
 
     // Process pending requests
     if (!pending_requests_.empty()) {
@@ -254,7 +263,7 @@ void SRAMModel::tick() {
         pending_requests_.pop();
     }
 
-    // Leakage power is constant
+    // Leakage power is constant (but scaled by CACTI if available)
 }
 
 Cycle SRAMModel::getLatency(MemoryRequestType type) const {

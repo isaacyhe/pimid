@@ -116,19 +116,28 @@ public:
                 c = std::toupper(c);
             }
 
-            // Handle PE type
+            // Handle PE type and determine memory tech index
+            // Note: "simple_alu" has underscore, so it spans parts[2] and parts[3]
+            size_t mem_tech_idx = 3;  // Default index for memory tech
+
             if (parts[2] == "inorder") {
                 config.pe_type = "in_order_core";
-            } else if (parts[2] == "simple") {
+            } else if (parts[2] == "simple" && parts.size() > 4 && parts[3] == "alu") {
+                // Handle "simple_alu" which spans two parts
                 config.pe_type = "simple_alu";
+                mem_tech_idx = 4;  // Skip "alu" to get memory tech
             } else if (parts[2] == "ooo") {
                 config.pe_type = "out_of_order_core";
             } else {
                 config.pe_type = "in_order_core";  // default
             }
 
-            // Memory technology
-            config.memory_tech = parts[3];
+            // Memory technology (index depends on PE type parsing)
+            if (mem_tech_idx < parts.size()) {
+                config.memory_tech = parts[mem_tech_idx];
+            } else {
+                config.memory_tech = "DRAM";  // fallback
+            }
 
             // Convert memory tech to uppercase
             for (char& c : config.memory_tech) {

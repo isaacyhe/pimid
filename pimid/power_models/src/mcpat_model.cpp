@@ -2,7 +2,9 @@
 #include <iostream>
 #include <iomanip>
 #include <fstream>
+#include <sstream>
 #include <cmath>
+#include <yaml-cpp/yaml.h>
 
 namespace pimid {
 
@@ -18,10 +20,13 @@ McPATModel::McPATModel(const TechnologyParams& params)
 }
 
 McPATModel::~McPATModel() {
-    // TODO: Clean up McPAT instance when integrated
-    // if (mcpat_instance_) {
-    //     delete static_cast<McPATWrapper*>(mcpat_instance_);
-    // }
+#ifdef HAVE_MCPAT
+    // Clean up McPAT instance
+    if (mcpat_instance_) {
+        // McPAT cleanup happens through finalize()
+        mcpat_instance_ = nullptr;
+    }
+#endif
 }
 
 void McPATModel::initialize() {
@@ -30,8 +35,30 @@ void McPATModel::initialize() {
     // Initialize default configurations for different components
     initializeDefaultConfigs();
 
-    // TODO: Initialize McPAT instance when integrated
-    // mcpat_instance_ = new McPATWrapper(tech_params_);
+#ifdef HAVE_MCPAT
+    // Initialize McPAT instance
+    try {
+        // Generate McPAT configuration XML based on technology params
+        std::string mcpat_config = generateMcPATConfigXML();
+
+        // Write config to temp file for McPAT
+        std::ofstream config_file("/tmp/mcpat_config.xml");
+        if (config_file.is_open()) {
+            config_file << mcpat_config;
+            config_file.close();
+        }
+
+        // Note: Actual McPAT initialization would be done via:
+        // mcpat_instance_ = new McPATProcessor(xml_config);
+        // For now, we use analytical models that match McPAT's methodology
+        std::cout << "[McPATModel] McPAT-compatible configuration generated" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "[McPATModel] McPAT init error: " << e.what() << std::endl;
+        std::cerr << "[McPATModel] Using analytical power model" << std::endl;
+    }
+#else
+    std::cout << "[McPATModel] McPAT not linked, using analytical power model" << std::endl;
+#endif
 
     std::cout << "[McPATModel] Technology parameters:" << std::endl;
     std::cout << "  Node: " << tech_params_.tech_node_nm << " nm" << std::endl;
@@ -43,10 +70,92 @@ void McPATModel::initialize() {
 }
 
 void McPATModel::loadConfig(const std::string& config_path) {
-    // TODO: Parse YAML configuration file
-    // For now, use default configuration
     std::cout << "[McPATModel] Loading configuration from: " << config_path << std::endl;
-    std::cout << "[McPATModel] Using default McPAT configuration" << std::endl;
+
+    try {
+        YAML::Node config = YAML::LoadFile(config_path);
+
+        if (!config["power_model"]) {
+            std::cout << "[McPATModel] No 'power_model' section found, using defaults" << std::endl;
+            return;
+        }
+
+        YAML::Node power_cfg = config["power_model"];
+
+        // Load technology parameters
+        if (power_cfg["technology"]) {
+            auto tech = power_cfg["technology"];
+            if (tech["node_nm"]) {
+                tech_params_.tech_node_nm = tech["node_nm"].as<int>();
+            }
+            if (tech["device_type"]) {
+                tech_params_.device_type = tech["device_type"].as<std::string>();
+            }
+            if (tech["temperature_k"]) {
+                tech_params_.temperature_k = tech["temperature_k"].as<int>();
+            }
+            if (tech["frequency_ghz"]) {
+                tech_params_.frequency_ghz = tech["frequency_ghz"].as<double>();
+            }
+            if (tech["vdd"]) {
+                tech_params_.supply_voltage_v = tech["vdd"].as<double>();
+            }
+            if (tech["supply_voltage_v"]) {
+                tech_params_.supply_voltage_v = tech["supply_voltage_v"].as<double>();
+            }
+        }
+
+        // Load core configuration
+        if (power_cfg["core"]) {
+            auto core = power_cfg["core"];
+            CoreConfig core_cfg;
+            if (core["pipeline_depth"]) core_cfg.pipeline_depth = core["pipeline_depth"].as<int>();
+            if (core["issue_width"]) core_cfg.issue_width = core["issue_width"].as<int>();
+            if (core["alu_count"]) core_cfg.alu_count = core["alu_count"].as<int>();
+            if (core["mul_count"]) core_cfg.mul_count = core["mul_count"].as<int>();
+            if (core["fpu_count"]) core_cfg.fpu_count = core["fpu_count"].as<int>();
+            core_configs_[PowerComponent::CORE] = core_cfg;
+        }
+
+        // Load cache configurations
+        auto loadCacheConfig = [&](const std::string& key, PowerComponent comp) {
+            if (power_cfg[key]) {
+                auto cache = power_cfg[key];
+                CacheConfig cache_cfg;
+                if (cache["size_kb"]) cache_cfg.size_bytes = cache["size_kb"].as<uint64_t>() * 1024;
+                if (cache["line_size"]) cache_cfg.line_size = cache["line_size"].as<uint32_t>();
+                if (cache["associativity"]) cache_cfg.associativity = cache["associativity"].as<uint32_t>();
+                if (cache["banks"]) cache_cfg.banks = cache["banks"].as<uint32_t>();
+                if (cache["replacement"]) cache_cfg.replacement_policy = cache["replacement"].as<std::string>();
+                cache_configs_[comp] = cache_cfg;
+            }
+        };
+
+        loadCacheConfig("l1_cache", PowerComponent::L1_CACHE);
+        loadCacheConfig("l2_cache", PowerComponent::L2_CACHE);
+        loadCacheConfig("l3_cache", PowerComponent::L3_CACHE);
+
+        // Load PE configuration (similar to core but potentially simpler)
+        if (power_cfg["pe"]) {
+            auto pe = power_cfg["pe"];
+            CoreConfig pe_cfg;
+            if (pe["pipeline_depth"]) pe_cfg.pipeline_depth = pe["pipeline_depth"].as<int>();
+            if (pe["issue_width"]) pe_cfg.issue_width = pe["issue_width"].as<int>();
+            if (pe["alu_count"]) pe_cfg.alu_count = pe["alu_count"].as<int>();
+            if (pe["mul_count"]) pe_cfg.mul_count = pe["mul_count"].as<int>();
+            if (pe["fpu_count"]) pe_cfg.fpu_count = pe["fpu_count"].as<int>();
+            core_configs_[PowerComponent::PE] = pe_cfg;
+        }
+
+        std::cout << "[McPATModel] Successfully loaded configuration from YAML" << std::endl;
+
+    } catch (const YAML::Exception& e) {
+        std::cerr << "[McPATModel] YAML parsing error: " << e.what() << std::endl;
+        std::cerr << "[McPATModel] Using default configuration" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "[McPATModel] Error loading config: " << e.what() << std::endl;
+        std::cerr << "[McPATModel] Using default configuration" << std::endl;
+    }
 }
 
 PowerMetrics McPATModel::estimatePower(PowerComponent component,
@@ -554,6 +663,121 @@ std::string McPATModel::componentToString(PowerComponent component) const {
         case PowerComponent::PE: return "Processing Element";
         default: return "Unknown";
     }
+}
+
+std::string McPATModel::generateMcPATConfigXML() const {
+    std::ostringstream xml;
+
+    xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    xml << "<component id=\"root\" name=\"root\">\n";
+
+    // System parameters
+    xml << "  <param name=\"number_of_cores\" value=\"1\"/>\n";
+    xml << "  <param name=\"number_of_L1Directories\" value=\"0\"/>\n";
+    xml << "  <param name=\"number_of_L2Directories\" value=\"0\"/>\n";
+    xml << "  <param name=\"number_of_L2s\" value=\"1\"/>\n";
+    xml << "  <param name=\"number_of_L3s\" value=\"1\"/>\n";
+    xml << "  <param name=\"number_of_NoCs\" value=\"1\"/>\n";
+    xml << "  <param name=\"homogeneous_cores\" value=\"1\"/>\n";
+    xml << "  <param name=\"homogeneous_L2s\" value=\"1\"/>\n";
+    xml << "  <param name=\"homogeneous_L1s\" value=\"1\"/>\n";
+    xml << "  <param name=\"homogeneous_L3s\" value=\"1\"/>\n";
+    xml << "  <param name=\"homogeneous_ccs\" value=\"1\"/>\n";
+    xml << "  <param name=\"homogeneous_NoCs\" value=\"1\"/>\n";
+
+    // Technology parameters
+    xml << "  <param name=\"core_tech_node\" value=\"" << tech_params_.tech_node_nm << "\"/>\n";
+    xml << "  <param name=\"target_core_clockrate\" value=\""
+        << static_cast<int>(tech_params_.frequency_ghz * 1000) << "\"/>\n";
+    xml << "  <param name=\"temperature\" value=\""
+        << static_cast<int>(tech_params_.temperature_k - 273.15) << "\"/>\n";
+
+    // Architecture parameters
+    xml << "  <param name=\"number_cache_levels\" value=\"3\"/>\n";
+    xml << "  <param name=\"interconnect_projection_type\" value=\"0\"/>\n";
+
+    // Device type: 0=HP, 1=LSTP, 2=LOP
+    int device_type_int = 0;
+    if (tech_params_.device_type == "LSTP") device_type_int = 1;
+    else if (tech_params_.device_type == "LOP") device_type_int = 2;
+    xml << "  <param name=\"device_type\" value=\"" << device_type_int << "\"/>\n";
+
+    xml << "  <param name=\"longer_channel_device\" value=\"1\"/>\n";
+    xml << "  <param name=\"power_gating\" value=\"0\"/>\n";
+    xml << "  <param name=\"machine_bits\" value=\"64\"/>\n";
+    xml << "  <param name=\"virtual_address_width\" value=\"64\"/>\n";
+    xml << "  <param name=\"physical_address_width\" value=\"48\"/>\n";
+    xml << "  <param name=\"virtual_memory_page_size\" value=\"4096\"/>\n";
+
+    // Core configuration
+    auto core_it = core_configs_.find(PowerComponent::CORE);
+    if (core_it != core_configs_.end()) {
+        const auto& cfg = core_it->second;
+        xml << "  <component id=\"system.core0\" name=\"core0\">\n";
+        xml << "    <param name=\"clock_rate\" value=\""
+            << static_cast<int>(tech_params_.frequency_ghz * 1000) << "\"/>\n";
+        xml << "    <param name=\"instruction_length\" value=\"32\"/>\n";
+        xml << "    <param name=\"opcode_width\" value=\"7\"/>\n";
+        xml << "    <param name=\"x86\" value=\"0\"/>\n";
+        xml << "    <param name=\"machine_type\" value=\"0\"/>\n";
+        xml << "    <param name=\"number_hardware_threads\" value=\"1\"/>\n";
+        xml << "    <param name=\"fetch_width\" value=\"" << cfg.issue_width << "\"/>\n";
+        xml << "    <param name=\"decode_width\" value=\"" << cfg.issue_width << "\"/>\n";
+        xml << "    <param name=\"issue_width\" value=\"" << cfg.issue_width << "\"/>\n";
+        xml << "    <param name=\"commit_width\" value=\"" << cfg.issue_width << "\"/>\n";
+        xml << "    <param name=\"pipeline_depth\" value=\"" << cfg.pipeline_depth << "\"/>\n";
+        xml << "    <param name=\"ALU_per_core\" value=\"" << cfg.alu_count << "\"/>\n";
+        xml << "    <param name=\"MUL_per_core\" value=\"" << cfg.mul_count << "\"/>\n";
+        xml << "    <param name=\"FPU_per_core\" value=\"" << cfg.fpu_count << "\"/>\n";
+        xml << "  </component>\n";
+    }
+
+    // L1 Cache configuration
+    auto l1_it = cache_configs_.find(PowerComponent::L1_CACHE);
+    if (l1_it != cache_configs_.end()) {
+        const auto& cfg = l1_it->second;
+        xml << "  <component id=\"system.L1i\" name=\"L1i\">\n";
+        xml << "    <param name=\"size\" value=\"" << cfg.size_bytes << "\"/>\n";
+        xml << "    <param name=\"block_size\" value=\"" << cfg.line_size << "\"/>\n";
+        xml << "    <param name=\"associativity\" value=\"" << cfg.associativity << "\"/>\n";
+        xml << "    <param name=\"banks\" value=\"" << cfg.banks << "\"/>\n";
+        xml << "  </component>\n";
+
+        xml << "  <component id=\"system.L1d\" name=\"L1d\">\n";
+        xml << "    <param name=\"size\" value=\"" << cfg.size_bytes << "\"/>\n";
+        xml << "    <param name=\"block_size\" value=\"" << cfg.line_size << "\"/>\n";
+        xml << "    <param name=\"associativity\" value=\"" << cfg.associativity << "\"/>\n";
+        xml << "    <param name=\"banks\" value=\"" << cfg.banks << "\"/>\n";
+        xml << "  </component>\n";
+    }
+
+    // L2 Cache configuration
+    auto l2_it = cache_configs_.find(PowerComponent::L2_CACHE);
+    if (l2_it != cache_configs_.end()) {
+        const auto& cfg = l2_it->second;
+        xml << "  <component id=\"system.L2\" name=\"L2\">\n";
+        xml << "    <param name=\"size\" value=\"" << cfg.size_bytes << "\"/>\n";
+        xml << "    <param name=\"block_size\" value=\"" << cfg.line_size << "\"/>\n";
+        xml << "    <param name=\"associativity\" value=\"" << cfg.associativity << "\"/>\n";
+        xml << "    <param name=\"banks\" value=\"" << cfg.banks << "\"/>\n";
+        xml << "  </component>\n";
+    }
+
+    // L3 Cache configuration
+    auto l3_it = cache_configs_.find(PowerComponent::L3_CACHE);
+    if (l3_it != cache_configs_.end()) {
+        const auto& cfg = l3_it->second;
+        xml << "  <component id=\"system.L3\" name=\"L3\">\n";
+        xml << "    <param name=\"size\" value=\"" << cfg.size_bytes << "\"/>\n";
+        xml << "    <param name=\"block_size\" value=\"" << cfg.line_size << "\"/>\n";
+        xml << "    <param name=\"associativity\" value=\"" << cfg.associativity << "\"/>\n";
+        xml << "    <param name=\"banks\" value=\"" << cfg.banks << "\"/>\n";
+        xml << "  </component>\n";
+    }
+
+    xml << "</component>\n";
+
+    return xml.str();
 }
 
 } // namespace pimid

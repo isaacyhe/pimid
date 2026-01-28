@@ -6,6 +6,8 @@
 #include "memory/sttmram_architecture.h"
 #include <queue>
 #include <memory>
+#include <map>
+#include <unordered_map>
 
 namespace pimid {
 
@@ -102,6 +104,11 @@ private:
 
     // Endurance tracking
     void updateEndurance(Address addr);
+    void initializeNVSim();
+
+    // Per-bank and per-page write counts for endurance tracking
+    std::map<uint32_t, uint64_t> bank_write_counts_;
+    std::unordered_map<uint64_t, uint64_t> page_write_counts_;
 };
 
 } // namespace pimid

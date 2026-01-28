@@ -1,6 +1,8 @@
 #include "host_engine/host_engine.h"
 #include "communication/socket_comm.h"
 #include "config/config_manager.h"
+#include "execution_model/zsim_execution_model.h"
+#include "execution_model/event_driven_execution_model.h"
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -13,6 +15,7 @@ HostEngine::HostEngine(const PIMIDConfig& config, int comm_port)
     : SimulationEngine(SimulationDomain::HOST, config),
       comm_port_(comm_port),
       device_connected_(false),
+      execution_model_type_(ExecutionModelType::EVENT_DRIVEN_ANALYTICAL),
       zsim_instance_(nullptr),
       total_offloads_(0),
       total_offload_cycles_(0) {
@@ -40,11 +43,24 @@ HostEngine::HostEngine(const PIMIDConfig& config, int comm_port)
     cache_config_.l3_associativity = static_cast<uint32_t>(
         cfg.getInt("host.caches.l3.associativity", 16));
 
+    // Load execution model type from configuration
+    // Options: "zsim" | "execution_driven" | "analytical" | "event_driven"
+    // Note: "hybrid" is deprecated - host and device are now configured independently
+    std::string exec_model_name = cfg.get("host.execution_model", "analytical");
+    if (exec_model_name == "zsim" || exec_model_name == "execution_driven") {
+        execution_model_type_ = ExecutionModelType::ZSIM_EXECUTION_DRIVEN;
+    } else {
+        // Default to analytical (fast, event-driven)
+        // "hybrid" and "event_driven" both map to analytical
+        execution_model_type_ = ExecutionModelType::EVENT_DRIVEN_ANALYTICAL;
+    }
+
     std::cout << "Host Engine cache configuration loaded from config" << std::endl;
     std::cout << "  L1I: " << cache_config_.l1i_size_kb << " KB, "
               << "L1D: " << cache_config_.l1d_size_kb << " KB, "
               << "L2: " << cache_config_.l2_size_kb << " KB, "
               << "L3: " << cache_config_.l3_size_kb << " KB" << std::endl;
+    std::cout << "  Execution Model: " << exec_model_name << std::endl;
 }
 
 HostEngine::~HostEngine() {
@@ -75,21 +91,39 @@ void HostEngine::run(Cycle num_cycles) {
 
     Cycle target_cycle = current_cycle_ + num_cycles;
 
-    while (current_cycle_ < target_cycle) {
-        // Check for messages from device
-        handleDeviceMessages();
+    // Use execution model if available
+    if (execution_model_) {
+        // Event-driven/analytical model: advance in larger chunks efficiently
+        const Cycle chunk_size = 1000;
 
-        // Execute one cycle of simulation
-        // In a real implementation, this would call ZSim's tick/advance
-        // For now, just advance the cycle counter
-        advanceCycle();
+        while (current_cycle_ < target_cycle) {
+            // Check for messages from device
+            handleDeviceMessages();
 
-        // Periodically synchronize with device (every 1000 cycles)
-        if (current_cycle_ % 1000 == 0) {
-            synchronizeWithDevice();
+            // Advance execution model
+            Cycle cycles_to_advance = std::min(chunk_size, target_cycle - current_cycle_);
+            execution_model_->advanceCycles(cycles_to_advance);
+            current_cycle_ = execution_model_->getCurrentCycle();
+
+            // Synchronize with device periodically
+            if (current_cycle_ % 1000 == 0) {
+                synchronizeWithDevice();
+            }
+
+            stats_.total_cycles = current_cycle_;
         }
+    } else {
+        // Fallback: simple cycle-by-cycle advance
+        while (current_cycle_ < target_cycle) {
+            handleDeviceMessages();
+            advanceCycle();
 
-        stats_.total_cycles = current_cycle_;
+            if (current_cycle_ % 1000 == 0) {
+                synchronizeWithDevice();
+            }
+
+            stats_.total_cycles = current_cycle_;
+        }
     }
 
     std::cout << "Host Engine completed " << num_cycles << " cycles" << std::endl;
@@ -97,6 +131,17 @@ void HostEngine::run(Cycle num_cycles) {
 
 void HostEngine::finalize() {
     std::cout << "Finalizing Host Engine..." << std::endl;
+
+    // Finalize execution model
+    if (execution_model_) {
+        // Get final stats from execution model
+        auto exec_stats = execution_model_->getStats();
+        stats_.total_cycles = std::max(stats_.total_cycles, exec_stats.total_cycles);
+        stats_.total_instructions = exec_stats.total_instructions;
+
+        execution_model_->finalize();
+        execution_model_.reset();
+    }
 
     // Send terminate message to device
     if (device_connected_ && device_comm_) {
@@ -121,37 +166,40 @@ void HostEngine::finalize() {
 
 void HostEngine::loadBinary(const std::string& binary_path) {
     std::cout << "Loading binary: " << binary_path << std::endl;
-    // TODO: Implement binary loading via ZSim
-    //
-    // IMPLEMENTATION GUIDE:
-    // ZSim uses Pin for binary instrumentation. Integration requires:
-    // 1. Initialize Pin tool with binary path
-    // 2. Set up callbacks for memory operations and instructions
-    // 3. Create ZSim configuration with memory hierarchy
-    // 4. Launch Pin with the binary
-    //
-    // Key ZSim integration points (see pimid/external/zsim/):
-    // - zsim_harness.cpp: Main ZSim entry point
-    // - pin_cmd.cpp: Pin command-line setup
-    // - zsim.cpp: Core simulation loop
-    //
-    // Example integration pattern:
-    //   zsim_instance_ = new ZsimHarness(binary_path);
-    //   zsim_instance_->setMemoryHierarchy(memory_hierarchy_);
-    //   zsim_instance_->initialize();
-    //
-    // For now, just store the path
+
+    // Store binary path for later use
+    binary_path_ = binary_path;
+
+    // If using ZSim execution model, launch simulation
+    if (execution_model_ &&
+        execution_model_->getType() == ExecutionModelType::ZSIM_EXECUTION_DRIVEN) {
+
+        auto* zsim_model = dynamic_cast<ZSimExecutionModel*>(execution_model_.get());
+        if (zsim_model) {
+            std::cout << "Launching ZSim simulation for binary: " << binary_path << std::endl;
+
+            // Launch ZSim with the binary
+            if (!zsim_model->launchSimulation(binary_path, binary_args_)) {
+                std::cerr << "Warning: Failed to launch ZSim simulation" << std::endl;
+                std::cerr << "  Ensure PIN_HOME is set and ZSim is built" << std::endl;
+                std::cerr << "  Falling back to analytical model" << std::endl;
+            }
+        }
+    }
+    // For analytical model, binary is used for workload characterization
+    // (e.g., extracting task parameters from profiling data)
 }
 
 void HostEngine::setArguments(int argc, char** argv) {
     std::cout << "Setting program arguments (argc=" << argc << ")" << std::endl;
-    // TODO: Pass arguments to ZSim
-    //
-    // IMPLEMENTATION GUIDE:
-    // ZSim/Pin needs program arguments for proper binary execution:
-    //   zsim_instance_->setProgramArguments(argc, argv);
-    // Or via Pin command builder:
-    //   pin_cmd.addApplicationArgs(argc, argv);
+
+    // Store arguments for later use with ZSim
+    binary_args_.clear();
+    for (int i = 0; i < argc; i++) {
+        if (argv[i]) {
+            binary_args_.push_back(argv[i]);
+        }
+    }
 }
 
 void HostEngine::offloadToDevice(Address code_addr, Address data_addr, uint64_t data_size) {
@@ -237,9 +285,40 @@ void HostEngine::setCacheConfig(const HostCacheConfig& cache) {
 }
 
 void HostEngine::initializeZSim() {
-    std::cout << "Initializing ZSim for host simulation..." << std::endl;
-    // TODO: Actual ZSim initialization
-    // For now, just set to nullptr to indicate it's a placeholder
+    std::cout << "Initializing execution model for host simulation..." << std::endl;
+
+    // Create execution model using factory
+    execution_model_ = ExecutionModelFactory::createExecutionModel(
+        execution_model_type_, config_, SimulationDomain::HOST);
+
+    if (!execution_model_) {
+        throw std::runtime_error("Failed to create execution model");
+    }
+
+    // Get config file path for execution model
+    auto& cfg = pimid::config::ConfigManager::getInstance();
+    std::string config_file = cfg.get("host.execution_config", "");
+
+    // Initialize the execution model
+    if (!execution_model_->initialize(config_file, SimulationDomain::HOST)) {
+        throw std::runtime_error("Failed to initialize execution model");
+    }
+
+    // Register memory model with execution model
+    if (memory_model_) {
+        execution_model_->registerMemoryModel(memory_model_);
+    }
+
+    // Register task completion callback
+    execution_model_->registerTaskCompleteCallback(
+        [this](const Task& task, Cycle completion_cycle) {
+            stats_.total_tasks++;
+            current_cycle_ = std::max(current_cycle_, completion_cycle);
+        });
+
+    std::cout << "Execution model initialized: " << execution_model_->getName() << std::endl;
+
+    // Legacy pointer for backwards compatibility
     zsim_instance_ = nullptr;
 }
 
@@ -274,9 +353,41 @@ void HostEngine::handleDeviceMessages() {
                 break;
 
             case MessageType::MEMORY_REQUEST:
-                // Handle cross-domain memory request
-                std::cout << "Received memory request from device" << std::endl;
-                // TODO: Process memory request and send response
+                // Handle cross-domain memory request from device
+                {
+                    std::cout << "Received memory request from device: addr=0x"
+                              << std::hex << msg.addr << std::dec
+                              << " size=" << msg.size << std::endl;
+
+                    // Process the memory request
+                    MemoryRequest req;
+                    req.addr = msg.addr;
+                    req.size = msg.size;
+                    req.type = (msg.data.size() > 0) ? MemoryRequestType::WRITE : MemoryRequestType::READ;
+
+                    Cycle latency = 0;
+                    if (memory_model_) {
+                        latency = memory_model_->access(req);
+                    } else {
+                        latency = 100;  // Default latency when no memory model
+                    }
+
+                    // Send response back to device
+                    CommMessage response;
+                    response.type = MessageType::MEMORY_RESPONSE;
+                    response.timestamp = latency;
+                    response.src_domain = SimulationDomain::HOST;
+                    response.dst_domain = SimulationDomain::DEVICE;
+                    response.addr = msg.addr;
+                    response.size = msg.size;
+                    response.request_id = msg.request_id;
+
+                    if (!device_comm_->sendMessage(response)) {
+                        std::cerr << "Failed to send memory response to device" << std::endl;
+                    }
+
+                    stats_.memory_accesses++;
+                }
                 break;
 
             case MessageType::SYNC_REQUEST:

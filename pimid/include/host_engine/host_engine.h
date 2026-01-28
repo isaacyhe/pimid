@@ -83,6 +83,10 @@ private:
     // Address translation
     std::unique_ptr<AddressTranslator> addr_translator_;
 
+    // Binary loading
+    std::string binary_path_;
+    std::vector<std::string> binary_args_;
+
     // Offload tracking
     struct OffloadRequest {
         Address code_addr;

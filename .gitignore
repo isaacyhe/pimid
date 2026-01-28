@@ -90,3 +90,7 @@ results/
 quick_test_output.log
 benchmark_test_results.log
 pimid/external/zsim/.sconsign.dblite
+
+# Intel PIN (large binary, download separately)
+pimid/external/pin-*
+*.tar.gz

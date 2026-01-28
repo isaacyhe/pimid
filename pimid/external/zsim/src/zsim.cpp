@@ -64,6 +64,16 @@
 
 //#include <signal.h> //can't include this, conflicts with PIN's
 
+// Explicit using declarations for std types (needed with PIN_CRT)
+using std::cerr;
+using std::cout;
+using std::endl;
+using std::ifstream;
+using std::ofstream;
+using std::string;
+using std::stringstream;
+using std::vector;
+
 /* Command-line switches (used to pass info from harness that cannot be passed through the config file, most config is file-based) */
 
 KNOB<INT32> KnobProcIdx(KNOB_MODE_WRITEONCE, "pintool",

@@ -3,6 +3,14 @@
 
 #include "memory_model.h"
 #include <queue>
+#include <map>
+#include <unordered_map>
+#include <memory>
+
+// Forward declaration
+namespace pimid {
+class NVSimWrapper;
+}
 
 namespace pimid {
 
@@ -58,7 +66,10 @@ private:
 
     NVMConfig nvm_config_;
 
-    // NVSim interface (placeholder - will integrate actual NVSim)
+    // NVSim wrapper for accurate modeling (when HAVE_NVSIM defined)
+    std::unique_ptr<NVSimWrapper> nvsim_wrapper_;
+
+    // Legacy placeholder (deprecated)
     void* nvsim_instance_;
 
     // Request queue
@@ -83,6 +94,11 @@ private:
 
     // Endurance tracking
     void updateEndurance(Address addr);
+    void initializeNVSim();
+
+    // Per-bank and per-page write counts for endurance tracking
+    std::map<uint32_t, uint64_t> bank_write_counts_;
+    std::unordered_map<uint64_t, uint64_t> page_write_counts_;
 };
 
 } // namespace pimid

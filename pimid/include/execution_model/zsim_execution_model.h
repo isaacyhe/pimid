@@ -5,12 +5,16 @@
 #include <atomic>
 #include <thread>
 #include <mutex>
+#include <memory>
 
 // Forward declarations for ZSim types
 struct GlobSimInfo;
 class Core;
 
 namespace pimid {
+
+// Forward declaration for ZSim subprocess launcher
+class ZSimLauncher;
 
 /**
  * @brief ZSim-based execution-driven model (Option 3)
@@ -86,6 +90,30 @@ public:
      */
     void configurePIMMode(bool enable_pim, uint32_t num_pim_cores);
 
+    /**
+     * @brief Launch ZSim simulation with a binary
+     * @param binary_path Path to the binary to simulate
+     * @param args Command line arguments for the binary
+     * @return true on successful launch
+     *
+     * ZSim runs as a subprocess using Intel PIN for binary instrumentation.
+     * This method generates a ZSim config, launches the harness, and monitors
+     * execution. Results are parsed from ZSim output files.
+     */
+    bool launchSimulation(const std::string& binary_path,
+                          const std::vector<std::string>& args = {});
+
+    /**
+     * @brief Wait for ZSim simulation to complete
+     * @return Exit code from ZSim (0 = success)
+     */
+    int waitForCompletion();
+
+    /**
+     * @brief Check if ZSim simulation is running
+     */
+    bool isSimulationRunning() const;
+
 private:
     // ZSim instance
     GlobSimInfo* zsim_glob_info_;
@@ -113,10 +141,18 @@ private:
     std::atomic<bool> initialized_;
     std::atomic<bool> idle_;
 
+    // ZSim subprocess launcher
+    std::unique_ptr<ZSimLauncher> zsim_launcher_;
+    std::string output_dir_;
+
     // Internal helpers
     void initializeZSim(const std::string& config_file);
     void setupMemoryInterception();
     void connectToRamulator();
+    bool parseZSimConfig(const std::string& config_file);
+    std::string generateZSimConfig(const std::string& binary_path,
+                                   const std::vector<std::string>& args);
+    void parseZSimOutput();
 
     // ZSim callbacks (static methods called by ZSim)
     static void zsimMemoryRequestCallback(void* ctx, uint64_t address,

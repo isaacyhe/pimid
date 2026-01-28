@@ -4,6 +4,8 @@
 #include <iostream>
 #include <cmath>
 #include <algorithm>
+#include <map>
+#include <unordered_map>
 
 namespace pimid {
 
@@ -220,7 +222,106 @@ void PCMModel::resetStats() {
 }
 
 void PCMModel::updateEndurance(Address addr) {
-    // TODO: Per-cell endurance tracking with wear-leveling
+    // Per-cell endurance tracking with wear-leveling for PCM
+    // PCM has LIMITED endurance (~10^8 writes) - CRITICAL to track!
+
+    // Calculate bank and page from address
+    uint32_t bank = static_cast<uint32_t>((addr >> 12) % pcm_config_.banks);
+    uint64_t page = (addr >> 12) / pcm_config_.banks;
+    uint64_t cell = addr >> 6;  // Cell granularity (64-byte line)
+
+    // Track writes per bank
+    bank_write_counts_[bank]++;
+
+    // Track writes per page (every 50th page - more aggressive due to low endurance)
+    if (page % 50 == 0) {
+        page_write_counts_[page]++;
+
+        // PCM has very limited endurance - warn at lower threshold
+        uint64_t hot_threshold = endurance_ / 50;  // Scaled by sampling factor
+        if (page_write_counts_[page] > hot_threshold) {
+            // Critical warning for PCM - endurance is very limited!
+            std::cerr << "[PCMModel] CRITICAL: Hot page at " << page
+                      << " with " << page_write_counts_[page]
+                      << " writes (sampling 1:50)!" << std::endl;
+            std::cerr << "[PCMModel] PCM endurance is LIMITED (~10^8). "
+                      << "Consider wear-leveling!" << std::endl;
+        }
+    }
+
+    // Track high-write cells for wear-leveling (sample every 500th cell)
+    // More aggressive sampling for PCM due to lower endurance
+    if (cell % 500 == 0) {
+        cell_write_counts_[cell]++;
+
+        // Warn about hot cells much earlier for PCM
+        if (cell_write_counts_[cell] > endurance_ / 5000) {
+            std::cerr << "[PCMModel] WARNING: Hot cell at address 0x"
+                      << std::hex << addr << std::dec
+                      << " with " << cell_write_counts_[cell] << " writes."
+                      << " (sampling 1:500)" << std::endl;
+            std::cerr << "[PCMModel] Consider applying wear-leveling to extend lifetime."
+                      << std::endl;
+        }
+    }
+
+    // Report bank-level wear imbalance periodically (every 50K writes for PCM)
+    if (write_cycles_ % 50000 == 0 && write_cycles_ > 0) {
+        reportWearImbalance();
+    }
+
+    // Suggest wear-leveling when approaching 10% endurance consumption
+    if (write_cycles_ % 1000000 == 0) {
+        double endurance_used_pct = (static_cast<double>(write_cycles_) / endurance_) * 100.0;
+        if (endurance_used_pct > 10.0) {
+            std::cerr << "[PCMModel] WARNING: " << endurance_used_pct
+                      << "% of total endurance consumed!" << std::endl;
+            std::cerr << "[PCMModel] Recommend enabling wear-leveling if not already active."
+                      << std::endl;
+        }
+    }
+}
+
+void PCMModel::reportWearImbalance() const {
+    if (bank_write_counts_.empty()) return;
+
+    uint64_t max_bank_writes = 0;
+    uint64_t min_bank_writes = UINT64_MAX;
+    uint32_t max_bank_id = 0;
+    uint32_t min_bank_id = 0;
+
+    for (const auto& [bank_id, count] : bank_write_counts_) {
+        if (count > max_bank_writes) {
+            max_bank_writes = count;
+            max_bank_id = bank_id;
+        }
+        if (count < min_bank_writes) {
+            min_bank_writes = count;
+            min_bank_id = bank_id;
+        }
+    }
+
+    if (min_bank_writes > 0 && max_bank_writes / min_bank_writes > 2) {
+        std::cerr << "[PCMModel] WARNING: Bank wear imbalance detected!" << std::endl;
+        std::cerr << "  Max writes: bank " << max_bank_id << " (" << max_bank_writes << " writes)" << std::endl;
+        std::cerr << "  Min writes: bank " << min_bank_id << " (" << min_bank_writes << " writes)" << std::endl;
+        std::cerr << "  Imbalance ratio: " << (max_bank_writes / min_bank_writes) << "x" << std::endl;
+        std::cerr << "  CRITICAL: PCM has limited endurance! Enable wear-leveling now." << std::endl;
+    }
+
+    // Also check for cells approaching wear-out
+    uint64_t cells_near_wearout = 0;
+    for (const auto& [cell_id, count] : cell_write_counts_) {
+        // If sampled cell has more than 1/1000th of endurance, it's a hot cell
+        if (count * 500 > endurance_ / 1000) {  // Account for 1:500 sampling
+            cells_near_wearout++;
+        }
+    }
+
+    if (cells_near_wearout > 0) {
+        std::cerr << "[PCMModel] WARNING: ~" << (cells_near_wearout * 500)
+                  << " cells estimated to be approaching wear-out!" << std::endl;
+    }
 }
 
 //=============================================================================

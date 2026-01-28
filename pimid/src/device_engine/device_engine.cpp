@@ -1,6 +1,8 @@
 #include "device_engine/device_engine.h"
 #include "communication/socket_comm.h"
 #include "config/config_manager.h"
+#include "execution_model/zsim_execution_model.h"
+#include "execution_model/event_driven_execution_model.h"
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -15,6 +17,7 @@ DeviceEngine::DeviceEngine(const PIMIDConfig& config,
       host_address_(host_addr),
       comm_port_(port),
       host_connected_(false),
+      execution_model_type_(ExecutionModelType::EVENT_DRIVEN_ANALYTICAL),
       zsim_instance_(nullptr),
       next_offload_id_(0),
       total_offloads_handled_(0),
@@ -35,7 +38,19 @@ DeviceEngine::DeviceEngine(const PIMIDConfig& config,
     sync_interval_cycles_ = static_cast<Cycle>(
         cfg.getInt("device.host_communication.sync_interval_cycles", 1000));
 
+    // Load execution model type from configuration
+    // Options: "zsim" | "execution_driven" | "analytical" | "event_driven"
+    // Note: For PIM device, analytical is typically preferred (faster, PEs aren't x86)
+    std::string exec_model_name = cfg.get("device.execution_model", "analytical");
+    if (exec_model_name == "zsim" || exec_model_name == "execution_driven") {
+        execution_model_type_ = ExecutionModelType::ZSIM_EXECUTION_DRIVEN;
+    } else {
+        // Default to analytical (fast, event-driven) - recommended for PIM
+        execution_model_type_ = ExecutionModelType::EVENT_DRIVEN_ANALYTICAL;
+    }
+
     std::cout << "Device Engine configured with " << total_num_pes_ << " PEs" << std::endl;
+    std::cout << "  Execution Model: " << exec_model_name << std::endl;
 }
 
 DeviceEngine::~DeviceEngine() {
@@ -69,35 +84,50 @@ void DeviceEngine::run(Cycle num_cycles) {
 
     Cycle target_cycle = current_cycle_ + num_cycles;
 
-    while (current_cycle_ < target_cycle) {
-        // Check for messages from host
-        handleHostMessages();
+    // Use execution model if available
+    if (execution_model_) {
+        // Event-driven/analytical model: advance in larger chunks efficiently
+        const Cycle chunk_size = 1000;
 
-        // Execute one cycle of simulation
-        // In a real implementation, this would call ZSim's tick/advance for all PEs
-        // For now, just advance the cycle counter
-        advanceCycle();
+        while (current_cycle_ < target_cycle) {
+            // Check for messages from host
+            handleHostMessages();
 
-        // Process active offloads
-        for (auto& offload : active_offloads_) {
-            if (!offload.completed) {
-                // Simulate offload execution
-                // In a real implementation, this would execute on PEs
-                // Check if enough cycles have elapsed (configured via device.execution.offload_completion_cycles)
-                if (current_cycle_ - offload.start_cycle >= offload_completion_cycles_) {
-                    offload.completion_cycle = current_cycle_;
-                    offload.completed = true;
-                    completeOffload(offload.offload_id);
+            // Advance execution model
+            Cycle cycles_to_advance = std::min(chunk_size, target_cycle - current_cycle_);
+            execution_model_->advanceCycles(cycles_to_advance);
+            current_cycle_ = execution_model_->getCurrentCycle();
+
+            // Synchronize with host periodically
+            if (current_cycle_ % sync_interval_cycles_ == 0) {
+                synchronizeWithHost();
+            }
+
+            stats_.total_cycles = current_cycle_;
+        }
+    } else {
+        // Fallback: simple cycle-by-cycle advance (legacy mode)
+        while (current_cycle_ < target_cycle) {
+            handleHostMessages();
+            advanceCycle();
+
+            // Process active offloads (legacy mode without execution model)
+            for (auto& offload : active_offloads_) {
+                if (!offload.completed) {
+                    if (current_cycle_ - offload.start_cycle >= offload_completion_cycles_) {
+                        offload.completion_cycle = current_cycle_;
+                        offload.completed = true;
+                        completeOffload(offload.offload_id);
+                    }
                 }
             }
-        }
 
-        // Periodically synchronize with host (configured via device.host_communication.sync_interval_cycles)
-        if (current_cycle_ % sync_interval_cycles_ == 0) {
-            synchronizeWithHost();
-        }
+            if (current_cycle_ % sync_interval_cycles_ == 0) {
+                synchronizeWithHost();
+            }
 
-        stats_.total_cycles = current_cycle_;
+            stats_.total_cycles = current_cycle_;
+        }
     }
 
     std::cout << "Device Engine completed " << num_cycles << " cycles" << std::endl;
@@ -105,6 +135,17 @@ void DeviceEngine::run(Cycle num_cycles) {
 
 void DeviceEngine::finalize() {
     std::cout << "Finalizing Device Engine..." << std::endl;
+
+    // Finalize execution model
+    if (execution_model_) {
+        // Get final stats from execution model
+        auto exec_stats = execution_model_->getStats();
+        stats_.total_cycles = std::max(stats_.total_cycles, exec_stats.total_cycles);
+        stats_.total_instructions = exec_stats.total_instructions;
+
+        execution_model_->finalize();
+        execution_model_.reset();
+    }
 
     // Shutdown communication
     if (host_comm_) {
@@ -217,23 +258,81 @@ void DeviceEngine::setScheduler(std::unique_ptr<class PEScheduler> scheduler) {
 
 uint32_t DeviceEngine::selectPE(Address data_addr) {
     if (scheduler_) {
-        // TODO: Use scheduler to select PE
-        // return scheduler_->scheduleTask(...);
+        // Create task descriptor and use scheduler to select PE
+        PIMTask task;
+        task.task_id = next_offload_id_;
+        task.data_addr = data_addr;
+        task.arrival_cycle = current_cycle_;
+        return scheduler_->scheduleTask(task);
     }
 
-    // Simple default: select based on data address
-    // In a real implementation, this would use PEPlacementManager
+    // Fallback: select based on data address hash
     // Number of PEs is configured via device.processing_elements.placement.total_num_pes
     return static_cast<uint32_t>(data_addr % total_num_pes_);
 }
 
 void DeviceEngine::initializeZSim() {
-    std::cout << "Initializing ZSim for device PEs..." << std::endl;
-    // ZSim initialization for PEs will be implemented using zsim.enabled and zsim.config_file
-    // from device configuration when ZSim integration is complete
-    // For now, just set to nullptr to indicate it's a placeholder
+    std::cout << "Initializing execution model for device PEs..." << std::endl;
+
+    // Create execution model using factory
+    execution_model_ = ExecutionModelFactory::createExecutionModel(
+        execution_model_type_, config_, SimulationDomain::DEVICE);
+
+    if (!execution_model_) {
+        throw std::runtime_error("Failed to create device execution model");
+    }
+
+    // Get config file path for execution model
+    auto& cfg = pimid::config::ConfigManager::getInstance();
+    std::string config_file = cfg.get("device.execution_config", "");
+
+    // Initialize the execution model
+    if (!execution_model_->initialize(config_file, SimulationDomain::DEVICE)) {
+        throw std::runtime_error("Failed to initialize device execution model");
+    }
+
+    // Register memory model with execution model
+    if (memory_model_) {
+        execution_model_->registerMemoryModel(memory_model_);
+    }
+
+    // Configure for PIM mode if using ZSim
+    if (execution_model_type_ == ExecutionModelType::ZSIM_EXECUTION_DRIVEN) {
+        auto* zsim_model = dynamic_cast<ZSimExecutionModel*>(execution_model_.get());
+        if (zsim_model) {
+            zsim_model->configurePIMMode(true, total_num_pes_);
+        }
+    }
+
+    // For analytical model, set number of cores to match PEs
+    if (execution_model_type_ == ExecutionModelType::EVENT_DRIVEN_ANALYTICAL) {
+        auto* analytical_model = dynamic_cast<EventDrivenExecutionModel*>(execution_model_.get());
+        if (analytical_model) {
+            analytical_model->setNumCores(total_num_pes_);
+        }
+    }
+
+    // Register task completion callback
+    execution_model_->registerTaskCompleteCallback(
+        [this](const Task& task, Cycle completion_cycle) {
+            stats_.total_tasks++;
+            current_cycle_ = std::max(current_cycle_, completion_cycle);
+
+            // Find and complete the corresponding offload
+            for (auto& offload : active_offloads_) {
+                if (offload.offload_id == task.task_id && !offload.completed) {
+                    offload.completion_cycle = completion_cycle;
+                    offload.completed = true;
+                    completeOffload(offload.offload_id);
+                    break;
+                }
+            }
+        });
+
+    std::cout << "Device execution model initialized: " << execution_model_->getName() << std::endl;
+
+    // Legacy pointer for backwards compatibility
     zsim_instance_ = nullptr;
-    std::cout << "ZSim placeholder set (full integration pending)" << std::endl;
 }
 
 void DeviceEngine::initializeCommunication() {
@@ -273,8 +372,21 @@ void DeviceEngine::handleHostMessages() {
 
             case MessageType::MEMORY_RESPONSE:
                 // Handle memory response from host
-                std::cout << "Received memory response from host" << std::endl;
-                // TODO: Process memory response
+                {
+                    std::cout << "Received memory response from host: addr=0x"
+                              << std::hex << msg.addr << std::dec
+                              << " latency=" << msg.timestamp << std::endl;
+
+                    // Forward to memory model for tracking
+                    MemoryRequest req;
+                    req.addr = msg.addr;
+                    req.size = msg.size;
+                    req.type = MemoryRequestType::READ;  // Response to a read
+                    handleMemoryResponse(req, msg.timestamp);
+
+                    // Update statistics
+                    stats_.memory_accesses++;
+                }
                 break;
 
             case MessageType::SYNC_REQUEST:
@@ -320,9 +432,38 @@ void DeviceEngine::executeOnPE(uint32_t pe_id, Address code_addr, Address data_a
     std::cout << "Executing on PE " << pe_id << ": code=0x" << std::hex
               << code_addr << " data=0x" << data_addr << std::dec << std::endl;
 
-    // TODO: Actual execution on PE via ZSim
-    // For now, this is a placeholder
-    // The execution is simulated in the run() loop
+    if (execution_model_) {
+        // Create task descriptor for execution model
+        Task task;
+        task.task_id = next_offload_id_ - 1;  // Use the offload ID we just assigned
+        task.kernel_name = "pim_offload";
+        task.pe_id = pe_id;
+        task.start_cycle = current_cycle_;
+
+        // Set up memory addresses
+        task.input_addresses.push_back(data_addr);
+        task.output_addresses.push_back(data_addr);  // In-place computation
+
+        // Get data size from the active offload
+        for (const auto& offload : active_offloads_) {
+            if (offload.offload_id == task.task_id) {
+                task.input_size = offload.data_size;
+                task.output_size = offload.data_size;
+                break;
+            }
+        }
+
+        // Estimate operations based on data size (1 op per byte as baseline)
+        task.num_ops = task.input_size;
+        task.estimated_cycles = offload_completion_cycles_;
+
+        // Execute task via execution model
+        Cycle completion = execution_model_->executeTask(task);
+
+        std::cout << "  Task " << task.task_id << " scheduled, estimated completion at cycle "
+                  << completion << std::endl;
+    }
+    // If no execution model, fallback logic in run() handles completion
 }
 
 } // namespace pimid

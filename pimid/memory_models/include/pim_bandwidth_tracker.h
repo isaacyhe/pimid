@@ -129,6 +129,40 @@ public:
                                      int target_id) const;
 
     /**
+     * @brief Set queue depth limit for a specific granularity level
+     * @param granularity PIM granularity level
+     * @param limit Maximum queue depth (0 = unlimited)
+     */
+    void setQueueDepthLimit(PIMGranularity granularity, size_t limit);
+
+    /**
+     * @brief Set queue depth limit for all granularity levels
+     * @param limit Maximum queue depth (0 = unlimited)
+     */
+    void setGlobalQueueDepthLimit(size_t limit);
+
+    /**
+     * @brief Get queue depth limit for a specific granularity level
+     * @param granularity PIM granularity level
+     * @return Queue depth limit (0 = unlimited)
+     */
+    size_t getQueueDepthLimit(PIMGranularity granularity) const;
+
+    /**
+     * @brief Get current queue depth for a specific port
+     * @param granularity PIM granularity level
+     * @param target_id Target bank/subarray ID
+     * @return Current queue depth
+     */
+    size_t getCurrentQueueDepth(PIMGranularity granularity, int target_id) const;
+
+    /**
+     * @brief Complete a request (decrement queue depth)
+     * @param payload Request payload
+     */
+    void completeRequest(const PIMRequestPayload& payload);
+
+    /**
      * @brief Print bandwidth statistics
      */
     void printStats() const;
@@ -240,6 +274,11 @@ private:
     // Statistics window
     static constexpr uint64_t STATS_WINDOW_CYCLES = 10000;
     uint64_t window_start_cycle_;
+
+    // Queue depth limits per granularity (0 = unlimited)
+    static constexpr size_t DEFAULT_QUEUE_DEPTH_LIMIT = 32;
+    std::map<PIMGranularity, size_t> queue_depth_limits_;
+    std::map<std::pair<PIMGranularity, int>, size_t> active_queue_depths_;
 
     // Statistics
     uint64_t total_requests_;

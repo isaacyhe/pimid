@@ -98,8 +98,133 @@ void GarnetHostInterconnect::setupTopology() {
 
     std::cout << "  Mapped LLC to network node " << node_id << std::endl;
 
-    // TODO: Set up connections based on topology
-    // For mesh, this would connect adjacent routers
+    // Set up connections based on topology
+    uint32_t total_nodes = node_id + 1;
+    uint32_t rows = config_.garnet_config.num_rows;
+    uint32_t cols = config_.garnet_config.num_cols;
+
+    // Adjust dimensions if not explicitly set
+    if (rows == 0 || cols == 0) {
+        rows = static_cast<uint32_t>(std::sqrt(total_nodes));
+        cols = (total_nodes + rows - 1) / rows;
+    }
+
+    switch (config_.garnet_config.topology) {
+        case NetworkTopology::MESH_2D:
+            // Connect adjacent nodes in 2D mesh (no wrap-around)
+            std::cout << "  Setting up 2D mesh connections (" << rows << "x" << cols << ")" << std::endl;
+            for (uint32_t r = 0; r < rows; r++) {
+                for (uint32_t c = 0; c < cols; c++) {
+                    uint32_t current = r * cols + c;
+                    if (current >= total_nodes) break;
+
+                    // Connect to east neighbor
+                    if (c < cols - 1) {
+                        uint32_t east = r * cols + (c + 1);
+                        if (east < total_nodes) {
+                            garnet_->connectNodes(current, east);
+                            garnet_->connectNodes(east, current);
+                        }
+                    }
+
+                    // Connect to south neighbor
+                    if (r < rows - 1) {
+                        uint32_t south = (r + 1) * cols + c;
+                        if (south < total_nodes) {
+                            garnet_->connectNodes(current, south);
+                            garnet_->connectNodes(south, current);
+                        }
+                    }
+                }
+            }
+            break;
+
+        case NetworkTopology::TORUS_2D:
+            // Connect adjacent nodes with wrap-around
+            std::cout << "  Setting up 2D torus connections (" << rows << "x" << cols << ")" << std::endl;
+            for (uint32_t r = 0; r < rows; r++) {
+                for (uint32_t c = 0; c < cols; c++) {
+                    uint32_t current = r * cols + c;
+                    if (current >= total_nodes) break;
+
+                    // Connect to east neighbor (with wrap-around)
+                    uint32_t east_c = (c + 1) % cols;
+                    uint32_t east = r * cols + east_c;
+                    if (east < total_nodes && east != current) {
+                        garnet_->connectNodes(current, east);
+                        garnet_->connectNodes(east, current);
+                    }
+
+                    // Connect to south neighbor (with wrap-around)
+                    uint32_t south_r = (r + 1) % rows;
+                    uint32_t south = south_r * cols + c;
+                    if (south < total_nodes && south != current) {
+                        garnet_->connectNodes(current, south);
+                        garnet_->connectNodes(south, current);
+                    }
+                }
+            }
+            break;
+
+        case NetworkTopology::CROSSBAR:
+            // Full connectivity - every node connects to every other node
+            std::cout << "  Setting up crossbar connections (" << total_nodes << " nodes)" << std::endl;
+            for (uint32_t i = 0; i < total_nodes; i++) {
+                for (uint32_t j = i + 1; j < total_nodes; j++) {
+                    garnet_->connectNodes(i, j);
+                    garnet_->connectNodes(j, i);
+                }
+            }
+            break;
+
+        case NetworkTopology::H_TREE:
+        case NetworkTopology::FAT_TREE:
+            // Tree-based topologies - connect nodes in hierarchical fashion
+            std::cout << "  Setting up tree connections (" << total_nodes << " nodes)" << std::endl;
+            // Simple binary tree: each node i connects to children 2i+1 and 2i+2
+            for (uint32_t i = 0; i < total_nodes; i++) {
+                uint32_t left_child = 2 * i + 1;
+                uint32_t right_child = 2 * i + 2;
+
+                if (left_child < total_nodes) {
+                    garnet_->connectNodes(i, left_child);
+                    garnet_->connectNodes(left_child, i);
+                }
+                if (right_child < total_nodes) {
+                    garnet_->connectNodes(i, right_child);
+                    garnet_->connectNodes(right_child, i);
+                }
+            }
+            break;
+
+        default:
+            // Default to mesh topology
+            std::cout << "  Setting up default mesh connections" << std::endl;
+            for (uint32_t r = 0; r < rows; r++) {
+                for (uint32_t c = 0; c < cols; c++) {
+                    uint32_t current = r * cols + c;
+                    if (current >= total_nodes) break;
+
+                    if (c < cols - 1) {
+                        uint32_t east = r * cols + (c + 1);
+                        if (east < total_nodes) {
+                            garnet_->connectNodes(current, east);
+                            garnet_->connectNodes(east, current);
+                        }
+                    }
+                    if (r < rows - 1) {
+                        uint32_t south = (r + 1) * cols + c;
+                        if (south < total_nodes) {
+                            garnet_->connectNodes(current, south);
+                            garnet_->connectNodes(south, current);
+                        }
+                    }
+                }
+            }
+            break;
+    }
+
+    std::cout << "  Topology connections established" << std::endl;
 }
 
 bool GarnetHostInterconnect::canSend(uint32_t src_id) {

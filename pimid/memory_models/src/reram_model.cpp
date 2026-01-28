@@ -4,6 +4,8 @@
 #include <iostream>
 #include <cmath>
 #include <algorithm>
+#include <map>
+#include <unordered_map>
 
 namespace pimid {
 
@@ -119,17 +121,26 @@ Cycle ReRAMModel::access(const MemoryRequest& req) {
             std::cerr << "[ReRAMModel] WARNING: Endurance limit exceeded!" << std::endl;
         }
     } else if (req.type == MemoryRequestType::ATOMIC) {
-        // Check if this is an analog compute operation
-        // TODO: Extend MemoryRequest to support PIM operation types
-        if (reram_config_.analog_capable) {
-            // Analog compute is VERY fast!
+        // Check if this is an analog compute operation via request flags or payload
+        // PIM operation types can be detected via:
+        // 1. req.flags containing PIM_ANALOG_COMPUTE flag
+        // 2. req.size == 0 indicating no data movement (pure compute)
+        // 3. req.payload containing PIM operation descriptor
+        bool is_analog_compute = reram_config_.analog_capable &&
+            (req.size == 0 || (req.flags & 0x80) != 0);  // Flag 0x80 = analog compute
+
+        if (is_analog_compute) {
+            // Analog compute is VERY fast - in-situ matrix-vector multiplication!
             latency = reram_config_.analog_compute_latency;
             total_analog_ops_++;
         } else {
+            // Standard atomic: read-modify-write
             latency = reram_config_.read_latency + reram_config_.write_latency;
             total_reads_++;
             total_writes_++;
             write_cycles_++;
+
+            updateEndurance(req.addr);
         }
     }
 
@@ -250,7 +261,77 @@ void ReRAMModel::resetStats() {
 }
 
 void ReRAMModel::updateEndurance(Address addr) {
-    // TODO: Per-cell endurance tracking
+    // Per-cell endurance tracking for ReRAM
+    // ReRAM has moderate endurance (10^10 - 10^12 writes)
+    // which is better than PCM but worse than STT-MRAM
+
+    // Calculate bank and page from address
+    uint32_t bank = static_cast<uint32_t>((addr >> 12) % reram_config_.banks);
+    uint64_t page = (addr >> 12) / reram_config_.banks;
+    uint64_t cell = addr >> 6;  // Cell granularity (64-byte)
+
+    // Track writes per bank
+    bank_write_counts_[bank]++;
+
+    // Track writes per page (sampled - every 100th page for memory efficiency)
+    if (page % 100 == 0) {
+        page_write_counts_[page]++;
+
+        // Check for hot pages approaching wear-out
+        // ReRAM endurance is ~10^11, so threshold scales accordingly
+        uint64_t hot_threshold = endurance_ / 100;  // Scaled by sampling factor
+        if (page_write_counts_[page] > hot_threshold) {
+            std::cerr << "[ReRAMModel] WARNING: Hot page at " << page
+                      << " with " << page_write_counts_[page]
+                      << " writes (sampling 1:100). Consider wear-leveling." << std::endl;
+        }
+    }
+
+    // Track high-write cells for wear-leveling hints (sample every 1000th cell)
+    if (cell % 1000 == 0) {
+        cell_write_counts_[cell]++;
+
+        // Warn about potential hot cells
+        if (cell_write_counts_[cell] > endurance_ / 10000) {
+            std::cerr << "[ReRAMModel] WARNING: Hot cell at address 0x"
+                      << std::hex << addr << std::dec
+                      << " with " << cell_write_counts_[cell] << " writes."
+                      << " (sampling 1:1000)" << std::endl;
+        }
+    }
+
+    // Report bank-level wear imbalance periodically (every 100K writes)
+    if (write_cycles_ % 100000 == 0 && write_cycles_ > 0) {
+        reportWearImbalance();
+    }
+}
+
+void ReRAMModel::reportWearImbalance() const {
+    if (bank_write_counts_.empty()) return;
+
+    uint64_t max_bank_writes = 0;
+    uint64_t min_bank_writes = UINT64_MAX;
+    uint32_t max_bank_id = 0;
+    uint32_t min_bank_id = 0;
+
+    for (const auto& [bank_id, count] : bank_write_counts_) {
+        if (count > max_bank_writes) {
+            max_bank_writes = count;
+            max_bank_id = bank_id;
+        }
+        if (count < min_bank_writes) {
+            min_bank_writes = count;
+            min_bank_id = bank_id;
+        }
+    }
+
+    if (min_bank_writes > 0 && max_bank_writes / min_bank_writes > 2) {
+        std::cerr << "[ReRAMModel] WARNING: Bank wear imbalance detected!" << std::endl;
+        std::cerr << "  Max writes: bank " << max_bank_id << " (" << max_bank_writes << " writes)" << std::endl;
+        std::cerr << "  Min writes: bank " << min_bank_id << " (" << min_bank_writes << " writes)" << std::endl;
+        std::cerr << "  Imbalance ratio: " << (max_bank_writes / min_bank_writes) << "x" << std::endl;
+        std::cerr << "  Consider enabling bank-level wear-leveling." << std::endl;
+    }
 }
 
 //=============================================================================

@@ -64,13 +64,13 @@ void STTMRAMModel::initialize() {
     std::cout << "[STTMRAMModel] Inner-bank write latency: "
               << mram_arch_->timing.inner_bank.getTotalWriteLatency() << " ns" << std::endl;
 
-    // Use architecture energy values
+    // Use architecture energy values as defaults
     read_energy_ = mram_arch_->energy.read_energy_per_byte;
     write_energy_ = mram_arch_->energy.write_energy_per_byte;
     leakage_power_ = mram_arch_->energy.chip_leakage_mw / 1000.0;  // mW to W
 
-    // TODO: Initialize NVSim for runtime calculations
-    // nvsim_wrapper_ = std::make_unique<NVSimWrapper>(nvsim_config);
+    // Initialize NVSim for runtime calculations (if HAVE_NVSIM is defined)
+    initializeNVSim();
 
     std::cout << "[STTMRAMModel] Configuration:" << std::endl;
     std::cout << "  Capacity: " << (mram_config_.capacity / (1024.0 * 1024)) << " MB" << std::endl;
@@ -272,8 +272,73 @@ void STTMRAMModel::resetStats() {
 }
 
 void STTMRAMModel::updateEndurance(Address addr) {
-    // TODO: Implement per-cell endurance tracking
-    // For now, just increment global counter
+    // Per-cell endurance tracking
+    // Calculate bank and page from address
+    uint32_t bank = static_cast<uint32_t>((addr >> 12) % mram_config_.banks);
+    uint64_t page = (addr >> 12) / mram_config_.banks;
+
+    // Track writes per bank
+    bank_write_counts_[bank]++;
+
+    // Track writes per page (sampled - every 1000th page tracked)
+    if (page % 1000 == 0) {
+        page_write_counts_[page]++;
+
+        // Check for hot pages (potential wear-out)
+        if (page_write_counts_[page] > endurance_ / 1000) {
+            std::cerr << "[STTMRAMModel] WARNING: Hot page detected at page "
+                      << page << " with " << page_write_counts_[page]
+                      << " writes (sampling 1:1000)" << std::endl;
+        }
+    }
+}
+
+void STTMRAMModel::initializeNVSim() {
+#ifdef HAVE_NVSIM
+    try {
+        // Create NVSim configuration for STT-MRAM
+        NVSimWrapper::NVMConfig nvsim_config;
+        nvsim_config.capacity_bytes = mram_config_.capacity;
+        nvsim_config.word_width_bits = 64;
+        nvsim_config.nvm_type = NVSimWrapper::NVMType::STTRAM;
+        nvsim_config.process_node_nm = mram_config_.tech_node_nm;
+        nvsim_config.temperature_k = 350;  // 77°C typical operating temp
+        nvsim_config.optimize_read_energy = true;
+        nvsim_config.optimize_write_energy = true;
+        nvsim_config.optimize_leakage = true;
+        nvsim_config.is_cache = false;
+
+        // Create and initialize NVSim wrapper
+        nvsim_wrapper_ = std::make_unique<NVSimWrapper>(nvsim_config);
+        nvsim_wrapper_->initialize();
+
+        // Extract NVSim results if valid
+        if (nvsim_wrapper_->isValid()) {
+            read_energy_ = nvsim_wrapper_->getReadDynamicEnergy();
+            write_energy_ = nvsim_wrapper_->getWriteDynamicEnergy();
+            leakage_power_ = nvsim_wrapper_->getLeakagePower() / 1000.0;  // mW to W
+            area_mm2_ = nvsim_wrapper_->getArea();
+
+            // Update latencies based on NVSim
+            double freq_hz = 1e9;  // Assume 1 GHz
+            mram_config_.read_latency = static_cast<Cycle>(
+                nvsim_wrapper_->getReadLatency() * freq_hz);
+            mram_config_.write_latency = static_cast<Cycle>(
+                nvsim_wrapper_->getWriteLatency() * freq_hz);
+
+            std::cout << "[STTMRAMModel] Using NVSim-generated parameters" << std::endl;
+        } else {
+            std::cerr << "[STTMRAMModel] NVSim failed: "
+                      << nvsim_wrapper_->getErrorMessage() << std::endl;
+            std::cerr << "[STTMRAMModel] Using architecture-based defaults" << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[STTMRAMModel] NVSim exception: " << e.what() << std::endl;
+        std::cerr << "[STTMRAMModel] Using architecture-based defaults" << std::endl;
+    }
+#else
+    std::cout << "[STTMRAMModel] NVSim not available, using architecture-based values" << std::endl;
+#endif
 }
 
 //=============================================================================

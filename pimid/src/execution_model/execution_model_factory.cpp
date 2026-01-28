@@ -22,12 +22,10 @@ std::shared_ptr<IExecutionModel> ExecutionModelFactory::createExecutionModel(
             std::cout << "Event-Driven Analytical" << std::endl;
             return std::make_shared<EventDrivenExecutionModel>();
 
-        case ExecutionModelType::HYBRID: {
-            std::cout << "Hybrid (ZSim host + Event-Driven device)" << std::endl;
-            auto host_model = std::make_shared<ZSimExecutionModel>();
-            auto device_model = std::make_shared<EventDrivenExecutionModel>();
-            return std::make_shared<HybridExecutionModel>(host_model, device_model);
-        }
+        case ExecutionModelType::HYBRID:
+            // Hybrid mode deprecated - host and device should be configured independently
+            std::cout << "Hybrid (deprecated, using Analytical)" << std::endl;
+            return std::make_shared<EventDrivenExecutionModel>();
 
         case ExecutionModelType::TRACE_DRIVEN:
             std::cout << "Trace-Driven (not yet implemented)" << std::endl;

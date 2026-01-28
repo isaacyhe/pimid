@@ -35,6 +35,7 @@ libEnv.SharedLibrary("zsim.so", libSrcs)
 
 # Build tracing utilities (need hdf5 & dynamic linking)
 traceEnv = env.Clone()
+traceEnv["LIBPATH"] += ["/usr/lib/x86_64-linux-gnu/hdf5/serial"]  # Ubuntu 24.04
 traceEnv["LIBS"] += ["hdf5", "hdf5_hl"]
 traceEnv["OBJSUFFIX"] += "t"
 traceEnv.Program("dumptrace", ["dumptrace.cpp", "access_tracing.cpp", "memory_hierarchy.cpp"] + commonSrcs)

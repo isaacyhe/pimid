@@ -25,8 +25,6 @@
 
 #include "debug_zsim.h"
 #include <fcntl.h>
-#include <gelf.h>
-#include <link.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,11 +32,22 @@
 #include <unistd.h>
 #include "log.h"
 
+// Check for libelf availability at compile time
+#if __has_include(<gelf.h>)
+#define HAVE_LIBELF 1
+#include <gelf.h>
+#include <link.h>
+#else
+#define HAVE_LIBELF 0
+#include <link.h>
+#endif
+
 /* This file is pretty much self-contained, and has minimal external dependencies.
  * Please keep it this way, and ESPECIALLY don't include Pin headers since there
  * seem to be conflicts between those and some system headers.
  */
 
+#if HAVE_LIBELF
 static int pp_callback(dl_phdr_info* info, size_t size, void* data) {
     if (strstr(info->dlpi_name, "libzsim.so")) {
         int fd;
@@ -90,6 +99,35 @@ void getLibzsimAddrs(LibInfo* libzsimAddrs) {
     int ret = dl_iterate_phdr(pp_callback, libzsimAddrs);
     if (ret != 1) panic("libzsim.so not found");
 }
+
+#else // !HAVE_LIBELF - provide stub implementation
+
+// Stub callback that gets base address from program headers
+static int pp_callback_stub(dl_phdr_info* info, size_t size, void* data) {
+    if (strstr(info->dlpi_name, "libzsim.so")) {
+        LibInfo* offsets = static_cast<LibInfo*>(data);
+        // Without libelf, we can't get exact section addresses
+        // Use the load address as a rough approximation
+        offsets->textAddr = reinterpret_cast<void*>(info->dlpi_addr);
+        offsets->dataAddr = reinterpret_cast<void*>(info->dlpi_addr);
+        offsets->bssAddr = reinterpret_cast<void*>(info->dlpi_addr);
+        return 1;
+    }
+    return 0;
+}
+
+void getLibzsimAddrs(LibInfo* libzsimAddrs) {
+    warn("libelf not available - debug symbol lookup disabled");
+    int ret = dl_iterate_phdr(pp_callback_stub, libzsimAddrs);
+    if (ret != 1) {
+        // Fallback: set addresses to null if libzsim.so not found
+        libzsimAddrs->textAddr = nullptr;
+        libzsimAddrs->dataAddr = nullptr;
+        libzsimAddrs->bssAddr = nullptr;
+    }
+}
+
+#endif // HAVE_LIBELF
 
 
 void notifyHarnessForDebugger(int harnessPid) {

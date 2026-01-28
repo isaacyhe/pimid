@@ -60,6 +60,20 @@ public:
     // -------------------------------------------------------------------------
 
     /**
+     * @brief Core type configuration for analytical models
+     */
+    struct CoreType {
+        double frequency_mhz;
+        double ipc;              // Instructions per cycle
+        uint32_t vector_width;   // SIMD width
+        uint32_t pipeline_depth;
+        std::string name;
+
+        CoreType() : frequency_mhz(1000.0), ipc(1.0), vector_width(1),
+                     pipeline_depth(5), name("GenericCore") {}
+    };
+
+    /**
      * @brief Set number of cores/PEs
      */
     void setNumCores(uint32_t num_cores);
@@ -113,17 +127,7 @@ private:
     Cycle current_cycle_;
     bool initialized_;
 
-    // Analytical models
-    struct CoreType {
-        double frequency_mhz;
-        double ipc;              // Instructions per cycle
-        uint32_t vector_width;   // SIMD width
-        uint32_t pipeline_depth;
-        std::string name;
-
-        CoreType() : frequency_mhz(1000.0), ipc(1.0), vector_width(1),
-                     pipeline_depth(5), name("GenericCore") {}
-    };
+    // Core configuration
     CoreType core_type_;
 
     // Internal methods

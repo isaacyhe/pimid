@@ -1,10 +1,12 @@
 #include "config/config_manager.h"
 #include "config/config_parser.h"
+#include "plugin/plugin_interface.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <cstdlib>
 #include <cstring>
+#include <regex>
 
 namespace pimid {
 namespace config {
@@ -290,7 +292,7 @@ void ConfigManager::set(const std::string& key, double value) {
 }
 
 void ConfigManager::set(const std::string& key, bool value) {
-    set(key, value ? "true" : "false");
+    set(key, std::string(value ? "true" : "false"));
 }
 
 std::map<std::string, std::string> ConfigManager::getSection(const std::string& section) const {
@@ -318,9 +320,19 @@ bool ConfigManager::hasSection(const std::string& section) const {
 }
 
 ValidationResult ConfigManager::validate() {
-    ValidationResult result;
-    result.valid = true;
-    // TODO: Implement full validation using ConfigValidator
+    // Create validator with current schema
+    ConfigValidator validator(schema_);
+
+    // Allow unknown parameters by default (schema may not be complete)
+    validator.setAllowUnknownParameters(true);
+    validator.setCheckFileExistence(false);
+
+    // Validate configuration
+    ValidationResult result = validator.validate(config_);
+
+    // Update internal validity flag
+    is_valid_ = result.valid;
+
     return result;
 }
 
@@ -426,9 +438,45 @@ std::string ConfigManager::generateDiffReport(const ConfigManager& other) const 
 
 // Plugin configuration
 bool ConfigManager::loadPlugin(const std::string& plugin_name) {
-    // TODO: Implement plugin loading
-    std::cerr << "Plugin loading not yet implemented: " << plugin_name << std::endl;
-    return false;
+    // Get plugin registry
+    auto& registry = plugin::PluginRegistry::getInstance();
+
+    // Check if plugin exists
+    if (!registry.hasPlugin(plugin_name)) {
+        std::cerr << "Plugin not found in registry: " << plugin_name << std::endl;
+        return false;
+    }
+
+    // Get existing plugin configuration (if any)
+    std::map<std::string, std::string> plugin_config;
+    auto it = plugin_configs_.find(plugin_name);
+    if (it != plugin_configs_.end()) {
+        plugin_config = it->second;
+    }
+
+    // Also check for plugin config in main config
+    std::string plugin_prefix = "plugin." + plugin_name + ".";
+    for (const auto& kv : config_) {
+        if (kv.first.find(plugin_prefix) == 0) {
+            std::string param_name = kv.first.substr(plugin_prefix.length());
+            plugin_config[param_name] = kv.second;
+        }
+    }
+
+    // Create and initialize plugin
+    auto plugin = registry.createPlugin(plugin_name, plugin_config);
+    if (!plugin) {
+        std::cerr << "Failed to create plugin: " << plugin_name << std::endl;
+        return false;
+    }
+
+    // Store plugin configuration
+    plugin_configs_[plugin_name] = plugin_config;
+
+    std::cout << "Loaded plugin: " << plugin_name
+              << " (v" << plugin->getVersion() << ")" << std::endl;
+
+    return true;
 }
 
 bool ConfigManager::configurePlugin(const std::string& plugin_name,
@@ -468,21 +516,190 @@ void ConfigManager::saveAsPreset(const std::string& preset_name) {
 }
 
 bool ConfigManager::importFromJSON(const std::string& json_str) {
-    // TODO: Implement JSON import
-    std::cerr << "JSON import not yet implemented" << std::endl;
-    return false;
+    // Simple JSON parser for flat key-value pairs
+    // Expected format: {"key1": "value1", "key2": "value2", ...}
+
+    try {
+        // Remove whitespace and newlines
+        std::string json = json_str;
+
+        // Find opening brace
+        size_t start = json.find('{');
+        size_t end = json.rfind('}');
+        if (start == std::string::npos || end == std::string::npos || end <= start) {
+            std::cerr << "Invalid JSON format: missing braces" << std::endl;
+            return false;
+        }
+
+        std::string content = json.substr(start + 1, end - start - 1);
+
+        // Parse key-value pairs using regex
+        // Pattern: "key" : "value"
+        std::regex pair_regex("\"([^\"]+)\"\\s*:\\s*\"([^\"]*)\"");
+        std::smatch match;
+        std::string::const_iterator search_start = content.cbegin();
+
+        while (std::regex_search(search_start, content.cend(), match, pair_regex)) {
+            std::string key = match[1].str();
+            std::string value = match[2].str();
+            config_[key] = value;
+            search_start = match.suffix().first;
+        }
+
+        // Also handle numeric values without quotes
+        // Pattern: "key" : 123.45 or "key" : -123
+        std::regex num_pair_regex("\"([^\"]+)\"\\s*:\\s*(-?[\\d.]+)");
+        search_start = content.cbegin();
+
+        while (std::regex_search(search_start, content.cend(), match, num_pair_regex)) {
+            std::string key = match[1].str();
+            std::string value = match[2].str();
+            // Only set if not already set by string regex
+            if (config_.find(key) == config_.end()) {
+                config_[key] = value;
+            }
+            search_start = match.suffix().first;
+        }
+
+        // Handle boolean values
+        // Pattern: "key" : true or "key" : false
+        std::regex bool_pair_regex("\"([^\"]+)\"\\s*:\\s*(true|false)");
+        search_start = content.cbegin();
+
+        while (std::regex_search(search_start, content.cend(), match, bool_pair_regex)) {
+            std::string key = match[1].str();
+            std::string value = match[2].str();
+            if (config_.find(key) == config_.end()) {
+                config_[key] = value;
+            }
+            search_start = match.suffix().first;
+        }
+
+        return true;
+
+    } catch (const std::exception& e) {
+        std::cerr << "JSON import error: " << e.what() << std::endl;
+        return false;
+    }
 }
 
 bool ConfigManager::importFromXML(const std::string& xml_str) {
-    // TODO: Implement XML import
-    std::cerr << "XML import not yet implemented" << std::endl;
-    return false;
+    // Simple XML parser for flat configuration
+    // Expected format: <config><key1>value1</key1><key2>value2</key2>...</config>
+
+    try {
+        // Extract content between config tags
+        // Pattern: <config...>...</config>
+        std::regex config_regex("<config[^>]*>([\\s\\S]*)</config>");
+        std::smatch config_match;
+
+        if (!std::regex_search(xml_str, config_match, config_regex)) {
+            std::cerr << "Invalid XML format: missing <config> root element" << std::endl;
+            return false;
+        }
+
+        std::string content = config_match[1].str();
+
+        // Parse individual elements
+        // Handles nested structure like <section><key>value</key></section>
+        std::function<void(const std::string&, const std::string&)> parseElement;
+        parseElement = [&](const std::string& xml, const std::string& prefix) {
+            // Pattern: <tagname>content</tagname>
+            std::regex nested_regex("<(\\w+)>([\\s\\S]*?)</\\1>");
+            std::smatch match;
+            std::string::const_iterator search_start = xml.cbegin();
+
+            while (std::regex_search(search_start, xml.cend(), match, nested_regex)) {
+                std::string tag = match[1].str();
+                std::string inner = match[2].str();
+
+                std::string full_key = prefix.empty() ? tag : prefix + "." + tag;
+
+                // Check if inner content has more elements
+                if (inner.find('<') != std::string::npos) {
+                    // Has nested elements - recurse
+                    parseElement(inner, full_key);
+                } else {
+                    // Leaf value - trim whitespace
+                    size_t start = inner.find_first_not_of(" \t\n\r");
+                    size_t end = inner.find_last_not_of(" \t\n\r");
+                    if (start != std::string::npos && end != std::string::npos) {
+                        config_[full_key] = inner.substr(start, end - start + 1);
+                    }
+                }
+
+                search_start = match.suffix().first;
+            }
+        };
+
+        parseElement(content, "");
+        return true;
+
+    } catch (const std::exception& e) {
+        std::cerr << "XML import error: " << e.what() << std::endl;
+        return false;
+    }
 }
 
 std::string ConfigManager::exportToXML() const {
-    // TODO: Implement XML export
-    std::cerr << "XML export not yet implemented" << std::endl;
-    return "";
+    std::ostringstream xml;
+    xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    xml << "<config>\n";
+
+    // Group config by top-level section
+    std::map<std::string, std::map<std::string, std::string>> sections;
+
+    for (const auto& kv : config_) {
+        size_t dot_pos = kv.first.find('.');
+        if (dot_pos != std::string::npos) {
+            std::string section = kv.first.substr(0, dot_pos);
+            std::string key = kv.first.substr(dot_pos + 1);
+            sections[section][key] = kv.second;
+        } else {
+            sections["_root"][kv.first] = kv.second;
+        }
+    }
+
+    // Output root-level items first
+    auto root_it = sections.find("_root");
+    if (root_it != sections.end()) {
+        for (const auto& kv : root_it->second) {
+            xml << "  <" << kv.first << ">" << kv.second << "</" << kv.first << ">\n";
+        }
+        sections.erase(root_it);
+    }
+
+    // Output sections
+    for (const auto& section : sections) {
+        xml << "  <" << section.first << ">\n";
+
+        // Group by subsection
+        std::map<std::string, std::map<std::string, std::string>> subsections;
+        for (const auto& kv : section.second) {
+            size_t dot_pos = kv.first.find('.');
+            if (dot_pos != std::string::npos) {
+                std::string subsec = kv.first.substr(0, dot_pos);
+                std::string key = kv.first.substr(dot_pos + 1);
+                subsections[subsec][key] = kv.second;
+            } else {
+                xml << "    <" << kv.first << ">" << kv.second << "</" << kv.first << ">\n";
+            }
+        }
+
+        // Output subsections
+        for (const auto& subsec : subsections) {
+            xml << "    <" << subsec.first << ">\n";
+            for (const auto& kv : subsec.second) {
+                xml << "      <" << kv.first << ">" << kv.second << "</" << kv.first << ">\n";
+            }
+            xml << "    </" << subsec.first << ">\n";
+        }
+
+        xml << "  </" << section.first << ">\n";
+    }
+
+    xml << "</config>\n";
+    return xml.str();
 }
 
 } // namespace config
