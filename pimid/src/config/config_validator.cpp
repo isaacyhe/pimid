@@ -6,6 +6,7 @@
 #include <fstream>
 #include <cmath>
 #include <filesystem>
+#include <functional>
 #include <set>
 
 namespace pimid {

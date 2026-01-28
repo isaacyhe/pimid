@@ -1,6 +1,8 @@
 #include "power_model_manager.h"
 #include "network_model.h"
+#include <yaml-cpp/yaml.h>
 #include <iostream>
+#include <fstream>
 #include <iomanip>
 #include <cmath>
 
@@ -95,7 +97,133 @@ void PowerModelManager::initialize() {
 void PowerModelManager::loadConfig(const std::string& config_path) {
     std::cout << "[PowerModelManager] Loading configuration from: "
               << config_path << std::endl;
-    // TODO: Parse YAML configuration to override defaults
+
+    try {
+        YAML::Node config = YAML::LoadFile(config_path);
+
+        // Parse technology parameters section
+        if (config["technology"]) {
+            auto tech = config["technology"];
+            if (tech["node_nm"]) {
+                tech_params_.tech_node_nm = tech["node_nm"].as<double>();
+            }
+            if (tech["frequency_ghz"]) {
+                tech_params_.frequency_ghz = tech["frequency_ghz"].as<double>();
+            }
+            if (tech["temperature_k"]) {
+                tech_params_.temperature_k = tech["temperature_k"].as<double>();
+            }
+            if (tech["supply_voltage_v"]) {
+                tech_params_.supply_voltage_v = tech["supply_voltage_v"].as<double>();
+            }
+            if (tech["core_count"]) {
+                tech_params_.core_count = tech["core_count"].as<uint32_t>();
+            }
+        }
+
+        // Parse McPAT configuration section
+        if (config["mcpat"]) {
+            auto mcpat = config["mcpat"];
+
+            if (mcpat["enabled"]) {
+                mcpat_fallback_enabled_ = mcpat["enabled"].as<bool>();
+            }
+
+            // Core parameters
+            if (mcpat["cores"]) {
+                mcpat_config_.num_cores = mcpat["cores"].as<uint32_t>();
+            }
+            if (mcpat["core_clock_mhz"]) {
+                mcpat_config_.core_clock_mhz = mcpat["core_clock_mhz"].as<double>();
+            }
+
+            // Cache sizes
+            if (mcpat["l1i_size_kb"]) {
+                mcpat_config_.l1i_size_bytes = mcpat["l1i_size_kb"].as<uint64_t>() * 1024;
+            }
+            if (mcpat["l1d_size_kb"]) {
+                mcpat_config_.l1d_size_bytes = mcpat["l1d_size_kb"].as<uint64_t>() * 1024;
+            }
+            if (mcpat["l2_size_kb"]) {
+                mcpat_config_.l2_size_bytes = mcpat["l2_size_kb"].as<uint64_t>() * 1024;
+            }
+            if (mcpat["l3_size_mb"]) {
+                mcpat_config_.l3_size_bytes = mcpat["l3_size_mb"].as<uint64_t>() * 1024 * 1024;
+            }
+
+            // Memory controllers
+            if (mcpat["memory_controllers"]) {
+                mcpat_config_.num_memory_controllers = mcpat["memory_controllers"].as<uint32_t>();
+            }
+            if (mcpat["has_noc"]) {
+                mcpat_config_.has_noc = mcpat["has_noc"].as<bool>();
+            }
+        }
+
+        // Parse analytical model configuration
+        if (config["analytical"]) {
+            auto analytical = config["analytical"];
+
+            if (analytical["enabled"]) {
+                analytical_fallback_enabled_ = analytical["enabled"].as<bool>();
+            }
+
+            // Component-specific scaling factors
+            if (analytical["core_power_scale"]) {
+                // Could store scaling factors for analytical model tuning
+                std::cout << "  Core power scaling: "
+                          << analytical["core_power_scale"].as<double>() << "x" << std::endl;
+            }
+            if (analytical["memory_power_scale"]) {
+                std::cout << "  Memory power scaling: "
+                          << analytical["memory_power_scale"].as<double>() << "x" << std::endl;
+            }
+        }
+
+        // Parse power budget constraints
+        if (config["power_budget"]) {
+            auto budget = config["power_budget"];
+            if (budget["max_total_w"]) {
+                std::cout << "  Power budget: "
+                          << budget["max_total_w"].as<double>() << " W" << std::endl;
+            }
+            if (budget["thermal_limit_w"]) {
+                std::cout << "  Thermal limit: "
+                          << budget["thermal_limit_w"].as<double>() << " W" << std::endl;
+            }
+        }
+
+        // Parse specialized model paths
+        if (config["specialized_models"]) {
+            auto models = config["specialized_models"];
+
+            if (models["ramulator_config"]) {
+                std::cout << "  Ramulator config: "
+                          << models["ramulator_config"].as<std::string>() << std::endl;
+            }
+            if (models["garnet_config"]) {
+                std::cout << "  GARNET config: "
+                          << models["garnet_config"].as<std::string>() << std::endl;
+            }
+        }
+
+        std::cout << "[PowerModelManager] Configuration loaded successfully" << std::endl;
+        std::cout << "  Technology: " << tech_params_.tech_node_nm << " nm" << std::endl;
+        std::cout << "  Frequency: " << tech_params_.frequency_ghz << " GHz" << std::endl;
+        std::cout << "  Temperature: " << tech_params_.temperature_k << " K" << std::endl;
+        std::cout << "  McPAT: " << (mcpat_fallback_enabled_ ? "enabled" : "disabled") << std::endl;
+        std::cout << "  Analytical: " << (analytical_fallback_enabled_ ? "enabled" : "disabled") << std::endl;
+
+    } catch (const YAML::BadFile& e) {
+        std::cerr << "[PowerModelManager] ERROR: Cannot open config file: "
+                  << config_path << std::endl;
+    } catch (const YAML::ParserException& e) {
+        std::cerr << "[PowerModelManager] ERROR: YAML parsing error in "
+                  << config_path << ": " << e.what() << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "[PowerModelManager] ERROR: Failed to load config: "
+                  << e.what() << std::endl;
+    }
 }
 
 //=============================================================================

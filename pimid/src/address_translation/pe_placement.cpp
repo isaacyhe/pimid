@@ -503,9 +503,52 @@ Address PEPlacementManager::translateAddress(uint32_t from_pe, uint32_t to_pe,
         return addr;
     }
 
-    // For discrete addressing, would need offset calculation
-    // TODO: Implement discrete address translation
-    return addr;
+    // For discrete addressing, translate between PE-local address spaces
+    const PEDescriptor* from = getPE(from_pe);
+    const PEDescriptor* to = getPE(to_pe);
+
+    if (!from || !to) {
+        return addr;  // Cannot translate without PE descriptors
+    }
+
+    // Calculate the local offset within the source PE's address space
+    // In discrete mode, addresses are relative to each PE's base
+    Address local_offset = 0;
+
+    if (addr >= from->addr_base && addr < from->addr_limit) {
+        // Address is within source PE's local space
+        local_offset = addr - from->addr_base;
+    } else if (addr >= from->addr_constraints.accessible_base &&
+               addr < from->addr_constraints.accessible_limit) {
+        // Address is in source PE's accessible range (relative addressing)
+        local_offset = addr - from->addr_constraints.accessible_base;
+    } else {
+        // Address appears to already be a global offset
+        local_offset = addr;
+    }
+
+    // If target PE has the same size, direct mapping works
+    if (to->addr_constraints.accessible_size_bytes ==
+        from->addr_constraints.accessible_size_bytes) {
+        // Direct 1:1 mapping
+        return to->addr_base + local_offset;
+    }
+
+    // Handle size mismatch (e.g., subarray PE to bank PE)
+    // Scale the offset based on size ratio
+    double scale_factor = static_cast<double>(to->addr_constraints.accessible_size_bytes) /
+                         static_cast<double>(from->addr_constraints.accessible_size_bytes);
+
+    // For larger target: offset maps directly
+    // For smaller target: offset wraps within target space
+    if (scale_factor >= 1.0) {
+        // Target is larger or equal - direct mapping
+        return to->addr_base + local_offset;
+    } else {
+        // Target is smaller - wrap within target space
+        uint64_t wrapped_offset = local_offset % to->addr_constraints.accessible_size_bytes;
+        return to->addr_base + wrapped_offset;
+    }
 }
 
 std::vector<uint32_t> PEPlacementManager::getPEsInSubarray(uint32_t bank_id,
@@ -548,14 +591,87 @@ std::vector<uint32_t> PEPlacementManager::getPEsOnLogicDie() const {
 
 Address PEPlacementManager::getHierarchyBase(PEPlacementLevel level,
                                              const PEDescriptor& pe) const {
-    // TODO: Implement based on memory organization
-    return 0;
+    // Calculate base address based on memory hierarchy organization
+    // Uses sizes from hierarchy_, falling back to defaults if not configured
+
+    const uint64_t SUBARRAY_SIZE = hierarchy_.subarray_size_bytes > 0 ?
+        hierarchy_.subarray_size_bytes : (128ULL * 1024);  // 128 KB default
+    const uint64_t BANK_SIZE = hierarchy_.bank_size_bytes > 0 ?
+        hierarchy_.bank_size_bytes : (8ULL * 1024 * 1024);  // 8 MB default
+    const uint64_t CHIP_SIZE = hierarchy_.chip_size_bytes > 0 ?
+        hierarchy_.chip_size_bytes : (64ULL * 1024 * 1024);  // 64 MB default
+    const uint64_t RANK_SIZE = hierarchy_.rank_size_bytes > 0 ?
+        hierarchy_.rank_size_bytes : (256ULL * 1024 * 1024);  // 256 MB default
+
+    switch (level) {
+        case PEPlacementLevel::SUBARRAY:
+            // Base of specific subarray
+            return pe.rank_id * RANK_SIZE +
+                   pe.chip_id * CHIP_SIZE +
+                   pe.bank_id * BANK_SIZE +
+                   pe.subarray_id * SUBARRAY_SIZE;
+
+        case PEPlacementLevel::BANK:
+            // Base of specific bank
+            return pe.rank_id * RANK_SIZE +
+                   pe.chip_id * CHIP_SIZE +
+                   pe.bank_id * BANK_SIZE;
+
+        case PEPlacementLevel::CHIP:
+            // Base of specific chip
+            return pe.rank_id * RANK_SIZE +
+                   pe.chip_id * CHIP_SIZE;
+
+        case PEPlacementLevel::RANK:
+            // Base of specific rank
+            return pe.rank_id * RANK_SIZE;
+
+        case PEPlacementLevel::LOGIC_DIE:
+            // Logic die has access to all memory - base is 0
+            return 0;
+
+        default:
+            return 0;
+    }
 }
 
 Address PEPlacementManager::getHierarchyLimit(PEPlacementLevel level,
                                               const PEDescriptor& pe) const {
-    // TODO: Implement based on memory organization
-    return 0;
+    // Calculate limit address (exclusive) based on memory hierarchy organization
+    // Uses sizes from hierarchy_, falling back to defaults if not configured
+
+    const uint64_t SUBARRAY_SIZE = hierarchy_.subarray_size_bytes > 0 ?
+        hierarchy_.subarray_size_bytes : (128ULL * 1024);  // 128 KB default
+    const uint64_t BANK_SIZE = hierarchy_.bank_size_bytes > 0 ?
+        hierarchy_.bank_size_bytes : (8ULL * 1024 * 1024);  // 8 MB default
+    const uint64_t CHIP_SIZE = hierarchy_.chip_size_bytes > 0 ?
+        hierarchy_.chip_size_bytes : (64ULL * 1024 * 1024);  // 64 MB default
+    const uint64_t RANK_SIZE = hierarchy_.rank_size_bytes > 0 ?
+        hierarchy_.rank_size_bytes : (256ULL * 1024 * 1024);  // 256 MB default
+
+    // Get base address and add size for the level
+    Address base = getHierarchyBase(level, pe);
+
+    switch (level) {
+        case PEPlacementLevel::SUBARRAY:
+            return base + SUBARRAY_SIZE;
+
+        case PEPlacementLevel::BANK:
+            return base + BANK_SIZE;
+
+        case PEPlacementLevel::CHIP:
+            return base + CHIP_SIZE;
+
+        case PEPlacementLevel::RANK:
+            return base + RANK_SIZE;
+
+        case PEPlacementLevel::LOGIC_DIE:
+            // Logic die has access to all memory
+            return RANK_SIZE * hierarchy_.num_ranks;
+
+        default:
+            return 0;
+    }
 }
 
 bool PEPlacementManager::isAddressInRange(Address addr,
