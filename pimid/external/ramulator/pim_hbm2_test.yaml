@@ -1,0 +1,37 @@
+# HBM2 Configuration for PIM simulation
+# HBM2 provides high bandwidth ideal for PIM architectures
+
+Frontend:
+  impl: SimpleO3
+  clock_ratio: 4
+  num_expected_insts: 100000
+  traces:
+    - pim_workload.trace
+
+  Translation:
+    impl: RandomTranslation
+    max_addr: 2147483648
+
+MemorySystem:
+  impl: GenericDRAM
+  clock_ratio: 1
+
+  DRAM:
+    impl: HBM2
+    org:
+      preset: HBM2_4Gb
+    timing:
+      preset: HBM2_2Gbps
+
+  Controller:
+    impl: Generic
+    Scheduler:
+      impl: FRFCFS
+    RefreshManager:
+      impl: AllBank
+    RowPolicy:
+      impl: OpenRowPolicy
+      cap: 16
+
+  AddrMapper:
+    impl: RoBaRaCoCh
