@@ -571,34 +571,95 @@ bool InternalDRAMNetwork::sendPacket(const InternalNetworkPacket& packet) {
     NetworkLevel level = determineNetworkLevel(packet.source_bank, packet.dest_bank,
                                               packet.source_subarray, packet.dest_subarray);
 
-    // Get the appropriate network config
+    // Get the appropriate network config and GARNET model
     InternalNetworkLink* link_config = nullptr;
     std::queue<InternalNetworkPacket>* queue = nullptr;
+    std::shared_ptr<NetworkModel> garnet_network = nullptr;
 
     switch (level) {
         case NetworkLevel::SUBARRAY_NETWORK:
             link_config = &subarray_network_config_;
             queue = &subarray_network_queue_;
+            garnet_network = garnet_subarray_network_;
             subarray_network_accesses_++;
             break;
         case NetworkLevel::BANK_NETWORK:
             link_config = &bank_network_config_;
             queue = &bank_network_queue_;
+            garnet_network = garnet_bank_network_;
             bank_network_accesses_++;
             break;
         case NetworkLevel::BANK_GROUP_NETWORK:
             link_config = &bg_network_config_;
             queue = &bg_network_queue_;
+            garnet_network = garnet_bg_network_;
             bg_network_accesses_++;
             break;
         case NetworkLevel::CHIP_NETWORK:
             link_config = &chip_network_config_;
             queue = &chip_network_queue_;
+            garnet_network = garnet_chip_network_;
             chip_network_accesses_++;
             break;
     }
 
-    // Calculate completion time
+    // Use GARNET cycle-accurate simulation if enabled
+    if (use_garnet_models_ && garnet_network) {
+        // Convert to NetworkPacket for GARNET
+        uint32_t src_node = 0, dst_node = 0;
+
+        // Map bank/subarray IDs to network node IDs based on level
+        switch (level) {
+            case NetworkLevel::SUBARRAY_NETWORK:
+                src_node = static_cast<uint32_t>(packet.source_subarray);
+                dst_node = static_cast<uint32_t>(packet.dest_subarray);
+                break;
+            case NetworkLevel::BANK_NETWORK:
+                src_node = static_cast<uint32_t>(packet.source_bank % num_banks_per_bg_);
+                dst_node = static_cast<uint32_t>(packet.dest_bank % num_banks_per_bg_);
+                break;
+            case NetworkLevel::BANK_GROUP_NETWORK:
+                src_node = static_cast<uint32_t>((packet.source_bank / num_banks_per_bg_) % num_bg_per_chip_);
+                dst_node = static_cast<uint32_t>((packet.dest_bank / num_banks_per_bg_) % num_bg_per_chip_);
+                break;
+            case NetworkLevel::CHIP_NETWORK:
+                src_node = static_cast<uint32_t>((packet.source_bank / (num_banks_per_bg_ * num_bg_per_chip_)) % num_chips_per_rank_);
+                dst_node = static_cast<uint32_t>((packet.dest_bank / (num_banks_per_bg_ * num_bg_per_chip_)) % num_chips_per_rank_);
+                break;
+        }
+
+        // Check if GARNET can accept the packet
+        if (!garnet_network->canInject(src_node)) {
+            // Network congested - packet rejected
+            return false;
+        }
+
+        // Create GARNET NetworkPacket
+        NetworkPacket net_packet(
+            src_node,
+            dst_node,
+            PacketType::DATA,
+            static_cast<uint32_t>(packet.data_bytes),
+            packet.packet_id,
+            current_cycle_
+        );
+
+        // Inject into GARNET network
+        garnet_network->injectPacket(net_packet);
+
+        // Track packet in inflight list (GARNET handles actual timing)
+        InternalNetworkPacket timed_packet = packet;
+        timed_packet.injection_time = current_cycle_;
+        timed_packet.completion_time = 0;  // Will be set when packet arrives
+        timed_packet.completed = false;
+        inflight_packets_.push_back(timed_packet);
+
+        total_packets_sent_++;
+        total_bytes_transferred_ += packet.data_bytes;
+        return true;
+    }
+
+    // Fall back to analytical model
     uint64_t transfer_time = calculateTransferTime(*link_config, packet.data_bytes);
     uint64_t completion_time = current_cycle_ + link_config->latency_cycles + transfer_time;
 
@@ -619,6 +680,18 @@ bool InternalDRAMNetwork::sendPacket(const InternalNetworkPacket& packet) {
 
 void InternalDRAMNetwork::tick() {
     current_cycle_++;
+
+    // Tick GARNET networks if enabled
+    if (use_garnet_models_) {
+        if (garnet_subarray_network_) garnet_subarray_network_->tick();
+        if (garnet_bank_network_) garnet_bank_network_->tick();
+        if (garnet_bg_network_) garnet_bg_network_->tick();
+        if (garnet_chip_network_) garnet_chip_network_->tick();
+
+        // Check for arrived packets in GARNET networks
+        processGarnetArrivedPackets();
+    }
+
     processInflightPackets();
 }
 
@@ -699,6 +772,13 @@ uint64_t InternalDRAMNetwork::calculateTransferTime(const InternalNetworkLink& l
 void InternalDRAMNetwork::processInflightPackets() {
     auto it = inflight_packets_.begin();
     while (it != inflight_packets_.end()) {
+        // For GARNET-managed packets, completion_time is 0 until packet arrives
+        if (it->completion_time == 0 && use_garnet_models_) {
+            // Packet is being managed by GARNET, skip analytical processing
+            ++it;
+            continue;
+        }
+
         if (current_cycle_ >= it->completion_time && !it->completed) {
             // Packet completed
             it->completed = true;
@@ -716,6 +796,71 @@ void InternalDRAMNetwork::processInflightPackets() {
             ++it;
         }
     }
+}
+
+void InternalDRAMNetwork::processGarnetArrivedPackets() {
+    // Helper to process arrived packets from a GARNET network
+    auto process_network = [this](std::shared_ptr<NetworkModel>& network, NetworkLevel level) {
+        if (!network) return;
+
+        // Check each destination node for arrived packets
+        for (const auto& node : network->getConfig().num_rows > 0 ?
+             std::vector<uint32_t>(network->getConfig().num_rows) : std::vector<uint32_t>()) {
+            // Note: This is a simplified check. In production, we'd track
+            // which destination nodes might have packets.
+        }
+
+        // Extract arrived packets - iterate through possible destination nodes
+        uint32_t max_nodes = 0;
+        switch (level) {
+            case NetworkLevel::SUBARRAY_NETWORK:
+                max_nodes = num_subarrays_per_bank_;
+                break;
+            case NetworkLevel::BANK_NETWORK:
+                max_nodes = num_banks_per_bg_;
+                break;
+            case NetworkLevel::BANK_GROUP_NETWORK:
+                max_nodes = num_bg_per_chip_;
+                break;
+            case NetworkLevel::CHIP_NETWORK:
+                max_nodes = num_chips_per_rank_;
+                break;
+        }
+
+        for (uint32_t dst = 0; dst < max_nodes; dst++) {
+            while (network->hasArrived(dst)) {
+                NetworkPacket arrived = network->extractPacket(dst);
+
+                // Find matching inflight packet and mark as completed
+                for (auto& pkt : inflight_packets_) {
+                    if (pkt.packet_id == arrived.addr && !pkt.completed && pkt.completion_time == 0) {
+                        pkt.completion_time = current_cycle_;
+                        pkt.completed = true;
+                        total_packets_completed_++;
+                        total_network_latency_ += (pkt.completion_time - pkt.injection_time);
+
+                        if (pkt.callback) {
+                            pkt.callback();
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    };
+
+    // Process each network level
+    process_network(garnet_subarray_network_, NetworkLevel::SUBARRAY_NETWORK);
+    process_network(garnet_bank_network_, NetworkLevel::BANK_NETWORK);
+    process_network(garnet_bg_network_, NetworkLevel::BANK_GROUP_NETWORK);
+    process_network(garnet_chip_network_, NetworkLevel::CHIP_NETWORK);
+
+    // Clean up completed GARNET-managed packets
+    inflight_packets_.erase(
+        std::remove_if(inflight_packets_.begin(), inflight_packets_.end(),
+                      [](const InternalNetworkPacket& pkt) { return pkt.completed; }),
+        inflight_packets_.end()
+    );
 }
 
 void InternalDRAMNetwork::printStats() const {
@@ -1443,6 +1588,242 @@ std::string InternalDRAMNetwork::getTopologyName(TopologyType topology) {
         case TopologyType::CUSTOM:     return "Custom";
         default:                        return "Unknown";
     }
+}
+
+//=============================================================================
+// Factory Functions for Network Creation at Different Hierarchy Levels
+//=============================================================================
+
+namespace {
+    // Helper to get network parameters based on DRAM type
+    struct NetworkParams {
+        int link_width_bits;
+        int link_latency_cycles;
+        double bandwidth_GBs;
+    };
+
+    NetworkParams getSubarrayParams(const std::string& dram_type) {
+        if (dram_type == "HBM3") return {512, 3, 115.2};
+        if (dram_type == "HBM2") return {256, 3, 32.0};
+        if (dram_type == "HBM" || dram_type == "HBM1") return {256, 4, 32.0};
+        if (dram_type == "DDR5") return {128, 5, 25.6};
+        if (dram_type == "GDDR6") return {256, 4, 64.0};
+        if (dram_type == "LPDDR5") return {128, 4, 25.6};
+        if (dram_type == "SRAM") return {128, 1, 40.0};
+        if (dram_type == "STT-MRAM" || dram_type == "STTMRAM") return {64, 3, 12.0};
+        if (dram_type == "PCM" || dram_type == "PRAM") return {64, 4, 9.6};
+        if (dram_type == "ReRAM" || dram_type == "RERAM") return {64, 3, 11.2};
+        // Default: DDR4
+        return {64, 5, 9.6};
+    }
+
+    NetworkParams getBankParams(const std::string& dram_type) {
+        if (dram_type == "HBM3") return {128, 5, 28.8};
+        if (dram_type == "HBM2") return {64, 5, 8.0};
+        if (dram_type == "HBM" || dram_type == "HBM1") return {64, 6, 8.0};
+        if (dram_type == "DDR5") return {16, 10, 3.2};
+        if (dram_type == "GDDR6") return {32, 6, 8.0};
+        if (dram_type == "LPDDR5") return {16, 8, 3.2};
+        if (dram_type == "SRAM") return {64, 2, 20.0};
+        if (dram_type == "STT-MRAM" || dram_type == "STTMRAM") return {16, 6, 3.0};
+        if (dram_type == "PCM" || dram_type == "PRAM") return {16, 8, 2.4};
+        if (dram_type == "ReRAM" || dram_type == "RERAM") return {16, 7, 2.8};
+        // Default: DDR4
+        return {8, 10, 1.2};
+    }
+
+    NetworkParams getBankGroupParams(const std::string& dram_type) {
+        if (dram_type == "HBM3") return {256, 8, 57.6};
+        if (dram_type == "HBM2") return {128, 8, 16.0};
+        if (dram_type == "HBM" || dram_type == "HBM1") return {128, 10, 16.0};
+        if (dram_type == "DDR5") return {32, 20, 6.4};
+        if (dram_type == "GDDR6") return {64, 10, 16.0};
+        if (dram_type == "LPDDR5") return {32, 15, 6.4};
+        if (dram_type == "SRAM") return {64, 3, 20.0};
+        if (dram_type == "STT-MRAM" || dram_type == "STTMRAM") return {32, 12, 6.0};
+        if (dram_type == "PCM" || dram_type == "PRAM") return {32, 16, 4.8};
+        if (dram_type == "ReRAM" || dram_type == "RERAM") return {32, 14, 5.6};
+        // Default: DDR4
+        return {16, 20, 2.4};
+    }
+
+    NetworkParams getChipParams(const std::string& dram_type) {
+        if (dram_type == "HBM3") return {128, 10, 28.8};
+        if (dram_type == "HBM2") return {128, 10, 16.0};
+        if (dram_type == "HBM" || dram_type == "HBM1") return {128, 12, 16.0};
+        if (dram_type == "DDR5") return {8, 50, 1.6};
+        if (dram_type == "GDDR6") return {16, 20, 4.0};
+        if (dram_type == "LPDDR5") return {16, 30, 3.2};
+        if (dram_type == "SRAM") return {32, 4, 10.0};
+        if (dram_type == "STT-MRAM" || dram_type == "STTMRAM") return {16, 25, 3.0};
+        if (dram_type == "PCM" || dram_type == "PRAM") return {16, 32, 2.4};
+        if (dram_type == "ReRAM" || dram_type == "RERAM") return {16, 28, 2.8};
+        // Default: DDR4
+        return {8, 50, 1.2};
+    }
+}
+
+std::shared_ptr<NetworkModel> createSubarrayNetwork(
+    const std::string& dram_type,
+    int num_subarrays,
+    bool use_garnet) {
+
+    if (use_garnet) {
+        auto params = getSubarrayParams(dram_type);
+        return createGarnetHTreeForDRAM(
+            NetworkLevel::SUBARRAY_NETWORK,
+            num_subarrays,
+            params.link_width_bits,
+            params.link_latency_cycles,
+            params.bandwidth_GBs
+        );
+    }
+
+    // Create simple analytical model via GarnetModel with H-tree topology
+    NetworkConfig config;
+    config.topology = NetworkTopology::H_TREE;
+    config.routing = RoutingAlgorithm::TREE_BASED;
+    config.num_rows = num_subarrays;
+    config.num_cols = 1;
+    config.router_pipeline = RouterPipelineComplexity::MINIMAL;
+    config.router_latency = 1;
+
+    auto params = getSubarrayParams(dram_type);
+    config.link_width_bytes = params.link_width_bits / 8;
+    config.link_latency = params.link_latency_cycles;
+
+    auto model = std::make_shared<GarnetModel>(config);
+    model->initialize();
+    return model;
+}
+
+std::shared_ptr<NetworkModel> createBankNetwork(
+    const std::string& dram_type,
+    int num_banks,
+    bool use_garnet) {
+
+    if (use_garnet) {
+        auto params = getBankParams(dram_type);
+        return createGarnetHTreeForDRAM(
+            NetworkLevel::BANK_NETWORK,
+            num_banks,
+            params.link_width_bits,
+            params.link_latency_cycles,
+            params.bandwidth_GBs
+        );
+    }
+
+    // Create simple model
+    NetworkConfig config;
+    config.topology = NetworkTopology::CROSSBAR;  // Banks often use bus/crossbar
+    config.routing = RoutingAlgorithm::MINIMAL;
+    config.num_rows = num_banks;
+    config.num_cols = 1;
+    config.router_pipeline = RouterPipelineComplexity::SIMPLE;
+    config.router_latency = 2;
+
+    auto params = getBankParams(dram_type);
+    config.link_width_bytes = params.link_width_bits / 8;
+    config.link_latency = params.link_latency_cycles;
+
+    auto model = std::make_shared<GarnetModel>(config);
+    model->initialize();
+    return model;
+}
+
+std::shared_ptr<NetworkModel> createBankGroupNetwork(
+    const std::string& dram_type,
+    int num_bank_groups,
+    bool use_garnet) {
+
+    if (use_garnet) {
+        auto params = getBankGroupParams(dram_type);
+        return createGarnetHTreeForDRAM(
+            NetworkLevel::BANK_GROUP_NETWORK,
+            num_bank_groups,
+            params.link_width_bits,
+            params.link_latency_cycles,
+            params.bandwidth_GBs
+        );
+    }
+
+    // Create simple model
+    NetworkConfig config;
+    config.topology = NetworkTopology::CROSSBAR;
+    config.routing = RoutingAlgorithm::MINIMAL;
+    config.num_rows = num_bank_groups;
+    config.num_cols = 1;
+    config.router_pipeline = RouterPipelineComplexity::SIMPLE;
+    config.router_latency = 2;
+
+    auto params = getBankGroupParams(dram_type);
+    config.link_width_bytes = params.link_width_bits / 8;
+    config.link_latency = params.link_latency_cycles;
+
+    auto model = std::make_shared<GarnetModel>(config);
+    model->initialize();
+    return model;
+}
+
+std::shared_ptr<NetworkModel> createChipNetwork(
+    const std::string& dram_type,
+    int num_chips,
+    bool use_garnet) {
+
+    if (use_garnet) {
+        auto params = getChipParams(dram_type);
+        return createGarnetHTreeForDRAM(
+            NetworkLevel::CHIP_NETWORK,
+            num_chips,
+            params.link_width_bits,
+            params.link_latency_cycles,
+            params.bandwidth_GBs
+        );
+    }
+
+    // Create simple model - chips typically use point-to-point or crossbar
+    NetworkConfig config;
+    config.topology = NetworkTopology::CROSSBAR;
+    config.routing = RoutingAlgorithm::MINIMAL;
+    config.num_rows = num_chips;
+    config.num_cols = 1;
+    config.router_pipeline = RouterPipelineComplexity::REDUCED;
+    config.router_latency = 3;
+
+    auto params = getChipParams(dram_type);
+    config.link_width_bytes = params.link_width_bits / 8;
+    config.link_latency = params.link_latency_cycles;
+
+    auto model = std::make_shared<GarnetModel>(config);
+    model->initialize();
+    return model;
+}
+
+std::shared_ptr<InternalDRAMNetwork> createHierarchicalNetwork(
+    const std::string& dram_type,
+    int num_subarrays_per_bank,
+    int num_banks_per_bg,
+    int num_bg_per_chip,
+    int num_chips_per_rank,
+    bool use_garnet) {
+
+    std::cout << "\n[Factory] Creating hierarchical network for " << dram_type << ":" << std::endl;
+    std::cout << "  Subarrays per bank: " << num_subarrays_per_bank << std::endl;
+    std::cout << "  Banks per BG: " << num_banks_per_bg << std::endl;
+    std::cout << "  BGs per chip: " << num_bg_per_chip << std::endl;
+    std::cout << "  Chips per rank: " << num_chips_per_rank << std::endl;
+    std::cout << "  GARNET mode: " << (use_garnet ? "enabled (cycle-accurate)" : "disabled (analytical)") << std::endl;
+
+    auto network = std::make_shared<InternalDRAMNetwork>(dram_type);
+    network->initialize(num_subarrays_per_bank, num_banks_per_bg,
+                       num_bg_per_chip, num_chips_per_rank);
+
+    if (use_garnet) {
+        network->enableGarnetSimulation(true);
+    }
+
+    std::cout << "[Factory] Hierarchical network created successfully\n" << std::endl;
+    return network;
 }
 
 } // namespace pimid

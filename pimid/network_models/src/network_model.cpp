@@ -1,5 +1,7 @@
 #include "network_model.h"
 #include <iostream>
+#include <fstream>
+#include <sstream>
 
 namespace pimid {
 
@@ -112,8 +114,105 @@ void GarnetModel::initialize() {
 void GarnetModel::loadConfig(const std::string& config_path) {
     std::cout << "Loading GARNET configuration from: " << config_path << std::endl;
 
-    // TODO: Load GARNET-specific configuration
-    // This would parse gem5 config files or YAML config
+    // Parse configuration file (YAML or INI format)
+    std::ifstream config_file(config_path);
+    if (!config_file.is_open()) {
+        std::cerr << "[GarnetModel] Warning: Could not open config file: " << config_path << std::endl;
+        std::cerr << "[GarnetModel] Using default configuration" << std::endl;
+        return;
+    }
+
+    std::string line;
+    while (std::getline(config_file, line)) {
+        // Skip comments and empty lines
+        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+
+        // Find key-value separator
+        size_t sep_pos = line.find(':');
+        if (sep_pos == std::string::npos) {
+            sep_pos = line.find('=');
+        }
+        if (sep_pos == std::string::npos) continue;
+
+        std::string key = line.substr(0, sep_pos);
+        std::string value = line.substr(sep_pos + 1);
+
+        // Trim whitespace
+        auto trim = [](std::string& s) {
+            size_t start = s.find_first_not_of(" \t\r\n");
+            size_t end = s.find_last_not_of(" \t\r\n");
+            if (start == std::string::npos) { s = ""; return; }
+            s = s.substr(start, end - start + 1);
+        };
+        trim(key);
+        trim(value);
+
+        // Parse configuration parameters
+        if (key == "topology") {
+            if (value == "mesh_2d" || value == "MESH_2D") {
+                config_.topology = NetworkTopology::MESH_2D;
+            } else if (value == "mesh_3d" || value == "MESH_3D") {
+                config_.topology = NetworkTopology::MESH_3D;
+            } else if (value == "torus_2d" || value == "TORUS_2D") {
+                config_.topology = NetworkTopology::TORUS_2D;
+            } else if (value == "h_tree" || value == "H_TREE") {
+                config_.topology = NetworkTopology::H_TREE;
+            } else if (value == "fat_tree" || value == "FAT_TREE") {
+                config_.topology = NetworkTopology::FAT_TREE;
+            } else if (value == "crossbar" || value == "CROSSBAR") {
+                config_.topology = NetworkTopology::CROSSBAR;
+            } else if (value == "dragonfly" || value == "DRAGONFLY") {
+                config_.topology = NetworkTopology::DRAGONFLY;
+            }
+        } else if (key == "routing") {
+            if (value == "xy" || value == "XY") {
+                config_.routing = RoutingAlgorithm::XY;
+            } else if (value == "xyz" || value == "XYZ") {
+                config_.routing = RoutingAlgorithm::XYZ;
+            } else if (value == "adaptive" || value == "ADAPTIVE") {
+                config_.routing = RoutingAlgorithm::ADAPTIVE;
+            } else if (value == "west_first" || value == "WEST_FIRST") {
+                config_.routing = RoutingAlgorithm::WEST_FIRST;
+            } else if (value == "tree_based" || value == "TREE_BASED") {
+                config_.routing = RoutingAlgorithm::TREE_BASED;
+            }
+        } else if (key == "num_rows") {
+            config_.num_rows = std::stoul(value);
+        } else if (key == "num_cols") {
+            config_.num_cols = std::stoul(value);
+        } else if (key == "num_layers") {
+            config_.num_layers = std::stoul(value);
+        } else if (key == "virtual_networks") {
+            config_.virtual_networks = std::stoul(value);
+        } else if (key == "virtual_channels_per_vn") {
+            config_.virtual_channels_per_vn = std::stoul(value);
+            config_.virtual_channels = config_.virtual_networks * config_.virtual_channels_per_vn;
+        } else if (key == "virtual_channels") {
+            config_.virtual_channels = std::stoul(value);
+        } else if (key == "link_width_bytes") {
+            config_.link_width_bytes = std::stoul(value);
+        } else if (key == "link_latency") {
+            config_.link_latency = std::stoull(value);
+        } else if (key == "router_latency") {
+            config_.router_latency = std::stoull(value);
+        } else if (key == "input_buffer_depth") {
+            config_.input_buffer_depth = std::stoul(value);
+        } else if (key == "output_buffer_depth") {
+            config_.output_buffer_depth = std::stoul(value);
+        } else if (key == "enable_router_bypass") {
+            config_.enable_router_bypass = (value == "true" || value == "1" || value == "yes");
+        }
+    }
+
+    config_file.close();
+    std::cout << "[GarnetModel] Configuration loaded successfully:" << std::endl;
+    std::cout << "  Topology: " << static_cast<int>(config_.topology) << std::endl;
+    std::cout << "  Dimensions: " << config_.num_rows << "x" << config_.num_cols;
+    if (config_.num_layers > 1) std::cout << "x" << config_.num_layers;
+    std::cout << std::endl;
+    std::cout << "  Virtual channels: " << config_.virtual_channels << std::endl;
+    std::cout << "  Link width: " << config_.link_width_bytes << " bytes" << std::endl;
+    std::cout << "  Router latency: " << config_.router_latency << " cycles" << std::endl;
 }
 
 void GarnetModel::addNode(const NetworkNode& node) {

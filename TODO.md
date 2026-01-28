@@ -167,8 +167,11 @@
 ### PIM Bandwidth Tracker
 - [ ] **`pimid/memory_models/src/pim_bandwidth_tracker.cpp:118`** - Queue depth limits
 
-### Network Model
-- [ ] **`pimid/network_models/src/network_model.cpp:115`** - Load GARNET-specific configuration
+### Network Model ✅ COMPLETE
+- [x] **`pimid/network_models/src/network_model.cpp`** - ✅ GARNET configuration loading implemented
+  - Full YAML/INI config file parsing for topology, routing, dimensions, VCs, etc.
+  - Supports all topology types (MESH_2D, MESH_3D, TORUS_2D, H_TREE, FAT_TREE, CROSSBAR, DRAGONFLY)
+  - Supports all routing algorithms (XY, XYZ, ADAPTIVE, WEST_FIRST, TREE_BASED)
 
 ### Event-Driven Execution
 - [ ] **`pimid/src/execution_model/event_driven_execution_model.cpp:274`** - Load from actual YAML config file
@@ -191,6 +194,23 @@
 ---
 
 ## ✅ Completed Items
+
+### 2026-01-28: GARNET Network Integration Complete
+- [x] **GARNET Configuration Loading** - Full config file parsing in network_model.cpp
+  - Supports YAML/INI format with topology, routing, dimension parameters
+  - Virtual network/channel configuration
+  - Link width, latency, and buffer depth settings
+- [x] **GARNET-InternalDRAMNetwork Wiring** - Networks connected at all hierarchy levels
+  - sendPacket() routes through GARNET when use_garnet_models_ is true
+  - tick() advances GARNET networks and processes arrived packets
+  - Proper node mapping for subarray/bank/BG/chip levels
+- [x] **Factory Functions for Network Hierarchy** - Easy network creation
+  - createSubarrayNetwork() - Within-bank communication
+  - createBankNetwork() - Within-bankgroup communication
+  - createBankGroupNetwork() - Within-chip communication
+  - createChipNetwork() - Within-rank communication
+  - createHierarchicalNetwork() - Complete memory system network with all levels
+  - Pre-configured parameters for DDR4/DDR5/HBM2/HBM3/GDDR6/LPDDR5/SRAM/NVMs
 
 ### 2026-01-28: Medium Priority - External Tool Integration
 - [x] **NVSim Integration** - Full NVSim wrapper support for STT-MRAM and NVM models

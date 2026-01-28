@@ -466,6 +466,13 @@ private:
      * @brief Process packets in flight
      */
     void processInflightPackets();
+
+    /**
+     * @brief Process packets that have arrived via GARNET networks
+     * Called when use_garnet_models_ is true to check for packet arrivals
+     * and update the inflight_packets_ list accordingly.
+     */
+    void processGarnetArrivedPackets();
 };
 
 /**
@@ -501,6 +508,80 @@ std::shared_ptr<NetworkModel> createGarnetHTreeForDRAM(
     int link_width_bits,
     int link_latency_cycles,
     double bandwidth_GBs);
+
+/**
+ * @brief Factory: Create network for subarray-level communication (within bank)
+ *
+ * @param dram_type DRAM type for configuration defaults
+ * @param num_subarrays Number of subarrays in the bank
+ * @param use_garnet True to use GARNET cycle-accurate, false for analytical
+ * @return Configured network model
+ */
+std::shared_ptr<NetworkModel> createSubarrayNetwork(
+    const std::string& dram_type,
+    int num_subarrays,
+    bool use_garnet = false);
+
+/**
+ * @brief Factory: Create network for bank-level communication (within bank group)
+ *
+ * @param dram_type DRAM type for configuration defaults
+ * @param num_banks Number of banks in the bank group
+ * @param use_garnet True to use GARNET cycle-accurate, false for analytical
+ * @return Configured network model
+ */
+std::shared_ptr<NetworkModel> createBankNetwork(
+    const std::string& dram_type,
+    int num_banks,
+    bool use_garnet = false);
+
+/**
+ * @brief Factory: Create network for bank-group-level communication (within chip)
+ *
+ * @param dram_type DRAM type for configuration defaults
+ * @param num_bank_groups Number of bank groups in the chip
+ * @param use_garnet True to use GARNET cycle-accurate, false for analytical
+ * @return Configured network model
+ */
+std::shared_ptr<NetworkModel> createBankGroupNetwork(
+    const std::string& dram_type,
+    int num_bank_groups,
+    bool use_garnet = false);
+
+/**
+ * @brief Factory: Create network for chip-level communication (within rank)
+ *
+ * @param dram_type DRAM type for configuration defaults
+ * @param num_chips Number of chips in the rank
+ * @param use_garnet True to use GARNET cycle-accurate, false for analytical
+ * @return Configured network model
+ */
+std::shared_ptr<NetworkModel> createChipNetwork(
+    const std::string& dram_type,
+    int num_chips,
+    bool use_garnet = false);
+
+/**
+ * @brief Factory: Create complete hierarchical network for a memory system
+ *
+ * Creates all four levels of internal DRAM network in one call.
+ * This is the recommended way to set up networks for PIM simulation.
+ *
+ * @param dram_type DRAM type (DDR4, DDR5, HBM2, HBM3, etc.)
+ * @param num_subarrays_per_bank Subarrays per bank (typically 16-64)
+ * @param num_banks_per_bg Banks per bank group (typically 4-8)
+ * @param num_bg_per_chip Bank groups per chip (typically 2-8)
+ * @param num_chips_per_rank Chips per rank (typically 4-8)
+ * @param use_garnet True to use GARNET cycle-accurate, false for analytical
+ * @return Fully configured InternalDRAMNetwork with all levels
+ */
+std::shared_ptr<InternalDRAMNetwork> createHierarchicalNetwork(
+    const std::string& dram_type,
+    int num_subarrays_per_bank = 16,
+    int num_banks_per_bg = 4,
+    int num_bg_per_chip = 4,
+    int num_chips_per_rank = 8,
+    bool use_garnet = false);
 
 } // namespace pimid
 
