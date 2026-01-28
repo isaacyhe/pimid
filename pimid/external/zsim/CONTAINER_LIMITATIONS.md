@@ -2,9 +2,25 @@
 
 ## Summary
 
-ZSim requires Intel PIN for execution-driven simulation. When running in a gVisor-based container environment, PIN fails to initialize due to missing kernel interface files.
+ZSim requires Intel PIN for execution-driven simulation. When running in a gVisor-based container environment, PIN fails to initialize due to missing kernel interface files. However, **this can be worked around using proot**.
 
-## Issue Details
+## Solution: Using proot
+
+The `proot` tool can fake the `/proc/sys/kernel/osrelease` file, allowing ZSim/PIN to run:
+
+```bash
+# Create fake osrelease file
+mkdir -p /tmp/fake_proc/sys/kernel
+echo "5.15.0-generic" > /tmp/fake_proc/sys/kernel/osrelease
+
+# Run ZSim with proot
+proot -b /tmp/fake_proc/sys/kernel/osrelease:/proc/sys/kernel/osrelease \
+    ./zsim config.cfg
+```
+
+**Note:** PIN 3.28 requires kernel 5.x. PIN 2.14 requires kernel 3.x.
+
+## Original Issue
 
 **Error Message:**
 ```
@@ -19,13 +35,13 @@ PIN attempts to read `/proc/sys/kernel/osrelease` to determine the kernel versio
 - Reported kernel: 4.4.0 (from `/proc/version`)
 - Missing file: `/proc/sys/kernel/osrelease`
 
-## Attempted Workarounds
+## Attempted Workarounds (before finding proot solution)
 
 1. **LD_PRELOAD interception**: Created a shared library to intercept `openat()` syscalls and redirect reads of `/proc/sys/kernel/osrelease` to a fake file. This failed because PIN uses internal mechanisms that bypass LD_PRELOAD.
 
 2. **Bind mount**: Attempted to bind-mount a fake osrelease file. This failed because the mount target does not exist in gVisor's proc filesystem.
 
-3. **PIN 2.14 vs PIN 3.28**: Both PIN versions exhibit the same behavior.
+3. **PIN 2.14 vs PIN 3.28**: Both PIN versions exhibit the same behavior without proot.
 
 ## Builds Successfully
 
