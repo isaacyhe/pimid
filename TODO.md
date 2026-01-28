@@ -1,6 +1,6 @@
 # PIMID TODO List
 
-> **Last Updated:** 2025-01-28
+> **Last Updated:** 2026-01-28
 > **Status:** Working reminder for development priorities
 
 ---
@@ -45,19 +45,32 @@
   - SchedulerFactory
 - [x] **`pimid/src/common/simulation_engine.cpp`** - ✅ FIXED: Memory model forwarding
 
-### Host Engine ZSim Integration
-- [ ] **`pimid/src/host_engine/host_engine.cpp:124`** - Binary loading via ZSim
-- [ ] **`pimid/src/host_engine/host_engine.cpp:148`** - Pass arguments to ZSim
-- [ ] **`pimid/src/host_engine/host_engine.cpp:241`** - Actual ZSim initialization
-- [x] **`pimid/src/host_engine/host_engine.cpp:279`** - ✅ FIXED: Process memory request/response
+### Host Engine Execution Model Integration ✅ COMPLETE
+- [x] **`pimid/src/host_engine/host_engine.cpp`** - ✅ FIXED: Full execution model integration
+  - ✅ Uses ExecutionModelFactory to create ZSim or Analytical model
+  - ✅ Configurable via `host.execution_model` in YAML ("zsim" | "analytical" | "hybrid")
+  - ✅ Binary loading wired to ZSimExecutionModel::launchSimulation()
+  - ✅ Arguments properly stored and passed to ZSim
+  - ✅ Process memory request/response
 
 ### Device Engine
 - [x] **`pimid/src/device_engine/device_engine.cpp:220`** - ✅ FIXED: Use scheduler to select PE
 - [x] **`pimid/src/device_engine/device_engine.cpp:277`** - ✅ FIXED: Process memory response
 - [ ] **`pimid/src/device_engine/device_engine.cpp:323`** - Actual execution on PE via ZSim
 
-### Execution Model
-- [ ] **`pimid/src/execution_model/zsim_execution_model.cpp:276`** - ZSim initialization
+### Execution Model ✅ COMPLETE
+- [x] **`pimid/src/execution_model/zsim_execution_model.cpp`** - ✅ FIXED: Full ZSim integration
+  - ✅ ZSimLauncher class for subprocess-based simulation
+  - ✅ Finds ZSim/PIN paths automatically
+  - ✅ Generates ZSim config files
+  - ✅ Parses ZSim output for statistics
+  - ✅ launchSimulation(), waitForCompletion(), isSimulationRunning() methods
+- [x] **`pimid/src/execution_model/event_driven_execution_model.cpp`** - ✅ ALREADY COMPLETE
+  - ✅ Analytical model with Roofline and Configurable IPC
+  - ✅ 100-1000x faster than execution-driven
+  - ✅ Suitable for large-scale design space exploration
+- [x] **`pimid/src/execution_model/execution_model_factory.cpp`** - ✅ ALREADY COMPLETE
+  - ✅ Creates ZSim, Analytical, or Hybrid execution models
 
 ---
 
@@ -151,6 +164,16 @@
 ---
 
 ## ✅ Completed Items
+
+### 2025-01-28: Execution Model Integration
+- [x] **zsim_execution_model.cpp** - Full ZSim subprocess launcher implementation (~600 lines)
+  - ZSimLauncher class with fork/exec pattern
+  - Config generation and output parsing
+  - PIN/ZSim path discovery
+- [x] **zsim_execution_model.h** - Updated with launchSimulation(), waitForCompletion(), etc.
+- [x] **host_engine.cpp** - Wired to use execution models via factory
+  - Supports "zsim", "analytical", "hybrid" via config
+  - Binary loading triggers ZSim simulation launch
 
 ### 2025-01-28: High Priority Fixes
 - [x] **scheduler.cpp** - Full implementation (300 lines): base class, 3 schedulers, factory
