@@ -483,6 +483,24 @@ VOID CheckForTermination() {
  */
 VOID EndOfPhaseActions() {
     zinfo->profSimTime->transition(PROF_WEAVE);
+
+    // Container workaround: Print stats to stderr every N phases for gVisor compatibility
+    // This output goes directly to console and survives abnormal PIN termination
+    static uint64_t lastStatsDump = 0;
+    uint64_t statsDumpInterval = zinfo->statsPhaseInterval ? zinfo->statsPhaseInterval : 100;
+    if (zinfo->numPhases >= lastStatsDump + statsDumpInterval) {
+        uint64_t totalInstrs = 0;
+        uint64_t totalCycles = zinfo->numPhases * zinfo->phaseLength;
+        for (uint32_t i = 0; i < zinfo->numCores; i++) {
+            totalInstrs += zinfo->cores[i]->getInstrs();
+        }
+        double ipc = (totalCycles > 0) ? (double)totalInstrs / totalCycles : 0.0;
+        fprintf(stderr, "[STATS] phase=%lu cycles=%lu instrs=%lu IPC=%.4f\n",
+                zinfo->numPhases, totalCycles, totalInstrs, ipc);
+        fflush(stderr);
+        lastStatsDump = zinfo->numPhases;
+    }
+
     if (zinfo->globalPauseFlag) {
         info("Simulation entering global pause");
         zinfo->profSimTime->transition(PROF_FF);
@@ -1441,6 +1459,8 @@ static EXCEPT_HANDLING_RESULT InternalExceptionHandler(THREADID tid, EXCEPTION_I
 /* ===================================================================== */
 
 int main(int argc, char *argv[]) {
+    fprintf(stderr, "[ZSIM_PIN] PIN tool starting...\n");
+    fflush(stderr);
     PIN_InitSymbols();
     if (PIN_Init(argc, argv)) return Usage();
 
