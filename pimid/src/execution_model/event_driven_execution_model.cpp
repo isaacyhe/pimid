@@ -1,4 +1,6 @@
 #include "execution_model/event_driven_execution_model.h"
+#include <yaml-cpp/yaml.h>
+#include <fstream>
 #include <iostream>
 #include <algorithm>
 #include <cmath>
@@ -271,13 +273,106 @@ void EventDrivenExecutionModel::setCoreType(const CoreType& type) {
 // -------------------------------------------------------------------------
 
 void EventDrivenExecutionModel::loadConfiguration(const std::string& config_file) {
-    // TODO: Load from actual YAML config file
-    // For now, use defaults
-
     std::cout << "Loading configuration from: " << config_file << std::endl;
 
-    // Default: 4 host cores or 256 PIM PEs
+    // Default values
     num_cores_ = (domain_ == SimulationDomain::HOST) ? 4 : 256;
+    perf_model_ = PerformanceModel::ROOFLINE;
+    core_type_ = CoreType();
+
+    // Try to load from YAML config file
+    if (config_file.empty()) {
+        std::cout << "  No config file specified, using defaults" << std::endl;
+        return;
+    }
+
+    // Check if file exists
+    std::ifstream file_check(config_file);
+    if (!file_check.good()) {
+        std::cout << "  Config file not found, using defaults" << std::endl;
+        return;
+    }
+    file_check.close();
+
+    try {
+        YAML::Node config = YAML::LoadFile(config_file);
+
+        // Determine which section to read based on domain
+        std::string section = (domain_ == SimulationDomain::HOST) ? "host" : "device";
+
+        if (config[section]) {
+            YAML::Node domain_config = config[section];
+
+            // Load number of cores
+            if (domain_config["num_cores"]) {
+                num_cores_ = domain_config["num_cores"].as<uint32_t>();
+                std::cout << "  Loaded num_cores: " << num_cores_ << std::endl;
+            }
+
+            // Load performance model
+            if (domain_config["performance_model"]) {
+                std::string model_str = domain_config["performance_model"].as<std::string>();
+                if (model_str == "roofline" || model_str == "ROOFLINE") {
+                    perf_model_ = PerformanceModel::ROOFLINE;
+                } else if (model_str == "configurable_ipc" || model_str == "CONFIGURABLE_IPC" ||
+                           model_str == "ipc") {
+                    perf_model_ = PerformanceModel::CONFIGURABLE_IPC;
+                }
+                std::cout << "  Loaded performance_model: " << model_str << std::endl;
+            }
+
+            // Load core type configuration
+            if (domain_config["core_type"]) {
+                YAML::Node core_config = domain_config["core_type"];
+
+                if (core_config["name"]) {
+                    core_type_.name = core_config["name"].as<std::string>();
+                }
+                if (core_config["frequency_mhz"]) {
+                    core_type_.frequency_mhz = core_config["frequency_mhz"].as<double>();
+                }
+                if (core_config["ipc"]) {
+                    core_type_.ipc = core_config["ipc"].as<double>();
+                }
+                if (core_config["vector_width"]) {
+                    core_type_.vector_width = core_config["vector_width"].as<uint32_t>();
+                }
+                if (core_config["pipeline_depth"]) {
+                    core_type_.pipeline_depth = core_config["pipeline_depth"].as<uint32_t>();
+                }
+
+                std::cout << "  Loaded core_type: " << core_type_.name
+                          << " (freq=" << core_type_.frequency_mhz << " MHz"
+                          << ", ipc=" << core_type_.ipc
+                          << ", vector_width=" << core_type_.vector_width
+                          << ", pipeline_depth=" << core_type_.pipeline_depth << ")" << std::endl;
+            }
+        }
+
+        // Also check for analytical_model section (alternative naming)
+        if (config["analytical_model"]) {
+            YAML::Node model_config = config["analytical_model"];
+
+            if (model_config["num_cores"] && num_cores_ == ((domain_ == SimulationDomain::HOST) ? 4 : 256)) {
+                num_cores_ = model_config["num_cores"].as<uint32_t>();
+            }
+            if (model_config["performance_model"] && perf_model_ == PerformanceModel::ROOFLINE) {
+                std::string model_str = model_config["performance_model"].as<std::string>();
+                if (model_str == "configurable_ipc" || model_str == "ipc") {
+                    perf_model_ = PerformanceModel::CONFIGURABLE_IPC;
+                }
+            }
+        }
+
+        std::cout << "  Configuration loaded successfully" << std::endl;
+
+    } catch (const YAML::Exception& e) {
+        std::cerr << "  YAML parsing error: " << e.what() << std::endl;
+        std::cerr << "  Using default configuration" << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "  Error loading config: " << e.what() << std::endl;
+        std::cerr << "  Using default configuration" << std::endl;
+    }
 }
 
 Cycle EventDrivenExecutionModel::estimateTaskLatency(const Task& task) const {

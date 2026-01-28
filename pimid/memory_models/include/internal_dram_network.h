@@ -179,8 +179,41 @@ public:
 
     /**
      * @brief Check if network can accept more packets
+     * @param level Network level to check
+     * @return true if queue depth is below limit, false if congested
      */
     bool canAcceptPacket(NetworkLevel level);
+
+    /**
+     * @brief Set queue depth limit for a specific network level
+     * @param level Network level
+     * @param limit Maximum queue depth (0 = unlimited)
+     */
+    void setQueueLimit(NetworkLevel level, size_t limit);
+
+    /**
+     * @brief Set queue depth limits for all network levels
+     * @param subarray_limit Subarray network queue limit
+     * @param bank_limit Bank network queue limit
+     * @param bg_limit Bank group network queue limit
+     * @param chip_limit Chip network queue limit
+     */
+    void setQueueLimits(size_t subarray_limit, size_t bank_limit,
+                        size_t bg_limit, size_t chip_limit);
+
+    /**
+     * @brief Get current queue depth for a network level
+     * @param level Network level
+     * @return Current number of packets in queue
+     */
+    size_t getQueueDepth(NetworkLevel level) const;
+
+    /**
+     * @brief Get queue depth limit for a network level
+     * @param level Network level
+     * @return Queue depth limit (0 = unlimited)
+     */
+    size_t getQueueLimit(NetworkLevel level) const;
 
     /**
      * @brief Get network statistics
@@ -404,6 +437,15 @@ private:
 
     // In-flight packets
     std::vector<InternalNetworkPacket> inflight_packets_;
+
+    // Queue depth limits (0 = unlimited)
+    size_t subarray_queue_limit_;
+    size_t bank_queue_limit_;
+    size_t bg_queue_limit_;
+    size_t chip_queue_limit_;
+
+    // Default queue depth limit
+    static constexpr size_t DEFAULT_QUEUE_DEPTH_LIMIT = 64;
 
     // External network model (optional, for detailed simulation)
     std::shared_ptr<NetworkModel> external_network_model_;

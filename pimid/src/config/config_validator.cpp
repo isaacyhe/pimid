@@ -1,10 +1,12 @@
 #include "config/config_validator.h"
+#include <yaml-cpp/yaml.h>
 #include <iostream>
 #include <sstream>
 #include <algorithm>
 #include <fstream>
 #include <cmath>
 #include <filesystem>
+#include <set>
 
 namespace pimid {
 namespace config {
@@ -142,8 +144,62 @@ ValidationResult ConfigValidator::validate(
 
     // Check for unknown parameters if not allowed
     if (!allow_unknown_params_) {
-        // TODO: Implement unknown parameter detection
-        // Would require building a set of all valid parameter paths
+        // Build set of all valid parameter paths from schema
+        std::set<std::string> valid_paths;
+        std::function<void(const SectionSchema&, const std::string&)> collectPaths;
+        collectPaths = [&](const SectionSchema& section, const std::string& prefix) {
+            std::string section_prefix = prefix.empty() ?
+                section.name : prefix + "." + section.name;
+
+            // Add parameter paths
+            for (const auto& param : section.parameters) {
+                valid_paths.insert(section_prefix + "." + param.name);
+            }
+
+            // Process subsections recursively
+            for (const auto& subsection : section.subsections) {
+                collectPaths(subsection, section_prefix);
+            }
+        };
+
+        for (const auto& section : schema_.getSections()) {
+            collectPaths(section, "");
+        }
+
+        // Check for unknown parameters in config
+        for (const auto& [key, value] : config) {
+            // Check if this key or any prefix of it is valid
+            bool found = false;
+
+            // Direct match
+            if (valid_paths.find(key) != valid_paths.end()) {
+                found = true;
+            }
+
+            // Check if any valid path starts with this key (it's a parent)
+            if (!found) {
+                for (const auto& valid_path : valid_paths) {
+                    if (valid_path.find(key + ".") == 0 || key.find(valid_path) == 0) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!found && !valid_paths.empty()) {
+                // Find closest match for suggestion
+                std::vector<std::string> valid_vec(valid_paths.begin(), valid_paths.end());
+                std::string suggestion = suggestCorrection(key, valid_vec);
+
+                ValidationError error(
+                    strict_mode_ ? ValidationError::Severity::ERROR : ValidationError::Severity::WARNING,
+                    key,
+                    "Unknown configuration parameter",
+                    suggestion.empty() ? "" : "Did you mean: " + suggestion + "?"
+                );
+                result.addError(error);
+            }
+        }
     }
 
     return result;
@@ -188,17 +244,76 @@ ValidationResult ConfigValidator::validateFile(const std::string& yaml_file) {
 ValidationResult ConfigValidator::validateYAML(const std::string& yaml_content) {
     ValidationResult result;
 
-    // TODO: Parse YAML and validate
-    // For now, just return success
-    // In real implementation, would use yaml-cpp or similar library
+    try {
+        // Parse YAML content
+        YAML::Node root = YAML::Load(yaml_content);
 
-    ValidationError error(
-        ValidationError::Severity::INFO,
-        "validator",
-        "YAML validation not yet implemented",
-        "Use validate() method with parsed config map instead"
-    );
-    result.addError(error);
+        // Convert YAML to flat map
+        std::map<std::string, std::string> config;
+        std::function<void(const YAML::Node&, const std::string&)> flattenNode;
+        flattenNode = [&](const YAML::Node& node, const std::string& prefix) {
+            if (!node.IsDefined() || node.IsNull()) {
+                return;
+            }
+
+            if (node.IsScalar()) {
+                config[prefix] = node.as<std::string>();
+                return;
+            }
+
+            if (node.IsSequence()) {
+                // Store list as comma-separated values
+                std::ostringstream oss;
+                for (size_t i = 0; i < node.size(); ++i) {
+                    if (i > 0) oss << ",";
+                    if (node[i].IsScalar()) {
+                        oss << node[i].as<std::string>();
+                    }
+                }
+                config[prefix] = oss.str();
+                return;
+            }
+
+            if (node.IsMap()) {
+                for (YAML::const_iterator it = node.begin(); it != node.end(); ++it) {
+                    std::string key = it->first.as<std::string>();
+                    std::string full_key = prefix.empty() ? key : prefix + "." + key;
+                    flattenNode(it->second, full_key);
+                }
+            }
+        };
+
+        flattenNode(root, "");
+
+        // Validate the parsed config
+        return validate(config);
+
+    } catch (const YAML::ParserException& e) {
+        ValidationError error(
+            ValidationError::Severity::ERROR,
+            "yaml_parser",
+            "YAML syntax error: " + std::string(e.what()),
+            "Check YAML syntax at the reported line"
+        );
+        error.line_number = e.mark.line;
+        result.addError(error);
+    } catch (const YAML::Exception& e) {
+        ValidationError error(
+            ValidationError::Severity::ERROR,
+            "yaml_parser",
+            "YAML parsing error: " + std::string(e.what()),
+            "Verify YAML file format"
+        );
+        result.addError(error);
+    } catch (const std::exception& e) {
+        ValidationError error(
+            ValidationError::Severity::ERROR,
+            "yaml_parser",
+            "Error processing YAML: " + std::string(e.what()),
+            "Check configuration content"
+        );
+        result.addError(error);
+    }
 
     return result;
 }

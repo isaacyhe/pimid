@@ -20,6 +20,10 @@ InternalDRAMNetwork::InternalDRAMNetwork(
       num_bg_per_chip_(0),
       num_chips_per_rank_(0),
       use_custom_switch_config_(false),
+      subarray_queue_limit_(DEFAULT_QUEUE_DEPTH_LIMIT),
+      bank_queue_limit_(DEFAULT_QUEUE_DEPTH_LIMIT),
+      bg_queue_limit_(DEFAULT_QUEUE_DEPTH_LIMIT),
+      chip_queue_limit_(DEFAULT_QUEUE_DEPTH_LIMIT),
       external_network_model_(network_model),
       garnet_subarray_network_(nullptr),
       garnet_bank_network_(nullptr),
@@ -720,9 +724,70 @@ uint64_t InternalDRAMNetwork::getTransferLatency(NetworkLevel level,
 }
 
 bool InternalDRAMNetwork::canAcceptPacket(NetworkLevel level) {
-    // For now, always accept (no queue depth limit)
-    // TODO: Add configurable queue limits
-    return true;
+    size_t current_depth = getQueueDepth(level);
+    size_t limit = getQueueLimit(level);
+
+    // If limit is 0, queue is unlimited
+    if (limit == 0) {
+        return true;
+    }
+
+    return current_depth < limit;
+}
+
+void InternalDRAMNetwork::setQueueLimit(NetworkLevel level, size_t limit) {
+    switch (level) {
+        case NetworkLevel::SUBARRAY_NETWORK:
+            subarray_queue_limit_ = limit;
+            break;
+        case NetworkLevel::BANK_NETWORK:
+            bank_queue_limit_ = limit;
+            break;
+        case NetworkLevel::BANK_GROUP_NETWORK:
+            bg_queue_limit_ = limit;
+            break;
+        case NetworkLevel::CHIP_NETWORK:
+            chip_queue_limit_ = limit;
+            break;
+    }
+}
+
+void InternalDRAMNetwork::setQueueLimits(size_t subarray_limit, size_t bank_limit,
+                                          size_t bg_limit, size_t chip_limit) {
+    subarray_queue_limit_ = subarray_limit;
+    bank_queue_limit_ = bank_limit;
+    bg_queue_limit_ = bg_limit;
+    chip_queue_limit_ = chip_limit;
+}
+
+size_t InternalDRAMNetwork::getQueueDepth(NetworkLevel level) const {
+    switch (level) {
+        case NetworkLevel::SUBARRAY_NETWORK:
+            return subarray_network_queue_.size();
+        case NetworkLevel::BANK_NETWORK:
+            return bank_network_queue_.size();
+        case NetworkLevel::BANK_GROUP_NETWORK:
+            return bg_network_queue_.size();
+        case NetworkLevel::CHIP_NETWORK:
+            return chip_network_queue_.size();
+        default:
+            return 0;
+    }
+}
+
+size_t InternalDRAMNetwork::getQueueLimit(NetworkLevel level) const {
+    switch (level) {
+        case NetworkLevel::SUBARRAY_NETWORK:
+            return subarray_queue_limit_;
+        case NetworkLevel::BANK_NETWORK:
+            return bank_queue_limit_;
+        case NetworkLevel::BANK_GROUP_NETWORK:
+            return bg_queue_limit_;
+        case NetworkLevel::CHIP_NETWORK:
+            return chip_queue_limit_;
+        default:
+            return 0;
+    }
 }
 
 NetworkLevel InternalDRAMNetwork::determineNetworkLevel(int source_bank, int dest_bank,

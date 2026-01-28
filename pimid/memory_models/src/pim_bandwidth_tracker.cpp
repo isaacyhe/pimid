@@ -24,6 +24,14 @@ PIMBandwidthTracker::PIMBandwidthTracker(
       total_requests_(0),
       bandwidth_limited_requests_(0),
       total_bytes_transferred_(0) {
+    // Initialize default queue depth limits for all granularity levels
+    queue_depth_limits_[PIMGranularity::SUBARRAY] = DEFAULT_QUEUE_DEPTH_LIMIT;
+    queue_depth_limits_[PIMGranularity::BANK] = DEFAULT_QUEUE_DEPTH_LIMIT;
+    queue_depth_limits_[PIMGranularity::BANK_GROUP] = DEFAULT_QUEUE_DEPTH_LIMIT;
+    queue_depth_limits_[PIMGranularity::CHIP] = DEFAULT_QUEUE_DEPTH_LIMIT;
+    queue_depth_limits_[PIMGranularity::RANK] = DEFAULT_QUEUE_DEPTH_LIMIT;
+    queue_depth_limits_[PIMGranularity::MEMORY_CONTROLLER] = DEFAULT_QUEUE_DEPTH_LIMIT;
+    queue_depth_limits_[PIMGranularity::CPU] = 0; // Unlimited for CPU
 }
 
 void PIMBandwidthTracker::initialize(int num_channels, int num_ranks,
@@ -100,6 +108,10 @@ uint64_t PIMBandwidthTracker::requestBandwidth(const PIMRequestPayload& payload,
     bytes_per_level_[payload.granularity] += required_bytes;
     total_bytes_transferred_ += required_bytes;
 
+    // Track queue depth
+    auto key = std::make_pair(payload.granularity, payload.target_bank);
+    active_queue_depths_[key]++;
+
     // Calculate transfer latency based on granularity and contention
     uint64_t latency = calculateTransferLatency(payload.granularity,
                                                 payload.target_bank,
@@ -114,9 +126,15 @@ uint64_t PIMBandwidthTracker::requestBandwidth(const PIMRequestPayload& payload,
 
 bool PIMBandwidthTracker::canAcceptRequest(const PIMRequestPayload& payload,
                                            uint64_t required_bytes) {
-    // For now, always accept (backpressure handled by latency)
-    // TODO: Add queue depth limits if needed
-    return true;
+    size_t limit = getQueueDepthLimit(payload.granularity);
+
+    // If limit is 0, queue is unlimited
+    if (limit == 0) {
+        return true;
+    }
+
+    size_t current_depth = getCurrentQueueDepth(payload.granularity, payload.target_bank);
+    return current_depth < limit;
 }
 
 void PIMBandwidthTracker::tick() {
@@ -447,6 +465,45 @@ int PIMBandwidthTracker::getPEChip(int pe_id) const {
     // Assuming 8 chips, banks distributed evenly
     int banks_per_chip = num_banks_ / 8;
     return pe_bank / banks_per_chip;
+}
+
+void PIMBandwidthTracker::setQueueDepthLimit(PIMGranularity granularity, size_t limit) {
+    queue_depth_limits_[granularity] = limit;
+}
+
+void PIMBandwidthTracker::setGlobalQueueDepthLimit(size_t limit) {
+    queue_depth_limits_[PIMGranularity::SUBARRAY] = limit;
+    queue_depth_limits_[PIMGranularity::BANK] = limit;
+    queue_depth_limits_[PIMGranularity::BANK_GROUP] = limit;
+    queue_depth_limits_[PIMGranularity::CHIP] = limit;
+    queue_depth_limits_[PIMGranularity::RANK] = limit;
+    queue_depth_limits_[PIMGranularity::MEMORY_CONTROLLER] = limit;
+    queue_depth_limits_[PIMGranularity::CPU] = limit;
+}
+
+size_t PIMBandwidthTracker::getQueueDepthLimit(PIMGranularity granularity) const {
+    auto it = queue_depth_limits_.find(granularity);
+    if (it != queue_depth_limits_.end()) {
+        return it->second;
+    }
+    return DEFAULT_QUEUE_DEPTH_LIMIT;
+}
+
+size_t PIMBandwidthTracker::getCurrentQueueDepth(PIMGranularity granularity, int target_id) const {
+    auto key = std::make_pair(granularity, target_id);
+    auto it = active_queue_depths_.find(key);
+    if (it != active_queue_depths_.end()) {
+        return it->second;
+    }
+    return 0;
+}
+
+void PIMBandwidthTracker::completeRequest(const PIMRequestPayload& payload) {
+    auto key = std::make_pair(payload.granularity, payload.target_bank);
+    auto it = active_queue_depths_.find(key);
+    if (it != active_queue_depths_.end() && it->second > 0) {
+        it->second--;
+    }
 }
 
 } // namespace pimid

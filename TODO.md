@@ -133,9 +133,15 @@
 
 ## 🟢 Low Priority - Config & Plugin System
 
-### Configuration Validation
-- [ ] **`pimid/src/config/config_validator.cpp:145`** - Implement unknown parameter detection
-- [ ] **`pimid/src/config/config_validator.cpp:191`** - Parse YAML and validate
+### Configuration Validation ✅ COMPLETE
+- [x] **`pimid/src/config/config_validator.cpp:145`** - ✅ Unknown parameter detection implemented
+  - Builds set of valid paths from schema
+  - Checks config keys against valid paths
+  - Suggests corrections using fuzzy matching
+- [x] **`pimid/src/config/config_validator.cpp:191`** - ✅ YAML parsing and validation
+  - Uses yaml-cpp to parse YAML content
+  - Flattens nested YAML to config map
+  - Validates against schema
 
 ### Config Manager
 - [ ] **`pimid/src/config/config_manager.cpp:323`** - Full validation using ConfigValidator
@@ -158,14 +164,27 @@
 - [ ] **`pimid/src/address_translation/pe_placement.cpp:507`** - Discrete address translation
 - [ ] **`pimid/src/address_translation/pe_placement.cpp:551,557`** - Memory organization based implementation
 
-### Host Interconnect
-- [ ] **`pimid/src/host_engine/host_interconnect.cpp:101`** - Set up connections based on topology
+### Host Interconnect ✅ COMPLETE
+- [x] **`pimid/src/host_engine/host_interconnect.cpp:101`** - ✅ Topology connections implemented
+  - MESH_2D: Adjacent node connections (east/south)
+  - TORUS_2D: Wrap-around connections
+  - CROSSBAR: Full connectivity
+  - H_TREE/FAT_TREE: Binary tree structure
 
-### Internal DRAM Network
-- [ ] **`pimid/memory_models/src/internal_dram_network.cpp:651`** - Configurable queue limits
+### Internal DRAM Network ✅ COMPLETE
+- [x] **`pimid/memory_models/src/internal_dram_network.cpp`** - ✅ Configurable queue limits
+  - Queue depth limits per network level (subarray, bank, bg, chip)
+  - setQueueLimit(), setQueueLimits(), getQueueDepth(), getQueueLimit()
+  - canAcceptPacket() checks queue depth vs limit
+  - Default limit: 64 packets per queue
 
-### PIM Bandwidth Tracker
-- [ ] **`pimid/memory_models/src/pim_bandwidth_tracker.cpp:118`** - Queue depth limits
+### PIM Bandwidth Tracker ✅ COMPLETE
+- [x] **`pimid/memory_models/src/pim_bandwidth_tracker.cpp`** - ✅ Queue depth limits
+  - Per-granularity queue depth limits
+  - setQueueDepthLimit(), setGlobalQueueDepthLimit()
+  - getCurrentQueueDepth(), completeRequest()
+  - canAcceptRequest() checks queue depth vs limit
+  - Default limit: 32 per level
 
 ### Network Model ✅ COMPLETE
 - [x] **`pimid/network_models/src/network_model.cpp`** - ✅ GARNET configuration loading implemented
@@ -173,8 +192,12 @@
   - Supports all topology types (MESH_2D, MESH_3D, TORUS_2D, H_TREE, FAT_TREE, CROSSBAR, DRAGONFLY)
   - Supports all routing algorithms (XY, XYZ, ADAPTIVE, WEST_FIRST, TREE_BASED)
 
-### Event-Driven Execution
-- [ ] **`pimid/src/execution_model/event_driven_execution_model.cpp:274`** - Load from actual YAML config file
+### Event-Driven Execution ✅ COMPLETE
+- [x] **`pimid/src/execution_model/event_driven_execution_model.cpp`** - ✅ YAML config loading
+  - Loads num_cores, performance_model, core_type from YAML
+  - Supports host/device sections and analytical_model section
+  - CoreType configuration: frequency_mhz, ipc, vector_width, pipeline_depth
+  - Graceful fallback to defaults if file missing or invalid
 
 ---
 
@@ -265,6 +288,27 @@
 - [x] **NVM Model** - Already loads from YAML config (was not broken)
 - [x] **SRAM Model** - Already has CACTI integration (was not broken)
 - [x] **Power Model** - Fixed to use memory/network models instead of placeholders
+
+### 2026-01-28: Low Priority Tasks Complete
+- [x] **internal_dram_network.cpp** - Configurable queue limits
+  - Queue depth limits per network level (default: 64)
+  - setQueueLimit(), setQueueLimits(), getQueueDepth(), getQueueLimit() methods
+  - canAcceptPacket() now checks queue depth against limits
+- [x] **pim_bandwidth_tracker.cpp** - Queue depth limits
+  - Per-granularity queue depth limits (default: 32)
+  - setQueueDepthLimit(), setGlobalQueueDepthLimit(), completeRequest() methods
+  - canAcceptRequest() now checks queue depth
+- [x] **event_driven_execution_model.cpp** - YAML config loading
+  - Loads num_cores, performance_model, core_type from YAML
+  - Supports host/device and analytical_model sections
+  - Graceful fallback to defaults
+- [x] **config_validator.cpp** - Unknown parameter detection
+  - Builds set of valid paths from schema
+  - Reports unknown parameters with suggestions
+  - YAML parsing with yaml-cpp
+- [x] **host_interconnect.cpp** - Topology connections
+  - MESH_2D, TORUS_2D, CROSSBAR, H_TREE/FAT_TREE support
+  - Proper node connections for each topology type
 
 ---
 
