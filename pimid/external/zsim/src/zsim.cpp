@@ -28,6 +28,7 @@
 
 #include "zsim.h"
 #include <algorithm>
+#include <cstdlib>  // For atexit() in container environment workaround
 #define _SIGNAL_H
 #include <signum.h>
 #undef _SIGNAL_H
@@ -1522,6 +1523,26 @@ int main(int argc, char *argv[]) {
     }
 
     info("Started process, PID %d", getpid()); //NOTE: external scripts expect this line, please do not change without checking first
+
+    // Register atexit handler to dump stats in container environments (gVisor)
+    // where PIN's Fini callback may not be called due to waitpid issues.
+    // NOTE: This may not work if PIN uses _exit() instead of exit(), but it
+    // doesn't hurt to register it. Full stats collection in gVisor requires
+    // either native Linux execution or using trace-driven simulation mode.
+    static bool atexitRegistered = false;
+    if (!atexitRegistered) {
+        atexitRegistered = true;
+        atexit([]() {
+            // Check if stats have already been dumped (perProcessEndFlag set)
+            if (!perProcessEndFlag && zinfo && zinfo->statsBackends) {
+                warn("Dumping stats from atexit handler (container environment workaround)");
+                zinfo->trigger = 20000;
+                for (StatsBackend* backend : *(zinfo->statsBackends)) {
+                    backend->dump(false /*unbuffered*/);
+                }
+            }
+        });
+    }
 
     //Unless things change substantially, keep this disabled; it causes higher imbalance and doesn't solve large system time with lots of processes.
     //Affinity testing code
