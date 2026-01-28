@@ -8,6 +8,12 @@
 
 A comprehensive full-system simulator for Processing-in-Memory (PIM) architectures with Ubuntu 24.04 support, cycle-accurate timing, and 100% test pass rate.
 
+<p align="center">
+  <img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=https://github.com/isaacyhe/pimid" alt="PIMID Repository QR Code" />
+  <br/>
+  <em>Scan to access the PIMID repository</em>
+</p>
+
 ---
 
 ## 🚀 Quick Start
