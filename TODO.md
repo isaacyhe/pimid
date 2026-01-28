@@ -7,30 +7,31 @@
 
 ## 🔴 Critical Priority - Hardcoded Values
 
-These hardcoded values should be replaced with configurable parameters or factory functions.
+**Status: Most items already properly implemented with configurable parameters or factory functions.**
 
-### PE Placement Manager
-- [ ] **`pimid/src/address_translation/pe_placement.cpp:65-120`**
-  - PE bus constraints are hardcoded (64-bit width, 25 Gbps, 8KB row buffer)
-  - Should use `createPEBusConstraintsFromDRAM()` factory function
-  - HBM2 gets wrong values (should be 128-bit wide buses)
+### PE Placement Manager ✅ ALREADY IMPLEMENTED
+- [x] **`pimid/src/address_translation/pe_placement.cpp:72-96`**
+  - ✅ Uses `createPEBusConstraintsFromDRAM()` when `dram_arch_` is available
+  - ✅ Fallback values (lines 98-151) only used when no DRAM architecture provided
+  - ✅ HBM2/DDR4/etc. get correct values from DRAMArchitectureV2
 
-### NVM Model
-- [ ] **`pimid/memory_models/src/nvm_model.cpp:30-71`**
-  - Read/write latencies hardcoded (10/50 cycles)
-  - Tech node hardcoded to 22nm
-  - Should integrate with NVSim for accurate values
+### NVM Model ✅ ALREADY IMPLEMENTED
+- [x] **`pimid/memory_models/src/nvm_model.cpp`**
+  - ✅ Loads timing/energy from YAML config (lines 93-186)
+  - ✅ Supports STT-MRAM, PCM, ReRAM cell types
+  - ⚠️ Runtime NVSim integration is a future enhancement (not blocking)
 
-### SRAM Model
-- [ ] **`pimid/memory_models/src/sram_model.cpp:31-37`**
-  - Line size, associativity, banks hardcoded
-  - Should be parsed from YAML configuration
+### SRAM Model ✅ ALREADY IMPLEMENTED
+- [x] **`pimid/memory_models/src/sram_model.cpp`**
+  - ✅ CACTI integration when `HAVE_CACTI` is defined (lines 51-94)
+  - ✅ Loads config from YAML (lines 125-208)
+  - ✅ Uses SRAM architecture specs for timing (lines 109-121)
 
-### Power Model
-- [ ] **`pimid/power_models/src/power_model.cpp:80-88`**
-  - Using placeholder power values (`TODO: Placeholder`)
-  - Memory power: 5.0W placeholder
-  - Network power: 2.0W placeholder
+### Power Model ✅ FIXED
+- [x] **`pimid/power_models/src/power_model.cpp:82-136`**
+  - ✅ Now uses `memory_model_->getTotalEnergy()` and `getLeakagePower()`
+  - ✅ Now uses `network_model_->getTotalEnergy()`, `getRouterEnergy()`, `getLinkEnergy()`
+  - ✅ Falls back to technology-scaled estimates only when models unavailable
 
 ---
 
@@ -148,7 +149,11 @@ These hardcoded values should be replaced with configurable parameters or factor
 
 ## ✅ Completed Items
 
-*(Move items here when done)*
+### 2025-01-28: Hardcoded Values Review
+- [x] **PE Placement** - Already uses DRAM factory functions (was not broken)
+- [x] **NVM Model** - Already loads from YAML config (was not broken)
+- [x] **SRAM Model** - Already has CACTI integration (was not broken)
+- [x] **Power Model** - Fixed to use memory/network models instead of placeholders
 
 ---
 

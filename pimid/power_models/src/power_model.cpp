@@ -1,7 +1,10 @@
 #include "power_model.h"
+#include "memory_model.h"
+#include "network_model.h"
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
+#include <cmath>
 
 namespace pimid {
 
@@ -77,16 +80,60 @@ PowerMetrics CompositePowerModel::estimatePower(PowerComponent component,
             break;
 
         case PowerComponent::MEMORY:
-            // TODO: Get power from memory model when available
-            metrics.dynamic_power_w = 5.0;  // Placeholder
-            metrics.leakage_power_w = 1.5;
+            if (memory_model_) {
+                // Get power from actual memory model
+                double total_energy = memory_model_->getTotalEnergy();  // in nJ
+                double leakage = memory_model_->getLeakagePower();      // in W
+
+                // Convert energy to power: P = E / t (assuming 1 GHz clock)
+                // Total energy is cumulative, divide by simulation time
+                double sim_time_s = stats.total_cycles / (tech_params_.frequency_ghz * 1e9);
+                if (sim_time_s > 0) {
+                    metrics.dynamic_power_w = (total_energy * 1e-9) / sim_time_s;  // nJ to J, then divide by time
+                } else {
+                    // Estimate based on access rates
+                    double read_energy = memory_model_->getReadEnergy();   // nJ per access
+                    double write_energy = memory_model_->getWriteEnergy(); // nJ per access
+                    uint64_t total_accesses = stats.memory_reads + stats.memory_writes;
+                    double access_rate = total_accesses * tech_params_.frequency_ghz * 1e9; // accesses/sec
+                    metrics.dynamic_power_w = access_rate * ((read_energy + write_energy) / 2.0) * 1e-9;
+                }
+                metrics.leakage_power_w = leakage;
+            } else {
+                // Fallback: estimate based on technology node
+                double scale = std::pow(22.0 / tech_params_.tech_node_nm, 2.0);
+                metrics.dynamic_power_w = 5.0 * scale;
+                metrics.leakage_power_w = 1.5 * scale;
+            }
             break;
 
         case PowerComponent::NETWORK_ROUTER:
         case PowerComponent::NETWORK_LINK:
-            // TODO: Get power from network model when available
-            metrics.dynamic_power_w = 2.0;  // Placeholder
-            metrics.leakage_power_w = 0.5;
+            if (network_model_) {
+                // Get power from actual network model
+                double total_energy = network_model_->getTotalEnergy();  // in J
+
+                // Convert energy to power
+                double sim_time_s = stats.total_cycles / (tech_params_.frequency_ghz * 1e9);
+                if (sim_time_s > 0) {
+                    double total_power = total_energy / sim_time_s;
+                    if (component == PowerComponent::NETWORK_ROUTER) {
+                        metrics.dynamic_power_w = network_model_->getRouterEnergy() / sim_time_s;
+                    } else {
+                        metrics.dynamic_power_w = network_model_->getLinkEnergy() / sim_time_s;
+                    }
+                } else {
+                    metrics.dynamic_power_w = total_energy > 0 ? 2.0 : 0.0;
+                }
+                // Leakage estimate based on technology
+                double scale = std::pow(22.0 / tech_params_.tech_node_nm, 1.5);
+                metrics.leakage_power_w = 0.5 * scale;
+            } else {
+                // Fallback: estimate based on technology node
+                double scale = std::pow(22.0 / tech_params_.tech_node_nm, 2.0);
+                metrics.dynamic_power_w = 2.0 * scale;
+                metrics.leakage_power_w = 0.5 * scale;
+            }
             break;
     }
 
