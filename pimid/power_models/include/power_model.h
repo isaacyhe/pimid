@@ -80,11 +80,12 @@ struct TechnologyParams {
     double temperature_k;       // Operating temperature
     uint32_t core_count;
     double frequency_ghz;
+    double supply_voltage_v;    // Supply voltage (Vdd)
 
     // Default constructor - override these with actual configuration values
     TechnologyParams() : tech_node_nm(22), device_type("HP"),
                          temperature_k(350.0), core_count(1),
-                         frequency_ghz(2.0) {}
+                         frequency_ghz(2.0), supply_voltage_v(0.9) {}
 };
 
 /**

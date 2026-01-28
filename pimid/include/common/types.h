@@ -87,10 +87,15 @@ struct MemoryRequest {
     Cycle issue_cycle;
     SimulationDomain domain;
     uint32_t src_id;
+    uint32_t flags;  // Request flags (e.g., 0x80 for PIM analog compute)
+
+    MemoryRequest()
+        : addr(0), type(MemoryRequestType::READ), size(0), issue_cycle(0),
+          domain(SimulationDomain::HOST), src_id(0), flags(0) {}
 
     MemoryRequest(Address a, MemoryRequestType t, uint64_t s, Cycle c,
-                  SimulationDomain d, uint32_t id)
-        : addr(a), type(t), size(s), issue_cycle(c), domain(d), src_id(id) {}
+                  SimulationDomain d, uint32_t id, uint32_t f = 0)
+        : addr(a), type(t), size(s), issue_cycle(c), domain(d), src_id(id), flags(f) {}
 };
 
 // Network packet structure
@@ -114,13 +119,14 @@ struct PIMIDStats {
     uint64_t total_instructions;
     uint64_t memory_accesses;
     uint64_t network_packets;
+    uint64_t total_tasks;
     double total_energy_j;
     double memory_energy_j;
     double compute_energy_j;
     double network_energy_j;
 
     PIMIDStats() : total_cycles(0), total_instructions(0),
-                   memory_accesses(0), network_packets(0),
+                   memory_accesses(0), network_packets(0), total_tasks(0),
                    total_energy_j(0.0), memory_energy_j(0.0),
                    compute_energy_j(0.0), network_energy_j(0.0) {}
 };

@@ -98,7 +98,10 @@ void McPATModel::loadConfig(const std::string& config_path) {
                 tech_params_.frequency_ghz = tech["frequency_ghz"].as<double>();
             }
             if (tech["vdd"]) {
-                tech_params_.vdd = tech["vdd"].as<double>();
+                tech_params_.supply_voltage_v = tech["vdd"].as<double>();
+            }
+            if (tech["supply_voltage_v"]) {
+                tech_params_.supply_voltage_v = tech["supply_voltage_v"].as<double>();
             }
         }
 

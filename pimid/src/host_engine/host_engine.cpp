@@ -46,7 +46,7 @@ HostEngine::HostEngine(const PIMIDConfig& config, int comm_port)
     // Load execution model type from configuration
     // Options: "zsim" | "execution_driven" | "analytical" | "event_driven"
     // Note: "hybrid" is deprecated - host and device are now configured independently
-    std::string exec_model_name = cfg.getString("host.execution_model", "analytical");
+    std::string exec_model_name = cfg.get("host.execution_model", "analytical");
     if (exec_model_name == "zsim" || exec_model_name == "execution_driven") {
         execution_model_type_ = ExecutionModelType::ZSIM_EXECUTION_DRIVEN;
     } else {
@@ -297,7 +297,7 @@ void HostEngine::initializeZSim() {
 
     // Get config file path for execution model
     auto& cfg = pimid::config::ConfigManager::getInstance();
-    std::string config_file = cfg.getString("host.execution_config", "");
+    std::string config_file = cfg.get("host.execution_config", "");
 
     // Initialize the execution model
     if (!execution_model_->initialize(config_file, SimulationDomain::HOST)) {

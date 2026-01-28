@@ -91,7 +91,7 @@ uint32_t NearestPEScheduler::findNearestPE(Address data_addr) const {
     }
 
     // Use PE placement manager to find PE responsible for this address
-    return pe_manager_->getResponsiblePE(data_addr);
+    return pe_manager_->getPEForAddress(data_addr);
 }
 
 //=============================================================================

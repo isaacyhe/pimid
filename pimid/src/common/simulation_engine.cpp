@@ -1,4 +1,5 @@
 #include "common/simulation_engine.h"
+#include "memory_model.h"
 #include <iostream>
 #include <iomanip>
 

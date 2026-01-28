@@ -41,7 +41,7 @@ DeviceEngine::DeviceEngine(const PIMIDConfig& config,
     // Load execution model type from configuration
     // Options: "zsim" | "execution_driven" | "analytical" | "event_driven"
     // Note: For PIM device, analytical is typically preferred (faster, PEs aren't x86)
-    std::string exec_model_name = cfg.getString("device.execution_model", "analytical");
+    std::string exec_model_name = cfg.get("device.execution_model", "analytical");
     if (exec_model_name == "zsim" || exec_model_name == "execution_driven") {
         execution_model_type_ = ExecutionModelType::ZSIM_EXECUTION_DRIVEN;
     } else {
@@ -284,7 +284,7 @@ void DeviceEngine::initializeZSim() {
 
     // Get config file path for execution model
     auto& cfg = pimid::config::ConfigManager::getInstance();
-    std::string config_file = cfg.getString("device.execution_config", "");
+    std::string config_file = cfg.get("device.execution_config", "");
 
     // Initialize the execution model
     if (!execution_model_->initialize(config_file, SimulationDomain::DEVICE)) {
