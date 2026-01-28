@@ -48,15 +48,18 @@
 ### Host Engine Execution Model Integration ✅ COMPLETE
 - [x] **`pimid/src/host_engine/host_engine.cpp`** - ✅ FIXED: Full execution model integration
   - ✅ Uses ExecutionModelFactory to create ZSim or Analytical model
-  - ✅ Configurable via `host.execution_model` in YAML ("zsim" | "analytical" | "hybrid")
+  - ✅ Configurable via `host.execution_model` in YAML ("zsim" | "analytical")
   - ✅ Binary loading wired to ZSimExecutionModel::launchSimulation()
   - ✅ Arguments properly stored and passed to ZSim
   - ✅ Process memory request/response
 
-### Device Engine
-- [x] **`pimid/src/device_engine/device_engine.cpp:220`** - ✅ FIXED: Use scheduler to select PE
-- [x] **`pimid/src/device_engine/device_engine.cpp:277`** - ✅ FIXED: Process memory response
-- [ ] **`pimid/src/device_engine/device_engine.cpp:323`** - Actual execution on PE via ZSim
+### Device Engine Execution Model Integration ✅ COMPLETE
+- [x] **`pimid/src/device_engine/device_engine.cpp`** - ✅ FIXED: Full execution model integration
+  - ✅ Uses ExecutionModelFactory to create ZSim or Analytical model
+  - ✅ Configurable via `device.execution_model` in YAML ("zsim" | "analytical")
+  - ✅ Scheduler integration for PE selection
+  - ✅ Task execution via execution model
+  - ✅ Configures PIM mode for ZSim or numCores for Analytical
 
 ### Execution Model ✅ COMPLETE
 - [x] **`pimid/src/execution_model/zsim_execution_model.cpp`** - ✅ FIXED: Full ZSim integration
@@ -69,8 +72,9 @@
   - ✅ Analytical model with Roofline and Configurable IPC
   - ✅ 100-1000x faster than execution-driven
   - ✅ Suitable for large-scale design space exploration
-- [x] **`pimid/src/execution_model/execution_model_factory.cpp`** - ✅ ALREADY COMPLETE
-  - ✅ Creates ZSim, Analytical, or Hybrid execution models
+- [x] **`pimid/src/execution_model/execution_model_factory.cpp`** - ✅ COMPLETE
+  - ✅ Creates ZSim or Analytical execution models
+  - ✅ "hybrid" option deprecated (host/device configured independently)
 
 ---
 
@@ -165,14 +169,24 @@
 
 ## ✅ Completed Items
 
-### 2025-01-28: Execution Model Integration
+### 2026-01-28: Device Engine Execution Model Integration
+- [x] **device_engine.cpp** - Full execution model integration
+  - Uses ExecutionModelFactory like host_engine
+  - Configurable via `device.execution_model` in YAML
+  - Task execution via executeTask() API
+  - Configures PIM mode for ZSim, numCores for Analytical
+- [x] **execution_model_factory.cpp** - Deprecated "hybrid" option
+  - Host and device now configured independently
+  - Cleaner architecture
+
+### 2026-01-28: ZSim/PIN Integration
 - [x] **zsim_execution_model.cpp** - Full ZSim subprocess launcher implementation (~600 lines)
   - ZSimLauncher class with fork/exec pattern
   - Config generation and output parsing
   - PIN/ZSim path discovery
 - [x] **zsim_execution_model.h** - Updated with launchSimulation(), waitForCompletion(), etc.
 - [x] **host_engine.cpp** - Wired to use execution models via factory
-  - Supports "zsim", "analytical", "hybrid" via config
+  - Supports "zsim" or "analytical" via config
   - Binary loading triggers ZSim simulation launch
 
 ### 2025-01-28: High Priority Fixes

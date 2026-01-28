@@ -44,14 +44,14 @@ HostEngine::HostEngine(const PIMIDConfig& config, int comm_port)
         cfg.getInt("host.caches.l3.associativity", 16));
 
     // Load execution model type from configuration
-    // Options: "zsim" | "execution_driven" | "analytical" | "event_driven" | "hybrid"
+    // Options: "zsim" | "execution_driven" | "analytical" | "event_driven"
+    // Note: "hybrid" is deprecated - host and device are now configured independently
     std::string exec_model_name = cfg.getString("host.execution_model", "analytical");
     if (exec_model_name == "zsim" || exec_model_name == "execution_driven") {
         execution_model_type_ = ExecutionModelType::ZSIM_EXECUTION_DRIVEN;
-    } else if (exec_model_name == "hybrid") {
-        execution_model_type_ = ExecutionModelType::HYBRID;
     } else {
         // Default to analytical (fast, event-driven)
+        // "hybrid" and "event_driven" both map to analytical
         execution_model_type_ = ExecutionModelType::EVENT_DRIVEN_ANALYTICAL;
     }
 
