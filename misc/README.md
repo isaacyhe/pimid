@@ -1,8 +1,15 @@
 # Miscellaneous Files
 
-This directory contains audit reports, test results, and test scripts organized for reference.
+This directory contains audit reports, test results, test scripts, and archived documentation organized for reference.
 
 ## Directory Structure
+
+### `archive/`
+Archived documentation files (moved from `docs/archive/`):
+- Architecture analysis documents
+- GARNET integration notes
+- Plugin system documentation (outdated)
+- Core model architecture analysis
 
 ### `audit_reports/`
 Comprehensive audit reports from different phases of development:
