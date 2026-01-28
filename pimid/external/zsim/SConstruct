@@ -219,11 +219,21 @@ def buildSim(cppFlags, dir, type, pgo=None):
     # check for glibc version features
     env["CPPFLAGS"] += ' -include /usr/include/features.h '
 
-    # Fix for PIN 3.28: types_foundation.PH needs to be included before intel-fp.hpp
-    # which uses UINT64/UINT16 types without including the header
-    # Also need stdint.h for uint64_t etc.
+    # GCC 13 / PIN 3.28: just include stdint.h for basic types
+    # Don't pre-include types.h as it conflicts with LEVEL_BASE namespace types
     env["CPPFLAGS"] += ' -include /usr/include/stdint.h '
-    env["CPPFLAGS"] += ' -include ' + joinpath(pinInclDir, "gen/types_foundation.PH") + ' '
+
+    # Define PIN_CRT to use consistent type definitions from types.h
+    # This prevents the USIZE ambiguity between global namespace and LEVEL_BASE namespace
+    # When PIN_CRT is defined, types_foundation.PH uses "using ::ADDRINT" etc.
+    # instead of redefining types, avoiding the USIZE conflict
+    env["CPPFLAGS"] += ' -DPIN_CRT '
+
+    # Define PIN types as macros - intel-fp.hpp is included before types_foundation.PH
+    # When types_foundation.PH does "typedef uint8_t UINT8;", it becomes
+    # "typedef uint8_t uint8_t;" which is harmless
+    env["CPPFLAGS"] += ' -DUINT8=uint8_t -DUINT16=uint16_t -DUINT32=uint32_t -DUINT64=uint64_t '
+    env["CPPFLAGS"] += ' -DINT8=int8_t -DINT16=int16_t -DINT32=int32_t -DINT64=int64_t '
 
     # Enables lib and harness to use the same info/log code,
     # but only lib uses pin locks for thread safety

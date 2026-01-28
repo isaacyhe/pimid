@@ -45,19 +45,14 @@ void ALUCore::initStats(AggregateStat* parentStat) {
     AggregateStat* coreStat = new AggregateStat();
     coreStat->init(name.c_str(), "Core stats");
 
-    auto x = [this]() { return curCycle; };
-    LambdaStat<decltype(x)>* cyclesStat = new LambdaStat<decltype(x)>(x);
+    auto x = [this]() -> uint64_t { return curCycle; };
+    auto cyclesStat = makeLambdaStat(x);
     cyclesStat->init("cycles", "Simulated cycles");
     coreStat->append(cyclesStat);
 
-    auto y = [this]() { return instrs; };
-    LambdaStat<decltype(y)>* instrsStat = new LambdaStat<decltype(y)>(y);
-    instrsStat->init("instrs", "Simulated instructions");
+    ProxyStat* instrsStat = new ProxyStat();
+    instrsStat->init("instrs", "Simulated instructions", &instrs);
     coreStat->append(instrsStat);
-
-    ProxyStat* ipcStat = new ProxyStat();
-    ipcStat->init("ipc", "Instructions per cycle", instrsStat, cyclesStat);
-    coreStat->append(ipcStat);
 
     parentStat->append(coreStat);
 }
@@ -69,8 +64,7 @@ void ALUCore::contextSwitch(int32_t gid) {
 }
 
 void ALUCore::join() {
-    // Adjust curCycle to align with phaseEndCycle
-    curCycle = cOps.cycle(curCycle, phaseEndCycle);
+    // Sync curCycle with phase
     phaseEndCycle += zinfo->phaseLength;
 }
 
@@ -93,13 +87,11 @@ void ALUCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
         core->phaseEndCycle += zinfo->phaseLength;
         uint32_t cid = getCid(tid);
 
-        // Take schedule lock to avoid races with procFini
-        while(!TakeBarrier(tid)) {
-            // Spin until we can take barrier
-        }
-
-        // NOTE: LeaveBarrier is called by the scheduler
-        zinfo->sched->leave(cid, NONE, BLOCK);
+        // NOTE: TakeBarrier may take ownership of the core, and so it will be used by some other thread.
+        // If TakeBarrier context-switches us, the *only* safe option is to return immediately after we
+        // detect this, or we can race and corrupt core state.
+        uint32_t newCid = TakeBarrier(tid, cid);
+        if (newCid != cid) break; /*context-switch*/
     }
 }
 
