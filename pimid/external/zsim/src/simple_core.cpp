@@ -28,8 +28,6 @@
 #include "zsim.h"
 
 SimpleCore::SimpleCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name) : Core(_name), l1i(_l1i), l1d(_l1d), instrs(0), curCycle(0), haltedCycles(0) {
-    fprintf(stderr, "[ZSIM_INIT] SimpleCore created: %s\n", name.c_str());
-    fflush(stderr);
 }
 
 void SimpleCore::initStats(AggregateStat* parentStat) {
@@ -62,20 +60,6 @@ void SimpleCore::bbl(Address bblAddr, BblInfo* bblInfo) {
     //info("%d %d", bblInfo->instrs, bblInfo->bytes);
     instrs += bblInfo->instrs;
     curCycle += bblInfo->instrs;
-
-    // Container workaround: Write stats to file periodically for gVisor compatibility
-    static uint64_t lastStatsPrint = 0;
-    if (instrs >= lastStatsPrint + 1000000) {  // Every 1M instructions
-        double ipc = (curCycle > 0) ? (double)instrs / curCycle : 0.0;
-        // Write to file directly - stderr may be intercepted by PIN
-        FILE* statsFile = fopen("/tmp/zsim_live_stats.txt", "a");
-        if (statsFile) {
-            fprintf(statsFile, "core=%s instrs=%lu cycles=%lu IPC=%.4f\n",
-                    name.c_str(), instrs, curCycle, ipc);
-            fclose(statsFile);  // Close immediately to flush
-        }
-        lastStatsPrint = instrs;
-    }
 
     Address endBblAddr = bblAddr + bblInfo->bytes;
     for (Address fetchAddr = bblAddr; fetchAddr < endBblAddr; fetchAddr+=(1 << lineBits)) {

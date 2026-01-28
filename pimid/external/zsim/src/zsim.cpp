@@ -28,7 +28,6 @@
 
 #include "zsim.h"
 #include <algorithm>
-#include <cstdlib>  // For atexit() in container environment workaround
 #define _SIGNAL_H
 #include <signum.h>
 #undef _SIGNAL_H
@@ -483,24 +482,6 @@ VOID CheckForTermination() {
  */
 VOID EndOfPhaseActions() {
     zinfo->profSimTime->transition(PROF_WEAVE);
-
-    // Container workaround: Print stats to stderr every N phases for gVisor compatibility
-    // This output goes directly to console and survives abnormal PIN termination
-    static uint64_t lastStatsDump = 0;
-    uint64_t statsDumpInterval = zinfo->statsPhaseInterval ? zinfo->statsPhaseInterval : 100;
-    if (zinfo->numPhases >= lastStatsDump + statsDumpInterval) {
-        uint64_t totalInstrs = 0;
-        uint64_t totalCycles = zinfo->numPhases * zinfo->phaseLength;
-        for (uint32_t i = 0; i < zinfo->numCores; i++) {
-            totalInstrs += zinfo->cores[i]->getInstrs();
-        }
-        double ipc = (totalCycles > 0) ? (double)totalInstrs / totalCycles : 0.0;
-        fprintf(stderr, "[STATS] phase=%lu cycles=%lu instrs=%lu IPC=%.4f\n",
-                zinfo->numPhases, totalCycles, totalInstrs, ipc);
-        fflush(stderr);
-        lastStatsDump = zinfo->numPhases;
-    }
-
     if (zinfo->globalPauseFlag) {
         info("Simulation entering global pause");
         zinfo->profSimTime->transition(PROF_FF);
@@ -1459,8 +1440,6 @@ static EXCEPT_HANDLING_RESULT InternalExceptionHandler(THREADID tid, EXCEPTION_I
 /* ===================================================================== */
 
 int main(int argc, char *argv[]) {
-    fprintf(stderr, "[ZSIM_PIN] PIN tool starting...\n");
-    fflush(stderr);
     PIN_InitSymbols();
     if (PIN_Init(argc, argv)) return Usage();
 
@@ -1543,26 +1522,6 @@ int main(int argc, char *argv[]) {
     }
 
     info("Started process, PID %d", getpid()); //NOTE: external scripts expect this line, please do not change without checking first
-
-    // Register atexit handler to dump stats in container environments (gVisor)
-    // where PIN's Fini callback may not be called due to waitpid issues.
-    // NOTE: This may not work if PIN uses _exit() instead of exit(), but it
-    // doesn't hurt to register it. Full stats collection in gVisor requires
-    // either native Linux execution or using trace-driven simulation mode.
-    static bool atexitRegistered = false;
-    if (!atexitRegistered) {
-        atexitRegistered = true;
-        atexit([]() {
-            // Check if stats have already been dumped (perProcessEndFlag set)
-            if (!perProcessEndFlag && zinfo && zinfo->statsBackends) {
-                warn("Dumping stats from atexit handler (container environment workaround)");
-                zinfo->trigger = 20000;
-                for (StatsBackend* backend : *(zinfo->statsBackends)) {
-                    backend->dump(false /*unbuffered*/);
-                }
-            }
-        });
-    }
 
     //Unless things change substantially, keep this disabled; it causes higher imbalance and doesn't solve large system time with lots of processes.
     //Affinity testing code
