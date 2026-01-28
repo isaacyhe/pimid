@@ -20,6 +20,7 @@
 
 // Communication layer
 #include "common/types.h"
+#include "communication/socket_comm.h"
 
 using namespace pimid;
 using namespace pimid::test;
@@ -171,7 +172,7 @@ bool test_channel_close() {
 
     // Send a message
     CommMessage msg;
-    msg.type = MessageType::SYNC;
+    msg.type = MessageType::SYNC_REQUEST;
     assertTrue(channel.send(msg), "Send before close should succeed");
 
     // Close channel
@@ -245,7 +246,7 @@ bool test_sync_message() {
     channel.setLatency(0);
 
     CommMessage sync;
-    sync.type = MessageType::SYNC;
+    sync.type = MessageType::SYNC_REQUEST;
     sync.timestamp = 1000000;  // Cycle count
 
     assertTrue(channel.send(sync), "Send should succeed");
@@ -253,7 +254,7 @@ bool test_sync_message() {
     CommMessage received;
     assertTrue(channel.receive(received, 100), "Receive should succeed");
 
-    assertEqual(received.type, MessageType::SYNC, "Type mismatch");
+    assertEqual(received.type, MessageType::SYNC_REQUEST, "Type mismatch");
     assertEqual(received.timestamp, (uint64_t)1000000, "Timestamp mismatch");
 
     return true;
@@ -264,7 +265,7 @@ bool test_offload_message() {
     channel.setLatency(0);
 
     CommMessage offload;
-    offload.type = MessageType::OFFLOAD;
+    offload.type = MessageType::OFFLOAD_REQUEST;
     offload.src_domain = SimulationDomain::HOST;
     offload.dst_domain = SimulationDomain::DEVICE;
     offload.addr = 0x2000;  // Kernel address
@@ -275,7 +276,7 @@ bool test_offload_message() {
     CommMessage received;
     assertTrue(channel.receive(received, 100), "Receive should succeed");
 
-    assertEqual(received.type, MessageType::OFFLOAD, "Type mismatch");
+    assertEqual(received.type, MessageType::OFFLOAD_REQUEST, "Type mismatch");
 
     return true;
 }

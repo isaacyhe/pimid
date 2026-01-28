@@ -107,6 +107,10 @@ struct NetworkPacket {
     Address addr;
     Cycle inject_cycle;
 
+    NetworkPacket()
+        : src_node(0), dst_node(0), type(PacketType::DATA), size(0),
+          addr(0), inject_cycle(0) {}
+
     NetworkPacket(uint32_t src, uint32_t dst, PacketType t, uint64_t s,
                   Address a, Cycle c)
         : src_node(src), dst_node(dst), type(t), size(s), addr(a),
