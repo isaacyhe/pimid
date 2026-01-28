@@ -23,6 +23,26 @@
 
 using namespace pimid;
 
+// Helper function to find config file in multiple possible locations
+std::string findConfigFile(const std::string& relative_path) {
+    std::vector<std::string> search_paths = {
+        "",                           // Current directory
+        "../",                        // One level up
+        "../../",                     // Two levels up (from build/test/)
+        "../../../",                  // Three levels up
+        "/home/user/pimid-dev/",     // Absolute path
+    };
+
+    for (const auto& base : search_paths) {
+        std::string full_path = base + relative_path;
+        std::ifstream test(full_path);
+        if (test.good()) {
+            return full_path;
+        }
+    }
+    return relative_path;
+}
+
 // Test configuration structure
 struct MemoryConfigTest {
     std::string name;
@@ -286,31 +306,31 @@ int main() {
     // Define test cases for all memory technologies
     std::vector<MemoryConfigTest> test_cases = {
         // SRAM Tests
-        {"SRAM Small (256KB L2)", "../../pimid/configs/memory/sram_small_htree.yaml",
+        {"SRAM Small (256KB L2)", findConfigFile("pimid/configs/memory/sram_small_htree.yaml"),
          "SRAM", 8, 4, 1, 1, 2, 1, "MINIMAL", 1, 2, 2, 128, 2.5, 1},
 
-        {"SRAM Large (8MB L3)", "../../pimid/configs/memory/sram_large_htree.yaml",
+        {"SRAM Large (8MB L3)", findConfigFile("pimid/configs/memory/sram_large_htree.yaml"),
          "SRAM", 16, 16, 4, 1, 2, 1, "MINIMAL", 1, 2, 2, 128, 2.0, 2},
 
         // STT-MRAM Tests
-        {"STT-MRAM Standard (128MB)", "../../pimid/configs/memory/sttmram_standard_htree.yaml",
+        {"STT-MRAM Standard (128MB)", findConfigFile("pimid/configs/memory/sttmram_standard_htree.yaml"),
          "STT-MRAM", 16, 8, 2, 1, 2, 1, "MINIMAL", 1, 2, 2, 64, 1.5, 3},
 
-        {"STT-MRAM Fast (256MB)", "../../pimid/configs/memory/sttmram_fast_htree.yaml",
+        {"STT-MRAM Fast (256MB)", findConfigFile("pimid/configs/memory/sttmram_fast_htree.yaml"),
          "STT-MRAM", 32, 16, 4, 1, 2, 1, "MINIMAL", 1, 2, 2, 64, 2.0, 2},
 
         // PCM Tests
-        {"PCM Standard (256MB)", "../../pimid/configs/memory/pcm_standard_htree.yaml",
+        {"PCM Standard (256MB)", findConfigFile("pimid/configs/memory/pcm_standard_htree.yaml"),
          "PCM", 16, 8, 2, 1, 2, 1, "MINIMAL", 1, 2, 2, 64, 1.2, 4},
 
-        {"PCM Multi-Level (1GB)", "../../pimid/configs/memory/pcm_multilevel_htree.yaml",
+        {"PCM Multi-Level (1GB)", findConfigFile("pimid/configs/memory/pcm_multilevel_htree.yaml"),
          "PCM", 32, 16, 4, 1, 2, 1, "MINIMAL", 1, 2, 2, 64, 1.0, 5},
 
         // ReRAM Tests
-        {"ReRAM Standard (256MB)", "../../pimid/configs/memory/reram_standard_htree.yaml",
+        {"ReRAM Standard (256MB)", findConfigFile("pimid/configs/memory/reram_standard_htree.yaml"),
          "ReRAM", 16, 8, 2, 1, 2, 1, "MINIMAL", 1, 2, 2, 64, 1.4, 3},
 
-        {"ReRAM Crossbar (1GB)", "../../pimid/configs/memory/reram_crossbar_htree.yaml",
+        {"ReRAM Crossbar (1GB)", findConfigFile("pimid/configs/memory/reram_crossbar_htree.yaml"),
          "ReRAM", 32, 16, 4, 1, 2, 1, "MINIMAL", 1, 2, 2, 64, 1.5, 2},
     };
 
