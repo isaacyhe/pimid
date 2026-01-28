@@ -210,8 +210,20 @@ def buildSim(cppFlags, dir, type, pgo=None):
     # Uncomment to get logging messages to stderr
     ##env["CPPFLAGS"] += " -DDEBUG=1"
 
-    # Be a Warning Nazi? (recommended)
-    env["CPPFLAGS"] += " -Werror "
+    # Disable -Werror for GCC 13 compatibility with PIN 3.28
+    # The glibc_prereq warnings are not fatal but -Werror makes them so
+    # env["CPPFLAGS"] += " -Werror "
+
+    # Fix for GCC 13 + PIN 3.28: define __GLIBC_PREREQ before any glibc headers
+    # This prevents the "missing binary operator" error when glibc headers
+    # check for glibc version features
+    env["CPPFLAGS"] += ' -include /usr/include/features.h '
+
+    # Fix for PIN 3.28: types_foundation.PH needs to be included before intel-fp.hpp
+    # which uses UINT64/UINT16 types without including the header
+    # Also need stdint.h for uint64_t etc.
+    env["CPPFLAGS"] += ' -include /usr/include/stdint.h '
+    env["CPPFLAGS"] += ' -include ' + joinpath(pinInclDir, "gen/types_foundation.PH") + ' '
 
     # Enables lib and harness to use the same info/log code,
     # but only lib uses pin locks for thread safety
