@@ -38,19 +38,22 @@
 ## 🟠 High Priority - Incomplete Implementations
 
 ### Core Stubs (Empty/Minimal Files)
-- [ ] **`pimid/src/config/config_parser.cpp:6`** - ConfigParser class is stub
-- [ ] **`pimid/src/scheduler/scheduler.cpp:6`** - Scheduler base class is stub
-- [ ] **`pimid/src/common/simulation_engine.cpp:27`** - Memory model forwarding not implemented
+- [x] **`pimid/src/config/config_parser.cpp`** - ✅ ALREADY COMPLETE (147 lines, full YAML parsing)
+- [x] **`pimid/src/scheduler/scheduler.cpp`** - ✅ FIXED: Full implementation (300 lines)
+  - PEScheduler base class
+  - NearestPEScheduler, RoundRobinScheduler, LoadBalancedScheduler
+  - SchedulerFactory
+- [x] **`pimid/src/common/simulation_engine.cpp`** - ✅ FIXED: Memory model forwarding
 
 ### Host Engine ZSim Integration
 - [ ] **`pimid/src/host_engine/host_engine.cpp:124`** - Binary loading via ZSim
 - [ ] **`pimid/src/host_engine/host_engine.cpp:148`** - Pass arguments to ZSim
 - [ ] **`pimid/src/host_engine/host_engine.cpp:241`** - Actual ZSim initialization
-- [ ] **`pimid/src/host_engine/host_engine.cpp:279`** - Process memory request/response
+- [x] **`pimid/src/host_engine/host_engine.cpp:279`** - ✅ FIXED: Process memory request/response
 
 ### Device Engine
-- [ ] **`pimid/src/device_engine/device_engine.cpp:220`** - Use scheduler to select PE
-- [ ] **`pimid/src/device_engine/device_engine.cpp:277`** - Process memory response
+- [x] **`pimid/src/device_engine/device_engine.cpp:220`** - ✅ FIXED: Use scheduler to select PE
+- [x] **`pimid/src/device_engine/device_engine.cpp:277`** - ✅ FIXED: Process memory response
 - [ ] **`pimid/src/device_engine/device_engine.cpp:323`** - Actual execution on PE via ZSim
 
 ### Execution Model
@@ -148,6 +151,12 @@
 ---
 
 ## ✅ Completed Items
+
+### 2025-01-28: High Priority Fixes
+- [x] **scheduler.cpp** - Full implementation (300 lines): base class, 3 schedulers, factory
+- [x] **simulation_engine.cpp** - Memory model forwarding enabled
+- [x] **device_engine.cpp** - Scheduler wiring and memory response handling
+- [x] **host_engine.cpp** - Memory request processing and response
 
 ### 2025-01-28: Hardcoded Values Review
 - [x] **PE Placement** - Already uses DRAM factory functions (was not broken)

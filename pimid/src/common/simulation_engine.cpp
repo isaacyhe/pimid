@@ -24,9 +24,10 @@ void SimulationEngine::issueMemoryRequest(const MemoryRequest& req) {
     // Update statistics
     stats_.memory_accesses++;
 
-    // TODO: Forward to memory model
+    // Forward to memory model
     if (memory_model_) {
-        // memory_model_->access(req);
+        Cycle latency = memory_model_->access(req);
+        handleMemoryResponse(req, latency);
     }
 }
 

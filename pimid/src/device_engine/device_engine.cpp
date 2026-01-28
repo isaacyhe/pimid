@@ -217,12 +217,15 @@ void DeviceEngine::setScheduler(std::unique_ptr<class PEScheduler> scheduler) {
 
 uint32_t DeviceEngine::selectPE(Address data_addr) {
     if (scheduler_) {
-        // TODO: Use scheduler to select PE
-        // return scheduler_->scheduleTask(...);
+        // Create task descriptor and use scheduler to select PE
+        PIMTask task;
+        task.task_id = next_offload_id_;
+        task.data_addr = data_addr;
+        task.arrival_cycle = current_cycle_;
+        return scheduler_->scheduleTask(task);
     }
 
-    // Simple default: select based on data address
-    // In a real implementation, this would use PEPlacementManager
+    // Fallback: select based on data address hash
     // Number of PEs is configured via device.processing_elements.placement.total_num_pes
     return static_cast<uint32_t>(data_addr % total_num_pes_);
 }
@@ -273,8 +276,21 @@ void DeviceEngine::handleHostMessages() {
 
             case MessageType::MEMORY_RESPONSE:
                 // Handle memory response from host
-                std::cout << "Received memory response from host" << std::endl;
-                // TODO: Process memory response
+                {
+                    std::cout << "Received memory response from host: addr=0x"
+                              << std::hex << msg.addr << std::dec
+                              << " latency=" << msg.timestamp << std::endl;
+
+                    // Forward to memory model for tracking
+                    MemoryRequest req;
+                    req.addr = msg.addr;
+                    req.size = msg.size;
+                    req.type = MemoryRequestType::READ;  // Response to a read
+                    handleMemoryResponse(req, msg.timestamp);
+
+                    // Update statistics
+                    stats_.memory_accesses++;
+                }
                 break;
 
             case MessageType::SYNC_REQUEST:

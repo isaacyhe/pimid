@@ -274,9 +274,41 @@ void HostEngine::handleDeviceMessages() {
                 break;
 
             case MessageType::MEMORY_REQUEST:
-                // Handle cross-domain memory request
-                std::cout << "Received memory request from device" << std::endl;
-                // TODO: Process memory request and send response
+                // Handle cross-domain memory request from device
+                {
+                    std::cout << "Received memory request from device: addr=0x"
+                              << std::hex << msg.addr << std::dec
+                              << " size=" << msg.size << std::endl;
+
+                    // Process the memory request
+                    MemoryRequest req;
+                    req.addr = msg.addr;
+                    req.size = msg.size;
+                    req.type = (msg.data.size() > 0) ? MemoryRequestType::WRITE : MemoryRequestType::READ;
+
+                    Cycle latency = 0;
+                    if (memory_model_) {
+                        latency = memory_model_->access(req);
+                    } else {
+                        latency = 100;  // Default latency when no memory model
+                    }
+
+                    // Send response back to device
+                    CommMessage response;
+                    response.type = MessageType::MEMORY_RESPONSE;
+                    response.timestamp = latency;
+                    response.src_domain = SimulationDomain::HOST;
+                    response.dst_domain = SimulationDomain::DEVICE;
+                    response.addr = msg.addr;
+                    response.size = msg.size;
+                    response.request_id = msg.request_id;
+
+                    if (!device_comm_->sendMessage(response)) {
+                        std::cerr << "Failed to send memory response to device" << std::endl;
+                    }
+
+                    stats_.memory_accesses++;
+                }
                 break;
 
             case MessageType::SYNC_REQUEST:
