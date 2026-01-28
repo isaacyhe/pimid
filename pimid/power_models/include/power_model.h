@@ -184,6 +184,7 @@ private:
                             const ActivityStats& stats);
     PowerMetrics parseMcPATOutput();
     double calculateComponentEnergy(PowerComponent component, Cycle cycles);
+    std::string generateMcPATConfigXML() const;
 
     // XML generation helpers
     void generateCoreXML(std::ofstream& xml, const ActivityStats& stats);

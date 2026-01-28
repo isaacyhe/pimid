@@ -78,33 +78,56 @@
 
 ---
 
-## 🟡 Medium Priority - External Tool Integration
+## 🟡 Medium Priority - External Tool Integration ✅ COMPLETE
 
-### NVSim Integration
-- [ ] **`pimid/memory_models/src/sttmram_model.cpp:72`** - Initialize NVSim for runtime calculations
-- [ ] **`pimid/memory_models/src/sttmram_model.cpp:275`** - Per-cell endurance tracking
-- [ ] **`pimid/memory_models/src/nvm_model.cpp:50`** - Initialize NVSim instance
-- [ ] **`pimid/memory_models/src/nvm_model.cpp:255`** - Update energy models with NVSim
-- [ ] **`pimid/memory_models/src/nvm_model.cpp:357`** - Per-bank/page endurance tracking
+### NVSim Integration ✅ COMPLETE
+- [x] **`pimid/memory_models/src/sttmram_model.cpp`** - ✅ NVSim initialization implemented
+  - Calls initializeNVSim() which creates NVSimWrapper when HAVE_NVSIM defined
+  - Falls back to architecture-based values when unavailable
+- [x] **`pimid/memory_models/src/sttmram_model.cpp`** - ✅ Per-cell endurance tracking
+  - Per-bank, per-page, and per-cell write counts
+  - Hot page detection with sampling (1:1000)
+- [x] **`pimid/memory_models/src/nvm_model.cpp`** - ✅ NVSim integration implemented
+  - initializeNVSim() creates proper NVSimWrapper based on cell type (STT-MRAM, PCM, ReRAM)
+  - tick() periodically updates energy models
+- [x] **`pimid/memory_models/src/nvm_model.cpp`** - ✅ Per-bank/page endurance tracking
+  - Bank write counts, page write counts (1:1000 sampling)
+  - Bank wear imbalance detection
 
-### CACTI Integration
-- [ ] **`pimid/memory_models/src/sram_model.cpp:245`** - Update dynamic energy when CACTI integrated
+### CACTI Integration ✅ COMPLETE
+- [x] **`pimid/memory_models/src/sram_model.cpp`** - ✅ CACTI dynamic energy tracking
+  - Re-queries CACTI periodically (every 100K cycles) for temperature-aware leakage
 
-### ReRAM Model
-- [ ] **`pimid/memory_models/src/reram_model.cpp:123`** - Extend MemoryRequest for PIM operation types
-- [ ] **`pimid/memory_models/src/reram_model.cpp:253`** - Per-cell endurance tracking
+### ReRAM Model ✅ COMPLETE
+- [x] **`pimid/memory_models/src/reram_model.cpp`** - ✅ PIM operation types via request flags
+  - Flag 0x80 indicates analog compute operation
+  - Size==0 also indicates pure compute (no data movement)
+- [x] **`pimid/memory_models/src/reram_model.cpp`** - ✅ Per-cell endurance tracking
+  - Per-bank, per-page (1:100 sampling), per-cell (1:1000 sampling)
+  - reportWearImbalance() detects bank-level wear issues
 
-### PCM Model
-- [ ] **`pimid/memory_models/src/pcm_model.cpp:223`** - Per-cell endurance tracking with wear-leveling
+### PCM Model ✅ COMPLETE
+- [x] **`pimid/memory_models/src/pcm_model.cpp`** - ✅ Per-cell endurance tracking with wear-leveling
+  - More aggressive sampling (1:50 pages, 1:500 cells) due to lower PCM endurance (~10^8)
+  - Critical warnings when approaching wear-out
+  - Bank wear imbalance detection with wear-leveling recommendations
 
-### Ramulator Specs
-- [ ] **`pimid/memory_models/src/ramulator_wrapper.cpp:508`** - Add DDR5 verified specs
-- [ ] **`pimid/memory_models/src/ramulator_wrapper.cpp:514`** - Add HBM3 verified specs
+### Ramulator Specs ✅ COMPLETE
+- [x] **`pimid/memory_models/src/ramulator_wrapper.cpp`** - ✅ DDR5-4800 verified specs added
+  - 16n prefetch, 8 bank groups, dual 32-bit subchannels
+  - Full timing parameters (tRCD=16.67ns, tCAS=16.67ns, tRP=16.67ns)
+- [x] **`pimid/memory_models/src/ramulator_wrapper.cpp`** - ✅ HBM3 verified specs added
+  - 4.0 GT/s, 16 pseudo-channels, 512 GB/s peak bandwidth
+  - Full timing parameters (tRCD=10ns, tCAS=10ns, tRP=10ns)
 
-### McPAT Integration
-- [ ] **`pimid/power_models/src/mcpat_model.cpp:21`** - Clean up McPAT instance
-- [ ] **`pimid/power_models/src/mcpat_model.cpp:33`** - Initialize McPAT instance
-- [ ] **`pimid/power_models/src/mcpat_model.cpp:46`** - Parse YAML configuration file
+### McPAT Integration ✅ COMPLETE
+- [x] **`pimid/power_models/src/mcpat_model.cpp`** - ✅ McPAT instance lifecycle management
+  - Proper cleanup in destructor when HAVE_MCPAT defined
+- [x] **`pimid/power_models/src/mcpat_model.cpp`** - ✅ McPAT-compatible initialization
+  - generateMcPATConfigXML() creates proper McPAT XML configuration
+  - Writes config to /tmp/mcpat_config.xml when HAVE_MCPAT defined
+- [x] **`pimid/power_models/src/mcpat_model.cpp`** - ✅ YAML configuration parsing
+  - Loads technology params, core config, cache configs, PE config from YAML
 
 ---
 
@@ -168,6 +191,28 @@
 ---
 
 ## ✅ Completed Items
+
+### 2026-01-28: Medium Priority - External Tool Integration
+- [x] **NVSim Integration** - Full NVSim wrapper support for STT-MRAM and NVM models
+  - initializeNVSim() in sttmram_model.cpp and nvm_model.cpp
+  - Auto-detects cell type (STT-MRAM, PCM, ReRAM) for NVSim configuration
+  - Per-bank/page endurance tracking with hot page detection
+- [x] **CACTI Integration** - Dynamic energy updates in SRAM model
+  - Periodic re-query of CACTI for temperature-aware leakage (every 100K cycles)
+- [x] **DDR5/HBM3 Specs** - Verified specs added to dram_architecture_v2.h
+  - DDR5-4800: 16n prefetch, 8 bank groups, dual subchannels, 38.4 GB/s
+  - HBM3: 4.0 GT/s, 16 pseudo-channels, 512 GB/s peak
+- [x] **McPAT Integration** - Full YAML config support and XML generation
+  - loadConfig() parses power_model YAML section
+  - generateMcPATConfigXML() creates McPAT-compatible configuration
+- [x] **ReRAM Endurance Tracking** - Per-cell wear tracking with wear-leveling hints
+  - Per-bank, per-page (1:100), per-cell (1:1000) write counts
+  - Bank wear imbalance detection
+  - PIM operation types via request flags (0x80 = analog compute)
+- [x] **PCM Endurance Tracking** - Critical wear tracking for low-endurance PCM
+  - More aggressive sampling (1:50 pages, 1:500 cells) due to ~10^8 endurance limit
+  - reportWearImbalance() with cells-near-wearout estimation
+  - Automatic wear-leveling recommendations
 
 ### 2026-01-28: Device Engine Execution Model Integration
 - [x] **device_engine.cpp** - Full execution model integration

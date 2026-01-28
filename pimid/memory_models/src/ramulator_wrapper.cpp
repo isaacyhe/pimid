@@ -504,16 +504,18 @@ void RamulatorWrapper::enablePIMSupport(const std::string& dram_type) {
     // Create DRAM architecture based on type
     if (dram_type_ == "DDR4") {
         dram_arch_ = pimid::memory::createDDR4_2400_Verified();
+        std::cout << "Using DDR4-2400 architecture specs\n";
     } else if (dram_type_ == "DDR5") {
-        // TODO: Add DDR5 verified specs
-        std::cerr << "DDR5 specs not yet implemented, using DDR4\n";
-        dram_arch_ = pimid::memory::createDDR4_2400_Verified();
+        dram_arch_ = pimid::memory::createDDR5_4800_Verified();
+        std::cout << "Using DDR5-4800 architecture specs\n";
+        std::cout << "  Key DDR5 features: 16n prefetch, 8 bank groups, dual subchannels\n";
     } else if (dram_type_ == "HBM2") {
         dram_arch_ = pimid::memory::createHBM2_Verified();
+        std::cout << "Using HBM2 architecture specs\n";
     } else if (dram_type_ == "HBM3") {
-        // TODO: Add HBM3 verified specs
-        std::cerr << "HBM3 specs not yet implemented, using HBM2\n";
-        dram_arch_ = pimid::memory::createHBM2_Verified();
+        dram_arch_ = pimid::memory::createHBM3_Verified();
+        std::cout << "Using HBM3 architecture specs\n";
+        std::cout << "  Key HBM3 features: 4.0 GT/s, 16 pseudo-channels, 512 GB/s peak\n";
     } else {
         std::cerr << "Unknown DRAM type: " << dram_type_ << ", using DDR4\n";
         dram_arch_ = pimid::memory::createDDR4_2400_Verified();

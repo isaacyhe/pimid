@@ -6,6 +6,8 @@
 #include "memory/pcm_architecture.h"
 #include <queue>
 #include <memory>
+#include <map>
+#include <unordered_map>
 
 namespace pimid {
 
@@ -108,8 +110,15 @@ private:
     uint64_t bandwidth_;
     uint64_t endurance_;
 
-    // Endurance tracking
+    // Endurance tracking with wear-leveling support
     void updateEndurance(Address addr);
+    void reportWearImbalance() const;
+
+    // Per-bank, per-page, and per-cell write counts for wear tracking
+    // PCM has limited endurance (~10^8), so tracking is critical!
+    std::map<uint32_t, uint64_t> bank_write_counts_;
+    std::unordered_map<uint64_t, uint64_t> page_write_counts_;
+    std::unordered_map<uint64_t, uint64_t> cell_write_counts_;
 };
 
 } // namespace pimid

@@ -6,6 +6,8 @@
 #include "memory/reram_architecture.h"
 #include <queue>
 #include <memory>
+#include <map>
+#include <unordered_map>
 
 namespace pimid {
 
@@ -114,6 +116,12 @@ private:
 
     // Endurance tracking
     void updateEndurance(Address addr);
+    void reportWearImbalance() const;
+
+    // Per-bank, per-page, and per-cell write counts for wear tracking
+    std::map<uint32_t, uint64_t> bank_write_counts_;
+    std::unordered_map<uint64_t, uint64_t> page_write_counts_;
+    std::unordered_map<uint64_t, uint64_t> cell_write_counts_;
 };
 
 } // namespace pimid
