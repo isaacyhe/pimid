@@ -221,18 +221,40 @@
 
 ---
 
-## 📁 Code Cleanup
+## 📁 Code Cleanup ✅ COMPLETE
 
-### Multiple Main Files
-- [ ] Consolidate or clarify purpose of:
-  - `pimid/src/standalone_main.cpp` (empty stub)
-  - `pimid/src/standalone_main_new.cpp`
-  - `pimid/src/standalone_main_unified.cpp`
+### Multiple Main Files ✅ CONSOLIDATED
+- [x] Clarified purpose of simulator binaries:
+  - `pimid/src/standalone_main_new.cpp` → `pimid_standalone` binary
+    - Lightweight standalone-only simulator
+    - Simple interface for quick workload testing
+  - `pimid/src/standalone_main_unified.cpp` → `pimid` binary (main)
+    - Full-featured unified simulator
+    - Supports: standalone, host, device, cosim modes
+  - Note: `standalone_main.cpp` does not exist (was incorrectly listed)
 
-### Test Stubs
-- [ ] **`test/test_utils.cpp:7`** - Implement test utilities
-- [ ] **`test/unit/test_memory_model.cpp:5`** - Implement unit tests
-- [ ] **`test/integration/test_host_device_comm.cpp:5`** - Implement integration tests
+### Test Stubs ✅ IMPLEMENTED
+- [x] **`test/test_utils.cpp`** - ✅ Full test utilities implementation
+  - TestSuite class with run/summarize
+  - Assertion helpers: assertTrue, assertEqual, assertNear, etc.
+  - Memory test utilities: makeTestRequest, generateRandomRequests
+  - Timing utilities: Timer class, benchmark function
+  - Network utilities: makeTestPacket
+- [x] **`test/unit/test_memory_model.cpp`** - ✅ Comprehensive unit tests
+  - SRAM model tests (creation, capacity, latency, energy, access)
+  - DRAM model tests (creation, timing, bandwidth, access patterns)
+  - STT-MRAM model tests (creation, asymmetric energy, persistence)
+  - PCM model tests (creation, write latency)
+  - ReRAM model tests (creation, energy)
+  - Cross-technology comparison tests
+  - Stress tests (throughput, tick advancement, stats reset)
+- [x] **`test/integration/test_host_device_comm.cpp`** - ✅ Integration tests
+  - MockCommChannel for testing without sockets
+  - Basic communication tests (send/receive, ordering, timeout)
+  - Message type tests (memory request/response, sync, offload)
+  - Synchronization tests (bidirectional, concurrent, throughput)
+  - Error handling tests (empty queue, reset)
+  - Data integrity tests (large transfers, all fields)
 
 ---
 

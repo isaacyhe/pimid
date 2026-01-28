@@ -2,17 +2,26 @@
  * @file standalone_main_unified.cpp
  * @brief PIMID Unified Simulator - Single Entry Point for All Simulation Modes
  *
- * This is the unified PIMID simulator binary supporting multiple simulation modes:
+ * Binary: pimid (main PIMID binary)
+ *
+ * This is the PRIMARY PIMID simulator binary supporting all simulation modes:
  * - standalone: PIM-enabled workload execution (default)
- * - host: Host-only simulation
- * - device: Device-only simulation
- * - cosim: Host/Device co-simulation
+ * - host: Host-only simulation (for split host/device testing)
+ * - device: Device-only simulation (for split host/device testing)
+ * - cosim: Host/Device co-simulation (demonstrates data movement)
+ *
+ * @note For a simpler standalone-only interface, see standalone_main_new.cpp
+ *       which builds the pimid_standalone binary.
  *
  * Usage:
  *   pimid --mode standalone --config simulation.yaml --workload ./bfs [args...]
  *   pimid --mode host --port 9999 --cycles 100000
  *   pimid --mode device --host 127.0.0.1 --port 9999
  *   pimid --mode cosim --size 1000000
+ *
+ * Build information:
+ *   - Main binary: pimid (this file)
+ *   - Lightweight: pimid_standalone (standalone_main_new.cpp)
  */
 
 #include <iostream>

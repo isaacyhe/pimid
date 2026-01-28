@@ -1,12 +1,25 @@
 /**
- * @file standalone_main.cpp
- * @brief PIMID Standalone Simulator - Main Entry Point
+ * @file standalone_main_new.cpp
+ * @brief PIMID Standalone-Only Simulator (Lightweight Binary)
  *
- * This is the main PIMID simulator binary. It can simulate any workload
- * binary with configurable memory technologies, PE types, and placement strategies.
+ * @note This is the LIGHTWEIGHT standalone-only simulator.
+ *       For the full-featured simulator with multiple modes (standalone, host,
+ *       device, cosim), use the unified binary built from standalone_main_unified.cpp
+ *
+ * Binary: pimid_standalone
+ *
+ * This lightweight simulator is ideal for:
+ * - Simple workload execution with PIM instrumentation
+ * - Quick testing without host/device separation
+ * - Users who don't need co-simulation features
  *
  * Usage:
- *   pimid --config simulation.yaml --workload ./bfs_binary [workload_args...]
+ *   pimid_standalone --config simulation.yaml --workload ./bfs_binary [workload_args...]
+ *
+ * For more advanced modes, use the unified simulator:
+ *   pimid --mode standalone --workload ./bfs_binary
+ *   pimid --mode cosim --size 1000000
+ *   pimid --mode host --port 9999
  *
  * The simulator:
  * 1. Loads configuration from YAML file
