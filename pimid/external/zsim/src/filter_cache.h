@@ -76,6 +76,9 @@ class FilterCache : public Cache {
             reqFlags = 0;
         }
 
+        // Override type check for use without RTTI (Pin 4.x requires -fno-rtti)
+        FilterCache* asFilterCache() override { return this; }
+
         void setSourceId(uint32_t id) {
             srcId = id;
         }

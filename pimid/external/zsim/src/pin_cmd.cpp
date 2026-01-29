@@ -57,12 +57,19 @@ PinCmd::PinCmd(Config* conf, const char* configFile, const char* outputDir, uint
 
     //Additional options (e.g., -smc_strict for Java), parsed from config
     const char* pinOptions = conf->get<const char*>("sim.pinOptions", "");
-    wordexp_t p;
-    wordexp(pinOptions, &p, 0);
-    for (uint32_t i = 0; i < p.we_wordc; i++) {
-        args.push_back(g_string(p.we_wordv[i]));
+    // Only call wordexp if pinOptions is non-empty (musl's wordexp fails on empty string)
+    if (pinOptions && pinOptions[0] != '\0') {
+        wordexp_t p;
+        int wexp_result = wordexp(pinOptions, &p, 0);
+        if (wexp_result == 0) {
+            for (uint32_t i = 0; i < p.we_wordc; i++) {
+                args.push_back(g_string(p.we_wordv[i]));
+            }
+            wordfree(&p);
+        } else {
+            warn("wordexp failed with result %d for pinOptions '%s'", wexp_result, pinOptions);
+        }
     }
-    wordfree(&p);
 
     //Load tool
     args.push_back("-ifeellucky"); //bypass kernel version check

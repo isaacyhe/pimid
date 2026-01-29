@@ -28,6 +28,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <type_traits>
 
 int gm_init(size_t segmentSize);
 
@@ -36,7 +37,7 @@ void gm_attach(int shmid);
 // C-style interface
 void* gm_malloc(size_t size);
 void* __gm_calloc(size_t num, size_t size);  //deprecated, only used internally
-void* __gm_memalign(size_t blocksize, size_t bytes);  // deprecated, only used internally
+void* gm_memalign(size_t blocksize, size_t bytes);
 char* gm_strdup(const char* str);
 void gm_free(void* ptr);
 
@@ -45,8 +46,8 @@ template <typename T> T* gm_malloc() {return static_cast<T*>(gm_malloc(sizeof(T)
 template <typename T> T* gm_malloc(size_t objs) {return static_cast<T*>(gm_malloc(sizeof(T)*objs));}
 template <typename T> T* gm_calloc() {return static_cast<T*>(__gm_calloc(1, sizeof(T)));}
 template <typename T> T* gm_calloc(size_t objs) {return static_cast<T*>(__gm_calloc(objs, sizeof(T)));}
-template <typename T> T* gm_memalign(size_t blocksize) {return static_cast<T*>(__gm_memalign(blocksize, sizeof(T)));}
-template <typename T> T* gm_memalign(size_t blocksize, size_t objs) {return static_cast<T*>(__gm_memalign(blocksize, sizeof(T)*objs));}
+template <typename T> T* gm_memalign(size_t blocksize) {return static_cast<T*>(gm_memalign(blocksize, sizeof(T)));}
+template <typename T> T* gm_memalign(size_t blocksize, size_t objs) {return static_cast<T*>(gm_memalign(blocksize, sizeof(T)*objs));}
 template <typename T> T* gm_dup(T* src, size_t objs) {
     T* dst = gm_malloc<T>(objs);
     memcpy(dst, src, sizeof(T)*objs);
@@ -63,6 +64,21 @@ void gm_stats();
 
 bool gm_isready();
 void gm_detach();
+
+// Pointer relocation for non-fixed address mapping
+// When shared memory is mapped at a different address than GM_BASE_ADDR,
+// all pointers stored in shared memory need to be adjusted.
+void* gm_relocate_ptr(void* ptr);
+void* gm_canonicalize_ptr(void* ptr);
+bool gm_needs_relocation();
+
+// Template versions for type safety
+template <typename T> T* gm_relocate_ptr(T* ptr) {
+    return static_cast<T*>(gm_relocate_ptr(static_cast<void*>(const_cast<typename std::remove_const<T>::type*>(ptr))));
+}
+template <typename T> T* gm_canonicalize_ptr(T* ptr) {
+    return static_cast<T*>(gm_canonicalize_ptr(static_cast<void*>(const_cast<typename std::remove_const<T>::type*>(ptr))));
+}
 
 
 class GlobAlloc {

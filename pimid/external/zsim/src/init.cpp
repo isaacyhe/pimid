@@ -40,8 +40,10 @@ using namespace std;
 #include "constants.h"
 #include "contention_sim.h"
 #include "core.h"
+#ifndef ZSIM_NO_HDF5  // detailed_mem requires zlib which is not available in Pin 4.x musl
 #include "detailed_mem.h"
 #include "detailed_mem_params.h"
+#endif
 #include "ddr_mem.h"
 #include "debug_zsim.h"
 #include "dramsim_mem_ctrl.h"
@@ -134,8 +136,8 @@ BaseCache* BuildCacheBank(Config& config, const string& prefix, g_string& name, 
             assert(numHashes == 1);
             hf = new IdHashFamily;
         } else if (hashType == "H3") {
-            //STL hash function
-            size_t seed = _Fnv_hash_bytes(prefix.c_str(), prefix.size()+1, 0xB4AC5B);
+            // Use portable FNV hash (zsim_fnv_hash replaces glibc's _Fnv_hash_bytes)
+            size_t seed = zsim_fnv_hash(prefix.c_str(), prefix.size()+1, 0xB4AC5B);
             //info("%s -> %lx", prefix.c_str(), seed);
             hf = new H3HashFamily(numHashes, setBits, 0xCAC7EAFFA1 + seed /*make randSeed depend on prefix*/);
         } else if (hashType == "SHA1") {
@@ -247,7 +249,8 @@ BaseCache* BuildCacheBank(Config& config, const string& prefix, g_string& name, 
         array = ila;
     } else if (arrayType == "IdealLRUPart") {
         assert(!hf);
-        IdealLRUPartReplPolicy* irp = dynamic_cast<IdealLRUPartReplPolicy*>(rp);
+        // Use virtual method instead of dynamic_cast for -fno-rtti compatibility
+        IdealLRUPartReplPolicy* irp = rp->asIdealLRUPartReplPolicy();
         if (!irp) panic("IdealLRUPart array needs IdealLRUPart repl policy!");
         array = new IdealLRUPartArray(numLines, irp);
     } else {
@@ -363,10 +366,12 @@ MemObject* BuildMemoryController(Config& config, uint32_t lineSize, uint32_t fre
         string outputDir = config.get<const char*>("sys.mem.outputDir");
         string traceName = config.get<const char*>("sys.mem.traceName");
         mem = new DRAMSimMemory(dramTechIni, dramSystemIni, outputDir, traceName, capacity, cpuFreqHz, latency, domain, name);
+#ifndef ZSIM_NO_HDF5  // Detailed memory requires zlib which is not available in Pin 4.x musl
     } else if (type == "Detailed") {
         // FIXME(dsm): Don't use a separate config file... see DDRMemory
         g_string mcfg = config.get<const char*>("sys.mem.paramFile", "");
         mem = new MemControllerBase(mcfg, lineSize, frequency, domain, name);
+#endif
     } else {
         panic("Invalid memory controller type %s", type.c_str());
     }
@@ -444,6 +449,8 @@ static void InitSystem(Config& config) {
     // Build the caches
     vector<const char*> cacheGroupNames;
     config.subgroups("sys.caches", cacheGroupNames);
+    for (size_t i = 0; i < cacheGroupNames.size(); i++) {
+    }
     string prefix = "sys.caches.";
 
     for (const char* grp : cacheGroupNames) {
@@ -673,7 +680,8 @@ static void InitSystem(Config& config) {
                     if (assignedCaches[icache] >= igroup.size()) {
                         panic("%s: icache group %s (%ld caches) is fully used, can't connect more cores to it", name.c_str(), icache.c_str(), igroup.size());
                     }
-                    FilterCache* ic = dynamic_cast<FilterCache*>(igroup[assignedCaches[icache]][0]);
+                    // Use virtual method instead of dynamic_cast for -fno-rtti compatibility
+                    FilterCache* ic = igroup[assignedCaches[icache]][0]->asFilterCache();
                     assert(ic);
                     ic->setSourceId(coreIdx);
                     ic->setFlags(MemReq::IFETCH | MemReq::NOEXCL);
@@ -682,7 +690,8 @@ static void InitSystem(Config& config) {
                     if (assignedCaches[dcache] >= dgroup.size()) {
                         panic("%s: dcache group %s (%ld caches) is fully used, can't connect more cores to it", name.c_str(), dcache.c_str(), dgroup.size());
                     }
-                    FilterCache* dc = dynamic_cast<FilterCache*>(dgroup[assignedCaches[dcache]][0]);
+                    // Use virtual method instead of dynamic_cast for -fno-rtti compatibility
+                    FilterCache* dc = dgroup[assignedCaches[dcache]][0]->asFilterCache();
                     assert(dc);
                     dc->setSourceId(coreIdx);
                     assignedCaches[dcache]++;
@@ -755,7 +764,8 @@ static void InitSystem(Config& config) {
             if (isTerminal(grp)) {
                 for (vector<BaseCache*> cv : *cMap[grp]) {
                     assert(cv.size() == 1);
-                    TraceDriverProxyCache* proxy = dynamic_cast<TraceDriverProxyCache*>(cv[0]);
+                    // Use virtual method instead of dynamic_cast for -fno-rtti compatibility
+                    TraceDriverProxyCache* proxy = cv[0]->asTraceDriverProxyCache();
                     assert(proxy);
                     proxies.push_back(proxy);
                 }
@@ -817,7 +827,12 @@ static void PostInitStats(bool perProcessDir, Config& config) {
         const char* periodicStatsFilter = config.get<const char*>("sim.periodicStatsFilter", "");
         AggregateStat* prStat = (!strlen(periodicStatsFilter))? zinfo->rootStat : FilterStats(zinfo->rootStat, periodicStatsFilter);
         if (!prStat) panic("No stats match sim.periodicStatsFilter regex (%s)! Set interval to 0 to avoid periodic stats", periodicStatsFilter);
+#ifndef ZSIM_NO_HDF5
         zinfo->periodicStatsBackend = new HDF5Backend(pStatsFile, prStat, (1 << 20) /* 1MB chunks */, zinfo->skipStatsVectors, zinfo->compactPeriodicStats);
+#else
+        // Use text backend as fallback when HDF5 is disabled
+        zinfo->periodicStatsBackend = new TextBackend(pStatsFile, prStat);
+#endif
         zinfo->periodicStatsBackend->dump(true); //must have a first sample
 
         class PeriodicStatsDumpEvent : public Event {
@@ -835,7 +850,11 @@ static void PostInitStats(bool perProcessDir, Config& config) {
         zinfo->periodicStatsBackend = nullptr;
     }
 
+#ifndef ZSIM_NO_HDF5
     zinfo->eventualStatsBackend = new HDF5Backend(evStatsFile, zinfo->rootStat, (1 << 17) /* 128KB chunks */, zinfo->skipStatsVectors, false /* don't sum regular aggregates*/);
+#else
+    zinfo->eventualStatsBackend = new TextBackend(evStatsFile, zinfo->rootStat);
+#endif
     zinfo->eventualStatsBackend->dump(true); //must have a first sample
     zinfo->statsBackends->push_back(zinfo->eventualStatsBackend);
 
@@ -853,7 +872,11 @@ static void PostInitStats(bool perProcessDir, Config& config) {
     }
 
     // Convenience stats
+#ifndef ZSIM_NO_HDF5
     StatsBackend* compactStats = new HDF5Backend(cmpStatsFile, zinfo->rootStat, 0 /* no aggregation, this is just 1 record */, zinfo->skipStatsVectors, true); //don't dump a first sample.
+#else
+    StatsBackend* compactStats = new TextBackend(cmpStatsFile, zinfo->rootStat);
+#endif
     StatsBackend* textStats = new TextBackend(statsFile, zinfo->rootStat);
     zinfo->statsBackends->push_back(compactStats);
     zinfo->statsBackends->push_back(textStats);
