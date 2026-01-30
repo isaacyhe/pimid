@@ -96,7 +96,7 @@ PERFORMANCE SUMMARY
 - CMake 3.15+
 - yaml-cpp
 - Boost (system, filesystem)
-- **Intel PIN 3.28+** (required for ZSim-based workload execution)
+- **Intel PIN 3.x or 4.x** (required for ZSim-based workload execution)
 
 Note: PIN is only required for instruction-level workload tracing (`--mode standalone`). Config-driven simulation (`--mode sim`) and co-simulation (`--mode cosim`) work without PIN.
 
