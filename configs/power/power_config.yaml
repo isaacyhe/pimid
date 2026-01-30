@@ -1,0 +1,105 @@
+# Power and Energy Configuration
+# McPAT-based power modeling for host, PEs, and system components
+
+power:
+  name: "Power_Model"
+  model: "McPAT"
+
+  # Technology parameters
+  technology:
+    tech_node_nm: 22  # Technology node (45, 32, 22, 16, etc.)
+    device_type: "HP"  # HP (High Performance) | LSTP | LOP
+    temperature_k: 350  # Operating temperature in Kelvin
+    frequency_ghz: 3.0
+
+  # Host processor power
+  host:
+    num_cores: 4
+    core_type: "OOO"  # OOO (out-of-order) | Inorder
+
+    # Core configuration
+    core:
+      pipeline_depth: 14
+      issue_width: 4
+      alu_count: 4
+      mul_count: 2
+      fpu_count: 2
+      instruction_window_size: 96
+      rob_size: 168
+
+    # Cache power
+    l1i_cache:
+      size_kb: 32
+      line_size: 64
+      associativity: 8
+      banks: 1
+
+    l1d_cache:
+      size_kb: 32
+      line_size: 64
+      associativity: 8
+      banks: 1
+
+    l2_cache:
+      size_kb: 256
+      line_size: 64
+      associativity: 8
+      banks: 1
+
+    l3_cache:
+      size_kb: 8192
+      line_size: 64
+      associativity: 16
+      banks: 8
+
+  # PIM PE power
+  device:
+    num_pes: 4
+    pe_type: "Inorder"
+
+    # PE core configuration
+    pe_core:
+      pipeline_depth: 5
+      issue_width: 2
+      alu_count: 2
+      mul_count: 1
+      fpu_count: 1
+      instruction_window_size: 16
+      rob_size: 32
+
+    # PE cache power
+    pe_l1_cache:
+      size_kb: 16
+      line_size: 64
+      associativity: 4
+      banks: 1
+
+  # Memory controller power
+  memory_controller:
+    num_controllers: 1
+    memory_channels_per_controller: 1
+    mc_clock_mhz: 800
+
+  # Network power (additional to network_config)
+  network:
+    enable_detailed_power: true
+
+# McPAT-specific configuration
+mcpat:
+  config_file: "configs/power/mcpat.xml"
+  output_file: "results/power_stats.txt"
+
+# Activity factors (will be updated during simulation)
+activity:
+  host_core_utilization: 0.8
+  pe_utilization: 0.9
+  l1_cache_access_rate: 0.95
+  l2_cache_access_rate: 0.7
+  l3_cache_access_rate: 0.3
+  memory_access_rate: 0.1
+
+# Power reporting
+reporting:
+  report_interval_cycles: 1000000
+  enable_per_component_breakdown: true
+  enable_energy_tracking: true

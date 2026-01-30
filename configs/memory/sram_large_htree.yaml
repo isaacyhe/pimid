@@ -1,0 +1,59 @@
+# SRAM with GARNET H-tree Internal Network Configuration
+# Memory Technology: SRAM (Large - 8MB L3 cache size)
+# Topology: H-tree (hierarchical tree for bank interconnect)
+
+memory:
+  type: "SRAM"
+  organization:
+    capacity: 8388608  # 8 MB
+    num_banks: 16
+    num_subarrays: 16
+    num_bank_groups: 4
+    num_chips: 1
+
+  # Timing parameters (ns)
+  timing:
+    access_time: 1.2   # Larger cache, slightly slower
+    cycle_time: 0.5    # 2.0 GHz
+
+  # Technology
+  technology:
+    node_nm: 14
+    line_size: 64
+    associativity: 16  # 16-way set associative
+
+# GARNET H-tree Network Configuration
+network:
+  topology: "H_TREE"
+  model: "GARNET"
+
+  # Virtual Networks (VN) - Message Classes
+  virtual_networks: 2  # VN0: Reads, VN1: Writes
+
+  # Virtual Channels (VC) per VN
+  virtual_channels_per_vn: 1
+
+  # Router Pipeline - MINIMAL for on-chip
+  router_pipeline: "MINIMAL"
+  router_latency: 1
+  enable_router_bypass: true
+
+  # Buffer depths
+  input_buffer_depth: 2
+  output_buffer_depth: 2
+
+  # Link parameters - Larger SRAM has more subarrays
+  subarray_network:
+    link_width_bits: 128
+    frequency_GHz: 2.0
+    latency_cycles: 2      # Slightly higher for larger cache
+
+  bank_network:
+    link_width_bits: 64
+    frequency_GHz: 2.0
+    latency_cycles: 3
+
+  chip_network:
+    link_width_bits: 32
+    frequency_GHz: 2.0
+    latency_cycles: 5

@@ -1,0 +1,14 @@
+
+# External dependencies fetched by CMake
+ext/
+
+# Build artifacts
+build/
+
+# Simulation output files
+*.csv
+pim_sim_results.csv
+
+# Temporary workaround files
+fake_osrelease.c
+fake_osrelease*.so

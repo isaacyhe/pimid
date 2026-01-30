@@ -1,0 +1,67 @@
+# GEMM Benchmark Configuration - Bank-Level with In-Order Core PE
+# Memory Technology: RERAM
+
+benchmark:
+  name: "GEMM_Bank_InOrder_RERAM"
+  description: "Matrix Multiplication with bank-level In-Order Core PE on ReRAM"
+  workload_type: "gemm"
+
+# Workload parameters
+workload:
+  matrix:
+    size: 128  # 128x128 matrices
+    block_size: 16
+    data_type: "float32"
+
+  gemm:
+    alpha: 1.0
+    beta: 0.0
+    transpose_a: false
+    transpose_b: false
+
+# Memory configuration
+memory:
+  technology: "RERAM"
+  config_file: "configs/memory/reram_config.yaml"
+
+  hierarchy:
+    num_banks: 4
+    num_subarrays_per_bank: 4
+  # RERAM-specific timing
+  timing:
+    subarray_read_ns: 5.0
+    subarray_write_ns: 50.0
+    inner_bank_htree_ns: 8.65
+
+# Processing element configuration
+processing_element:
+  type: "in_order_core"
+  placement_level: "BANK"
+  num_pes: 4  # One per bank
+
+  pipeline:
+    stages: 5
+    fetch_decode_ns: 2.0
+    execute_compare_ns: 1.0
+    execute_alu_ns: 1.0
+    memory_access_ns: 1.0
+    writeback_ns: 0.5
+    branch_penalty_ns: 3.0
+    branch_prediction_accuracy: 0.5
+
+  energy:
+    fetch_decode_pj: 10.0
+    alu_pj: 5.0
+    branch_pj: 8.0
+
+# Simulation control
+simulation:
+  max_cycles: 1000000000
+  enable_power_modeling: true
+  enable_detailed_stats: true
+
+# Output configuration
+output:
+  stats_file: "results/gemm_bank_inorder_reram_stats.txt"
+  detailed_log: "results/gemm_bank_inorder_reram_detailed.log"
+  summary_format: "table"
