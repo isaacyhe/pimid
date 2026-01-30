@@ -97,7 +97,7 @@ enum BufferDesignTarget
 
 enum MemoryType
 {
-	data,
+	data_array,  // Renamed from 'data' to avoid conflict with C++17 std::data()
 	tag,
 	CAM
 };

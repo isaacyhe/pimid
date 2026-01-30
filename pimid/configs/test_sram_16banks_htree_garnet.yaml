@@ -1,0 +1,134 @@
+# Test Configuration: 16 Banks of SRAM with In-Order Cores
+# Network: H-tree with GARNET
+# Workload: Parallel reduction (naturally parallelizable)
+
+benchmark:
+  name: "REDUCTION_16Banks_InOrder_SRAM_HTree_GARNET"
+  description: "Parallel reduction with 16 bank-level In-Order Core PEs on SRAM with H-tree GARNET network"
+  workload_type: "reduction"
+
+# Workload parameters - parallelized reduction
+workload:
+  reduction:
+    array_size: 16777216   # 16M elements
+    element_size: 4        # 4 bytes (int/float)
+    operation: "sum"       # sum, max, min
+    parallel_mode: true    # Enable parallel execution across PEs
+
+  # Each PE handles 1/16 of the data
+  parallelization:
+    data_partitioning: "even_split"
+    synchronization: "barrier"
+
+# Memory configuration - 16 Banks of SRAM
+memory:
+  technology: "SRAM"
+  config_file: "configs/memory/sram_config.yaml"
+
+  organization:
+    capacity: 67108864      # 64 MB total SRAM
+    num_banks: 16           # 16 banks
+    num_subarrays_per_bank: 4
+    num_bank_groups: 4      # 4 bank groups of 4 banks each
+    num_chips: 1
+
+  # SRAM timing characteristics (fast and symmetric)
+  timing:
+    read_latency_ns: 1.0    # Fast SRAM read
+    write_latency_ns: 1.0   # Fast SRAM write (symmetric)
+    subarray_read_ns: 0.8
+    subarray_write_ns: 0.8
+    inner_bank_htree_ns: 2.0
+    cycle_time_ns: 0.5      # 2 GHz
+
+  # SRAM energy characteristics
+  energy:
+    read_energy_pj: 2.0
+    write_energy_pj: 2.5
+    leakage_power_uw: 50.0  # Higher leakage than NVM
+
+# Processing element configuration - In-Order Core per bank
+processing_element:
+  type: "in_order_core"
+  placement_level: "BANK"
+  num_pes: 16  # One per bank
+
+  # 5-stage in-order pipeline
+  pipeline:
+    stages: 5
+    fetch_decode_ns: 2.0
+    execute_compare_ns: 1.0
+    execute_alu_ns: 1.0
+    memory_access_ns: 1.0
+    writeback_ns: 0.5
+    branch_penalty_ns: 3.0
+    branch_prediction_accuracy: 0.5
+
+  # PE energy characteristics
+  energy:
+    fetch_decode_pj: 10.0
+    alu_pj: 5.0
+    branch_pj: 8.0
+    register_read_pj: 1.0
+    register_write_pj: 1.0
+
+# Network configuration - H-tree with GARNET
+network:
+  topology: "H_TREE"
+  model: "GARNET"
+
+  # Virtual Networks
+  virtual_networks: 2       # VN0: Requests, VN1: Responses
+  virtual_channels_per_vn: 2
+
+  # Router configuration - optimized for H-tree
+  router:
+    pipeline: "MINIMAL"
+    latency_cycles: 1
+    enable_bypass: true
+    input_buffer_depth: 4
+    output_buffer_depth: 4
+    routing_algorithm: "hierarchical"
+
+  # Hierarchical link parameters for H-tree
+  subarray_network:
+    link_width_bits: 64
+    frequency_GHz: 2.0
+    latency_cycles: 2
+
+  bank_network:
+    link_width_bits: 64
+    frequency_GHz: 2.0
+    latency_cycles: 4
+
+  bank_group_network:
+    link_width_bits: 128
+    frequency_GHz: 2.0
+    latency_cycles: 8
+
+  chip_network:
+    link_width_bits: 256
+    frequency_GHz: 2.0
+    latency_cycles: 16
+
+# GARNET-specific configuration
+garnet:
+  enable: true
+  enable_fault_model: false
+  enable_power_model: true
+  flit_size_bits: 128
+  ni_flit_size_bits: 128
+
+# Simulation control
+simulation:
+  max_cycles: 10000000      # 10M cycles for quick test
+  enable_power_modeling: true
+  enable_detailed_stats: true
+  enable_network_stats: true
+
+# Output configuration
+output:
+  stats_file: "results/sram_16banks_htree_garnet_stats.txt"
+  detailed_log: "results/sram_16banks_htree_garnet_detailed.log"
+  network_log: "results/sram_16banks_htree_garnet_network.log"
+  summary_format: "table"

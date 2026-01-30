@@ -1,0 +1,135 @@
+# Test Configuration: 16 Banks of STT-MRAM with In-Order Cores
+# Network: H-tree with GARNET
+# Workload: Parallel reduction (naturally parallelizable)
+
+benchmark:
+  name: "REDUCTION_16Banks_InOrder_STTMRAM_HTree"
+  description: "Parallel reduction with 16 bank-level In-Order Core PEs on STT-MRAM with H-tree network"
+  workload_type: "reduction"
+
+# Workload parameters - parallelized reduction
+workload:
+  reduction:
+    array_size: 16777216   # 16M elements
+    element_size: 4        # 4 bytes (int/float)
+    operation: "sum"       # sum, max, min
+    parallel_mode: true    # Enable parallel execution across PEs
+
+  # Each PE handles 1/16 of the data
+  parallelization:
+    data_partitioning: "even_split"
+    synchronization: "barrier"
+
+# Memory configuration - 16 Banks of STT-MRAM
+memory:
+  technology: "STT_MRAM"
+  config_file: "configs/memory/sttmram_standard_htree.yaml"
+
+  organization:
+    capacity: 268435456     # 256 MB total
+    num_banks: 16           # 16 banks
+    num_subarrays_per_bank: 4
+    num_bank_groups: 4      # 4 bank groups of 4 banks each
+    num_chips: 1
+
+  # STT-MRAM timing characteristics (asymmetric read/write)
+  timing:
+    read_latency_ns: 3.5    # Fast read (sensing MTJ resistance)
+    write_latency_ns: 15.0  # Slow write (MTJ switching time)
+    subarray_read_ns: 3.0
+    subarray_write_ns: 12.0
+    inner_bank_htree_ns: 5.0
+    cycle_time_ns: 0.67     # 1.5 GHz
+
+  # STT-MRAM energy characteristics
+  energy:
+    read_energy_pj: 3.5
+    write_energy_pj: 15.0
+    leakage_power_uw: 0.5   # Non-volatile - very low leakage
+
+# Processing element configuration - In-Order Core per bank
+processing_element:
+  type: "in_order_core"
+  placement_level: "BANK"
+  num_pes: 16  # One per bank
+
+  # 5-stage in-order pipeline
+  pipeline:
+    stages: 5
+    fetch_decode_ns: 2.0
+    execute_compare_ns: 1.0
+    execute_alu_ns: 1.0
+    memory_access_ns: 1.0
+    writeback_ns: 0.5
+    branch_penalty_ns: 3.0
+    branch_prediction_accuracy: 0.5
+
+  # PE energy characteristics
+  energy:
+    fetch_decode_pj: 10.0
+    alu_pj: 5.0
+    branch_pj: 8.0
+    register_read_pj: 1.0
+    register_write_pj: 1.0
+
+# Network configuration - H-tree with GARNET
+network:
+  topology: "H_TREE"
+  model: "GARNET"
+
+  # Virtual Networks for STT-MRAM asymmetry
+  virtual_networks: 2       # VN0: Reads (fast), VN1: Writes (slow)
+  virtual_channels_per_vn: 2
+
+  # Router configuration - optimized for H-tree
+  router:
+    pipeline: "MINIMAL"
+    latency_cycles: 1
+    enable_bypass: true
+    input_buffer_depth: 4
+    output_buffer_depth: 4
+    routing_algorithm: "hierarchical"
+
+  # Hierarchical link parameters for H-tree
+  subarray_network:
+    link_width_bits: 64
+    frequency_GHz: 1.5
+    latency_cycles: 3
+
+  bank_network:
+    link_width_bits: 32
+    frequency_GHz: 1.5
+    latency_cycles: 6
+
+  bank_group_network:
+    link_width_bits: 64
+    frequency_GHz: 1.5
+    latency_cycles: 10
+
+  chip_network:
+    link_width_bits: 128
+    frequency_GHz: 1.5
+    latency_cycles: 20
+
+# GARNET-specific configuration
+garnet:
+  enable: true
+  config_file: "configs/network/garnet.cfg"
+  enable_fault_model: false
+  enable_power_model: true
+  flit_size_bits: 128
+  ni_flit_size_bits: 128
+
+# Simulation control
+simulation:
+  max_cycles: 1000000000
+  enable_power_modeling: true
+  enable_detailed_stats: true
+  enable_network_stats: true
+
+# Output configuration
+output:
+  stats_file: "results/sttmram_16banks_htree_stats.txt"
+  detailed_log: "results/sttmram_16banks_htree_detailed.log"
+  network_log: "results/sttmram_16banks_htree_network.log"
+  summary_format: "table"

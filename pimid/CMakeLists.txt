@@ -28,6 +28,7 @@ include_directories(
     ${PROJECT_SOURCE_DIR}/external/cacti
     ${PROJECT_SOURCE_DIR}/external/nvsim
     ${PROJECT_SOURCE_DIR}/external/mcpat
+    ${PROJECT_SOURCE_DIR}/external/mcpat/cacti  # CACTI headers (via McPAT)
 )
 
 # Find required packages
@@ -64,8 +65,9 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/external/ramulator/CMakeLists.txt")
 endif()
 
 # CACTI for SRAM/cache modeling
+# Note: CACTI is bundled with McPAT - enabled when McPAT is available
 if(EXISTS "${PROJECT_SOURCE_DIR}/external/cacti/CMakeLists.txt")
-    message(STATUS "  - CACTI SRAM/cache analyzer")
+    message(STATUS "  - CACTI SRAM/cache analyzer (standalone)")
     add_subdirectory(external/cacti)
     add_definitions(-DHAVE_CACTI)
     set(HAVE_CACTI ON)
@@ -79,12 +81,19 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/external/nvsim/CMakeLists.txt")
     set(HAVE_NVSIM ON)
 endif()
 
-# McPAT for power modeling
+# McPAT for power modeling (includes CACTI)
 if(EXISTS "${PROJECT_SOURCE_DIR}/external/mcpat/CMakeLists.txt")
     message(STATUS "  - McPAT power analyzer")
     add_subdirectory(external/mcpat)
     add_definitions(-DHAVE_MCPAT)
     set(HAVE_MCPAT ON)
+    # McPAT includes CACTI - enable CACTI support via McPAT
+    if(NOT HAVE_CACTI)
+        message(STATUS "  - CACTI SRAM/cache analyzer (via McPAT)")
+        add_definitions(-DHAVE_CACTI)
+        set(HAVE_CACTI ON)
+        set(CACTI_VIA_MCPAT ON)
+    endif()
 endif()
 
 # Options
@@ -130,6 +139,7 @@ set(PIMID_SOURCES
     memory_models/src/pim_bandwidth_tracker.cpp
     memory_models/src/internal_dram_network.cpp
     memory_models/src/internal_memory_network.cpp
+    memory_models/src/multi_instance_garnet_network.cpp
     memory_models/src/pim_controller_plugin.cpp
 
     # DRAM architecture specifications
@@ -137,6 +147,7 @@ set(PIMID_SOURCES
 
     # Network (includes GARNET integration)
     network_models/src/network_model.cpp
+    network_models/src/garnet_detailed.cpp
 
     # Power
     power_models/src/power_model.cpp
@@ -194,9 +205,10 @@ if(HAVE_RAMULATOR)
     target_link_libraries(pimid_lib ramulator)
 endif()
 
-if(HAVE_CACTI)
+if(HAVE_CACTI AND NOT CACTI_VIA_MCPAT)
     target_link_libraries(pimid_lib cacti)
 endif()
+# Note: When CACTI is via McPAT, linking to mcpat handles CACTI
 
 if(HAVE_NVSIM)
     target_link_libraries(pimid_lib nvsim)

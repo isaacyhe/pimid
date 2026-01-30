@@ -1,0 +1,213 @@
+# Complex Simulation: 16 Banks STT-MRAM with In-Order Cores + L1 Cache
+# Network: H-tree with GARNET
+# Workload: Parallel vector operations
+
+benchmark:
+  name: "COMPLEX_16Banks_InOrder_L1Cache_STTMRAM"
+  description: "Complex PIM simulation with 16 STT-MRAM banks, in-order cores with L1 cache, H-tree GARNET network"
+  workload_type: "parallel_vector"
+
+# Workload parameters - parallelized vector operations
+workload:
+  parallel_vector:
+    array_size: 16777216     # 16M elements
+    element_size: 4          # 4 bytes (int/float)
+    operations:
+      - type: "vector_add"
+        iterations: 1000
+      - type: "vector_mul"
+        iterations: 500
+      - type: "reduction_sum"
+        iterations: 100
+    parallel_mode: true
+
+  # Data distribution across 16 banks
+  parallelization:
+    num_threads: 16          # One per bank
+    data_partitioning: "block"
+    synchronization: "barrier"
+    load_balance: "static"
+
+# Memory configuration - 16 Banks of STT-MRAM
+memory:
+  technology: "STT_MRAM"
+
+  organization:
+    capacity: 536870912      # 512 MB total
+    num_banks: 16            # 16 banks
+    num_subarrays_per_bank: 8
+    num_bank_groups: 4       # 4 bank groups of 4 banks each
+    num_chips: 1
+    bank_size: 33554432      # 32 MB per bank
+
+  # STT-MRAM timing characteristics
+  timing:
+    read_latency_ns: 3.5     # Fast read (MTJ resistance sensing)
+    write_latency_ns: 12.0   # Write (MTJ spin-transfer switching)
+    subarray_read_ns: 3.0
+    subarray_write_ns: 10.0
+    inner_bank_htree_ns: 4.0
+    cycle_time_ns: 0.5       # 2 GHz operation
+    tRCD_ns: 10.0
+    tRP_ns: 10.0
+    tCAS_ns: 10.0
+
+  # STT-MRAM energy characteristics
+  energy:
+    read_energy_pj: 3.0
+    write_energy_pj: 12.0
+    leakage_power_uw: 0.3    # Non-volatile - minimal leakage
+
+  # Bandwidth
+  bandwidth:
+    peak_bandwidth_GBs: 51.2  # DDR4-3200 equivalent
+    per_bank_bandwidth_GBs: 3.2
+
+# Processing element configuration - In-Order Core with L1 Cache per bank
+processing_element:
+  type: "in_order_core"
+  placement_level: "BANK"
+  num_pes: 16               # One per bank
+
+  # Core specifications
+  core:
+    frequency_GHz: 2.0
+    issue_width: 1          # Single-issue in-order
+    pipeline_depth: 5
+
+  # 5-stage in-order pipeline
+  pipeline:
+    stages: 5
+    fetch_width: 1
+    decode_width: 1
+    execute_width: 1
+    fetch_decode_ns: 0.5
+    execute_compare_ns: 0.5
+    execute_alu_ns: 0.5
+    memory_access_ns: 0.5
+    writeback_ns: 0.25
+    branch_penalty_cycles: 3
+    branch_prediction_accuracy: 0.85
+
+  # L1 Cache configuration (per core)
+  l1_cache:
+    enable: true
+    type: "SRAM"
+
+    # L1 Data Cache
+    l1d:
+      size_KB: 32            # 32 KB L1D per core
+      associativity: 8       # 8-way set associative
+      line_size_bytes: 64    # 64B cache line
+      hit_latency_cycles: 2
+      miss_penalty_cycles: 20
+      write_policy: "write_back"
+      replacement_policy: "LRU"
+      num_mshr: 8
+
+    # L1 Instruction Cache
+    l1i:
+      size_KB: 16            # 16 KB L1I per core
+      associativity: 4       # 4-way set associative
+      line_size_bytes: 64
+      hit_latency_cycles: 1
+      miss_penalty_cycles: 15
+      replacement_policy: "LRU"
+
+  # Register file
+  register_file:
+    num_int_regs: 32
+    num_fp_regs: 32
+    read_ports: 2
+    write_ports: 1
+
+  # PE energy characteristics
+  energy:
+    fetch_decode_pj: 8.0
+    alu_pj: 4.0
+    fpu_pj: 10.0
+    branch_pj: 6.0
+    register_read_pj: 0.5
+    register_write_pj: 0.5
+    l1_cache_read_pj: 20.0
+    l1_cache_write_pj: 25.0
+
+# Network configuration - H-tree with GARNET
+network:
+  topology: "H_TREE"
+  model: "GARNET"
+  num_nodes: 16             # One node per bank
+
+  # Virtual Networks
+  virtual_networks: 3       # VN0: Request, VN1: Response, VN2: Coherence
+  virtual_channels_per_vn: 2
+
+  # Router configuration
+  router:
+    pipeline: "MINIMAL"
+    latency_cycles: 2
+    enable_bypass: true
+    input_buffer_depth: 8
+    output_buffer_depth: 8
+    routing_algorithm: "hierarchical"
+    arbitration: "round_robin"
+
+  # Hierarchical link parameters for H-tree
+  subarray_network:
+    link_width_bits: 128
+    frequency_GHz: 2.0
+    latency_cycles: 2
+    bandwidth_GBs: 32.0
+
+  bank_network:
+    link_width_bits: 64
+    frequency_GHz: 2.0
+    latency_cycles: 4
+    bandwidth_GBs: 16.0
+
+  bank_group_network:
+    link_width_bits: 128
+    frequency_GHz: 2.0
+    latency_cycles: 8
+    bandwidth_GBs: 32.0
+
+  chip_network:
+    link_width_bits: 256
+    frequency_GHz: 2.0
+    latency_cycles: 15
+    bandwidth_GBs: 64.0
+
+# GARNET-specific configuration
+garnet:
+  enable: true
+  flit_size_bits: 128
+  ni_flit_size_bits: 128
+  enable_power_model: true
+  enable_fault_model: false
+
+  # Flow control
+  credit_link_latency: 1
+  routing_algorithm: "table"
+
+  # Statistics
+  track_network_stats: true
+  track_router_stats: true
+
+# Simulation control
+simulation:
+  max_cycles: 100000000     # 100M cycles max
+  warmup_cycles: 1000000    # 1M warmup cycles
+  enable_power_modeling: true
+  enable_detailed_stats: true
+  enable_network_stats: true
+  enable_cache_stats: true
+  checkpoint_interval: 10000000
+
+# Output configuration
+output:
+  stats_file: "results/complex_sttmram_16banks_l1cache_stats.txt"
+  detailed_log: "results/complex_sttmram_16banks_l1cache_detailed.log"
+  network_log: "results/complex_sttmram_16banks_l1cache_network.log"
+  cache_log: "results/complex_sttmram_16banks_l1cache_cache.log"
+  power_log: "results/complex_sttmram_16banks_l1cache_power.log"
+  summary_format: "detailed_table"

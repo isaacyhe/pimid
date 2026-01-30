@@ -198,9 +198,8 @@ InputParameter* CACTIWrapper::createCACTIInput(const SRAMConfig& config) {
     input->nuca = 0;
     input->nuca_bank_count = 0;
 
-    // 3D parameters (not used)
-    input->is_3d_mem = false;
-    input->print_detail_debug = false;
+    // Print detail level (0 = minimal output)
+    input->print_detail = 0;
 
     // Main memory parameters (set defaults even for cache)
     input->page_sz_bits = 8192;
