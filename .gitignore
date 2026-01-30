@@ -1,0 +1,96 @@
+# Build directories
+build/
+*/build/
+cmake-build-*/
+
+# Compiled files
+*.o
+*.so
+*.a
+*.out
+*.exe
+
+# Log files
+*.log
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+**/build/Makefile
+**/cmake_build/Makefile
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+# Build artifacts - MPICH workloads (moved to test/benchmarks/workloads)
+test/benchmarks/workloads/mpich_examples/vector_dotproduct
+test/benchmarks/workloads/mpich_examples/matrix_multiply
+test/benchmarks/workloads/mpich_examples/graph_pagerank
+
+# Build artifacts - BFS workload (moved to test/benchmarks/workloads)
+test/benchmarks/workloads/bfs/bfs
+test/benchmarks/workloads/bfs/bfs_omp
+test/benchmarks/workloads/bfs/bfs_pimid
+test/benchmarks/workloads/bfs/bfs_pimid_omp
+
+# Test configuration files
+test/benchmarks/workloads/*/test_config.yaml
+
+# DAC26 compiled workload binaries
+DAC26/workloads/*_shared
+DAC26/workloads/*_message
+DAC26/workloads/*_message_vc
+DAC26/workloads/*_workload
+
+# Compiled executables
+*.o
+*.exe
+*.out
+*.app
+
+# Temporary files
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test executables (changed from tests/ to test/)
+test/test_*
+!test/test_*.cpp
+!test/test_*.sh
+!test/test_*.py
+ext/
+/DAC26/workloads_pimid/reduction_shared_pimid
+
+# Benchmark results
+benchmark_results/
+benchmark_run.log
+
+# Test results (detailed results, configs, but keep summaries)
+test_results*/all_results*.json
+test_results*/configs/
+
+# Test artifacts and results
+test_configs/
+test_configs_scale/
+benchmark_test_results/
+comprehensive_benchmark_results/
+test_results/
+test_results_execution_models/
+results/
+*.log
+quick_test_output.log
+benchmark_test_results.log
+pimid/external/zsim/.sconsign.dblite
+
+# Intel PIN (large binary, download separately)
+pimid/external/pin-*
+*.tar.gz

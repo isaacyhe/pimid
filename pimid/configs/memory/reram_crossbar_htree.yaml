@@ -1,0 +1,66 @@
+# ReRAM with GARNET H-tree Internal Network Configuration
+# Memory Technology: ReRAM (Crossbar Array - High Density)
+# Topology: H-tree (hierarchical tree for bank interconnect)
+# Key Feature: Dense crossbar for neuromorphic/AI applications
+
+memory:
+  type: "ReRAM"
+  organization:
+    capacity: 1073741824  # 1 GB (dense crossbar)
+    num_banks: 16
+    num_subarrays: 32
+    num_bank_groups: 4
+    num_chips: 1
+
+  # Timing parameters (ns) - Optimized for parallel operations
+  timing:
+    read_latency: 4.0    # Fast parallel read
+    write_latency: 15.0  # Optimized write
+    cycle_time: 0.67     # 1.5 GHz
+
+  # Technology
+  technology:
+    node_nm: 22          # Advanced node
+    endurance: 1e12      # Higher endurance
+    retention_years: 10
+    crossbar_size: 128   # 128x128 crossbar
+
+# GARNET H-tree Network Configuration
+network:
+  topology: "H_TREE"
+  model: "GARNET"
+
+  # Virtual Networks
+  virtual_networks: 2  # VN0: Reads, VN1: Writes
+
+  virtual_channels_per_vn: 1
+
+  # Router Pipeline - MINIMAL
+  router_pipeline: "MINIMAL"
+  router_latency: 1
+  enable_router_bypass: true
+
+  # Buffer depths
+  input_buffer_depth: 2
+  output_buffer_depth: 2
+
+  # Link parameters - Optimized for crossbar
+  subarray_network:
+    link_width_bits: 64
+    frequency_GHz: 1.5
+    latency_cycles: 2
+
+  bank_network:
+    link_width_bits: 16
+    frequency_GHz: 1.5
+    latency_cycles: 5
+
+  bank_group_network:
+    link_width_bits: 32
+    frequency_GHz: 1.5
+    latency_cycles: 10
+
+  chip_network:
+    link_width_bits: 16
+    frequency_GHz: 1.5
+    latency_cycles: 20

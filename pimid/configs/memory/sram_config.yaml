@@ -1,0 +1,43 @@
+# SRAM Memory Configuration
+# Default configuration for SRAM-based PIM benchmarks
+
+memory:
+  technology: "SRAM"
+  model: "CACTI"
+
+  # SRAM organization
+  capacity: 8388608  # 8 MB (typical L3 cache size)
+  num_banks: 16
+  num_subarrays_per_bank: 16
+  num_bank_groups: 4
+  num_chips: 1
+
+  # Technology parameters
+  technology:
+    node_nm: 14  # 14nm technology
+    line_size: 64  # 64-byte cache line
+    associativity: 16  # 16-way set associative
+
+  # Timing parameters (in nanoseconds)
+  timing:
+    access_time: 1.2   # Fast SRAM access
+    cycle_time: 0.5    # 2.0 GHz clock
+    read_latency: 1.2
+    write_latency: 1.2
+
+  # Bandwidth
+  bus_width_bits: 128
+  frequency_ghz: 2.0
+
+  # Energy per access (in pJ)
+  energy:
+    read_energy_pj: 50   # Low energy for SRAM reads
+    write_energy_pj: 75  # Slightly higher for writes
+    leakage_power_mw: 100  # Static leakage
+
+# CACTI-specific configuration
+cacti:
+  enable_power_modeling: true
+  optimization_target: "ED"  # Energy-Delay product
+  wire_inside_mat: "global"
+  wire_outside_mat: "global"

@@ -1,0 +1,288 @@
+# PIMID Device Engine Configuration
+# Configuration for PIM processing elements (device)
+
+#==============================================================================
+# PROCESSING ELEMENTS (PEs)
+#==============================================================================
+processing_elements:
+  # PE placement in memory hierarchy
+  placement:
+    # Placement level: SUBARRAY, BANK, CHIP, RANK, LOGIC_DIE
+    level: "BANK"
+
+    # Number of PEs at each placement level
+    num_pes_per_level: 1
+
+    # Total number of PEs in the system
+    # (computed from num_pes_per_level × number of placement units)
+    # For BANK level with 16 banks: 16 PEs total
+    total_num_pes: 16
+
+    # PE distribution strategy: uniform, adaptive, manual
+    distribution: "uniform"
+
+  # PE architecture
+  architecture:
+    # Core type: in-order, out-of-order, simple
+    type: "in-order"
+
+    # Operating frequency (MHz)
+    frequency_mhz: 1000
+
+    # Number of cores per PE
+    num_cores: 1
+
+    # Number of hardware threads
+    num_threads: 1
+
+    # Pipeline depth
+    pipeline_depth: 5
+    issue_width: 1
+
+    # Execution units
+    num_int_alu: 2
+    num_fp_alu: 1
+    num_load_units: 1
+    num_store_units: 1
+
+    # Instruction set: RISC-V, ARM, x86_64, custom
+    isa: "RISC-V"
+
+    # Vector support
+    vector_support: true
+    vector_width: 256  # bits
+
+  # PE local memory
+  local_memory:
+    # Scratchpad memory size (KB)
+    scratchpad_size_kb: 256
+
+    # Scratchpad latency (cycles)
+    scratchpad_latency: 2
+
+    # L1 cache (if enabled)
+    has_l1_cache: true
+    l1_size_kb: 32
+    l1_line_size_bytes: 64
+    l1_associativity: 4
+    l1_latency_cycles: 3
+
+    # L2 cache (if enabled)
+    has_l2_cache: false
+    l2_size_kb: 128
+    l2_line_size_bytes: 64
+    l2_associativity: 8
+    l2_latency_cycles: 10
+
+#==============================================================================
+# PE SCHEDULER
+#==============================================================================
+scheduler:
+  # Scheduling policy: NEAREST_PE, ROUND_ROBIN, LOAD_BALANCED,
+  #                    PRIORITY_BASED, DATA_AWARE, ENERGY_AWARE
+  policy: "NEAREST_PE"
+
+  # Task queue size
+  task_queue_size: 128
+
+  # Load balancing threshold (%)
+  load_balance_threshold: 20
+
+  # Scheduling interval (cycles)
+  scheduling_interval: 100
+
+  # Priority levels (if priority-based scheduling)
+  num_priority_levels: 4
+
+  # Enable dynamic load balancing
+  dynamic_load_balancing: true
+
+  # Migration overhead (cycles)
+  migration_overhead_cycles: 1000
+
+  # Custom scheduler plugin (optional)
+  # custom_plugin: "energy_aware_scheduler"
+  # plugin_config:
+  #   energy_weight: 0.6
+  #   performance_weight: 0.4
+
+#==============================================================================
+# MEMORY HIERARCHY
+#==============================================================================
+memory_hierarchy:
+  # Subarray configuration
+  subarray:
+    num_subarrays_per_bank: 16
+    size_mb: 2
+
+  # Bank configuration
+  bank:
+    num_banks_per_chip: 16
+    size_mb: 32
+
+  # Chip configuration
+  chip:
+    num_chips_per_rank: 8
+    size_gb: 2
+
+  # Rank configuration
+  rank:
+    num_ranks: 2
+    size_gb: 16
+
+  # Logic die (for HBM/HMC)
+  logic_die:
+    has_logic_die: false
+    num_pes_on_logic_die: 0
+    logic_die_frequency_mhz: 1500
+
+#==============================================================================
+# ADDRESSING MODE
+#==============================================================================
+addressing:
+  # Mode: UNIFIED (shared address space) or DISCRETE (separate address spaces)
+  mode: "UNIFIED"
+
+  # For discrete mode:
+  discrete:
+    # PE address space size (per PE, in GB)
+    pe_address_space_gb: 1
+
+    # Data transfer mechanism: DMA, explicit_copy
+    transfer_mechanism: "DMA"
+
+    # DMA configuration
+    dma_channels: 4
+    dma_bandwidth_gbs: 25.6
+    dma_latency_cycles: 50
+
+  # For unified mode:
+  unified:
+    # Address interleaving granularity: cache_line, page, bank, rank
+    interleaving: "cache_line"
+
+    # Cache coherence with host: none, write-through, write-back
+    coherence: "none"
+
+#==============================================================================
+# TASK EXECUTION
+#==============================================================================
+execution:
+  # Task granularity (minimum instructions per task)
+  min_task_size: 100
+
+  # Maximum concurrent tasks per PE
+  max_concurrent_tasks: 4
+
+  # Context switch overhead (cycles)
+  context_switch_overhead: 50
+
+  # Offload completion time (cycles)
+  # This is used when actual PE execution is not simulated
+  offload_completion_cycles: 100
+
+  # Support for task preemption
+  preemption_enabled: false
+
+  # Synchronization primitive latencies
+  sync:
+    atomic_latency: 10
+    barrier_latency: 100
+    lock_latency: 20
+
+#==============================================================================
+# COMMUNICATION WITH HOST
+#==============================================================================
+host_communication:
+  # Communication latency (cycles)
+  latency_cycles: 1000
+
+  # Synchronization interval (cycles)
+  sync_interval_cycles: 1000
+
+  # Message size (bytes)
+  message_size_bytes: 64
+
+  # Number of outstanding requests
+  max_outstanding_requests: 16
+
+  # Request timeout (cycles)
+  request_timeout_cycles: 100000
+
+#==============================================================================
+# ZSIM INTEGRATION FOR PEs
+#==============================================================================
+zsim:
+  # ZSim configuration for PEs
+  config_file: "config/zsim_device.cfg"
+
+  # Enable ZSim for device simulation
+  enabled: true
+
+  # Separate ZSim instance per PE
+  separate_instances: false
+
+  # ZSim options
+  options:
+    cache_model: "timing"
+    core_type: "simple"
+
+#==============================================================================
+# PERFORMANCE MONITORING
+#==============================================================================
+performance_monitoring:
+  # Enable performance counters per PE
+  enabled: true
+
+  # Metrics to track
+  track_instructions: true
+  track_cache_hits: true
+  track_memory_accesses: true
+  track_execution_time: true
+  track_power_consumption: true
+
+  # Sampling interval (cycles)
+  sampling_interval: 10000
+
+#==============================================================================
+# POWER MANAGEMENT
+#==============================================================================
+power_management:
+  # Enable dynamic voltage and frequency scaling (DVFS)
+  dvfs_enabled: false
+
+  # Voltage levels (V)
+  voltage_levels: [0.8, 0.9, 1.0, 1.1]
+
+  # Frequency levels (MHz)
+  frequency_levels: [500, 750, 1000, 1250]
+
+  # Power gating
+  power_gating_enabled: false
+  power_gating_latency_cycles: 1000
+
+  # Clock gating
+  clock_gating_enabled: true
+  clock_gating_latency_cycles: 10
+
+#==============================================================================
+# DEBUGGING AND TRACING
+#==============================================================================
+debug:
+  # Enable PE-level debugging
+  enabled: false
+
+  # Debug output level: minimal, normal, verbose
+  level: "normal"
+
+  # Trace generation for specific PEs
+  trace_pes: []  # Empty = all PEs, or list specific PE IDs
+
+  # Trace events: memory, compute, communication, all
+  trace_events: ["all"]
+
+  # Trace file format: text, binary, json
+  trace_format: "text"
+
+  # Trace output directory
+  trace_dir: "traces/device"

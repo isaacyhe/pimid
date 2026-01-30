@@ -1,0 +1,391 @@
+#include "pcm_model.h"
+#include "nvsim_wrapper.h"
+#include "memory/pcm_architecture.h"
+#include <iostream>
+#include <cmath>
+#include <algorithm>
+#include <map>
+#include <unordered_map>
+
+namespace pimid {
+
+//=============================================================================
+// PCMModel Implementation
+//=============================================================================
+
+PCMModel::PCMModel(const std::string& config_path)
+    : MemoryModel(MemoryTechnology::PCM, config_path)
+    , nvsim_wrapper_(nullptr)
+    , pcm_arch_(nullptr)
+    , total_reads_(0)
+    , total_set_writes_(0)
+    , total_reset_writes_(0)
+    , write_cycles_(0)
+    , read_energy_(0.0)
+    , write_energy_(0.0)
+    , leakage_power_(0.0)
+    , area_mm2_(0.0)
+    , current_cycle_(0)
+    , capacity_(0)
+    , bandwidth_(0)
+    , endurance_(0) {
+
+    // Initialize default PCM configuration
+    pcm_config_.capacity = 1ULL * 1024 * 1024 * 1024;  // 1GB
+    pcm_config_.banks = 16;
+    pcm_config_.read_write_ports = 1;
+    pcm_config_.tech_node_nm = 90;
+    pcm_config_.read_latency = 12;         // 12 cycles (moderate)
+    pcm_config_.set_write_latency = 100;   // 100 cycles (VERY SLOW!)
+    pcm_config_.reset_write_latency = 40;  // 40 cycles (faster than SET)
+    pcm_config_.endurance = 1e8;           // 10^8 writes (limited)
+    pcm_config_.is_pim_enabled = true;
+}
+
+void PCMModel::initialize() {
+    std::cout << "[PCMModel] Initializing PCM model..." << std::endl;
+    loadConfig(config_path_);
+
+    // Calculate derived parameters
+    capacity_ = pcm_config_.capacity;
+    bandwidth_ = capacity_ / 200;  // Lower bandwidth due to slow writes
+    endurance_ = pcm_config_.endurance;
+
+    // Initialize PCM architecture with inner-bank timing (NEW!)
+    pcm_arch_ = memory::createPCM_16MB_90nm();
+    std::cout << "[PCMModel] Using 16MB 90nm architecture specs" << std::endl;
+
+    std::cout << "[PCMModel] Inner-bank read latency: "
+              << pcm_arch_->timing.inner_bank.getTotalReadLatency() << " ns" << std::endl;
+    std::cout << "[PCMModel] Inner-bank SET write latency: "
+              << pcm_arch_->timing.inner_bank.getTotalSetWriteLatency() << " ns" << std::endl;
+    std::cout << "[PCMModel] Inner-bank RESET write latency: "
+              << pcm_arch_->timing.inner_bank.getTotalResetWriteLatency() << " ns" << std::endl;
+
+    // Use architecture energy values
+    read_energy_ = pcm_arch_->energy.read_energy_per_byte;
+    write_energy_ = pcm_arch_->energy.write_energy_per_byte;  // Average of SET/RESET
+    leakage_power_ = pcm_arch_->energy.chip_leakage_mw / 1000.0;
+
+    std::cout << "[PCMModel] Configuration:" << std::endl;
+    std::cout << "  Capacity: " << (pcm_config_.capacity / (1024.0 * 1024 * 1024)) << " GB" << std::endl;
+    std::cout << "  Banks: " << pcm_config_.banks << std::endl;
+    std::cout << "  Technology: " << pcm_config_.tech_node_nm << " nm" << std::endl;
+    std::cout << "  Read Latency: " << pcm_config_.read_latency << " cycles" << std::endl;
+    std::cout << "  SET Write Latency: " << pcm_config_.set_write_latency << " cycles (SLOW!)" << std::endl;
+    std::cout << "  RESET Write Latency: " << pcm_config_.reset_write_latency << " cycles" << std::endl;
+    std::cout << "  Endurance: " << pcm_config_.endurance << " writes (limited)" << std::endl;
+    std::cout << "  WARNING: PCM only suitable for read-heavy PIM workloads!" << std::endl;
+    std::cout << "  Read Energy: " << read_energy_ << " pJ/byte" << std::endl;
+    std::cout << "  Write Energy: " << write_energy_ << " pJ/byte (30x read!)" << std::endl;
+    std::cout << "  Leakage Power: " << leakage_power_ << " W" << std::endl;
+    std::cout << "[PCMModel] Initialization complete" << std::endl;
+}
+
+void PCMModel::loadConfig(const std::string& config_path) {
+    std::cout << "[PCMModel] Loading configuration from: " << config_path << std::endl;
+    std::cout << "[PCMModel] Using default 1GB PCM configuration" << std::endl;
+}
+
+Cycle PCMModel::access(const MemoryRequest& req) {
+    Cycle latency;
+
+    // PCM has VERY asymmetric read/write latency
+    if (req.type == MemoryRequestType::READ) {
+        latency = pcm_config_.read_latency;
+        total_reads_++;
+    } else if (req.type == MemoryRequestType::WRITE) {
+        // Use SET latency (conservative estimate)
+        latency = pcm_config_.set_write_latency;  // VERY SLOW!
+        total_set_writes_++;
+        write_cycles_++;
+
+        updateEndurance(req.addr);
+
+        if (write_cycles_ > endurance_) {
+            std::cerr << "[PCMModel] WARNING: Endurance limit exceeded!" << std::endl;
+        }
+    } else if (req.type == MemoryRequestType::ATOMIC) {
+        latency = pcm_config_.read_latency + pcm_config_.set_write_latency;
+        total_reads_++;
+        total_set_writes_++;
+        write_cycles_++;
+    }
+
+    // Add queuing delay
+    if (!pending_requests_.empty()) {
+        latency += pending_requests_.size() * 2;  // Higher penalty
+    }
+
+    pending_requests_.push(req);
+
+    if (completion_callback_) {
+        Cycle completion_cycle = current_cycle_ + latency;
+    }
+
+    return latency;
+}
+
+bool PCMModel::canAccept(const MemoryRequest& req) {
+    const size_t MAX_PENDING_REQUESTS = 16;  // Smaller queue due to slow writes
+    if (pending_requests_.size() >= MAX_PENDING_REQUESTS) {
+        return false;
+    }
+
+    // Check endurance for writes
+    if ((req.type == MemoryRequestType::WRITE ||
+         req.type == MemoryRequestType::ATOMIC) &&
+        write_cycles_ >= endurance_) {
+        return false;
+    }
+
+    return true;
+}
+
+void PCMModel::tick() {
+    current_cycle_++;
+
+    if (!pending_requests_.empty()) {
+        pending_requests_.pop();
+    }
+}
+
+Cycle PCMModel::getLatency(MemoryRequestType type) const {
+    switch (type) {
+        case MemoryRequestType::READ:
+            return pcm_config_.read_latency;
+        case MemoryRequestType::WRITE:
+            return pcm_config_.set_write_latency;  // Conservative (SET)
+        case MemoryRequestType::ATOMIC:
+            return pcm_config_.read_latency + pcm_config_.set_write_latency;
+        default:
+            return pcm_config_.read_latency;
+    }
+}
+
+double PCMModel::getTotalEnergy() const {
+    double dynamic_energy = (total_reads_ * read_energy_) +
+                           ((total_set_writes_ + total_reset_writes_) * write_energy_);
+    double leakage_energy = leakage_power_ * (current_cycle_ / 1e9);
+    return dynamic_energy + leakage_energy;
+}
+
+void PCMModel::printStats() const {
+    std::cout << "\n=== PCM Model Statistics ===" << std::endl;
+    std::cout << "Total Cycles: " << current_cycle_ << std::endl;
+    std::cout << "Total Reads: " << total_reads_ << std::endl;
+    std::cout << "Total SET Writes: " << total_set_writes_ << std::endl;
+    std::cout << "Total RESET Writes: " << total_reset_writes_ << std::endl;
+    std::cout << "Total Writes: " << (total_set_writes_ + total_reset_writes_) << std::endl;
+    std::cout << "Write Cycles (Endurance): " << write_cycles_ << " / " << endurance_ << std::endl;
+
+    uint64_t total_ops = total_reads_ + total_set_writes_ + total_reset_writes_;
+    if (total_ops > 0) {
+        double read_ratio = static_cast<double>(total_reads_) / total_ops;
+        double write_ratio = static_cast<double>(total_set_writes_ + total_reset_writes_) / total_ops;
+        std::cout << "Read Ratio: " << (read_ratio * 100.0) << "%" << std::endl;
+        std::cout << "Write Ratio: " << (write_ratio * 100.0) << "%" << std::endl;
+
+        if (write_ratio > 0.2) {
+            std::cout << "WARNING: High write ratio detected! PCM is best for read-heavy workloads." << std::endl;
+        }
+
+        double endurance_used = (static_cast<double>(write_cycles_) / endurance_) * 100.0;
+        std::cout << "Endurance Used: " << endurance_used << "%" << std::endl;
+    }
+
+    std::cout << "\nLatency (Inner-Bank Timing):" << std::endl;
+    std::cout << "  Subarray Read: " << getSubarrayReadLatency() << " ns" << std::endl;
+    std::cout << "  Bank Read: " << getBankReadLatency() << " ns" << std::endl;
+    std::cout << "  Chip Read: " << getChipReadLatency() << " ns" << std::endl;
+    std::cout << "  Subarray SET Write: " << getSubarraySetWriteLatency() << " ns (SLOW!)" << std::endl;
+    std::cout << "  Bank SET Write: " << getBankSetWriteLatency() << " ns" << std::endl;
+    std::cout << "  Chip SET Write: " << getChipSetWriteLatency() << " ns" << std::endl;
+
+    std::cout << "\nEnergy Consumption:" << std::endl;
+    std::cout << "  Read Energy (per byte): " << read_energy_ << " pJ" << std::endl;
+    std::cout << "  Write Energy (per byte): " << write_energy_ << " pJ (30x read!)" << std::endl;
+    std::cout << "  Total Read Energy: " << (total_reads_ * read_energy_) << " pJ" << std::endl;
+    std::cout << "  Total Write Energy: "
+              << ((total_set_writes_ + total_reset_writes_) * write_energy_) << " pJ" << std::endl;
+    std::cout << "  Leakage Power: " << leakage_power_ << " W" << std::endl;
+    std::cout << "  Total Energy: " << getTotalEnergy() << " pJ" << std::endl;
+    std::cout << "================================\n" << std::endl;
+}
+
+void PCMModel::resetStats() {
+    total_reads_ = 0;
+    total_set_writes_ = 0;
+    total_reset_writes_ = 0;
+    write_cycles_ = 0;
+    current_cycle_ = 0;
+}
+
+void PCMModel::updateEndurance(Address addr) {
+    // Per-cell endurance tracking with wear-leveling for PCM
+    // PCM has LIMITED endurance (~10^8 writes) - CRITICAL to track!
+
+    // Calculate bank and page from address
+    uint32_t bank = static_cast<uint32_t>((addr >> 12) % pcm_config_.banks);
+    uint64_t page = (addr >> 12) / pcm_config_.banks;
+    uint64_t cell = addr >> 6;  // Cell granularity (64-byte line)
+
+    // Track writes per bank
+    bank_write_counts_[bank]++;
+
+    // Track writes per page (every 50th page - more aggressive due to low endurance)
+    if (page % 50 == 0) {
+        page_write_counts_[page]++;
+
+        // PCM has very limited endurance - warn at lower threshold
+        uint64_t hot_threshold = endurance_ / 50;  // Scaled by sampling factor
+        if (page_write_counts_[page] > hot_threshold) {
+            // Critical warning for PCM - endurance is very limited!
+            std::cerr << "[PCMModel] CRITICAL: Hot page at " << page
+                      << " with " << page_write_counts_[page]
+                      << " writes (sampling 1:50)!" << std::endl;
+            std::cerr << "[PCMModel] PCM endurance is LIMITED (~10^8). "
+                      << "Consider wear-leveling!" << std::endl;
+        }
+    }
+
+    // Track high-write cells for wear-leveling (sample every 500th cell)
+    // More aggressive sampling for PCM due to lower endurance
+    if (cell % 500 == 0) {
+        cell_write_counts_[cell]++;
+
+        // Warn about hot cells much earlier for PCM
+        if (cell_write_counts_[cell] > endurance_ / 5000) {
+            std::cerr << "[PCMModel] WARNING: Hot cell at address 0x"
+                      << std::hex << addr << std::dec
+                      << " with " << cell_write_counts_[cell] << " writes."
+                      << " (sampling 1:500)" << std::endl;
+            std::cerr << "[PCMModel] Consider applying wear-leveling to extend lifetime."
+                      << std::endl;
+        }
+    }
+
+    // Report bank-level wear imbalance periodically (every 50K writes for PCM)
+    if (write_cycles_ % 50000 == 0 && write_cycles_ > 0) {
+        reportWearImbalance();
+    }
+
+    // Suggest wear-leveling when approaching 10% endurance consumption
+    if (write_cycles_ % 1000000 == 0) {
+        double endurance_used_pct = (static_cast<double>(write_cycles_) / endurance_) * 100.0;
+        if (endurance_used_pct > 10.0) {
+            std::cerr << "[PCMModel] WARNING: " << endurance_used_pct
+                      << "% of total endurance consumed!" << std::endl;
+            std::cerr << "[PCMModel] Recommend enabling wear-leveling if not already active."
+                      << std::endl;
+        }
+    }
+}
+
+void PCMModel::reportWearImbalance() const {
+    if (bank_write_counts_.empty()) return;
+
+    uint64_t max_bank_writes = 0;
+    uint64_t min_bank_writes = UINT64_MAX;
+    uint32_t max_bank_id = 0;
+    uint32_t min_bank_id = 0;
+
+    for (const auto& [bank_id, count] : bank_write_counts_) {
+        if (count > max_bank_writes) {
+            max_bank_writes = count;
+            max_bank_id = bank_id;
+        }
+        if (count < min_bank_writes) {
+            min_bank_writes = count;
+            min_bank_id = bank_id;
+        }
+    }
+
+    if (min_bank_writes > 0 && max_bank_writes / min_bank_writes > 2) {
+        std::cerr << "[PCMModel] WARNING: Bank wear imbalance detected!" << std::endl;
+        std::cerr << "  Max writes: bank " << max_bank_id << " (" << max_bank_writes << " writes)" << std::endl;
+        std::cerr << "  Min writes: bank " << min_bank_id << " (" << min_bank_writes << " writes)" << std::endl;
+        std::cerr << "  Imbalance ratio: " << (max_bank_writes / min_bank_writes) << "x" << std::endl;
+        std::cerr << "  CRITICAL: PCM has limited endurance! Enable wear-leveling now." << std::endl;
+    }
+
+    // Also check for cells approaching wear-out
+    uint64_t cells_near_wearout = 0;
+    for (const auto& [cell_id, count] : cell_write_counts_) {
+        // If sampled cell has more than 1/1000th of endurance, it's a hot cell
+        if (count * 500 > endurance_ / 1000) {  // Account for 1:500 sampling
+            cells_near_wearout++;
+        }
+    }
+
+    if (cells_near_wearout > 0) {
+        std::cerr << "[PCMModel] WARNING: ~" << (cells_near_wearout * 500)
+                  << " cells estimated to be approaching wear-out!" << std::endl;
+    }
+}
+
+//=============================================================================
+// Inner-Bank Timing Queries (NEW!)
+//=============================================================================
+
+double PCMModel::getSubarrayReadLatency() const {
+    if (!pcm_arch_) return 0.0;
+    return pcm_arch_->timing.subarray_read_ns;
+}
+
+double PCMModel::getBankReadLatency() const {
+    if (!pcm_arch_) return 0.0;
+    return pcm_arch_->timing.bank_read_ns;
+}
+
+double PCMModel::getChipReadLatency() const {
+    if (!pcm_arch_) return 0.0;
+    return pcm_arch_->timing.chip_read_ns;
+}
+
+double PCMModel::getSubarraySetWriteLatency() const {
+    if (!pcm_arch_) return 0.0;
+    return pcm_arch_->timing.subarray_set_ns;
+}
+
+double PCMModel::getBankSetWriteLatency() const {
+    if (!pcm_arch_) return 0.0;
+    return pcm_arch_->timing.bank_set_ns;
+}
+
+double PCMModel::getChipSetWriteLatency() const {
+    if (!pcm_arch_) return 0.0;
+    return pcm_arch_->timing.chip_set_ns;
+}
+
+double PCMModel::getSubarrayResetWriteLatency() const {
+    if (!pcm_arch_) return 0.0;
+    return pcm_arch_->timing.subarray_reset_ns;
+}
+
+double PCMModel::getBankResetWriteLatency() const {
+    if (!pcm_arch_) return 0.0;
+    return pcm_arch_->timing.bank_reset_ns;
+}
+
+double PCMModel::getChipResetWriteLatency() const {
+    if (!pcm_arch_) return 0.0;
+    return pcm_arch_->timing.chip_reset_ns;
+}
+
+double PCMModel::getInnerBankReadLatency() const {
+    if (!pcm_arch_) return 0.0;
+    return pcm_arch_->timing.inner_bank.getTotalReadLatency();
+}
+
+bool PCMModel::supportsBankPIM() const {
+    if (!pcm_arch_) return false;
+    return pcm_arch_->isSuitableForPIM();
+}
+
+bool PCMModel::supportsSubarrayPIM() const {
+    // PCM supports subarray PIM, but ONLY for read-heavy workloads
+    return true;
+}
+
+} // namespace pimid

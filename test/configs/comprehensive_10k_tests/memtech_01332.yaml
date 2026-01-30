@@ -1,0 +1,19 @@
+simulation:
+  name: memtech_01332
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: HBM3
+  channels: 32
+  ranks_per_channel: 2
+  chips_per_rank: 4
+  bg_per_chip: 8
+  banks_per_bg: 4
+  subarrays_per_bank: 32
+pim:
+  enabled: true
+  num_pes: 2097152
+  pe_placement: subarray
+  scheduling_policy: round_robin
+  core_type: out-of-order

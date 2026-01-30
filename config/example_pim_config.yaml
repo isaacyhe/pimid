@@ -1,0 +1,248 @@
+# Unified PIM Simulator Configuration File
+# All parameters in one place for easy experimentation
+
+# ============================================================================
+# Simulation Metadata
+# ============================================================================
+simulation:
+  name: "Bank-PIM Performance Analysis"
+  description: "Compare Bank-PIM vs MC-PIM with 50% local data"
+  output_format: csv      # Options: csv, json, text, all
+  output_directory: ./results
+  detailed_stats: true
+  compare_configs: true   # Compare multiple PIM granularities
+
+# ============================================================================
+# DRAM Configuration
+# ============================================================================
+dram:
+  type: DDR4-2400        # Options: DDR4-2400, DDR4-3200, HBM2, HBM3, or CUSTOM
+
+  # DRAM organization
+  channels: 1
+  ranks_per_channel: 1
+  bank_groups: 4
+  banks_per_group: 4     # Total banks = bank_groups × banks_per_group = 16
+  subarrays_per_bank: 16
+
+  # ========================================================================
+  # CUSTOM DRAM CONFIGURATION (for hypothetical studies)
+  # ========================================================================
+  # All parameters below are OPTIONAL. By default (commented out or -1),
+  # uses Ramulator's verified values for the selected DRAM type.
+  #
+  # For completely custom DRAM: set type="CUSTOM" and define all parameters
+  # ========================================================================
+
+  # Interface widths (bits) - OPTIONAL overrides
+  # Defaults from Ramulator:
+  #   DDR4-2400: rank=64, bank_io=8, gsa=256 (JEDEC + papers)
+  #   HBM2:      rank=128, bank_io=64, gsa=512 (JEDEC + TSV)
+  #
+  # rank_interface_width: 64.0    # External rank interface
+  # bank_io_width: 16.0           # Internal bank I/O (8 for x8, 16 for x16)
+  # gsa_width: 256.0              # Global Sense Amplifier width
+
+  # Timing parameters (nanoseconds, MHz) - OPTIONAL overrides
+  # Defaults from Ramulator:
+  #   DDR4-2400: freq=1200 MHz, tRCD=tCAS=tRP=13.32ns
+  #   HBM2:      freq=1000 MHz, tRCD=tCAS=tRP=12.5ns
+  #
+  # clock_freq_mhz: 1200.0        # Clock frequency (1200 for DDR4-2400)
+  # tRCD_ns: 13.32                # Row-to-Column Delay
+  # tCAS_ns: 13.32                # Column Access Strobe
+  # tRP_ns: 13.32                 # Row Precharge
+  # tRAS_ns: 32.0                 # Row Access Strobe
+
+  # ========================================================================
+  # SCALING FACTORS FOR HYPOTHETICAL STUDIES
+  # ========================================================================
+  # These factors provide an easy way to model future or hypothetical DRAM
+  # without manually setting all individual parameters. They scale the final
+  # DRAM parameters (after Ramulator defaults and any user overrides).
+  #
+  # bandwidth_scale_factor: Positive integer (default: 1)
+  #   - Multiplies ALL interface widths (rank, bank_io, gsa)
+  #   - Example: 2 = 2× bandwidth everywhere (future technology)
+  #   - Example: 4 = 4× bandwidth everywhere (aggressive future)
+  #
+  # latency_scale_factor: Fractional value in range (0.0, 1.0] (default: 1.0)
+  #   - Multiplies ALL timing parameters (tRCD, tCAS, tRP, tRAS)
+  #   - Example: 1.0 = no change (default)
+  #   - Example: 0.5 = half latency (faster future technology)
+  #   - Example: 0.25 = quarter latency (aggressive future)
+  #
+  # bandwidth_scale_factor: 1     # Default: no scaling
+  # latency_scale_factor: 1.0     # Default: no scaling
+
+  # ========================================================================
+  # EXAMPLE CUSTOM CONFIGURATIONS
+  # ========================================================================
+  #
+  # Example 1: Simulate x16 DDR4 device (2× bank bandwidth):
+  #   bank_io_width: 16.0
+  #
+  # Example 2: Simulate faster DDR4-3200:
+  #   type: CUSTOM
+  #   clock_freq_mhz: 1600.0
+  #   tRCD_ns: 13.75
+  #   tCAS_ns: 13.75
+  #   tRP_ns: 13.75
+  #
+  # Example 3: Hypothetical future DRAM (ultra-wide bank paths):
+  #   type: CUSTOM
+  #   rank_interface_width: 128.0
+  #   bank_io_width: 32.0
+  #   gsa_width: 512.0
+  #   clock_freq_mhz: 2000.0
+  #   tRCD_ns: 10.0
+  #   tCAS_ns: 10.0
+  #
+  # Example 4: Simulate HBM-like DDR (wide internal paths):
+  #   type: CUSTOM
+  #   bank_io_width: 64.0
+  #   clock_freq_mhz: 1000.0
+  #
+  # Example 5: Future DRAM with 2× bandwidth (using scaling factor):
+  #   bandwidth_scale_factor: 2
+  #   # This doubles ALL interface widths: rank (128-bit), bank_io (16-bit), gsa (512-bit)
+  #
+  # Example 6: Future DRAM with half latency (using scaling factor):
+  #   latency_scale_factor: 0.5
+  #   # This halves ALL timing: tRCD (6.66ns), tCAS (6.66ns), tRP (6.66ns)
+  #
+  # Example 7: Aggressive future DRAM (4× BW, quarter latency):
+  #   bandwidth_scale_factor: 4
+  #   latency_scale_factor: 0.25
+  #   # Combines scaling factors for dramatic performance improvement
+  #
+  # Example 8: Mixed approach (custom base + scaling):
+  #   type: CUSTOM
+  #   bank_io_width: 16.0           # Start with x16 device
+  #   bandwidth_scale_factor: 2     # Then double it (32-bit bank I/O)
+  #   latency_scale_factor: 0.5     # And halve latency
+  # ========================================================================
+
+  # Latency overheads (nanoseconds) - SYSTEM-LEVEL parameters
+  # These represent system-level overhead (cache, coherence, distance), not DRAM timing
+  # DRAM timing (tRCD, tCAS, etc.) comes from Ramulator's DRAMArchitectureV2
+  # Added on top of base DRAM latency (tRCD + tCAS ~27ns for DDR4-2400)
+  latency_overhead_host_cpu: 150.0   # Host: cache + coherence + distance (~180ns total)
+  latency_overhead_mc_pim: 40.0      # MC-PIM: MC logic delay (~70ns total)
+  latency_overhead_rank_pim: 15.0    # Rank-PIM: minimal MC overhead (~42ns total)
+  latency_overhead_chip_pim: 7.0     # Chip-PIM: close to banks (~34ns total)
+  latency_overhead_bg_pim: 3.0       # BG-PIM: very close to data (~30ns total)
+  latency_overhead_bank_pim: 0.0     # Bank-PIM: at the data (~27ns total)
+
+  # Optional: Override default timing (use defaults if not specified)
+  # timing:
+  #   tRCD_ns: 13.32
+  #   tCAS_ns: 13.32
+  #   tRP_ns: 13.32
+  #   frequency_mhz: 1200
+
+# ============================================================================
+# PIM Configuration
+# ============================================================================
+pim:
+  # PIM Granularity
+  # Options: CPU, MEMORY_CONTROLLER, RANK, CHIP, BANK_GROUP, BANK, SUBARRAY
+  granularity: BANK
+
+  # Number of Processing Elements
+  num_pes: 64
+
+  # Compute capability (GFLOPS per PE or total)
+  compute_gflops: 128.0
+  compute_per_pe: false   # If true, compute_gflops is per-PE; if false, total
+
+  # Optional: PE placement strategy
+  # placement: uniform    # Options: uniform, custom
+  # custom_placement:     # Only if placement == custom
+  #   - pe_id: 0
+  #     bank: 0
+  #   - pe_id: 1
+  #     bank: 1
+
+# ============================================================================
+# Workload Configuration
+# ============================================================================
+workload:
+  # Data size (in bytes, or use suffixes: KB, MB, GB)
+  total_data_bytes: 1GB   # Will be parsed as 1073741824 bytes
+
+  # Compute operations (FLOPs)
+  total_compute_ops: 128GFLOP  # Will be parsed as 137438953472
+
+  # Data locality (fraction of data that's local to PIM unit)
+  local_data_fraction: 0.5  # 0.0 = all remote, 1.0 = all local
+
+  # Access pattern
+  access_pattern: random    # Options: sequential, random, custom
+  cache_line_size: 64       # bytes
+
+  # Optional: Custom data distribution
+  # data_distribution:
+  #   - bank: 0
+  #     bytes: 536870912  # 512 MB
+  #   - bank: 5
+  #     bytes: 536870912  # 512 MB
+
+# ============================================================================
+# Comparison Mode (optional)
+# If enabled, will simulate multiple configurations and compare
+# ============================================================================
+comparison:
+  enabled: true
+
+  # Which granularities to compare
+  granularities:
+    - CPU
+    - MEMORY_CONTROLLER
+    - RANK
+    - CHIP
+    - BANK_GROUP
+    - BANK
+
+  # Which workload patterns to test
+  workload_patterns:
+    - name: "LOCAL"
+      description: "All data fits locally"
+      total_data_bytes: 64MB
+      local_data_fraction: 1.0
+
+    - name: "GLOBAL"
+      description: "Data spread across all banks"
+      total_data_bytes: 1GB
+      local_data_fraction: 0.0625  # 1/16 banks
+
+    - name: "PARTIAL"
+      description: "50% local, 50% remote"
+      total_data_bytes: 512MB
+      local_data_fraction: 0.5
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+output:
+  # Output file prefix
+  prefix: "pim_sim"
+
+  # CSV columns to include
+  csv_columns:
+    - config_name
+    - granularity
+    - num_pes
+    - local_data_bytes
+    - remote_data_bytes
+    - local_fraction
+    - compute_time_us
+    - data_movement_time_us
+    - network_time_us
+    - total_time_us
+    - speedup
+    - bottleneck
+
+  # Generate plots (requires matplotlib/gnuplot)
+  generate_plots: false
+  plot_type: png         # png, pdf, svg

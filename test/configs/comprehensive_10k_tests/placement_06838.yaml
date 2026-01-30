@@ -1,0 +1,38 @@
+simulation:
+  name: placement_06838
+  mode: standalone
+  duration_cycles: 10000
+  workload: build/test/workloads/test_pim_workloads
+memory:
+  dram_type: HBM2
+  channels: 8
+  ranks_per_channel: 2
+  chips_per_rank: 2
+  bg_per_chip: 4
+  banks_per_bg: 4
+  subarrays_per_bank: 16
+  network:
+    custom_topology:
+      enabled: true
+      l0:
+        use_default: true
+      l1:
+        use_default: false
+        topology: BUS
+        num_switches: 1
+        ports_per_switch: 16
+        num_endpoints: 16
+      l2:
+        use_default: true
+      l3:
+        use_default: true
+      l4:
+        use_default: true
+      l5:
+        use_default: true
+pim:
+  enabled: true
+  num_pes: 32
+  pe_placement: chip
+  scheduling_policy: nearest
+  core_type: simple

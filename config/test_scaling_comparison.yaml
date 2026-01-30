@@ -1,0 +1,81 @@
+# Test scaling factors with comparison mode
+
+simulation:
+  name: "Scaling Factor Comparison"
+  description: "Compare granularities with 2× BW and 0.5× latency"
+  output_format: csv
+  output_directory: ./results
+  detailed_stats: true
+  compare_configs: true
+
+dram:
+  type: DDR4-2400
+  channels: 1
+  ranks_per_channel: 1
+  bank_groups: 4
+  banks_per_group: 4
+  subarrays_per_bank: 16
+
+  # Test scaling factors
+  bandwidth_scale_factor: 2     # 2× bandwidth everywhere
+  latency_scale_factor: 0.5     # Half latency everywhere
+
+  # System-level latency overheads
+  latency_overhead_host_cpu: 150.0
+  latency_overhead_mc_pim: 40.0
+  latency_overhead_rank_pim: 15.0
+  latency_overhead_chip_pim: 7.0
+  latency_overhead_bg_pim: 3.0
+  latency_overhead_bank_pim: 0.0
+
+pim:
+  granularity: BANK
+  num_pes: 64
+  compute_gflops: 128.0
+  compute_per_pe: false
+
+workload:
+  total_data_bytes: 1GB
+  total_compute_ops: 128GFLOP
+  local_data_fraction: 0.5
+  access_pattern: random
+  cache_line_size: 64
+
+comparison:
+  enabled: true
+
+  granularities:
+    - CPU
+    - MEMORY_CONTROLLER
+    - RANK
+    - CHIP
+    - BANK_GROUP
+    - BANK
+
+  workload_patterns:
+    - name: "LOCAL"
+      description: "All data fits locally"
+      total_data_bytes: 64MB
+      local_data_fraction: 1.0
+
+    - name: "GLOBAL"
+      description: "Data spread across all banks"
+      total_data_bytes: 1GB
+      local_data_fraction: 0.0625
+
+output:
+  prefix: "test_scaling_comp"
+  csv_columns:
+    - config_name
+    - granularity
+    - num_pes
+    - local_data_bytes
+    - remote_data_bytes
+    - local_fraction
+    - compute_time_us
+    - data_movement_time_us
+    - network_time_us
+    - total_time_us
+    - speedup
+    - bottleneck
+  generate_plots: false

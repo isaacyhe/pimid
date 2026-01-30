@@ -1,0 +1,356 @@
+# PIMID Network-on-Chip Configuration
+# Configuration for NoC modeling using GARNET
+
+#==============================================================================
+# NETWORK TOPOLOGY
+#==============================================================================
+topology:
+  # Topology type: MESH_2D, MESH_3D, TORUS_2D, TORUS_3D,
+  #                CROSSBAR, FAT_TREE, DRAGONFLY, CUSTOM
+  type: "MESH_2D"
+
+  # Topology dimensions
+  dimensions:
+    rows: 4
+    cols: 4
+    layers: 1  # For 3D topologies
+
+  # For fat-tree topology
+  fat_tree:
+    num_levels: 3
+    nodes_per_level: [16, 8, 4]
+    radix: 4
+
+  # For dragonfly topology
+  dragonfly:
+    num_groups: 4
+    routers_per_group: 4
+    nodes_per_router: 4
+    global_links_per_router: 3
+
+  # Custom topology (if type = CUSTOM)
+  custom:
+    num_routers: 16
+    # connectivity matrix or adjacency list can be specified
+
+#==============================================================================
+# ROUTING ALGORITHM
+#==============================================================================
+routing:
+  # Algorithm: XY, XYZ, WEST_FIRST, NORTH_LAST, MINIMAL, ADAPTIVE, VALIANT
+  algorithm: "XY"
+
+  # Adaptive routing configuration
+  adaptive:
+    # Adaptive threshold (queue depth)
+    threshold: 8
+
+    # Randomization for load balancing
+    randomize: true
+
+  # Deadlock avoidance: virtual_channels, escape_path, bubble_flow
+  deadlock_avoidance: "virtual_channels"
+
+#==============================================================================
+# ROUTER CONFIGURATION
+#==============================================================================
+router:
+  # Router architecture: VC (virtual channel), wormhole, circuit_switched
+  architecture: "VC"
+
+  # Router pipeline stages
+  pipeline:
+    # Number of pipeline stages
+    num_stages: 4
+
+    # Stages: route_compute, VC_allocation, switch_allocation, switch_traversal
+    stages: ["route_compute", "VC_allocation", "switch_allocation", "switch_traversal"]
+
+    # Cycles per stage (can be different for each stage)
+    cycles_per_stage: [1, 1, 1, 1]
+
+  # Router latency (total cycles)
+  latency_cycles: 4
+
+  # Input/output ports
+  ports:
+    num_input_ports: 5   # 4 directions + 1 injection
+    num_output_ports: 5  # 4 directions + 1 ejection
+
+  # Arbitration: round_robin, priority, age-based
+  arbiter: "round_robin"
+
+  # Speculation
+  speculation_enabled: false
+
+#==============================================================================
+# VIRTUAL CHANNELS
+#==============================================================================
+virtual_channels:
+  # Number of virtual channels per physical channel
+  num_vcs: 4
+
+  # VC classes (for differentiated service)
+  vc_classes:
+    - name: "request"
+      num_vcs: 2
+      priority: 1
+
+    - name: "response"
+      num_vcs: 2
+      priority: 2
+
+  # VC allocation: separable, unified
+  allocation: "separable"
+
+#==============================================================================
+# LINK CONFIGURATION
+#==============================================================================
+links:
+  # Link width (bytes)
+  width_bytes: 8
+
+  # Link latency (cycles)
+  latency_cycles: 1
+
+  # Link bandwidth (GB/s)
+  bandwidth_gbs: 8.0
+
+  # Link type: electrical, optical, wireless
+  type: "electrical"
+
+  # Link length (mm) - affects power
+  length_mm: 5.0
+
+  # Optical link configuration (if type = optical)
+  optical:
+    wavelengths: 4
+    modulation_rate_gbps: 25
+
+#==============================================================================
+# BUFFER CONFIGURATION
+#==============================================================================
+buffers:
+  # Input buffer organization: per_VC, per_port, shared
+  organization: "per_VC"
+
+  # Buffer depth per VC (flits)
+  input_buffer_depth: 8
+  output_buffer_depth: 4
+
+  # Flit size (bytes)
+  flit_size_bytes: 8
+
+  # Credit-based flow control
+  flow_control: "credit"
+
+  # Credit roundtrip latency (cycles)
+  credit_latency_cycles: 2
+
+#==============================================================================
+# PACKET CONFIGURATION
+#==============================================================================
+packets:
+  # Maximum packet size (flits)
+  max_packet_size_flits: 8
+
+  # Minimum packet size (flits)
+  min_packet_size_flits: 1
+
+  # Packet format: head-tail, head-body-tail
+  format: "head-tail"
+
+  # Flit types: head, body, tail
+  header_size_bytes: 8
+  payload_size_bytes: 64
+
+#==============================================================================
+# TRAFFIC CLASSES
+#==============================================================================
+traffic:
+  # Number of traffic classes
+  num_classes: 2
+
+  # Traffic class definitions
+  classes:
+    - name: "data"
+      priority: 1
+      vcs: [0, 1]
+      max_packet_size: 8
+
+    - name: "control"
+      priority: 2
+      vcs: [2, 3]
+      max_packet_size: 2
+
+  # Quality of Service (QoS)
+  qos:
+    enabled: false
+    guaranteed_bandwidth: {}  # Per-flow guaranteed bandwidth
+
+#==============================================================================
+# NETWORK-MEMORY MAPPING
+#==============================================================================
+mapping:
+  # How memory components map to network nodes
+  # memory_component: [subarray, bank, chip, rank, logic_die, pe, host]
+  node_mapping:
+    type: "hierarchical"  # Options: hierarchical, flat, custom
+
+  # Hierarchical mapping configuration
+  hierarchical:
+    # Each level in hierarchy maps to network position
+    subarray_to_router: false
+    bank_to_router: true    # Each bank maps to a router
+    chip_to_router: false
+    rank_to_router: false
+
+  # Custom mapping (if type = custom)
+  custom:
+    # Explicit mapping of memory IDs to router IDs
+    # memory_id -> router_id
+    mappings: {}
+
+#==============================================================================
+# GARNET INTEGRATION
+#==============================================================================
+garnet:
+  # GARNET version: garnet2.0, garnet3.0
+  version: "garnet2.0"
+
+  # GARNET configuration file
+  config_file: "pimid/external/gem5/configs/network/garnet_config.py"
+
+  # Enable GARNET
+  enabled: true
+
+  # GARNET detailed modeling
+  detailed_model: true
+
+  # Power modeling in GARNET
+  power_model_enabled: true
+
+  # DSENT integration for power
+  dsent:
+    enabled: true
+    config_file: "pimid/external/gem5/ext/dsent/configs/router.cfg"
+    tech_node_nm: 22
+
+#==============================================================================
+# NETWORK INTERFACES
+#==============================================================================
+network_interface:
+  # NI architecture: simple, advanced
+  architecture: "simple"
+
+  # Injection and ejection latency (cycles)
+  injection_latency: 1
+  ejection_latency: 1
+
+  # NI buffer sizes (flits)
+  injection_buffer_size: 4
+  ejection_buffer_size: 4
+
+  # Bandwidth limiter
+  injection_rate_limit_gbs: 0  # 0 = unlimited
+
+#==============================================================================
+# CONGESTION CONTROL
+#==============================================================================
+congestion:
+  # Congestion detection
+  detection:
+    enabled: true
+    threshold_buffer_occupancy: 0.75  # 75% full
+
+  # Congestion avoidance
+  avoidance:
+    algorithm: "adaptive_routing"  # Options: adaptive_routing, throttling, back_pressure
+
+  # Throttling (if algorithm = throttling)
+  throttling:
+    initial_rate: 1.0  # 100%
+    reduction_factor: 0.9
+    increase_factor: 1.05
+
+#==============================================================================
+# FAULT TOLERANCE
+#==============================================================================
+fault_tolerance:
+  # Enable fault tolerance
+  enabled: false
+
+  # Fault model: link_failure, router_failure, transient
+  fault_model: "link_failure"
+
+  # Redundancy: path_diversity, packet_retransmission
+  redundancy: "path_diversity"
+
+  # Error detection and correction
+  ecc:
+    enabled: false
+    code: "hamming"  # Options: hamming, reed_solomon, crc
+
+#==============================================================================
+# PERFORMANCE MONITORING
+#==============================================================================
+monitoring:
+  # Enable network performance monitoring
+  enabled: true
+
+  # Metrics to track
+  track_latency: true
+  track_throughput: true
+  track_buffer_occupancy: true
+  track_link_utilization: true
+  track_congestion: true
+  track_power: true
+
+  # Per-router statistics
+  per_router_stats: true
+
+  # Per-link statistics
+  per_link_stats: true
+
+  # Histogram settings
+  latency_histogram:
+    enabled: true
+    min_latency: 0
+    max_latency: 1000
+    bucket_size: 10
+
+#==============================================================================
+# VISUALIZATION
+#==============================================================================
+visualization:
+  # Enable network visualization
+  enabled: false
+
+  # Visualization output format: dot, json, svg
+  format: "dot"
+
+  # Output file
+  output_file: "network_topology.dot"
+
+  # Animate traffic flow
+  animate_traffic: false
+
+#==============================================================================
+# STATISTICS COLLECTION
+#==============================================================================
+statistics:
+  # Detailed statistics collection
+  detailed_stats: true
+
+  # Statistics output file
+  stats_file: "network_stats.txt"
+
+  # Statistics interval (cycles)
+  stats_interval: 10000
+
+  # Per-packet statistics
+  per_packet_stats: false  # Can be very verbose
+
+  # Heatmap generation
+  generate_heatmaps: false
+  heatmap_interval: 100000
