@@ -1,7 +1,0 @@
-# SimpleNetwork Configuration
-# This is a simple config file for the example network model
-
-num_nodes = 16
-topology = mesh
-link_bandwidth = 10.0  # GB/s
-link_latency = 10      # cycles

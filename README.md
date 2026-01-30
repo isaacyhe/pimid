@@ -23,12 +23,11 @@ PIMID is a comprehensive simulator for Processing-in-Memory (PIM) architectures,
 
 ```bash
 # Build
-cd pimid
 mkdir build && cd build
 cmake .. && make -j$(nproc)
 
-# Run simulation
-./pimid --config ../configs/test_complex_sttmram_16banks_l1cache.yaml
+# Run simulation with config file
+./pimid --config configs/test_complex_sttmram_16banks_l1cache.yaml
 
 # Show version and integrated models
 ./pimid --version
@@ -105,19 +104,6 @@ PERFORMANCE SUMMARY
 - Boost (system, filesystem)
 - **Intel PIN 3.x or 4.x** (required for ZSim-based workload execution)
 
-### Intel PIN Setup
-
-```bash
-# Download PIN 4.1 (recommended) or PIN 3.28
-# PIN 4.x
-wget https://software.intel.com/sites/landingpage/pintool/downloads/pin-external-4.1-99687-gd9b8f822c-gcc-linux.tar.gz
-tar xzf pin-external-4.1-99687-gd9b8f822c-gcc-linux.tar.gz
-export PINPATH=$PWD/pin-external-4.1-99687-gd9b8f822c-gcc-linux
-
-# Or PIN 3.28 (legacy)
-# wget https://software.intel.com/sites/landingpage/pintool/downloads/pin-3.28-98749-g6643ecee5-gcc-linux.tar.gz
-```
-
 Note: PIN is only required for instruction-level workload tracing (`--mode standalone`). Config-driven simulation (`--mode sim`) and co-simulation (`--mode cosim`) work without PIN.
 
 ## Project Structure
@@ -129,12 +115,13 @@ pimid/
 ├── network_models/         # Network topology models
 ├── power_models/           # Power estimation
 ├── configs/                # Example configurations
-└── external/               # External simulators
-    ├── ramulator/          # Ramulator2 (DRAM)
-    ├── nvsim/              # NVSim (NVM)
-    └── mcpat/              # McPAT + CACTI
+└── external/               # External simulators (submodules)
 ```
 
 ## License
 
 GPL-2.0. See [LICENSE](LICENSE).
+
+## Acknowledgments
+
+Built upon: [Ramulator2](https://github.com/CMU-SAFARI/ramulator2), [CACTI](https://github.com/HewlettPackard/cacti), [NVSim](https://github.com/SEAL-UCSB/NVSim), [McPAT](https://github.com/HewlettPackard/mcpat), [GARNET/gem5](https://www.gem5.org/).
