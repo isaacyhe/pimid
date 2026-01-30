@@ -109,16 +109,6 @@ pimid/
 └── external/               # External simulators (submodules)
 ```
 
-## Citation
-
-```bibtex
-@article{pimid2025,
-  title={PIMID: Processing-In-Memory Infrastructure for Design-space Exploration},
-  author={He, Yuan and Kondo, Masaaki and Shipman, Galen M. and others},
-  year={2025}
-}
-```
-
 ## License
 
 GPL-2.0. See [LICENSE](LICENSE).
