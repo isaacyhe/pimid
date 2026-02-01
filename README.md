@@ -3,6 +3,12 @@
 [![License](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
 
+<p align="center">
+  <img src="assets/qr-code.png" alt="PIMID Repository QR Code" width="150" />
+  <br/>
+  <em>Scan to access the PIMID repository</em>
+</p>
+
 PIMID is a comprehensive simulator for Processing-in-Memory (PIM) architectures, enabling design-space exploration across memory technologies, PE placements, and network topologies.
 
 ## Features
