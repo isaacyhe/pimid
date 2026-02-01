@@ -3,7 +3,7 @@
  * @brief Implementation of network topology and external model config parser
  */
 
-#include "config/include/network_config_parser.h"
+#include "config/network_config_parser.h"
 #include <iostream>
 #include <stdexcept>
 #include <fstream>

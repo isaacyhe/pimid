@@ -96,28 +96,23 @@ PERFORMANCE SUMMARY
 
 ```
 pimid/
-├── src/                    # Core simulator source
-│   ├── memory/             # Memory model implementations
-│   ├── network/            # Network model implementations
-│   ├── power/              # Power model implementations
-│   └── ...                 # Other core components
-├── include/                # Headers
-│   ├── memory/             # Memory model headers
-│   ├── network/            # Network model headers
-│   └── power/              # Power model headers
-├── configs/                # Example configurations (1000+ YAML files)
-├── external/               # External simulators (all included)
-│   ├── ramulator/          # Ramulator2 (DRAM timing)
-│   ├── cacti/              # CACTI 7.0 (SRAM/cache characterization)
-│   ├── nvsim/              # NVSim (NVM modeling, namespaced)
-│   ├── mcpat/              # McPAT + CACTI 6.5-P (power modeling)
-│   ├── garnet/             # Garnet NoC (extracted from gem5)
-│   ├── zsim/               # ZSim (workload execution)
-│   └── pin/                # Intel PIN symlink (see below)
-├── ext/                    # Header-only libraries
-│   ├── yaml-cpp/           # YAML parsing
-│   ├── spdlog/             # Logging
-│   └── argparse/           # Argument parsing
+├── src/                    # Source code
+│   ├── memory/             # Memory models (DRAM, SRAM, NVM wrappers)
+│   ├── network/            # Network models (Garnet wrapper)
+│   ├── power/              # Power models (McPAT wrapper)
+│   ├── config/             # Configuration parsing
+│   └── ...                 # Core components (scheduler, address translation, etc.)
+├── include/                # Headers (mirrors src/ structure)
+├── configs/                # YAML configuration files (1000+)
+├── external/               # External simulators (auto-built)
+│   ├── ramulator/          # Ramulator2 - DRAM timing
+│   ├── cacti/              # CACTI 7.0 - SRAM characterization
+│   ├── nvsim/              # NVSim - NVM modeling (namespaced)
+│   ├── mcpat/              # McPAT - power modeling (with CACTI 6.5-P)
+│   ├── garnet/             # Garnet - NoC simulation (standalone)
+│   ├── zsim/               # ZSim - workload execution
+│   └── pin/                # Intel PIN 4.1
+├── ext/                    # Header-only libraries (yaml-cpp, spdlog, argparse)
 └── memory/                 # DRAM architecture specifications
 ```
 
@@ -137,25 +132,19 @@ pimid/
 - C++17 compiler (GCC 9+ recommended)
 - CMake 3.15+
 - pthread
+- **Intel PIN 4.1** (for cycle-accurate simulation)
 
-### Optional Dependencies
-
-- **Intel PIN 4.1**: Required only for `--mode standalone` (workload execution)
-- **Boost**: Enhanced filesystem operations (auto-detected)
-
-### Intel PIN Setup (Optional)
-
-PIN is only needed for instruction-level workload tracing. Config-driven simulation works without it.
+### Intel PIN Setup
 
 ```bash
-# Option 1: Set environment variable
-export PINPATH=/path/to/pin
-
-# Option 2: Create symlink in external/
+# Download and extract PIN
 cd pimid/external
 wget https://software.intel.com/sites/landingpage/pintool/downloads/pin-external-4.1-99687-gd9b8f822c-gcc-linux.tar.gz
 tar xzf pin-external-4.1-99687-gd9b8f822c-gcc-linux.tar.gz
 ln -s pin-external-4.1-99687-gd9b8f822c-gcc-linux pin
+
+# Or set environment variable
+export PINPATH=/path/to/pin
 ```
 
 ## Environment Variables

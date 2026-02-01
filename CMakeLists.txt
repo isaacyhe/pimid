@@ -110,7 +110,7 @@ set(PIMID_SOURCES
     src/config/config_manager.cpp
     src/config/config_schema.cpp
     src/config/config_validator.cpp
-    config/src/network_config_parser.cpp
+    src/config/network_config_parser.cpp
 
     # Host engine
     src/host_engine/host_engine.cpp
@@ -255,24 +255,6 @@ install(DIRECTORY configs/ DESTINATION share/pimid/configs)
 
 # Test executables - now at project root level in tests/pimid/
 # Tests are built via the root-level CMakeLists.txt
-# The test source files have been moved to ../tests/pimid/
-
-# Documentation
-find_package(Doxygen)
-if(DOXYGEN_FOUND)
-    set(DOXYGEN_IN ${CMAKE_CURRENT_SOURCE_DIR}/docs/Doxyfile.in)
-    set(DOXYGEN_OUT ${CMAKE_CURRENT_BINARY_DIR}/Doxyfile)
-
-    configure_file(${DOXYGEN_IN} ${DOXYGEN_OUT} @ONLY)
-
-    add_custom_target(doc
-        COMMAND ${DOXYGEN_EXECUTABLE} ${DOXYGEN_OUT}
-        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-        COMMENT "Generating API documentation with Doxygen"
-        VERBATIM
-    )
-endif()
-
 # Summary
 message(STATUS "")
 message(STATUS "PIMID Configuration Summary:")
