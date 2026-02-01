@@ -29,16 +29,28 @@ cmake .. && make -j$(nproc)
 
 ## Simulation Modes
 
+PIMID uses two orthogonal options: `--method` (how) and `--scope` (what).
+
 ```bash
-# Config-driven PIM simulation (default)
-./pimid --mode sim --config <config.yaml>
+# Analytical device simulation (fast, default)
+./pimid --method analytical --config <config.yaml>
 
-# Host/Device co-simulation
-./pimid --mode cosim --size 1000000
+# Cycle-accurate device simulation (detailed, requires PIN)
+./pimid --method zsim --config <config.yaml> --workload ./benchmark
 
-# Workload execution (requires PIN)
-./pimid --mode standalone --workload ./benchmark
+# Host + Device co-simulation
+./pimid --scope cosim --size 1000000
 ```
+
+| Method | Description |
+|--------|-------------|
+| `analytical` | Fast analytical modeling (default) |
+| `zsim` | Cycle-accurate via ZSim/PIN instrumentation |
+
+| Scope | Description |
+|-------|-------------|
+| `device` | PIM device only (default) |
+| `cosim` | Host + PIM device co-simulation |
 
 ## Example Configuration
 
