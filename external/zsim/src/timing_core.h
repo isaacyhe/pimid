@@ -60,10 +60,14 @@ class TimingCore : public Core {
 
         InstrFuncPtrs GetFuncPtrs();
 
-        //Contention simulation interface
-        inline EventRecorder* getEventRecorder() {return cRec.getEventRecorder();}
-        void cSimStart() {curCycle = cRec.cSimStart(curCycle);}
-        void cSimEnd() {curCycle = cRec.cSimEnd(curCycle);}
+        // Virtual type check for use without RTTI (Pin 4.x requires -fno-rtti)
+        TimingCore* asTimingCore() override { return this; }
+
+        // Contention simulation interface
+        bool hasContentionSim() const override { return true; }
+        EventRecorder* getEventRecorder() override {return cRec.getEventRecorder();}
+        void cSimStart() override {curCycle = cRec.cSimStart(curCycle);}
+        void cSimEnd() override {curCycle = cRec.cSimEnd(curCycle);}
 
     private:
         inline void loadAndRecord(Address addr);

@@ -56,6 +56,7 @@ using namespace std;
 #include "log.h"
 #include "mem_ctrls.h"
 #include "network.h"
+#include "garnet_network.h"
 #include "null_core.h"
 #include "alu_core.h"
 #include "ooo_core.h"
@@ -442,9 +443,31 @@ static void InitSystem(Config& config) {
         return cVec;
     };
 
-    // If a network file is specified, build a Network
-    string networkFile = config.get<const char*>("sys.networkFile", "");
-    Network* network = (networkFile != "")? new Network(networkFile.c_str()) : nullptr;
+    // Build network model: either Garnet mesh or simple file-based delays
+    // GarnetNetwork inherits from Network, so we use a single Network* pointer
+    Network* network = nullptr;
+    zinfo->garnetNetwork = nullptr;  // Initialize to null
+
+    string networkType = config.get<const char*>("sys.networkType", "");
+    if (networkType == "garnet" || networkType == "mesh") {
+        // Use Garnet-based mesh network (topology-aware latencies)
+        uint32_t meshRows = config.get<uint32_t>("sys.network.rows", 4);
+        uint32_t meshCols = config.get<uint32_t>("sys.network.cols", 4);
+        uint32_t routerLat = config.get<uint32_t>("sys.network.routerLatency", 1);
+        uint32_t linkLat = config.get<uint32_t>("sys.network.linkLatency", 1);
+        bool cycleAccurate = config.get<bool>("sys.network.cycleAccurate", false);
+        double clockMhz = static_cast<double>(zinfo->freqMHz);
+
+        GarnetNetwork* garnet = new GarnetNetwork(meshRows, meshCols, routerLat, linkLat,
+                                                   cycleAccurate, clockMhz);
+        network = garnet;
+        zinfo->garnetNetwork = garnet;  // Store for stats output
+        info("[ZSim] Using Garnet %dx%d mesh network", meshRows, meshCols);
+    } else {
+        // Fall back to simple file-based network
+        string networkFile = config.get<const char*>("sys.networkFile", "");
+        network = (networkFile != "")? new Network(networkFile.c_str()) : nullptr;
+    }
 
     // Build the caches
     vector<const char*> cacheGroupNames;

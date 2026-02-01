@@ -40,6 +40,9 @@
 
 #include "FunctionUnit.h"
 
+namespace nvsim {
+
+
 class SenseAmp: public FunctionUnit {
 public:
 	SenseAmp();
@@ -64,4 +67,5 @@ public:
 	double pitchSenseAmp;	/* The maximum width allowed for one sense amplifier layout */
 };
 
+} // namespace nvsim
 #endif /* SENSEAMP_H_ */

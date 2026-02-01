@@ -44,6 +44,9 @@
 #include "typedef.h"
 #include "Comparator.h"
 
+namespace nvsim {
+
+
 class Mat: public FunctionUnit {
 public:
 	Mat();
@@ -95,4 +98,5 @@ public:
 	Comparator comparator;
 };
 
+} // namespace nvsim
 #endif /* MAT_H_ */

@@ -39,6 +39,9 @@
 #include "formula.h"
 #include "global.h"
 
+namespace nvsim {
+
+
 
 BankWithHtree::BankWithHtree() {
 	// TODO Auto-generated constructor stub
@@ -663,3 +666,5 @@ BankWithHtree & BankWithHtree::operator=(const BankWithHtree &rhs) {
 	levelVertical = rhs.levelVertical;
 	return *this;
 }
+
+} // namespace nvsim

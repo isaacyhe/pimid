@@ -3,7 +3,7 @@
 
 #include "common/types.h"
 #include "common/event_queue.h"
-#include "memory_model.h"
+#include "memory/memory_model.h"
 #include <memory>
 #include <string>
 #include <functional>

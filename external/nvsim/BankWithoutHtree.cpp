@@ -40,6 +40,9 @@
 #include "global.h"
 #include <math.h>
 
+namespace nvsim {
+
+
 BankWithoutHtree::BankWithoutHtree() {
 	// TODO Auto-generated constructor stub
 	initialized = false;
@@ -465,3 +468,4 @@ BankWithoutHtree & BankWithoutHtree::operator=(const BankWithoutHtree &rhs) {
 	return *this;
 }
 
+} // namespace nvsim

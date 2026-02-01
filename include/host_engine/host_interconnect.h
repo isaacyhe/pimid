@@ -2,7 +2,7 @@
 #define PIMID_HOST_INTERCONNECT_H
 
 #include "common/types.h"
-#include "network_model.h"
+#include "network/network_model.h"
 #include <memory>
 #include <string>
 

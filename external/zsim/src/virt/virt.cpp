@@ -85,9 +85,9 @@ void VirtSyscallEnter(THREADID tid, CONTEXT *ctxt, SYSCALL_STANDARD std, const c
     // Pin v2.14 crashes when it sees this unexpected arch_prctl subfunction.
     // Avoid the crash by just pretending to execute the syscall instruction
     // while skipping over it.
-    if (syscall == SYS_arch_prctl && PIN_GetContextReg(ctxt, REG_RDI) == 0x3001) {
+    if (syscall == SYS_arch_prctl && PIN_GetContextReg(ctxt, LEVEL_BASE::REG_RDI) == 0x3001) {
         PIN_SetContextReg(ctxt, REG_INST_PTR, PIN_GetContextReg(ctxt, REG_INST_PTR) + 2);
-        PIN_SetContextReg(ctxt, REG_RAX, -1UL);
+        PIN_SetContextReg(ctxt, LEVEL_BASE::REG_RAX, -1UL);
         return;
     }
 
@@ -96,7 +96,7 @@ void VirtSyscallEnter(THREADID tid, CONTEXT *ctxt, SYSCALL_STANDARD std, const c
     // portable binaries, do this even if compiling on a machine where
     // SYS_clone3 is undefined.
     if (syscall == 435/*SYS_clone3*/) {
-        PIN_SetContextReg(ctxt, REG_RAX, -ENOSYS);
+        PIN_SetContextReg(ctxt, LEVEL_BASE::REG_RAX, -ENOSYS);
         PIN_SetContextReg(ctxt, REG_INST_PTR, PIN_GetContextReg(ctxt, REG_INST_PTR) + 2);
         return;
     }

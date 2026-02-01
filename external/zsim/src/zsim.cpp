@@ -28,11 +28,10 @@
 
 #include "zsim.h"
 #include <algorithm>
-#define _SIGNAL_H
-#include <signum.h>
-#undef _SIGNAL_H
 #include <dlfcn.h>
+#ifndef PIN_CRT  // execinfo.h (backtrace) not available in musl
 #include <execinfo.h>
+#endif
 #include <fstream>
 #include <iostream>
 #include <sched.h>
@@ -61,6 +60,7 @@
 #include "stats.h"
 #include "trace_driver.h"
 #include "virt/virt.h"
+#include "garnet_network.h"
 
 //#include <signal.h> //can't include this, conflicts with PIN's
 
@@ -163,6 +163,71 @@ VOID FakeRDTSCPost(THREADID tid, REG* eax, REG* edx);
 
 VOID VdsoInstrument(INS ins);
 VOID FFThread(VOID* arg);
+
+/* Helper function to create a process-local copy of GlobSimInfo with all
+ * pointers relocated. This is needed when the shared memory segment is
+ * mapped at a different address than expected (e.g., in Pin 4.x which
+ * blocks fixed-address memory mapping).
+ *
+ * The original pointers in shared memory point to addresses relative to
+ * GM_BASE_ADDR (0xABBA000000), but when mapped at a different address,
+ * all pointer accesses need to be adjusted.
+ */
+static GlobSimInfo* localRelocatedZinfo = nullptr;
+
+static GlobSimInfo* getRelocatedZinfo() {
+    GlobSimInfo* rawZinfo = static_cast<GlobSimInfo*>(gm_get_glob_ptr());
+
+    if (!gm_needs_relocation()) {
+        return rawZinfo;  // No relocation needed
+    }
+
+    // Create a process-local copy if we haven't already
+    if (localRelocatedZinfo == nullptr) {
+        // Allocate local (non-shared) memory for the relocated copy
+        localRelocatedZinfo = new GlobSimInfo();
+
+        // Copy the entire structure first
+        memcpy(localRelocatedZinfo, rawZinfo, sizeof(GlobSimInfo));
+
+        // Relocate all pointer members
+        // Note: We use explicit casts to handle the relocation
+        #define RELOCATE_PTR(field) \
+            localRelocatedZinfo->field = gm_relocate_ptr(localRelocatedZinfo->field)
+
+        RELOCATE_PTR(cores);
+        RELOCATE_PTR(eventQueue);
+        RELOCATE_PTR(sched);
+        RELOCATE_PTR(contentionSim);
+        RELOCATE_PTR(eventRecorders);
+        RELOCATE_PTR(outputDir);
+        RELOCATE_PTR(rootStat);
+        RELOCATE_PTR(statsBackends);
+        RELOCATE_PTR(periodicStatsBackend);
+        RELOCATE_PTR(eventualStatsBackend);
+        RELOCATE_PTR(processStats);
+        RELOCATE_PTR(procStats);
+        RELOCATE_PTR(profSimTime);
+        RELOCATE_PTR(profHeartbeats);
+        RELOCATE_PTR(procTree);
+        RELOCATE_PTR(procArray);
+        RELOCATE_PTR(procExited);
+        RELOCATE_PTR(pinCmd);
+        RELOCATE_PTR(traceWriters);
+        RELOCATE_PTR(traceDriver);
+
+        // Relocate array of pointers
+        for (int i = 0; i < MAX_PORT_DOMAINS; i++) {
+            localRelocatedZinfo->portVirt[i] = gm_relocate_ptr(localRelocatedZinfo->portVirt[i]);
+        }
+
+        #undef RELOCATE_PTR
+
+        info("Created process-local relocated copy of GlobSimInfo");
+    }
+
+    return localRelocatedZinfo;
+}
 
 /* Indirect analysis calls to work around PIN's synchronization
  *
@@ -587,7 +652,7 @@ VOID Instruction(INS ins) {
      * is never emitted by any x86 compiler, as they use other (recommended) nop
      * instructions or sequences.
      */
-    if (INS_IsXchg(ins) && INS_OperandReg(ins, 0) == REG_RCX && INS_OperandReg(ins, 1) == REG_RCX) {
+    if (INS_IsXchg(ins) && INS_OperandReg(ins, 0) == LEVEL_BASE::REG_RCX && INS_OperandReg(ins, 1) == LEVEL_BASE::REG_RCX) {
         //info("Instrumenting magic op");
         INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) HandleMagicOp, IARG_THREAD_ID, IARG_REG_VALUE, REG_ECX, IARG_END);
     }
@@ -796,11 +861,11 @@ VOID VdsoInstrument(INS ins) {
     if (unlikely(insAddr >= vdsoStart && insAddr < vdsoEnd)) {
         if (vdsoEntryMap.find(insAddr) != vdsoEntryMap.end()) {
             VdsoFunc func = vdsoEntryMap[insAddr];
-            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) VdsoEntryPoint, IARG_THREAD_ID, IARG_UINT32, (uint32_t)func, IARG_REG_VALUE, REG_RDI, IARG_REG_VALUE, REG_RSI, IARG_END);
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) VdsoEntryPoint, IARG_THREAD_ID, IARG_UINT32, (uint32_t)func, IARG_REG_VALUE, LEVEL_BASE::REG_RDI, IARG_REG_VALUE, LEVEL_BASE::REG_RSI, IARG_END);
         } else if (INS_IsCall(ins)) {
             INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) VdsoCallPoint, IARG_THREAD_ID, IARG_END);
         } else if (INS_IsRet(ins)) {
-            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) VdsoRetPoint, IARG_THREAD_ID, IARG_REG_REFERENCE, REG_RAX /* return val */, IARG_END);
+            INS_InsertCall(ins, IPOINT_BEFORE, (AFUNPTR) VdsoRetPoint, IARG_THREAD_ID, IARG_REG_REFERENCE, LEVEL_BASE::REG_RAX /* return val */, IARG_END);
         }
     }
 
@@ -1127,6 +1192,14 @@ VOID SimEnd() {
         for (StatsBackend* backend : *(zinfo->statsBackends)) backend->dump(false /*unbuffered, write out*/);
         for (AccessTraceWriter* t : *(zinfo->traceWriters)) t->dump(false);  // flushes trace writer
 
+        // Output Garnet network stats for McPAT integration (PIMID)
+        if (zinfo->garnetNetwork) {
+            zinfo->garnetNetwork->setTotalCycles(zinfo->globPhaseCycles);
+            string garnetStatsPath = string(zinfo->outputDir) + "/garnet_stats.txt";
+            zinfo->garnetNetwork->writeStatsFile(garnetStatsPath.c_str());
+            zinfo->garnetNetwork->printStats();
+        }
+
         if (zinfo->sched) zinfo->sched->notifyTermination();
     }
 
@@ -1399,6 +1472,7 @@ static EXCEPT_HANDLING_RESULT InternalExceptionHandler(THREADID tid, EXCEPTION_I
         fprintf(stderr, "%s[%d]  Caused by invalid %saccess to address 0x%lx\n", logHeader, tid, faultyAccessStr, faultyAccessAddr);
     }
 
+#ifndef PIN_CRT  // backtrace not available in musl
     void* array[40];
     size_t size = backtrace(array, 40);
     char** strings = backtrace_symbols(array, size);
@@ -1432,6 +1506,9 @@ static EXCEPT_HANDLING_RESULT InternalExceptionHandler(THREADID tid, EXCEPTION_I
 
         fprintf(stderr, "%s[%d]  %s\n", logHeader, tid, s.c_str());
     }
+#else
+    fprintf(stderr, "%s[%d] Backtrace not available (musl libc)\n", logHeader, tid);
+#endif
     fflush(stderr);
 
     return EHR_CONTINUE_SEARCH; //we never solve anything at all :P
@@ -1456,8 +1533,9 @@ int main(int argc, char *argv[]) {
     //If parent dies, kill us
     //This avoids leaving strays running in any circumstances, but may be too heavy-handed with arbitrary process hierarchies.
     //If you ever need this disabled, sim.pinOptions = "-injection child" does the trick
+    //Note: prctl may fail in containerized/sandboxed environments - make it non-fatal
     if (prctl(PR_SET_PDEATHSIG, 9 /*SIGKILL*/) != 0) {
-        panic("prctl() failed");
+        warn("prctl(PR_SET_PDEATHSIG) failed (errno %d) - this is normal in containers/sandboxes", errno);
     }
 
     info("Started instance");
@@ -1473,8 +1551,15 @@ int main(int argc, char *argv[]) {
         masterProcess = true;
         SimInit(KnobConfigFile.Value().c_str(), KnobOutputDir.Value().c_str(), KnobShmid.Value());
     } else {
-        while (!gm_isready()) usleep(1000);  // wait till proc idx 0 initializes everything
-        zinfo = static_cast<GlobSimInfo*>(gm_get_glob_ptr());
+        int waitCount = 0;
+        while (!gm_isready()) {
+            usleep(1000);  // wait till proc idx 0 initializes everything
+            if (++waitCount % 1000 == 0) {
+                info("Still waiting for gm_isready() (waited %d ms)...", waitCount);
+            }
+        }
+        info("gm_isready() returned true, continuing");
+        zinfo = getRelocatedZinfo();  // Uses relocated copy if needed
     }
 
     //If assertion below fails, use this to print maps

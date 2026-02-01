@@ -29,6 +29,20 @@
 #include <stdint.h>
 #include "galloc.h"
 
+// Simple FNV-1a hash implementation for portability (replaces glibc's _Fnv_hash_bytes)
+inline size_t zsim_fnv_hash(const char* data, size_t len, size_t seed) {
+    // FNV-1a constants for 64-bit
+    const size_t FNV_OFFSET_BASIS = 14695981039346656037ULL;
+    const size_t FNV_PRIME = 1099511628211ULL;
+
+    size_t hash = FNV_OFFSET_BASIS ^ seed;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= static_cast<size_t>(data[i]);
+        hash *= FNV_PRIME;
+    }
+    return hash;
+}
+
 class HashFamily : public GlobAlloc {
     public:
         HashFamily() {}

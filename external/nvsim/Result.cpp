@@ -43,6 +43,9 @@
 #include <iostream>
 #include <fstream>
 
+namespace nvsim {
+
+
 using namespace std;
 
 Result::Result() {
@@ -875,3 +878,5 @@ void Result::printAsCacheToCsvFile(Result &tagResult, CacheAccessMode cacheAcces
 		outputFile << endl;
 	}
 }
+
+} // namespace nvsim

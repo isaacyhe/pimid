@@ -71,8 +71,9 @@ TimingEvent* TimingEvent::handleCrossing(TimingEvent* childEv, EventRecorder* ev
         assert_msg(childEv->numParents, "child has %d parents, nonzero expected", childEv->numParents);
         childEv->numParents--;
     }
-    assert_msg(minStartCycle != ((uint64_t)-1L), "Crossing domain (%d -> %d), but parent's minStartCycle is not set (my class: %s)",
-            domain, childEv->domain, typeid(*this).name()); //we can only handle a crossing if this has been set
+    // Note: typeid removed for Pin 4.x -fno-rtti compatibility
+    assert_msg(minStartCycle != ((uint64_t)-1L), "Crossing domain (%d -> %d), but parent's minStartCycle is not set",
+            domain, childEv->domain); //we can only handle a crossing if this has been set
     CrossingEvent* xe = new (evRec) CrossingEvent(this, childEv, minStartCycle+postDelay, evRec);
     return xe->getSrcDomainEvent();
 }

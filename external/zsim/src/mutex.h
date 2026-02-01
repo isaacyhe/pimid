@@ -31,9 +31,9 @@
 #include "pad.h"
 
 // Until GCC is compliant with this, just inherit:
-class mutex : public GlobAlloc {
+class zsim_mutex : public GlobAlloc {
     public:
-        mutex() {
+        zsim_mutex() {
             futex_init(&futex);
         }
 
@@ -53,11 +53,11 @@ class mutex : public GlobAlloc {
         volatile uint32_t futex;
 };
 
-class aligned_mutex : public mutex {} ATTR_LINE_ALIGNED;
+class aligned_mutex : public zsim_mutex {} ATTR_LINE_ALIGNED;
 
 class scoped_mutex : public GlobAlloc {
     public:
-        scoped_mutex(mutex& _mut)
+        scoped_mutex(zsim_mutex& _mut)
                 : mut(&_mut) {
             mut->lock();
         }
@@ -85,12 +85,12 @@ class scoped_mutex : public GlobAlloc {
             mut = 0;
         }
 
-        const mutex* get() const {
+        const zsim_mutex* get() const {
             return mut;
         }
 
     private:
-        mutex* mut;
+        zsim_mutex* mut;
 };
 
 /* Read-write mutex based on futex locks. Fair implementation, with read
@@ -99,8 +99,8 @@ class scoped_mutex : public GlobAlloc {
  */
 class rwmutex : public GlobAlloc {
     private:
-        mutex wq;
-        mutex rb;
+        zsim_mutex wq;
+        zsim_mutex rb;
         volatile uint32_t readers;
 
     public:

@@ -42,6 +42,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+namespace nvsim {
+
+
 InputParameter::InputParameter() {
 	// TODO Auto-generated constructor stub
 	designTarget = cache;
@@ -631,3 +634,5 @@ void InputParameter::PrintInputParameter() {
 		}
 	}
 }
+
+} // namespace nvsim

@@ -12,9 +12,9 @@
 #include "common/config_parser.h"
 #include "host_engine/host_engine.h"
 #include "device_engine/device_engine.h"
-#include "memory_model.h"
-#include "network_model.h"
-#include "power_model.h"
+#include "memory/memory_model.h"
+#include "network/network_model.h"
+#include "power/power_model.h"
 #include "address_translation/pe_placement.h"
 #include "scheduler/scheduler.h"
 

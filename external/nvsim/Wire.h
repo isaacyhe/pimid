@@ -44,6 +44,9 @@
 
 using namespace std;
 
+
+
+namespace nvsim {
 class Wire {
 public:
 	Wire();
@@ -90,4 +93,5 @@ public:
 	SenseAmp * senseAmp;
 };
 
+} // namespace nvsim
 #endif /* WIRE_H_ */

@@ -13,7 +13,7 @@
  */
 
 #include "plugin/memory_model_plugin.h"
-#include "memory_models/include/memory_model.h"
+#include "memory/memory_model.h"
 #include <iostream>
 #include <sstream>
 #include <stdexcept>

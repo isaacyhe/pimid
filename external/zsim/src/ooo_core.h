@@ -449,10 +449,14 @@ class OOOCore : public Core {
 
         InstrFuncPtrs GetFuncPtrs();
 
+        // Virtual type check for use without RTTI (Pin 4.x requires -fno-rtti)
+        OOOCore* asOOOCore() override { return this; }
+
         // Contention simulation interface
-        inline EventRecorder* getEventRecorder() {return cRec.getEventRecorder();}
-        void cSimStart();
-        void cSimEnd();
+        bool hasContentionSim() const override { return true; }
+        EventRecorder* getEventRecorder() override {return cRec.getEventRecorder();}
+        void cSimStart() override;
+        void cSimEnd() override;
 
     private:
         inline void load(Address addr);

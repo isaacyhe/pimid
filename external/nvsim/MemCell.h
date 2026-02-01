@@ -47,6 +47,9 @@
 
 using namespace std;
 
+
+
+namespace nvsim {
 class MemCell {
 public:
 	MemCell();
@@ -121,4 +124,5 @@ public:
 	double gateCouplingRatio;		/* The ratio of control gate to total floating gate capacitance */
 };
 
+} // namespace nvsim
 #endif /* MEMCELL_H_ */

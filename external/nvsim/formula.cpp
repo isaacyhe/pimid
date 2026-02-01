@@ -39,6 +39,9 @@
 #include "constant.h"
 #include <stdlib.h>
 
+namespace nvsim {
+
+
 bool isPow2(int n) {
 	if (n < 1)
 		return false;
@@ -365,3 +368,5 @@ double CalculateWireCapacitance(
 	sidewallCap = 2 * permittivity * millerValue * horizontalDielectric * wireThickness / wireSpacing;
 	return (verticalCap + sidewallCap + fringeCap);
 }
+
+} // namespace nvsim

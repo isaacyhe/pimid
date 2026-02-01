@@ -41,6 +41,9 @@
 #include "FunctionUnit.h"
 #include "OutputDriver.h"
 
+namespace nvsim {
+
+
 class Precharger: public FunctionUnit {
 public:
 	Precharger();
@@ -72,4 +75,5 @@ public:
 
 };
 
+} // namespace nvsim
 #endif /* PRECHARGER_H_ */

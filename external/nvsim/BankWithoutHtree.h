@@ -43,6 +43,9 @@
 #include "typedef.h"
 #include "Comparator.h"
 
+namespace nvsim {
+
+
 class BankWithoutHtree: public Bank {
 public:
 	BankWithoutHtree();
@@ -70,4 +73,5 @@ public:
 	Comparator globalComparator;
 };
 
+} // namespace nvsim
 #endif /* BANKWITHOUTHTREE_H_ */

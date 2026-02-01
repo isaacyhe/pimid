@@ -95,6 +95,9 @@ class TraceDriverProxyCache : public BaseCache {
         MemObject* getParent() const {return parent;}
         void setDriver(TraceDriver* driver) {drv = driver;}
 
+        // Override type check for use without RTTI (Pin 4.x requires -fno-rtti)
+        TraceDriverProxyCache* asTraceDriverProxyCache() override { return this; }
+
         uint64_t access(MemReq& req) {panic("Should never be called");}
         uint64_t invalidate(const InvReq& req) {
             return drv->invalidate(id, req.lineAddr, req.type, req.writeback, req.cycle, req.srcId);

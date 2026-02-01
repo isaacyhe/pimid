@@ -37,6 +37,9 @@
 
 #include "FunctionUnit.h"
 
+namespace nvsim {
+
+
 FunctionUnit::FunctionUnit() {
 	height = width = 0;
 	area = 0;
@@ -64,3 +67,5 @@ void FunctionUnit::PrintProperty() {
 	cout << " - Write Dynamic Energy = " << writeDynamicEnergy*1e12 << "pJ" << endl;
 	cout << " - Leakage Power = " << leakage*1e3 << "mW" << endl;
 }
+
+} // namespace nvsim

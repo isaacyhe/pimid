@@ -3,19 +3,13 @@
 [![License](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
 
-<p align="center">
-  <img src="assets/qr-code.png" alt="PIMID Repository QR Code" width="150" />
-  <br/>
-  <em>Scan to access the PIMID repository</em>
-</p>
-
 PIMID is a comprehensive simulator for Processing-in-Memory (PIM) architectures, enabling design-space exploration across memory technologies, PE placements, and network topologies.
 
 ## Features
 
-- **Multi-Technology Memory**: DRAM (Ramulator2), SRAM (CACTI), STT-MRAM/PCM/ReRAM (NVSim)
+- **Multi-Technology Memory**: DRAM (Ramulator2), SRAM (CACTI 7.0), STT-MRAM/PCM/ReRAM (NVSim)
 - **Flexible PE Placement**: Subarray, Bank, Bank-Group, Chip, Rank, Logic Die
-- **Network Modeling**: GARNET-based NoC with H-Tree, Mesh, Crossbar topologies
+- **Network Modeling**: Garnet-based NoC with H-Tree, Mesh, Crossbar topologies
 - **Power Analysis**: McPAT integration for comprehensive energy estimation
 - **Unified Binary**: Single `pimid` executable for all simulation modes
 
@@ -27,10 +21,10 @@ mkdir build && cd build
 cmake .. && make -j$(nproc)
 
 # Run simulation with config file
-./pimid --config configs/test_complex_sttmram_16banks_l1cache.yaml
+./pimid --config ../configs/test_complex_sttmram_16banks_l1cache.yaml
 
-# Show version and integrated models
-./pimid --version
+# Show help
+./pimid --help
 ```
 
 ## Simulation Modes
@@ -42,7 +36,7 @@ cmake .. && make -j$(nproc)
 # Host/Device co-simulation
 ./pimid --mode cosim --size 1000000
 
-# Workload execution
+# Workload execution (requires PIN)
 ./pimid --mode standalone --workload ./benchmark
 ```
 
@@ -86,37 +80,79 @@ PERFORMANCE SUMMARY
   Bottleneck:       Compute
 ```
 
-## External Models
-
-| Model | Purpose | Status |
-|-------|---------|--------|
-| Ramulator2 | DRAM timing (DDR4/5, HBM2/3) | Integrated |
-| CACTI | SRAM/cache modeling | Integrated |
-| NVSim | NVM modeling (STT-MRAM, PCM, ReRAM) | Integrated |
-| McPAT | Power modeling | Integrated |
-| GARNET | Network-on-chip | Integrated |
-
-## Build Requirements
-
-- C++17 compiler (GCC 7+ or Clang 6+)
-- CMake 3.15+
-- yaml-cpp
-- Boost (system, filesystem)
-- **Intel PIN 3.x or 4.x** (required for ZSim-based workload execution)
-
-Note: PIN is only required for instruction-level workload tracing (`--mode standalone`). Config-driven simulation (`--mode sim`) and co-simulation (`--mode cosim`) work without PIN.
-
-## Project Structure
+## Project Structure (Self-Contained)
 
 ```
 pimid/
 ├── src/                    # Core simulator source
-├── memory_models/          # Memory technology models
-├── network_models/         # Network topology models
-├── power_models/           # Power estimation
-├── configs/                # Example configurations
-└── external/               # External simulators (submodules)
+│   ├── memory/             # Memory model implementations
+│   ├── network/            # Network model implementations
+│   ├── power/              # Power model implementations
+│   └── ...                 # Other core components
+├── include/                # Headers
+│   ├── memory/             # Memory model headers
+│   ├── network/            # Network model headers
+│   └── power/              # Power model headers
+├── configs/                # Example configurations (1000+ YAML files)
+├── external/               # External simulators (all included)
+│   ├── ramulator/          # Ramulator2 (DRAM timing)
+│   ├── cacti/              # CACTI 7.0 (SRAM/cache characterization)
+│   ├── nvsim/              # NVSim (NVM modeling, namespaced)
+│   ├── mcpat/              # McPAT + CACTI 6.5-P (power modeling)
+│   ├── garnet/             # Garnet NoC (extracted from gem5)
+│   ├── zsim/               # ZSim (workload execution)
+│   └── pin/                # Intel PIN symlink (see below)
+├── ext/                    # Header-only libraries
+│   ├── yaml-cpp/           # YAML parsing
+│   ├── spdlog/             # Logging
+│   └── argparse/           # Argument parsing
+└── memory/                 # DRAM architecture specifications
 ```
+
+## External Models
+
+| Model | Purpose | Version | Notes |
+|-------|---------|---------|-------|
+| Ramulator2 | DRAM timing (DDR4/5, HBM2/3) | Latest | Included |
+| CACTI | SRAM/subarray characterization | 7.0 | Included |
+| NVSim | NVM modeling (STT-MRAM, PCM, ReRAM) | Namespaced | Included |
+| McPAT | Power modeling | 1.3 | Bundled with CACTI 6.5-P |
+| Garnet | Network-on-chip simulation | Extracted | Standalone (no gem5 dependency) |
+| ZSim | Workload execution | Modified | Included |
+
+## Build Requirements
+
+- C++17 compiler (GCC 9+ recommended)
+- CMake 3.15+
+- pthread
+
+### Optional Dependencies
+
+- **Intel PIN 4.1**: Required only for `--mode standalone` (workload execution)
+- **Boost**: Enhanced filesystem operations (auto-detected)
+
+### Intel PIN Setup (Optional)
+
+PIN is only needed for instruction-level workload tracing. Config-driven simulation works without it.
+
+```bash
+# Option 1: Set environment variable
+export PINPATH=/path/to/pin
+
+# Option 2: Create symlink in external/
+cd pimid/external
+wget https://software.intel.com/sites/landingpage/pintool/downloads/pin-external-4.1-99687-gd9b8f822c-gcc-linux.tar.gz
+tar xzf pin-external-4.1-99687-gd9b8f822c-gcc-linux.tar.gz
+ln -s pin-external-4.1-99687-gd9b8f822c-gcc-linux pin
+```
+
+## Environment Variables
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `PIMID_ROOT` | PIMID installation directory | Auto-detected from executable |
+| `PINPATH` | Intel PIN root directory | `external/pin` |
+| `ZSIM_PATH` | ZSim installation directory | `external/zsim` |
 
 ## License
 
@@ -124,4 +160,4 @@ GPL-2.0. See [LICENSE](LICENSE).
 
 ## Acknowledgments
 
-Built upon: [Ramulator2](https://github.com/CMU-SAFARI/ramulator2), [CACTI](https://github.com/HewlettPackard/cacti), [NVSim](https://github.com/SEAL-UCSB/NVSim), [McPAT](https://github.com/HewlettPackard/mcpat), [GARNET/gem5](https://www.gem5.org/).
+Built upon: [Ramulator2](https://github.com/CMU-SAFARI/ramulator2), [CACTI](https://github.com/HewlettPackard/cacti), [NVSim](https://github.com/SEAL-UCSB/NVSim), [McPAT](https://github.com/HewlettPackard/mcpat), [gem5/Garnet](https://www.gem5.org/), ZSim.

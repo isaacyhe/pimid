@@ -38,6 +38,8 @@
 #ifndef TYPEDEF_H_
 #define TYPEDEF_H_
 
+namespace nvsim {
+
 enum MemCellType
 {
 	SRAM,
@@ -147,4 +149,5 @@ enum CacheAccessMode
 	fast_access_mode		/* data and tag access happen in parallel */
 };
 
+} // namespace nvsim
 #endif /* TYPEDEF_H_ */

@@ -42,6 +42,9 @@
 
 using namespace std;
 
+
+
+namespace nvsim {
 class FunctionUnit {
 public:
 	FunctionUnit();
@@ -64,4 +67,5 @@ public:
 	double cellReadEnergy, cellSetEnergy, cellResetEnergy;			/* Unit: J */
 };
 
+} // namespace nvsim
 #endif /* FUNCTIONUNIT_H_ */

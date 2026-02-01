@@ -39,6 +39,9 @@
 #include "formula.h"
 #include "global.h"
 
+namespace nvsim {
+
+
 SenseAmp::SenseAmp() {
 	// TODO Auto-generated constructor stub
 	initialized = false;
@@ -230,3 +233,5 @@ SenseAmp & SenseAmp::operator=(const SenseAmp &rhs) {
 
 	return *this;
 }
+
+} // namespace nvsim

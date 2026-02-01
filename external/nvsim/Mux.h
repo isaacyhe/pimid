@@ -41,6 +41,9 @@
 #include "FunctionUnit.h"
 #include "constant.h"
 
+namespace nvsim {
+
+
 class Mux: public FunctionUnit {
 public:
 	Mux();
@@ -71,4 +74,5 @@ public:
 	double rampInput, rampOutput;
 };
 
+} // namespace nvsim
 #endif /* MUX_H_ */

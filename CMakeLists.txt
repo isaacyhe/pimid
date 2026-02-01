@@ -16,19 +16,16 @@ set(CMAKE_CXX_FLAGS "-Wall -Wextra")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDEBUG")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
-# Include directories
+# Include directories - NEW STRUCTURE
+# Note: CACTI 7.0 headers are added per-target to avoid naming conflicts
 include_directories(
     ${PROJECT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/include
-    ${PROJECT_SOURCE_DIR}/memory_models/include
-    ${PROJECT_SOURCE_DIR}/network_models/include
-    ${PROJECT_SOURCE_DIR}/power_models/include
+    ${PROJECT_SOURCE_DIR}/memory              # DRAM architecture specs
     ${PROJECT_SOURCE_DIR}/external
     ${PROJECT_SOURCE_DIR}/external/ramulator/src
-    ${PROJECT_SOURCE_DIR}/external/cacti
-    ${PROJECT_SOURCE_DIR}/external/nvsim
+    ${PROJECT_SOURCE_DIR}/external/nvsim      # Namespaced NVSim (avoids CACTI collision)
     ${PROJECT_SOURCE_DIR}/external/mcpat
-    ${PROJECT_SOURCE_DIR}/external/mcpat/cacti  # CACTI headers (via McPAT)
 )
 
 # Find required packages
@@ -49,9 +46,6 @@ endif()
 # Build external models
 message(STATUS "Building external models...")
 
-# External model integration system
-add_subdirectory(external_models)
-
 # Ramulator2 for DRAM modeling
 if(EXISTS "${PROJECT_SOURCE_DIR}/external/ramulator/CMakeLists.txt")
     message(STATUS "  - Ramulator2 DRAM simulator")
@@ -64,36 +58,41 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/external/ramulator/CMakeLists.txt")
     set(HAVE_RAMULATOR ON)
 endif()
 
-# CACTI for SRAM/cache modeling
-# Note: CACTI is bundled with McPAT - enabled when McPAT is available
+# CACTI 7.0 for SRAM/subarray characterization AND McPAT power modeling
+# McPAT now uses CACTI 7.0 instead of bundled CACTI 6.5-P
 if(EXISTS "${PROJECT_SOURCE_DIR}/external/cacti/CMakeLists.txt")
-    message(STATUS "  - CACTI SRAM/cache analyzer (standalone)")
+    message(STATUS "  - CACTI 7.0 SRAM/subarray analyzer")
     add_subdirectory(external/cacti)
     add_definitions(-DHAVE_CACTI)
+    add_definitions(-DHAVE_CACTI7)
     set(HAVE_CACTI ON)
+    set(HAVE_CACTI7 ON)
 endif()
 
-# NVSim for NVM modeling
+# NVSim for NVM modeling (namespaced to avoid CACTI symbol collision)
 if(EXISTS "${PROJECT_SOURCE_DIR}/external/nvsim/CMakeLists.txt")
-    message(STATUS "  - NVSim NVM analyzer")
+    message(STATUS "  - NVSim NVM analyzer (namespaced)")
     add_subdirectory(external/nvsim)
     add_definitions(-DHAVE_NVSIM)
     set(HAVE_NVSIM ON)
 endif()
 
-# McPAT for power modeling (includes CACTI)
+# McPAT for power modeling (uses bundled CACTI 6.5-P)
+# Note: McPAT has API dependencies on CACTI 6.5-P internal structures
+# (TechnologyParameter::DeviceType, etc.) that differ from CACTI 7.0.
+# PIMID uses CACTI 7.0 separately for subarray characterization.
 if(EXISTS "${PROJECT_SOURCE_DIR}/external/mcpat/CMakeLists.txt")
-    message(STATUS "  - McPAT power analyzer")
+    message(STATUS "  - McPAT power analyzer (with bundled CACTI 6.5-P)")
     add_subdirectory(external/mcpat)
     add_definitions(-DHAVE_MCPAT)
     set(HAVE_MCPAT ON)
-    # McPAT includes CACTI - enable CACTI support via McPAT
-    if(NOT HAVE_CACTI)
-        message(STATUS "  - CACTI SRAM/cache analyzer (via McPAT)")
-        add_definitions(-DHAVE_CACTI)
-        set(HAVE_CACTI ON)
-        set(CACTI_VIA_MCPAT ON)
-    endif()
+endif()
+
+# Garnet NoC simulator (extracted from gem5)
+if(EXISTS "${PROJECT_SOURCE_DIR}/external/garnet/CMakeLists.txt")
+    message(STATUS "  - Garnet NoC simulator (extracted from gem5)")
+    add_subdirectory(external/garnet)
+    set(HAVE_GARNET ON)
 endif()
 
 # Options
@@ -101,7 +100,7 @@ option(BUILD_PLUGINS "Build plugin system" ON)
 option(BUILD_TOOLS "Build configuration tools" ON)
 option(BUILD_EXAMPLES "Build example plugins" ON)
 
-# Source files
+# Source files - NEW PATHS
 set(PIMID_SOURCES
     # Common
     src/common/simulation_engine.cpp
@@ -123,37 +122,41 @@ set(PIMID_SOURCES
     # Communication
     src/communication/socket_comm.cpp
 
-    # Memory models
-    memory_models/src/memory_model.cpp
-    memory_models/src/dram_model.cpp
-    memory_models/src/sram_model.cpp
-    memory_models/src/nvm_model.cpp
-    memory_models/src/sttmram_model.cpp
-    memory_models/src/pcm_model.cpp
-    memory_models/src/reram_model.cpp
-    memory_models/src/ramulator_wrapper.cpp
-    memory_models/src/cacti_wrapper.cpp
-    memory_models/src/nvsim_wrapper.cpp
+    # Memory models - NEW PATHS
+    src/memory/memory_model.cpp
+    src/memory/dram_model.cpp
+    src/memory/sram_model.cpp
+    src/memory/nvm_model.cpp
+    src/memory/sttmram_model.cpp
+    src/memory/pcm_model.cpp
+    src/memory/reram_model.cpp
+    src/memory/ramulator_wrapper.cpp
+    src/memory/cacti_wrapper.cpp
+    src/memory/nvsim_wrapper.cpp
 
-    # PIM extensions for Ramulator
-    memory_models/src/pim_bandwidth_tracker.cpp
-    memory_models/src/internal_dram_network.cpp
-    memory_models/src/internal_memory_network.cpp
-    memory_models/src/multi_instance_garnet_network.cpp
-    memory_models/src/pim_controller_plugin.cpp
+    # PIM extensions
+    src/memory/pim_bandwidth_tracker.cpp
+    src/memory/internal_dram_network.cpp
+    src/memory/internal_memory_network.cpp
+    src/memory/multi_instance_garnet_network.cpp
+    src/memory/pim_controller_plugin.cpp
 
     # DRAM architecture specifications
     memory/dram_architecture.cpp
 
-    # Network (includes GARNET integration)
-    network_models/src/network_model.cpp
-    network_models/src/garnet_detailed.cpp
+    # Network - NEW PATHS
+    src/network/network_model.cpp
+    src/network/garnet_detailed.cpp
+    src/network/garnet_wrapper.cpp
 
-    # Power
-    power_models/src/power_model.cpp
-    power_models/src/mcpat_model.cpp
-    power_models/src/mcpat_wrapper.cpp
-    power_models/src/power_model_manager.cpp
+    # Power - NEW PATHS
+    src/power/power_model.cpp
+    src/power/mcpat_model.cpp
+    src/power/mcpat_wrapper.cpp
+    src/power/power_model_manager.cpp
+
+    # Model registry - NEW PATH
+    src/model_registry.cpp
 
     # Address translation
     src/address_translation/pe_placement.cpp
@@ -180,14 +183,6 @@ set(PIMID_PLUGIN_SOURCES
     src/plugin/scheduler_plugin.cpp
 )
 
-# Configuration system sources (MOVED TO PIMID_SOURCES - see above)
-# ConfigManager is now part of pimid_lib to resolve linkage issues
-# set(PIMID_CONFIG_SOURCES
-#     src/config/config_schema.cpp
-#     src/config/config_validator.cpp
-#     src/config/config_manager.cpp
-# )
-
 # PIMID core library
 add_library(pimid_lib STATIC ${PIMID_SOURCES})
 target_link_libraries(pimid_lib
@@ -205,17 +200,30 @@ if(HAVE_RAMULATOR)
     target_link_libraries(pimid_lib ramulator)
 endif()
 
-if(HAVE_CACTI AND NOT CACTI_VIA_MCPAT)
-    target_link_libraries(pimid_lib cacti)
+if(HAVE_CACTI7)
+    # Link CACTI 7.0 for subarray characterization
+    target_link_libraries(pimid_lib cacti7)
+    # Add CACTI 7.0 include directories specifically for pimid_lib
+    target_include_directories(pimid_lib PRIVATE ${PROJECT_SOURCE_DIR}/external/cacti)
 endif()
-# Note: When CACTI is via McPAT, linking to mcpat handles CACTI
 
 if(HAVE_NVSIM)
-    target_link_libraries(pimid_lib nvsim)
+    target_link_libraries(pimid_lib nvsim_ns)  # Namespaced NVSim library
 endif()
 
 if(HAVE_MCPAT)
     target_link_libraries(pimid_lib mcpat)
+endif()
+
+# Garnet NoC simulator (extracted from gem5)
+if(HAVE_GARNET)
+    target_link_libraries(pimid_lib garnet)
+    target_include_directories(pimid_lib PRIVATE
+        ${PROJECT_SOURCE_DIR}/external/garnet/src
+        ${PROJECT_SOURCE_DIR}/external/garnet/include
+        ${PROJECT_SOURCE_DIR}/external/garnet/include/gem5_compat
+    )
+    add_definitions(-DHAVE_GARNET)
 endif()
 
 # Plugin system library
@@ -227,37 +235,6 @@ if(BUILD_PLUGINS)
     )
 endif()
 
-# Configuration system library (NO LONGER NEEDED - ConfigManager moved to pimid_lib)
-# if(BUILD_PLUGINS AND yaml-cpp_FOUND)
-#     add_library(pimid_config SHARED ${PIMID_CONFIG_SOURCES})
-#     target_link_libraries(pimid_config
-#         pimid_lib
-#         pimid_plugin
-#         yaml-cpp
-#     )
-# endif()
-
-# Host simulator executable
-add_executable(pimid_host src/host_main.cpp)
-target_link_libraries(pimid_host pimid_lib)
-if(BUILD_PLUGINS)
-    target_link_libraries(pimid_host pimid_plugin)
-endif()
-
-# Device simulator executable
-add_executable(pimid_device src/device_main.cpp)
-target_link_libraries(pimid_device pimid_lib)
-if(BUILD_PLUGINS)
-    target_link_libraries(pimid_device pimid_plugin)
-endif()
-
-# Standalone simulator (single-process mode for debugging)
-add_executable(pimid_standalone src/standalone_main_new.cpp)
-target_link_libraries(pimid_standalone pimid_lib)
-if(BUILD_PLUGINS)
-    target_link_libraries(pimid_standalone pimid_plugin)
-endif()
-
 # Main PIMID binary - unified entry point for all simulation modes
 # Supports: standalone, host, device, and host/device co-simulation
 add_executable(pimid src/standalone_main_unified.cpp)
@@ -266,17 +243,8 @@ if(BUILD_PLUGINS)
     target_link_libraries(pimid pimid_plugin)
 endif()
 
-# PIM Simulator command-line tool (config-driven simulation)
-# NOTE: Standalone tool, doesn't link against pimid_lib to avoid external dependencies
-add_executable(pimid_sim
-    ../test/tools/pimid_sim.cpp
-    memory/dram_architecture.cpp
-)
-target_compile_options(pimid_sim PRIVATE -std=c++17)
-target_link_libraries(pimid_sim Threads::Threads)
-
 # Install targets
-install(TARGETS pimid_lib pimid_host pimid_device pimid_standalone pimid pimid_sim
+install(TARGETS pimid_lib pimid
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
@@ -285,7 +253,9 @@ install(TARGETS pimid_lib pimid_host pimid_device pimid_standalone pimid pimid_s
 install(DIRECTORY include/ DESTINATION include/pimid)
 install(DIRECTORY configs/ DESTINATION share/pimid/configs)
 
-# Testing and Benchmarks moved to root level CMakeLists.txt
+# Test executables - now at project root level in tests/pimid/
+# Tests are built via the root-level CMakeLists.txt
+# The test source files have been moved to ../tests/pimid/
 
 # Documentation
 find_package(Doxygen)
@@ -312,4 +282,20 @@ message(STATUS "  C++ compiler: ${CMAKE_CXX_COMPILER}")
 message(STATUS "  C++ flags: ${CMAKE_CXX_FLAGS}")
 message(STATUS "  Install prefix: ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "  YAML-CPP found: ${yaml-cpp_FOUND}")
+message(STATUS "  External models:")
+if(HAVE_RAMULATOR)
+    message(STATUS "    - Ramulator2: YES")
+endif()
+if(HAVE_CACTI7)
+    message(STATUS "    - CACTI 7.0: YES")
+endif()
+if(HAVE_NVSIM)
+    message(STATUS "    - NVSim: YES (namespaced)")
+endif()
+if(HAVE_MCPAT)
+    message(STATUS "    - McPAT: YES (with bundled CACTI 6.5-P)")
+endif()
+if(HAVE_GARNET)
+    message(STATUS "    - Garnet: YES")
+endif()
 message(STATUS "")

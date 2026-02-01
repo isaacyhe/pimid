@@ -60,6 +60,11 @@ struct InstrFuncPtrs {  // NOLINT(whitespace)
 #define FPTR_NOP (2L)
 #define FPTR_RETRY (3L)
 
+// Forward declarations for type checking without RTTI
+class TimingCore;
+class OOOCore;
+class EventRecorder;
+
 //Generic core class
 
 class Core : public GlobAlloc {
@@ -85,6 +90,16 @@ class Core : public GlobAlloc {
         virtual void join() {}
 
         virtual InstrFuncPtrs GetFuncPtrs() = 0;
+
+        // Virtual type checks for use without RTTI (Pin 4.x requires -fno-rtti)
+        virtual TimingCore* asTimingCore() { return nullptr; }
+        virtual OOOCore* asOOOCore() { return nullptr; }
+
+        // Virtual contention simulation interface (returns false if not supported)
+        virtual bool hasContentionSim() const { return false; }
+        virtual EventRecorder* getEventRecorder() { return nullptr; }
+        virtual void cSimStart() {}
+        virtual void cSimEnd() {}
 };
 
 #endif  // CORE_H_

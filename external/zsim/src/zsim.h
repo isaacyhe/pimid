@@ -38,6 +38,7 @@ class Scheduler;
 class AggregateStat;
 class StatsBackend;
 class ProcessTreeNode;
+class GarnetNetwork;
 class ProcessStats;
 class ProcStats;
 class EventQueue;
@@ -182,6 +183,9 @@ struct GlobSimInfo {
     // Trace-driven simulation (no cores)
     bool traceDriven;
     TraceDriver* traceDriver;
+
+    // Garnet network for NoC simulation (PIMID integration)
+    GarnetNetwork* garnetNetwork;
 };
 
 

@@ -1,0 +1,130 @@
+# PIMID Configuration: 4x4 Garnet Mesh with 16 STT-MRAM Banks
+# Each bank has an in-order core PE
+# Network: Garnet-based NoC with McPAT power modeling
+
+benchmark:
+  name: "Garnet_4x4_STTMRAM_16Banks"
+  description: "4x4 mesh NoC with 16 STT-MRAM banks, in-order cores via ZSim model"
+  workload_type: "synthetic"
+
+# Memory configuration - 16 STT-MRAM banks
+memory:
+  technology: "STT_MRAM"
+
+  hierarchy:
+    num_banks: 16
+    num_subarrays_per_bank: 8
+    bank_size_mb: 64  # 64MB per bank = 1GB total
+
+  # STT-MRAM timing parameters (from NVSim characterization)
+  timing:
+    subarray_read_ns: 7.0       # STT-MRAM read latency
+    subarray_write_ns: 25.0     # STT-MRAM write latency (asymmetric)
+    inner_bank_htree_ns: 7.3    # H-tree interconnect within bank
+    row_buffer_ns: 2.0
+
+  # STT-MRAM energy parameters
+  energy:
+    read_energy_pj: 120.0
+    write_energy_pj: 450.0      # Higher write energy
+    leakage_power_mw: 0.5
+
+# Network-on-Chip configuration (Garnet-based)
+# 4x4 mesh = 16 nodes, one per bank
+noc:
+  topology: "MESH_2D"
+  num_rows: 4
+  num_cols: 4
+
+  # Virtual channels and networks
+  virtual_channels_per_vn: 4
+  virtual_networks: 3           # request, response, data
+
+  # Link parameters
+  link_width_bytes: 16          # 128-bit links
+  link_latency: 1               # 1 cycle per link
+
+  # Router parameters
+  router_latency: 1             # Single-cycle router
+  input_buffer_depth: 4         # 4 flit buffers per VC
+
+  # Routing
+  routing: "XY"                 # Dimension-ordered routing
+
+# Processing element configuration - 16 in-order cores
+processing_element:
+  type: "in_order_core"         # ZSim-style in-order core model
+  placement_level: "BANK"       # One PE per bank
+  num_pes: 16                   # 16 PEs for 16 banks
+
+  # Core microarchitecture (ZSim ALU core parameters)
+  pipeline:
+    stages: 5                   # 5-stage in-order pipeline
+    issue_width: 1              # Single-issue
+    fetch_decode_ns: 2.0
+    execute_compare_ns: 1.0
+    execute_alu_ns: 1.0
+    memory_access_ns: 1.0
+    writeback_ns: 0.5
+    branch_penalty_ns: 3.0
+    branch_prediction_accuracy: 0.75
+
+  # Register file
+  register_file:
+    num_int_regs: 32
+    num_fp_regs: 32
+
+  # Local scratchpad (optional)
+  scratchpad:
+    enabled: true
+    size_kb: 16                 # 16KB scratchpad per PE
+    latency_cycles: 1
+
+  # Energy parameters (22nm technology)
+  energy:
+    fetch_decode_pj: 10.0
+    alu_pj: 5.0
+    branch_pj: 8.0
+    register_access_pj: 2.0
+
+# Power modeling configuration
+power:
+  # McPAT technology parameters
+  technology_node_nm: 22
+  temperature_k: 350            # ~77°C
+
+  # Enable activity-based power from Garnet
+  use_garnet_activity: true
+
+  # Enable McPAT NoC power model
+  use_mcpat_noc: true
+
+# Simulation control
+simulation:
+  max_cycles: 1000000           # 1M cycles max
+  warmup_cycles: 10000          # 10K warmup cycles
+
+  enable_power_modeling: true
+  enable_detailed_stats: true
+
+  # Execution model
+  execution_model: "analytical" # analytical or zsim
+
+  # For ZSim-based execution (standalone mode)
+  zsim:
+    config_template: "configs/zsim/inorder_core.cfg"
+    use_pin: false              # Set true for pin-based execution
+
+# Workload configuration (synthetic for sim mode)
+workload:
+  type: "synthetic"
+  data_size_mb: 256             # 256MB working set
+  compute_intensity: 10         # 10 ops per byte
+  locality: 0.8                 # 80% local accesses
+
+# Output configuration
+output:
+  stats_file: "results/garnet_sttmram_4x4_16banks_stats.txt"
+  detailed_log: "results/garnet_sttmram_4x4_16banks_detailed.log"
+  power_report: "results/garnet_sttmram_4x4_16banks_power.txt"
+  summary_format: "table"

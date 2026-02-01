@@ -40,6 +40,9 @@
 #include "formula.h"
 #include <math.h>
 
+namespace nvsim {
+
+
 OutputDriver::OutputDriver() : FunctionUnit(){
 	initialized = false;
 	invalid = false;
@@ -299,3 +302,5 @@ OutputDriver & OutputDriver::operator=(const OutputDriver &rhs) {
 
 	return *this;
 }
+
+} // namespace nvsim

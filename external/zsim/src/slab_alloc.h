@@ -96,7 +96,7 @@ class SlabAlloc {
         Slab* curSlab;
         g_vector<Slab*> freeList;
         uint32_t liveSlabs;
-        mutex freeLock;  // used because slab frees may be concurrent
+        zsim_mutex freeLock;  // used because slab frees may be concurrent
 
     public:
         SlabAlloc() : curSlab(nullptr), liveSlabs(0) {

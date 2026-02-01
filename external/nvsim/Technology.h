@@ -43,6 +43,9 @@
 
 using namespace std;
 
+
+
+namespace nvsim {
 class Technology {
 public:
 	Technology();
@@ -83,4 +86,5 @@ public:
 	double capPolywire;	/* Poly wire capacitance, Unit: F/m */
 };
 
+} // namespace nvsim
 #endif /* TECHNOLOGY_H_ */

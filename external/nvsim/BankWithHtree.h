@@ -40,6 +40,9 @@
 
 #include "Bank.h"
 
+namespace nvsim {
+
+
 class BankWithHtree: public Bank {
 public:
 	BankWithHtree();
@@ -77,4 +80,5 @@ public:
 	double * lengthVerticalWire;	/* The length of vertical wires on level x, Unit: m */
 };
 
+} // namespace nvsim
 #endif /* BANKWITHHTREE_H_ */

@@ -153,6 +153,9 @@ class IdealLRUPartReplPolicy : public PartReplPolicy {
             }
         }
 
+        // Override type check for use without RTTI (Pin 4.x requires -fno-rtti)
+        IdealLRUPartReplPolicy* asIdealLRUPartReplPolicy() override { return this; }
+
         void initStats(AggregateStat* parentStat) {
             AggregateStat* rpStat = new AggregateStat();
             rpStat->init("part", "IdealLRUPart replacement policy stats");

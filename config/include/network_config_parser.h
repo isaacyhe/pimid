@@ -8,8 +8,9 @@
 
 #include <string>
 #include <yaml-cpp/yaml.h>
-#include "memory_models/include/internal_dram_network.h"
-#include "external_models/include/external_model_interface.h"
+#include "memory/internal_dram_network.h"
+#include "external_model_interface.h"
+#include "network/network_model.h"
 
 namespace pimid {
 
@@ -109,6 +110,35 @@ private:
     static NetworkLevelConfig parseNetworkLevel(
         const YAML::Node& level_node,
         int level_num);
+
+    /**
+     * @brief Parse NoC configuration for Garnet network model
+     *
+     * Parses the 'noc:' section from YAML config file:
+     *   noc:
+     *     topology: "MESH_2D"
+     *     num_rows: 4
+     *     num_cols: 4
+     *     virtual_channels_per_vn: 4
+     *     virtual_networks: 3
+     *     link_width_bytes: 16
+     *     link_latency: 1
+     *     router_latency: 1
+     *     input_buffer_depth: 4
+     *     routing: "XY"
+     *
+     * @param config_file Path to YAML configuration file
+     * @return NetworkConfig for Garnet wrapper
+     */
+    static NetworkConfig parseNoCConfig(const std::string& config_file);
+
+    /**
+     * @brief Parse NoC configuration from YAML node
+     *
+     * @param noc_node YAML node containing 'noc' section
+     * @return NetworkConfig for Garnet wrapper
+     */
+    static NetworkConfig parseNoCNode(const YAML::Node& noc_node);
 };
 
 } // namespace pimid

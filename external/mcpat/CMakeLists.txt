@@ -1,10 +1,16 @@
 # McPAT CMake build configuration
 # McPAT - An Integrated Power, Area, and Timing Modeling Framework for Multicore Architectures
+#
+# Note: McPAT uses its bundled CACTI 6.5-P for cache/memory modeling.
+# CACTI 7.0 has API differences (DeviceType nesting, etc.) that require
+# code modifications to McPAT to use directly. For now, we keep using
+# the bundled version for McPAT while PIMID's cacti_wrapper can use
+# either CACTI 7.0 (for standalone subarray characterization) or CACTI 6.5.
 
 cmake_minimum_required(VERSION 3.10)
 project(mcpat CXX)
 
-# CACTI sources (McPAT depends on CACTI)
+# CACTI sources (McPAT's bundled CACTI 6.5-P)
 set(CACTI_SOURCES
     cacti/arbiter.cc
     cacti/area.cc
@@ -61,7 +67,10 @@ target_compile_options(mcpat PRIVATE
 )
 
 # Include directories
-target_include_directories(mcpat PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/cacti
+# Use PRIVATE to prevent McPAT's bundled CACTI 6.5 from conflicting with standalone CACTI 7.0
+target_include_directories(mcpat
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cacti  # McPAT's bundled CACTI 6.5-P (PRIVATE)
 )
+
+message(STATUS "McPAT configured with bundled CACTI 6.5-P")

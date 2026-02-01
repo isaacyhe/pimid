@@ -2,214 +2,137 @@
 
 This directory contains all external simulators and modeling tools integrated into PIMID.
 
-## Included Simulators
+## Included Components
 
 ### 1. Ramulator2 (DRAM Simulator)
 - **Repository**: https://github.com/CMU-SAFARI/ramulator2
-- **Purpose**: Cycle-accurate DRAM simulation
+- **Purpose**: Cycle-accurate DRAM timing simulation
 - **Technologies**: DDR4, DDR5, LPDDR4, LPDDR5, HBM2, HBM3, GDDR6
 - **Location**: `ramulator/`
-- **Documentation**: See `ramulator/README.md`
+- **Build**: Integrated via CMake (auto-built with PIMID)
 
-### 2. CACTI (SRAM/Cache Modeling)
+### 2. CACTI 7.0 (SRAM/Cache Characterization)
 - **Repository**: https://github.com/HewlettPackard/cacti
 - **Purpose**: Cache and memory access time, area, and power modeling
-- **Technologies**: SRAM, Cache hierarchies, DRAM
+- **Technologies**: SRAM, Cache hierarchies, subarray characterization
 - **Location**: `cacti/`
-- **Documentation**: See `cacti/README`
+- **Build**: Integrated via CMake (auto-built with PIMID)
 
 ### 3. NVSim (Non-Volatile Memory Simulator)
 - **Repository**: https://github.com/SEAL-UCSB/NVSim
 - **Purpose**: Performance, energy, and area estimation for NVM
-- **Technologies**: STT-RAM, PCM, ReRAM, FBDRAM, NAND Flash
+- **Technologies**: STT-MRAM, PCM, ReRAM, NAND Flash
 - **Location**: `nvsim/`
-- **Documentation**: See `nvsim/README`
+- **Note**: **Namespaced** (`nvsim::`) to avoid symbol collision with CACTI
+- **Build**: Integrated via CMake (auto-built with PIMID)
 
 ### 4. McPAT (Power Modeling)
 - **Repository**: https://github.com/HewlettPackard/mcpat
 - **Purpose**: Integrated power, area, and timing modeling
 - **Components**: Cores, caches, NoCs, memory controllers
 - **Location**: `mcpat/`
-- **Documentation**: See `mcpat/README`
-- **Note**: Includes CACTI-P (enhanced CACTI for power)
+- **Note**: Uses **bundled CACTI 6.5-P** (API compatibility with McPAT internals)
+- **Build**: Integrated via CMake (auto-built with PIMID)
 
-### 5. ZSim (CPU Simulator)
-- **Repository**: https://github.com/s5z/zsim
-- **Purpose**: Fast and scalable x86-64 multicore simulator
-- **Features**: Cycle-accurate, memory hierarchy modeling, fast-forward mode
+### 5. Garnet (Network-on-Chip Simulator)
+- **Origin**: Extracted from gem5
+- **Purpose**: Detailed NoC simulation with virtual channels, routing, flow control
+- **Topologies**: Mesh, H-Tree, Crossbar, Ring
+- **Location**: `garnet/`
+- **Note**: **Standalone** - no gem5 dependency, includes gem5 compatibility headers
+- **Build**: Integrated via CMake (auto-built with PIMID)
+
+### 6. ZSim (Workload Execution)
+- **Repository**: https://github.com/s5z/zsim (modified)
+- **Purpose**: Fast x86-64 multicore simulation for workload execution
+- **Features**: Cycle-accurate, memory hierarchy, fast-forward mode
 - **Location**: `zsim/`
-- **Documentation**: See `zsim/README.md`
-- **Special**: **Upgraded to support Intel Pin 3.x** - See `zsim/PIN3_UPGRADE.md`
+- **Requires**: **Intel PIN 4.1** (see below)
+- **Build**: `cd zsim && scons -j$(nproc)`
 
-### 6. gem5 (System Simulator with GARNET)
-- **Repository**: https://github.com/gem5/gem5
-- **Purpose**: Full-system computer architecture simulator
-- **PIMID Use**: GARNET 2.0 network-on-chip simulator
-- **Location**: `gem5/` (GARNET at `gem5/src/mem/ruby/network/garnet/`)
-- **Documentation**: See `gem5/README`
+### 7. Intel PIN (Optional)
+- **Purpose**: Dynamic binary instrumentation for ZSim
+- **Version**: **PIN 4.1** (pin-external-4.1-99687-gd9b8f822c-gcc-linux)
+- **Location**: `pin/` (symlink to actual installation)
+- **Required for**: `pimid --mode standalone` only
+- **Not required for**: `pimid --mode sim` (config-driven simulation)
 
 ## Integration Status
 
-| Simulator | Status | PIMID Integration | Notes |
-|-----------|--------|-------------------|-------|
-| Ramulator2 | ✅ Added | Ready | Latest version with modern DRAM standards |
-| CACTI | ✅ Added | Ready | For SRAM modeling |
-| NVSim | ✅ Added | Ready | For STT-MRAM and other NVM |
-| McPAT | ✅ Added | Ready | System-wide power modeling |
-| ZSim | ✅ Added + Upgraded | Ready | **Pin 3.x compatible (Ubuntu 24.04 ready)** |
-| gem5/GARNET | ✅ Added | Ready | Network-on-chip simulation |
-
-## Build Instructions
-
-### Prerequisites
-
-Each simulator has its own build requirements. Common dependencies:
-- GCC/G++ ≥ 7.0 or Clang ≥ 6.0
-- Make or SCons
-- Python 3.x (for some tools)
-- Various libraries (see individual READMEs)
-
-### ZSim Special Requirements
-
-ZSim requires Intel Pin:
-- **Pin 2.x**: Download Pin 2.14 from Intel (legacy support for Ubuntu 18.04)
-- **Pin 3.x**: Download Pin 3.28 or later (**RECOMMENDED for Ubuntu 20.04+**, compatibility patch applied)
-
-Set the `PINPATH` environment variable:
-```bash
-export PINPATH=/path/to/intel-pin
-```
-
-See `zsim/PIN3_UPGRADE.md` for details on Pin 3.x support.
-
-### Building Individual Simulators
-
-#### Ramulator2
-```bash
-cd ramulator
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
-```
-
-#### CACTI
-```bash
-cd cacti
-make -j$(nproc)
-```
-
-#### NVSim
-```bash
-cd nvsim
-make -j$(nproc)
-```
-
-#### McPAT
-```bash
-cd mcpat
-make -j$(nproc)
-```
-
-#### ZSim (with Pin 3.x)
-```bash
-cd zsim
-export PINPATH=/path/to/pin-3.28  # Or pin-2.14
-scons -j$(nproc)
-```
-
-#### gem5 (for GARNET)
-```bash
-cd gem5
-# gem5 uses SCons
-scons build/X86/gem5.opt -j$(nproc)
-# Or for fast build:
-scons build/X86/gem5.fast -j$(nproc)
-```
+| Component | Version | Build | Notes |
+|-----------|---------|-------|-------|
+| Ramulator2 | Latest | CMake | Auto-built |
+| CACTI | 7.0 | CMake | Auto-built |
+| NVSim | Namespaced | CMake | Auto-built, avoids CACTI collision |
+| McPAT | 1.3 | CMake | Auto-built with bundled CACTI 6.5-P |
+| Garnet | Extracted | CMake | Auto-built, standalone |
+| ZSim | Modified | SCons | Manual build required |
+| PIN | 4.1 | N/A | User-provided (optional) |
 
 ## PIMID Integration Points
 
-### Memory Models
-- **DRAM**: `pimid/include/memory_models/dram_model.h` → `ramulator/`
-- **SRAM**: `pimid/include/memory_models/sram_model.h` → `cacti/`
-- **NVM**: `pimid/include/memory_models/nvm_model.h` → `nvsim/`
+### Memory Models (`src/memory/`, `include/memory/`)
+- **DRAM**: `ramulator_wrapper.cpp` → `ramulator/`
+- **SRAM**: `cacti_wrapper.cpp` → `cacti/`
+- **NVM**: `nvsim_wrapper.cpp` → `nvsim/`
 
-### CPU Simulation
-- **Host Engine**: `pimid/include/host_engine/host_engine.h` → `zsim/`
-- **Device Engine**: `pimid/include/device_engine/device_engine.h` → `zsim/`
+### Network Models (`src/network/`, `include/network/`)
+- **Garnet NoC**: `garnet_wrapper.cpp` → `garnet/`
 
-### Network Modeling
-- **Network**: `pimid/include/network/network_model.h` → `gem5/src/mem/ruby/network/garnet/`
+### Power Models (`src/power/`, `include/power/`)
+- **McPAT**: `mcpat_wrapper.cpp` → `mcpat/`
 
-### Power Modeling
-- **Power**: `pimid/include/power/power_model.h` → `mcpat/`
+## Building
 
-## Version Information
-
-All simulators are tracked as git submodules. To check versions:
+All external models (except ZSim/PIN) are built automatically with PIMID:
 
 ```bash
-cd /path/to/pimid-dev
-git submodule status
+cd pimid
+mkdir build && cd build
+cmake .. && make -j$(nproc)
 ```
 
-To update to latest versions:
+### Building ZSim (Optional)
+
+Only needed for `--mode standalone`:
 
 ```bash
-git submodule update --remote --recursive
+# Set up PIN first
+export PINPATH=/path/to/pin-4.1
+
+# Build ZSim
+cd pimid/external/zsim
+scons -j$(nproc)
 ```
+
+### Setting up PIN (Optional)
+
+```bash
+cd pimid/external
+wget https://software.intel.com/sites/landingpage/pintool/downloads/pin-external-4.1-99687-gd9b8f822c-gcc-linux.tar.gz
+tar xzf pin-external-4.1-99687-gd9b8f822c-gcc-linux.tar.gz
+ln -s pin-external-4.1-99687-gd9b8f822c-gcc-linux pin
+```
+
+## CACTI Version Notes
+
+PIMID uses **two versions of CACTI**:
+
+1. **CACTI 7.0** (`external/cacti/`): Used by PIMID's `cacti_wrapper` for standalone SRAM/subarray characterization. Modern API with improved accuracy.
+
+2. **CACTI 6.5-P** (`external/mcpat/cacti/`): Bundled with McPAT. Required for McPAT's internal power calculations due to API dependencies (`TechnologyParameter::DeviceType`, etc.).
+
+This separation avoids API conflicts while leveraging the strengths of both versions.
 
 ## Licensing
 
-Each external tool maintains its own license:
-- **Ramulator2**: MIT License
-- **CACTI**: HP Labs License
-- **NVSim**: Custom License (see NVSim/README)
-- **McPAT**: HP Labs License
-- **ZSim**: GPL-2.0
-- **gem5**: BSD License
+| Component | License |
+|-----------|---------|
+| Ramulator2 | MIT |
+| CACTI | HP Labs |
+| NVSim | Custom (see nvsim/README) |
+| McPAT | HP Labs |
+| Garnet | BSD (gem5) |
+| ZSim | GPL-2.0 |
 
-PIMID itself is licensed under GPL-2.0.
-
-## Citations
-
-If you use PIMID with these simulators, please cite both PIMID and the respective tools:
-
-### Ramulator2
-```bibtex
-@article{kim2015ramulator,
-  title={Ramulator: A fast and extensible DRAM simulator},
-  author={Kim, Yoongu and Yang, Weikun and Mutlu, Onur},
-  journal={IEEE Computer Architecture Letters},
-  year={2015}
-}
-```
-
-### ZSim
-```bibtex
-@inproceedings{sanchez2013zsim,
-  title={ZSim: Fast and accurate microarchitectural simulation of thousand-core systems},
-  author={Sanchez, Daniel and Kozyrakis, Christos},
-  booktitle={ISCA},
-  year={2013}
-}
-```
-
-### gem5/GARNET
-```bibtex
-@article{binkert2011gem5,
-  title={The gem5 simulator},
-  author={Binkert, Nathan and others},
-  journal={ACM SIGARCH Computer Architecture News},
-  year={2011}
-}
-```
-
-## Support
-
-For issues specific to:
-- **PIMID integration**: See main PIMID repository
-- **Individual simulators**: See their respective GitHub repositories
-
-## Acknowledgments
-
-PIMID gratefully acknowledges these excellent open-source projects that make comprehensive PIM simulation possible.
+PIMID itself is GPL-2.0.

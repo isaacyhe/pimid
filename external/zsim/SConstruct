@@ -4,14 +4,7 @@ from os.path import join as joinpath
 useIcc = False
 #useIcc = True
 
-# Command-line options for user control
-AddOption('--pin-version',
-          dest='pin_version',
-          type='string',
-          nargs=1,
-          action='store',
-          metavar='VERSION',
-          help='Manually specify PIN version (2 or 3). If not specified, version is auto-detected.')
+# PIN 4.1 ONLY - No support for PIN 2.x or 3.x
 
 def buildSim(cppFlags, dir, type, pgo=None):
     ''' Build the simulator with a specific base buid dir and config type'''
@@ -40,27 +33,59 @@ def buildSim(cppFlags, dir, type, pgo=None):
     #env['CXX'] = 'g++ -flto -flto-report -fuse-linker-plugin'
     #env['CC'] = 'gcc -flto'
     #env["LINKFLAGS"] = " -O3 -finline "
-    if useIcc:
+
+    # Pin 4.x native mode - use Pin's compiler wrapper for full compatibility
+    usePin4Native = os.environ.get("ZSIM_PIN4_NATIVE", "0") == "1"
+    # Legacy options (less reliable)
+    useClang = os.environ.get("ZSIM_USE_CLANG", "0") == "1"
+    useMusl = os.environ.get("ZSIM_USE_MUSL", "0") == "1"
+
+    if usePin4Native:
+        # Use Pin 4.x's pin-g++ compiler wrapper - this is the recommended approach
+        # pin-g++ sets up the correct musl/libc++ environment automatically
+        print("Using Pin 4.x native mode with pin-g++ compiler")
+    elif useClang:
+        env['CC'] = 'clang'
+        env['CXX'] = 'clang++'
+        env["CPPFLAGS"] = env["CPPFLAGS"].replace("-fabi-version=2", "")
+        env["CPPFLAGS"] = env["CPPFLAGS"].replace("-D_GLIBCXX_USE_CXX11_ABI=0", "")
+        print("Using clang with libc++ for Pin 4.x compatibility")
+    elif useMusl:
+        env['CC'] = 'musl-gcc'
+        env['CXX'] = 'musl-gcc'
+        env["LINKFLAGS"] = " -lstdc++ "
+        print("Using musl-gcc for Pin 4.x compatibility")
+    elif useIcc:
         env['CC'] = 'icc'
         env['CXX'] = 'icpc -ipo'
 
-    # Required paths
+    # Required paths - PIN 4.1 ONLY
+    ROOT = Dir('.').abspath
+
+    # First check if PINPATH is set, then check for bundled PIN in external/pin
     if "PINPATH" in os.environ:
         PINPATH = os.environ["PINPATH"]
     else:
-       print("=" * 80)
-       print("ERROR: PIN not found!")
-       print("=" * 80)
-       print("You need to define the $PINPATH environment variable with Pin's path")
-       print("")
-       print("Example:")
-       print("  export PINPATH=/path/to/pin-3.28-98749-g6643ecee5-gcc-linux")
-       print("  scons -j$(nproc)")
-       print("")
-       print("Download PIN from:")
-       print("  https://www.intel.com/content/www/us/en/developer/articles/tool/pin-a-binary-instrumentation-tool-downloads.html")
-       print("=" * 80)
-       sys.exit(1)
+        # Try bundled PIN 4.1 in external/pin
+        bundledPinPath = joinpath(ROOT, "..", "pin")
+        if os.path.exists(bundledPinPath):
+            PINPATH = os.path.realpath(bundledPinPath)
+            print("Using bundled PIN 4.1 from:", PINPATH)
+        else:
+            print("=" * 80)
+            print("ERROR: PIN 4.1 not found!")
+            print("=" * 80)
+            print("Option 1: Use bundled PIN (recommended)")
+            print("  cd pimid/external")
+            print("  ln -s /path/to/pin-external-4.1-99687-gd9b8f822c-gcc-linux pin")
+            print("")
+            print("Option 2: Set PINPATH environment variable")
+            print("  export PINPATH=/path/to/pin-external-4.1-99687-gd9b8f822c-gcc-linux")
+            print("")
+            print("Download PIN 4.1 from:")
+            print("  https://software.intel.com/sites/landingpage/pintool/downloads/pin-external-4.1-99687-gd9b8f822c-gcc-linux.tar.gz")
+            print("=" * 80)
+            sys.exit(1)
 
     # Verify PINPATH exists
     if not os.path.exists(PINPATH):
@@ -74,121 +99,76 @@ def buildSim(cppFlags, dir, type, pgo=None):
         print("=" * 80)
         sys.exit(1)
 
-    ROOT = Dir('.').abspath
-
-    # NOTE: These flags are for the 28/02/2011 2.9 PIN kit (rev39599). Older versions will not build.
-    # NOTE (dsm 10 Jan 2013): Tested with Pin 2.10 thru 2.12 as well
-    # NOTE: Original Pin flags included -fno-strict-aliasing, but zsim does not do type punning
-    # NOTE (dsm 16 Apr 2015): Update flags code to support Pin 2.14 while retaining backwards compatibility
-    # NOTE (Pin 3.x upgrade 2025): Updated to support Pin 3.x (tested with Pin 3.28+)
-    #       GetVmLock/ReleaseVmLock calls removed as they were deprecated in Pin 3.0
-    env["CPPFLAGS"] += " -g -std=c++0x -Wall -Wno-unknown-pragmas -Wno-deprecated -Wno-unused-function -Wno-catch-value -fomit-frame-pointer -fno-stack-protector"
-    env["CPPFLAGS"] += " -MMD -DBIGARRAY_MULTIPLIER=1 -DUSING_XED -DTARGET_IA32E -DHOST_IA32E -fPIC -DTARGET_LINUX"
-    # NOTE (yyf 17 Sep 2020): Enforce to use older ABI when compiled with gcc-5 or newer.
-    env["CPPFLAGS"] += " -fabi-version=2 -D_GLIBCXX_USE_CXX11_ABI=0"
-
-    # Check if user manually specified PIN version
-    user_pin_version = GetOption('pin_version')
-    detected_pin_version = None
-
-    # Pin 2.12+ kits have changed the layout of includes, detect whether we need
-    # source/include/ or source/include/pin/
-    # Pin 3.x uses source/include/pin/ structure
-    pinInclDir = joinpath(PINPATH, "source/include/")
-
-    if user_pin_version:
-        # User manually specified version
-        if user_pin_version == '2':
-            print("User specified PIN 2.x")
-            detected_pin_version = "2.x (user-specified)"
-            # Force PIN 2.x paths
-            if not os.path.exists(joinpath(pinInclDir, "pin.H")):
-                print("=" * 80)
-                print("ERROR: PIN 2.x headers not found!")
-                print("=" * 80)
-                print("You specified --pin-version=2, but PIN 2.x structure not detected.")
-                print("Checked:", joinpath(pinInclDir, "pin.H"))
-                print("")
-                print("Either:")
-                print("  1. Remove --pin-version=2 to use auto-detection")
-                print("  2. Verify you have PIN 2.x installed at:", PINPATH)
-                print("=" * 80)
-                sys.exit(1)
-        elif user_pin_version == '3':
-            print("User specified PIN 3.x")
-            detected_pin_version = "3.x (user-specified)"
-            # Force PIN 3.x paths
-            pinInclDir = joinpath(pinInclDir, "pin")
-            if not os.path.exists(joinpath(pinInclDir, "pin.H")):
-                print("=" * 80)
-                print("ERROR: PIN 3.x headers not found!")
-                print("=" * 80)
-                print("You specified --pin-version=3, but PIN 3.x structure not detected.")
-                print("Checked:", joinpath(pinInclDir, "pin.H"))
-                print("")
-                print("Either:")
-                print("  1. Remove --pin-version=3 to use auto-detection")
-                print("  2. Verify you have PIN 3.x installed at:", PINPATH)
-                print("=" * 80)
-                sys.exit(1)
+    # Pin 4.x native mode uses pin-g++ which handles everything automatically
+    if usePin4Native:
+        pinGxx = joinpath(PINPATH, "intel64/pinrt/bin/pin-g++")
+        pinGcc = joinpath(PINPATH, "intel64/pinrt/bin/pin-gcc")
+        if os.path.exists(pinGxx):
+            env['CXX'] = pinGxx
+            env['CC'] = pinGcc
+            # Pin 4.x uses C++17 and different flags
+            env["CPPFLAGS"] = cppFlags  # Reset to just optimization flags
+            env["CPPFLAGS"] += " -std=c++17 -Wall -Wno-unknown-pragmas -fno-exceptions -funwind-tables"
+            env["CPPFLAGS"] += " -fasynchronous-unwind-tables -fno-rtti -fPIC -fomit-frame-pointer -fno-stack-protector"
+            env["CPPFLAGS"] += " -DBIGARRAY_MULTIPLIER=1 -DUSING_XED -DTARGET_IA32E -DHOST_IA32E -DTARGET_LINUX"
+            env["CPPFLAGS"] += " -DPIN_CRT=1 -DPIN_RT"  # Required for Pin 4.x runtime
+            # Disable HDF5 for Pin 4.x native (no musl-compatible HDF5 available)
+            env["CPPFLAGS"] += " -DZSIM_NO_HDF5=1"
+            print("  Using pin-g++:", pinGxx)
         else:
-            print("=" * 80)
-            print("ERROR: Invalid PIN version specified!")
-            print("=" * 80)
-            print("You specified: --pin-version=" + user_pin_version)
-            print("Valid options are: 2 or 3")
-            print("")
-            print("Example:")
-            print("  scons --pin-version=3")
-            print("  scons --pin-version=2")
-            print("=" * 80)
+            print("ERROR: pin-g++ not found at", pinGxx)
             sys.exit(1)
     else:
-        # Auto-detection mode
-        if os.path.exists(joinpath(pinInclDir, "pin.H")):
-            # PIN 2.x detected
-            detected_pin_version = "2.x (auto-detected)"
-            print("Auto-detected PIN 2.x")
-        else:
-            pinInclDir = joinpath(pinInclDir, "pin")
-            if os.path.exists(joinpath(pinInclDir, "pin.H")):
-                # PIN 3.x detected
-                detected_pin_version = "3.x (auto-detected)"
-                print("Auto-detected PIN 3.x")
-            else:
-                print("=" * 80)
-                print("ERROR: Could not detect PIN version!")
-                print("=" * 80)
-                print("Could not find pin.H in", PINPATH)
-                print("Checked:")
-                print("  PIN 2.x location:", joinpath(PINPATH, "source/include/pin.H"))
-                print("  PIN 3.x location:", joinpath(PINPATH, "source/include/pin/pin.H"))
-                print("")
-                print("Please verify:")
-                print("  1. PINPATH is correct:", PINPATH)
-                print("  2. PIN is properly installed")
-                print("  3. Or manually specify version: scons --pin-version=2 or --pin-version=3")
-                print("=" * 80)
-                sys.exit(1)
+        # Standard build flags for Pin 4.x with glibc compatibility
+        env["CPPFLAGS"] += " -g -std=c++17 -Wall -Wno-unknown-pragmas -Wno-deprecated -Wno-unused-function -Wno-catch-value -fomit-frame-pointer -fno-stack-protector"
+        env["CPPFLAGS"] += " -MMD -DBIGARRAY_MULTIPLIER=1 -DUSING_XED -DTARGET_IA32E -DHOST_IA32E -fPIC -DTARGET_LINUX"
+        # ABI compatibility for PIN
+        if os.environ.get("ZSIM_USE_CLANG", "0") != "1":
+            env["CPPFLAGS"] += " -fabi-version=2 -D_GLIBCXX_USE_CXX11_ABI=0"
 
-    # Pin 2.14 changes location of XED
-    xedName = "xed2"  # used below
+    # PIN 4.x ONLY - Verify PIN 4.x structure
+    pinInclDir = joinpath(PINPATH, "source/include/pin")
+    pinrtAdaptorPath = joinpath(PINPATH, "intel64/pinrt/include/adaptor/pinrt_adaptor.PH")
+
+    if not os.path.exists(pinrtAdaptorPath):
+        print("=" * 80)
+        print("ERROR: PIN 4.x required!")
+        print("=" * 80)
+        print("This build requires Intel PIN 4.1 (or compatible 4.x version).")
+        print("Checked for PIN 4.x marker:", pinrtAdaptorPath)
+        print("")
+        print("Please download PIN 4.1 from:")
+        print("  https://software.intel.com/sites/landingpage/pintool/downloads/pin-external-4.1-99687-gd9b8f822c-gcc-linux.tar.gz")
+        print("")
+        print("Then set PINPATH:")
+        print("  export PINPATH=/path/to/pin-external-4.1-99687-gd9b8f822c-gcc-linux")
+        print("=" * 80)
+        sys.exit(1)
+
+    if not os.path.exists(joinpath(pinInclDir, "pin.H")):
+        print("=" * 80)
+        print("ERROR: PIN 4.x headers not found!")
+        print("=" * 80)
+        print("Checked:", joinpath(pinInclDir, "pin.H"))
+        print("=" * 80)
+        sys.exit(1)
+
+    detected_pin_version = "4.x"
+    print("PIN 4.x detected")
+
+    # PIN 4.x uses xed-intel64
+    xedName = "xed"
     xedPath = joinpath(PINPATH, "extras/" + xedName + "-intel64/include")
     if not os.path.exists(xedPath):
-        xedName = "xed"
-        xedPath = joinpath(PINPATH, "extras/" + xedName + "-intel64/include")
-        if not os.path.exists(xedPath):
-            print("=" * 80)
-            print("ERROR: XED library not found!")
-            print("=" * 80)
-            print("Could not find XED headers in", PINPATH)
-            print("Checked:")
-            print("  PIN 2.x location:", joinpath(PINPATH, "extras/xed2-intel64/include"))
-            print("  PIN 3.x location:", joinpath(PINPATH, "extras/xed-intel64/include"))
-            print("")
-            print("Please verify PIN installation is complete.")
-            print("=" * 80)
-            sys.exit(1)
+        print("=" * 80)
+        print("ERROR: XED library not found!")
+        print("=" * 80)
+        print("Could not find XED headers in", PINPATH)
+        print("Checked:", joinpath(PINPATH, "extras/xed-intel64/include"))
+        print("")
+        print("Please verify PIN 4.1 installation is complete.")
+        print("=" * 80)
+        sys.exit(1)
 
     # Print detected configuration
     print("-" * 80)
@@ -202,7 +182,30 @@ def buildSim(cppFlags, dir, type, pgo=None):
     env["CPPPATH"] = [xedPath, joinpath(xedPath, "xed"),  # Pin 3.x has xed subdir
             pinInclDir, joinpath(pinInclDir, "gen"),
             joinpath(PINPATH, "extras/components/include"),
-            "/usr/include/hdf5/serial"]  # Ubuntu 24.04 HDF5 location
+            "/usr/include/hdf5/serial"]  # Ubuntu HDF5 location
+
+    # Pin 4.x requires pinrt includes for pinrt_adaptor.PH
+    # Use -isystem to give lower priority than system headers to avoid conflicts
+    # with glibc. The pinrt headers are based on musl and conflict with glibc.
+    # NOTE: We DON'T add pinos/pbits - it contains errno.h that shadows system errno
+    # The QUERY_MEM_* constants from __mman.h are defined in pin_types.h instead.
+    pinrtInclDir = joinpath(PINPATH, "intel64/pinrt/include")
+    if os.path.exists(pinrtInclDir):
+        # Only add pinos and adaptor paths - they contain pinrt_adaptor.PH dependencies
+        env["CPPFLAGS"] += " -isystem " + joinpath(pinrtInclDir, "pinos")
+        env["CPPFLAGS"] += " -isystem " + joinpath(pinrtInclDir, "adaptor")
+        # DON'T add:
+        # - main pinrt include - contains full C library (stdlib.h, stdio.h, etc.)
+        # - pinos/pbits - contains errno.h that conflicts with glibc
+        # - pinos/pbits/intel64 - contains stdint.h that conflicts
+
+    # Pin 4.x requires some CRT headers (types_marker.h, os-apis.h)
+    # But the full CRT path conflicts with glibc (xlocale.h, time.h, wchar.h)
+    # Solution: Use pre-created pin_stubs directory with only non-conflicting headers
+    pinStubDir = joinpath(ROOT, "pin_stubs")
+
+    # Add pin_stubs to include path (before Pin includes, after system includes)
+    env["CPPPATH"].insert(0, pinStubDir)
 
     # Perform trace logging?
     ##env["CPPFLAGS"] += " -D_LOG_TRACE_=1"
@@ -214,59 +217,63 @@ def buildSim(cppFlags, dir, type, pgo=None):
     # The glibc_prereq warnings are not fatal but -Werror makes them so
     # env["CPPFLAGS"] += " -Werror "
 
-    # Fix for GCC 13 + PIN 3.28: define __GLIBC_PREREQ before any glibc headers
-    # This prevents the "missing binary operator" error when glibc headers
-    # check for glibc version features
-    env["CPPFLAGS"] += ' -include /usr/include/features.h '
+    # Pre-include our Pin types stub before any Pin headers
+    pinStubDir = joinpath(ROOT, "pin_stubs")
+    env["CPPFLAGS"] += ' -include ' + joinpath(pinStubDir, "pin_types.h") + ' '
 
-    # GCC 13 / PIN 3.28: just include stdint.h for basic types
-    # Don't pre-include types.h as it conflicts with LEVEL_BASE namespace types
-    env["CPPFLAGS"] += ' -include /usr/include/stdint.h '
-
-    # Define PIN_CRT to use consistent type definitions from types.h
-    # This prevents the USIZE ambiguity between global namespace and LEVEL_BASE namespace
-    # When PIN_CRT is defined, types_foundation.PH uses "using ::ADDRINT" etc.
-    # instead of redefining types, avoiding the USIZE conflict
+    # PIN_CRT resolves USIZE ambiguity - types_foundation.PH uses "using ::USIZE"
+    # instead of redefining USIZE, avoiding conflict with components/types.h
     env["CPPFLAGS"] += ' -DPIN_CRT '
-
-    # Define PIN types as macros - intel-fp.hpp is included before types_foundation.PH
-    # When types_foundation.PH does "typedef uint8_t UINT8;", it becomes
-    # "typedef uint8_t uint8_t;" which is harmless
-    env["CPPFLAGS"] += ' -DUINT8=uint8_t -DUINT16=uint16_t -DUINT32=uint32_t -DUINT64=uint64_t '
-    env["CPPFLAGS"] += ' -DINT8=int8_t -DINT16=int16_t -DINT32=int32_t -DINT64=int64_t '
 
     # Enables lib and harness to use the same info/log code,
     # but only lib uses pin locks for thread safety
     env["PINCPPFLAGS"] = " -DMT_SAFE_LOG "
 
-    # PIN-specific libraries
-    env["PINLINKFLAGS"] = " -Wl,--hash-style=sysv -Wl,-Bsymbolic -Wl,--version-script=" + joinpath(pinInclDir, "pintool.ver")
+    # PIN-specific libraries - different for Pin 4.x native vs Pin 2.x/3.x
+    if usePin4Native:
+        # Pin 4.x native mode uses pin-g++ which links automatically
+        env["PINLINKFLAGS"] = " -Wl,-Bsymbolic -Wl,--version-script=" + joinpath(pinInclDir, "pintool.ver")
+        env["PINLIBPATH"] = [joinpath(PINPATH, "intel64/lib"), joinpath(PINPATH, "extras/" + xedName + "-intel64/lib")]
+        # Pin 4.x uses different library names
+        env["PINLIBS"] = ["pin", "pinrt-adaptor-static", "xed", "pindwarf", "dwarf", "unwind-dynamic"]
+        # Non-pintool libraries - libconfig++ needs to be built with musl for Pin 4.x
+        # For now, we'll try to use a static version or disable config file support
+        env["LIBPATH"] = []
+        env["LIBS"] = []  # Will be handled specially in SConscript
+        print("  Pin 4.x native: Using Pin's runtime libraries")
+    else:
+        # Pin 4.x with glibc - add RPATH so Pin's loader can find system libraries
+        # Use custom libconfig++ built with --hash-style=both for Pin's loader compatibility
+        customLibDir = joinpath(ROOT, "lib")
+        env["PINLINKFLAGS"] = " -Wl,--hash-style=sysv -Wl,-Bsymbolic -Wl,--version-script=" + joinpath(pinInclDir, "pintool.ver")
+        env["PINLINKFLAGS"] += " -static-libstdc++ -static-libgcc"  # Static C++ runtime for Pin compatibility
+        env["PINLINKFLAGS"] += " -Wl,-rpath," + customLibDir + " -Wl,-rpath,/lib/x86_64-linux-gnu -Wl,-rpath,/usr/lib/x86_64-linux-gnu -Wl,-rpath,/usr/lib/x86_64-linux-gnu/hdf5/serial"
 
-    # To prime system libs, we include /usr/lib and /usr/lib/x86_64-linux-gnu
-    # first in lib path. In particular, this solves the issue that, in some
-    # systems, Pin's libelf takes precedence over the system's, but it does not
-    # include symbols that we need or it's a different variant (we need
-    # libelfg0-dev in Ubuntu systems)
-    env["PINLIBPATH"] = ["/usr/lib", "/usr/lib/x86_64-linux-gnu", joinpath(PINPATH, "extras/" + xedName + "-intel64/lib"),
-            joinpath(PINPATH, "intel64/lib"), joinpath(PINPATH, "intel64/lib-ext")]
+        # Put custom lib directory FIRST so our hash-style=both libconfig++ is found before system's
+        env["PINLIBPATH"] = [customLibDir, "/usr/lib", "/usr/lib/x86_64-linux-gnu", joinpath(PINPATH, "extras/" + xedName + "-intel64/lib"),
+                joinpath(PINPATH, "intel64/lib"), joinpath(PINPATH, "intel64/lib-ext")]
 
-    # Libdwarf is provided in static and shared variants, Ubuntu only provides
-    # static, and I don't want to add -R<pin path/intel64/lib-ext> because
-    # there are some other old libraries provided there (e.g., libelf) and I
-    # want to use the system libs as much as possible. So link directly to the
-    # static version of libdwarf.
+        # Use pindwarf from Pin 4.x
+        pindwarfPath = joinpath(PINPATH, "intel64/lib-ext/libdwarf.a")
+        pindwarfLib = File(pindwarfPath)
+        if not os.path.exists(pindwarfPath):
+            pindwarfLib = "pindwarf"
 
-    # Pin 2.14 uses unambiguous libpindwarf
-    pindwarfPath = joinpath(PINPATH, "intel64/lib-ext/libdwarf.a")
-    pindwarfLib = File(pindwarfPath)
-    if not os.path.exists(pindwarfPath):
-        pindwarfLib = "pindwarf"
+        env["PINLIBS"] = ["pin", "xed", pindwarfLib, "elf", "dl", "rt"]
 
-    env["PINLIBS"] = ["pin", "xed", pindwarfLib, "elf", "dl", "rt"]
-
-    # Non-pintool libraries
-    env["LIBPATH"] = []
-    env["LIBS"] = ["config++"]
+        # Non-pintool libraries - use static libconfig++ for Pin compatibility
+        env["LIBPATH"] = []
+        customStaticLib = joinpath(customLibDir, "libconfig++.a")
+        customStaticLibC = joinpath(customLibDir, "libconfig.a")
+        if os.path.exists(customStaticLib):
+            env["LIBS"] = [File(customStaticLib), File(customStaticLibC)]
+            print("  Using static libconfig++ from: " + customLibDir)
+        elif os.path.exists("/usr/lib/x86_64-linux-gnu/libconfig++.a"):
+            env["LIBS"] = [File("/usr/lib/x86_64-linux-gnu/libconfig++.a"), File("/usr/lib/x86_64-linux-gnu/libconfig.a")]
+            print("  WARNING: Using system static libconfig++ (may need -fPIC rebuild)")
+        else:
+            env["LIBS"] = ["config++"]
+            print("  WARNING: Using dynamic libconfig++ (may fail with Pin's loader)")
 
     env["LINKFLAGS"] = ""
     env["RPATH"] = []
@@ -306,12 +313,19 @@ def buildSim(cppFlags, dir, type, pgo=None):
 
     env["CPPPATH"] += ["."]
 
-    # HDF5
-    env["PINLIBPATH"] += ["/usr/lib/x86_64-linux-gnu/hdf5/serial"]  # Ubuntu 24.04
-    env["PINLIBS"] += ["hdf5", "hdf5_hl"]
+    # HDF5 - optionally disable to reduce dependencies
+    # Set ZSIM_NO_HDF5=1 to disable HDF5 support (useful for Pin 4.x compatibility)
+    noHdf5 = os.environ.get("ZSIM_NO_HDF5", "0") == "1"
+    if not usePin4Native and not noHdf5:
+        env["PINLIBPATH"] += ["/usr/lib/x86_64-linux-gnu/hdf5/serial"]  # Ubuntu 24.04
+        env["PINLIBS"] += ["hdf5", "hdf5_hl"]
+    else:
+        print("  HDF5 disabled - stats output will use text format only")
 
     # Harness needs these defined
-    env["CPPFLAGS"] += ' -DPIN_PATH="' + joinpath(PINPATH, "intel64/bin/pinbin") + '" '
+    # Use the 'pin' launcher instead of 'pinbin' directly for all Pin versions
+    # The launcher sets up LD_LIBRARY_PATH for runtime libraries (libc++, libxed, etc.)
+    env["CPPFLAGS"] += ' -DPIN_PATH="' + joinpath(PINPATH, "pin") + '" '
     env["CPPFLAGS"] += ' -DZSIM_PATH="' + joinpath(ROOT, joinpath(buildDir, "libzsim.so")) + '" '
 
     # Do PGO?

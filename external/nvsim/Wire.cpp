@@ -41,6 +41,9 @@
 #include "constant.h"
 #include <math.h>
 
+namespace nvsim {
+
+
 Wire::Wire() {
 	// TODO Auto-generated constructor stub
 	initialized = false;
@@ -819,3 +822,5 @@ Wire & Wire::operator=(const Wire &rhs) {
 
 	return *this;
 }
+
+} // namespace nvsim

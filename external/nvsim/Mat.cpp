@@ -39,6 +39,9 @@
 #include "formula.h"
 #include "global.h"
 
+namespace nvsim {
+
+
 Mat::Mat() {
 	// TODO Auto-generated constructor stub
 	initialized = false;
@@ -386,3 +389,5 @@ Mat & Mat::operator=(const Mat &rhs) {
 
 	return *this;
 }
+
+} // namespace nvsim

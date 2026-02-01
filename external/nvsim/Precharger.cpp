@@ -39,6 +39,9 @@
 #include "formula.h"
 #include "global.h"
 
+namespace nvsim {
+
+
 Precharger::Precharger() {
 	// TODO Auto-generated constructor stub
 	initialized = false;
@@ -192,3 +195,5 @@ Precharger & Precharger::operator=(const Precharger &rhs) {
 
 	return *this;
 }
+
+} // namespace nvsim

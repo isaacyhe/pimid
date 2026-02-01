@@ -42,6 +42,9 @@
 #include "BankWithoutHtree.h"
 #include "Wire.h"
 
+namespace nvsim {
+
+
 class Result {
 public:
 	Result();
@@ -71,4 +74,5 @@ public:
 	double limitLeakage;				/* The maximum allowable leakage power, Unit: W */
 };
 
+} // namespace nvsim
 #endif /* RESULT_H_ */

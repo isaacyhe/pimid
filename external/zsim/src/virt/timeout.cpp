@@ -32,6 +32,29 @@
 #include "virt/time_conv.h"
 #include "zsim.h"
 
+// Futex constants not available in musl, define from Linux kernel headers
+#ifndef FUTEX_CMD_MASK
+#define FUTEX_CMD_MASK           (~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME))
+#endif
+#ifndef FUTEX_WAIT_BITSET
+#define FUTEX_WAIT_BITSET        9
+#endif
+#ifndef FUTEX_WAKE_BITSET
+#define FUTEX_WAKE_BITSET        10
+#endif
+#ifndef FUTEX_WAIT_REQUEUE_PI
+#define FUTEX_WAIT_REQUEUE_PI    11
+#endif
+#ifndef FUTEX_CMP_REQUEUE_PI
+#define FUTEX_CMP_REQUEUE_PI     12
+#endif
+#ifndef FUTEX_PRIVATE_FLAG
+#define FUTEX_PRIVATE_FLAG       128
+#endif
+#ifndef FUTEX_CLOCK_REALTIME
+#define FUTEX_CLOCK_REALTIME     256
+#endif
+
 static struct timespec fakeTimeouts[MAX_THREADS]; //for syscalls that use timespec to indicate a timeout
 static bool inFakeTimeoutMode[MAX_THREADS];
 

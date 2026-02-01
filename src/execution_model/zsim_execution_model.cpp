@@ -10,8 +10,33 @@
 #include <sys/stat.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <libgen.h>
 
 namespace pimid {
+
+// Helper to get PIMID root directory (from executable path or environment)
+static std::string getPimidRoot() {
+    // Check environment variable first
+    const char* env_root = getenv("PIMID_ROOT");
+    if (env_root && access(env_root, F_OK) == 0) {
+        return std::string(env_root);
+    }
+
+    // Get executable path and derive root
+    char exe_path[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len != -1) {
+        exe_path[len] = '\0';
+        std::string path(dirname(exe_path));
+        size_t build_pos = path.rfind("/build");
+        if (build_pos != std::string::npos) {
+            return path.substr(0, build_pos);
+        }
+        return path;
+    }
+    return ".";
+}
 
 // -------------------------------------------------------------------------
 // ZSim Process Launcher - Handles launching ZSim as a subprocess
@@ -143,40 +168,50 @@ public:
 
 private:
     std::string findZSimPath() {
-        // Check common locations
-        std::vector<std::string> paths = {
-            "./pimid/external/zsim",
-            "../pimid/external/zsim",
-            getenv("ZSIM_PATH") ? getenv("ZSIM_PATH") : "",
-            getenv("HOME") ? std::string(getenv("HOME")) + "/zsim" : ""
-        };
-
-        for (const auto& path : paths) {
-            if (path.empty()) continue;
+        // Check environment variable first
+        const char* zsim_env = getenv("ZSIM_PATH");
+        if (zsim_env) {
             struct stat st;
-            std::string scons = path + "/SConstruct";
+            std::string scons = std::string(zsim_env) + "/SConstruct";
             if (stat(scons.c_str(), &st) == 0) {
-                return path;
+                return zsim_env;
             }
         }
+
+        // Check PIMID's external/zsim
+        std::string pimid_root = getPimidRoot();
+        std::string zsim_path = pimid_root + "/external/zsim";
+        struct stat st;
+        std::string scons = zsim_path + "/SConstruct";
+        if (stat(scons.c_str(), &st) == 0) {
+            return zsim_path;
+        }
+
         return "";
     }
 
     std::string findPinPath() {
-        // Check environment first
+        // Check environment first (PIN_HOME or PINPATH)
         const char* pin_home = getenv("PIN_HOME");
         if (pin_home) return pin_home;
+        const char* pin_path = getenv("PINPATH");
+        if (pin_path) return pin_path;
 
-        // Check common locations
+        // Check PIMID's external/pin (symlink or directory)
+        std::string pimid_root = getPimidRoot();
+        std::string pimid_pin = pimid_root + "/external/pin";
+        struct stat st;
+        if (stat((pimid_pin + "/pin").c_str(), &st) == 0) {
+            return pimid_pin;
+        }
+
+        // Check common system locations
         std::vector<std::string> paths = {
             "/opt/pin",
-            "/usr/local/pin",
-            getenv("HOME") ? std::string(getenv("HOME")) + "/pin" : ""
+            "/usr/local/pin"
         };
 
         for (const auto& path : paths) {
-            if (path.empty()) continue;
-            struct stat st;
             std::string pin_exe = path + "/pin";
             if (stat(pin_exe.c_str(), &st) == 0) {
                 return path;

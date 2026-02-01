@@ -42,6 +42,9 @@
 #include "OutputDriver.h"
 #include "typedef.h"
 
+namespace nvsim {
+
+
 class RowDecoder: public FunctionUnit {
 public:
 	RowDecoder();
@@ -74,4 +77,5 @@ public:
 	double rampInput, rampOutput;
 };
 
+} // namespace nvsim
 #endif /* ROWDECODER_H_ */

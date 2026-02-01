@@ -39,6 +39,9 @@
 #include "formula.h"
 #include "global.h"
 
+namespace nvsim {
+
+
 PredecodeBlock::PredecodeBlock() {
 	// TODO Auto-generated constructor stub
 	initialized = false;
@@ -497,3 +500,5 @@ PredecodeBlock & PredecodeBlock::operator=(const PredecodeBlock &rhs) {
 	rampOutput = rhs.rampOutput;
 	return *this;
 }
+
+} // namespace nvsim

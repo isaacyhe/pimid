@@ -41,6 +41,9 @@
 #include "macros.h"
 #include <math.h>
 
+namespace nvsim {
+
+
 MemCell::MemCell() {
 	// TODO Auto-generated constructor stub
 	memCellType         = PCRAM;
@@ -698,3 +701,5 @@ void MemCell::PrintCell()
 		cout << "Gate Coupling Ratio: " << gateCouplingRatio << endl;
 	}
 }
+
+} // namespace nvsim

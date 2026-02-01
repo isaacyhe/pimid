@@ -89,6 +89,14 @@ class Stat : public GlobAlloc {
 
         virtual ~Stat() {}
 
+        // Virtual type check for use without RTTI (Pin 4.x requires -fno-rtti)
+        virtual bool isAggregate() const { return false; }
+        virtual class AggregateStat* asAggregate() { return nullptr; }
+        virtual class ScalarStat* asScalar() { return nullptr; }
+        virtual class VectorStat* asVector() { return nullptr; }
+        virtual class Counter* asCounter() { return nullptr; }
+        virtual class VectorCounter* asVectorCounter() { return nullptr; }
+
         const char* name() const {
             assert(_name);
             return _name;
@@ -124,6 +132,10 @@ class AggregateStat : public Stat {
          */
         explicit AggregateStat(bool isRegular = false) : Stat(), _isMutable(true), _isRegular(isRegular) {}
 
+        // Override type checks for use without RTTI (Pin 4.x requires -fno-rtti)
+        bool isAggregate() const override { return true; }
+        AggregateStat* asAggregate() override { return this; }
+
         void init(const char* name, const char* desc) {
             assert(_isMutable);
             initStat(name, desc);
@@ -138,8 +150,9 @@ class AggregateStat : public Stat {
             g_vector<Stat*> newChildren;
             for (it = _children.begin(); it != _children.end(); it++) {
                 Stat* s = *it;
-                AggregateStat* as = dynamic_cast<AggregateStat*>(s);
-                if (as) {
+                // Use virtual type check instead of dynamic_cast (Pin 4.x requires -fno-rtti)
+                if (s->isAggregate()) {
+                    AggregateStat* as = s->asAggregate();
                     bool emptyChild = as->makeImmutable();
                     if (!emptyChild) newChildren.push_back(s);
                 } else {
@@ -181,6 +194,9 @@ class ScalarStat : public Stat {
     public:
         ScalarStat() : Stat() {}
 
+        // Override type check for use without RTTI (Pin 4.x requires -fno-rtti)
+        ScalarStat* asScalar() override { return this; }
+
         virtual void init(const char* name, const char* desc) {
             initStat(name, desc);
         }
@@ -194,6 +210,9 @@ class VectorStat : public Stat {
 
     public:
         VectorStat() : _counterNames(nullptr) {}
+
+        // Override type check for use without RTTI (Pin 4.x requires -fno-rtti)
+        VectorStat* asVector() override { return this; }
 
         virtual uint64_t count(uint32_t idx) const = 0;
         virtual uint32_t size() const = 0;
@@ -218,6 +237,9 @@ class Counter : public ScalarStat {
 
     public:
         Counter() : ScalarStat(), _count(0) {}
+
+        // Override type check for use without RTTI (Pin 4.x requires -fno-rtti)
+        Counter* asCounter() override { return this; }
 
         void init(const char* name, const char* desc) {
             initStat(name, desc);
@@ -255,6 +277,9 @@ class VectorCounter : public VectorStat {
 
     public:
         VectorCounter() : VectorStat() {}
+
+        // Override type check for use without RTTI (Pin 4.x requires -fno-rtti)
+        VectorCounter* asVectorCounter() override { return this; }
 
         /* Without counter names */
         virtual void init(const char* name, const char* desc, uint32_t size) {
@@ -403,6 +428,7 @@ class TextBackend : public StatsBackend {
 };
 
 
+#ifndef ZSIM_NO_HDF5
 class HDF5BackendImpl;
 
 class HDF5Backend : public StatsBackend {
@@ -413,5 +439,6 @@ class HDF5Backend : public StatsBackend {
         HDF5Backend(const char* filename, AggregateStat* rootStat, size_t bytesPerWrite, bool skipVectors, bool sumRegularAggregates);
         virtual void dump(bool buffered);
 };
+#endif  // ZSIM_NO_HDF5
 
 #endif  // STATS_H_

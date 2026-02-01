@@ -26,8 +26,10 @@
 #ifndef NETWORK_H_
 #define NETWORK_H_
 
-/* Very simple fixed-delay network model. Parses a list of delays between
- * entities, then accepts queries for roundtrip times between these entities.
+/* Network model base class and simple fixed-delay implementation.
+ *
+ * Network: Simple fixed-delay model that parses delays from a file.
+ * Derived classes (e.g., GarnetNetwork) can provide topology-aware latencies.
  * There is no contention modeling or even support for serialization latency.
  * This is a basic model that should be extended as appropriate.
  */
@@ -36,12 +38,18 @@
 #include <unordered_map>
 
 class Network {
-    private:
+    protected:
         std::unordered_map<std::string, uint32_t> delayMap;
+
+        // Protected default constructor for derived classes
+        Network() {}
 
     public:
         explicit Network(const char* filename);
-        uint32_t getRTT(const char* src, const char* dst);
+        virtual ~Network() {}
+
+        // Returns round-trip time between src and dst in cycles
+        virtual uint32_t getRTT(const char* src, const char* dst);
 };
 
 #endif  // NETWORK_H_

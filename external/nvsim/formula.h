@@ -42,6 +42,9 @@
 #include "constant.h"
 #include <math.h>
 
+namespace nvsim {
+
+
 #define MAX(a,b) (((a)> (b))?(a):(b))
 #define MIN(a,b) (((a)< (b))?(a):(b))
 
@@ -93,4 +96,5 @@ double CalculateWireCapacitance(
 		double verticalDielectic, double fringeCap);
 
 
+} // namespace nvsim
 #endif /* FORMULA_H_ */

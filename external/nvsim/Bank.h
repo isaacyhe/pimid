@@ -42,6 +42,9 @@
 #include "Mat.h"
 #include "typedef.h"
 
+namespace nvsim {
+
+
 class Bank: public FunctionUnit {
 public:
 	Bank();
@@ -85,4 +88,5 @@ public:
 	Mat mat;
 };
 
+} // namespace nvsim
 #endif /* BANK_H_ */

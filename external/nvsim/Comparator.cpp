@@ -40,6 +40,9 @@
 #include "formula.h"
 #include <math.h>
 
+namespace nvsim {
+
+
 Comparator::Comparator() {
 	initialized = false;
 	capLoad = 0;
@@ -204,3 +207,5 @@ Comparator & Comparator::operator=(const Comparator &rhs) {
 
 	return *this;
 }
+
+} // namespace nvsim

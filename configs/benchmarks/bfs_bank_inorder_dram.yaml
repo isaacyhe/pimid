@@ -53,6 +53,20 @@ processing_element:
     alu_pj: 5.0
     branch_pj: 8.0
 
+# Network-on-Chip configuration (Garnet-based)
+# Power model from McPAT
+noc:
+  topology: "MESH_2D"
+  num_rows: 2
+  num_cols: 2
+  virtual_channels_per_vn: 4
+  virtual_networks: 3  # request, response, data
+  link_width_bytes: 16
+  link_latency: 1
+  router_latency: 1
+  input_buffer_depth: 4
+  routing: "XY"
+
 # Simulation control
 simulation:
   max_cycles: 1000000000

@@ -33,19 +33,13 @@
 #include <vector>
 #include <map>
 
+// Use common VerificationStatus enum from sram_architecture.h
+#include "sram_architecture.h"
+
 namespace pimid {
 namespace memory {
 
-//=============================================================================
-// Verification Status
-//=============================================================================
-
-enum class VerificationStatus {
-    VERIFIED,    // From JEDEC specs, datasheets, or definitive sources
-    INFERRED,    // Derived from academic papers or reverse engineering
-    ESTIMATED,   // Educated guess based on typical values
-    UNKNOWN      // Not documented, placeholder value
-};
+// VerificationStatus is defined in sram_architecture.h
 
 struct VerifiedValue {
     int value_bits;

@@ -39,6 +39,9 @@
 #include "formula.h"
 #include "global.h"
 
+namespace nvsim {
+
+
 RowDecoder::RowDecoder() : FunctionUnit(){
 	// TODO Auto-generated constructor stub
 	initialized = false;
@@ -232,3 +235,5 @@ RowDecoder & RowDecoder::operator=(const RowDecoder &rhs) {
 
 	return *this;
 }
+
+} // namespace nvsim

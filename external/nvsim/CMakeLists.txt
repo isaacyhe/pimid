@@ -1,10 +1,13 @@
-# NVSim CMake build configuration
-# NVSim - An area, timing and power model for NVM and volatile memory
+# NVSim - Local namespaced copy for PIMID
+# Original: https://github.com/SEAL-UCSB/NVSim
+#
+# This is a modified copy with all classes placed in the 'nvsim::' namespace
+# to avoid symbol collisions with CACTI (which has similar class names like
+# InputParameter, Wire, Mat, Bank, etc.)
 
 cmake_minimum_required(VERSION 3.10)
-project(nvsim CXX)
 
-# Source files for library (exclude main.cpp for library build)
+# Collect all source files (excluding main.cpp which is for standalone)
 set(NVSIM_SOURCES
     Bank.cpp
     BankWithHtree.cpp
@@ -17,8 +20,8 @@ set(NVSIM_SOURCES
     MemCell.cpp
     Mux.cpp
     OutputDriver.cpp
-    PredecodeBlock.cpp
     Precharger.cpp
+    PredecodeBlock.cpp
     Result.cpp
     RowDecoder.cpp
     SenseAmp.cpp
@@ -26,20 +29,16 @@ set(NVSIM_SOURCES
     Technology.cpp
     Wire.cpp
     formula.cpp
-    nvsim_globals.cpp  # Global variable definitions for library use
+    nvsim_globals.cpp
 )
 
-# Build as static library for integration with pimid
-add_library(nvsim STATIC ${NVSIM_SOURCES})
-
-# C++17 compatibility fix: renamed 'data' enum to 'data_array' to avoid
-# conflict with std::data() when using namespace std
-target_compile_features(nvsim PUBLIC cxx_std_17)
-
-# Suppress warnings for third-party code
-target_compile_options(nvsim PRIVATE
-    -w  # Suppress all warnings for external code
-)
+# Create NVSim library (namespaced version)
+add_library(nvsim_ns STATIC ${NVSIM_SOURCES})
 
 # Include directory for headers
-target_include_directories(nvsim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(nvsim_ns PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Suppress warnings in external code
+target_compile_options(nvsim_ns PRIVATE -w)
+
+message(STATUS "  - NVSim (namespaced) for PIMID integration")

@@ -41,6 +41,9 @@
 #include "constant.h"
 #include <math.h>
 
+namespace nvsim {
+
+
 SubArray::SubArray() {
 	// TODO Auto-generated constructor stub
 	initialized = false;
@@ -946,3 +949,5 @@ SubArray & SubArray::operator=(const SubArray &rhs) {
 
 	return *this;
 }
+
+} // namespace nvsim

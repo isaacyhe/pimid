@@ -41,6 +41,9 @@
 #include "FunctionUnit.h"
 #include "OutputDriver.h"
 
+namespace nvsim {
+
+
 class BasicDecoder: public FunctionUnit {
 public:
 	BasicDecoder();
@@ -69,4 +72,5 @@ public:
 
 };
 
+} // namespace nvsim
 #endif /* BASICDECODER_H_ */

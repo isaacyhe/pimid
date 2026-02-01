@@ -532,8 +532,8 @@ static bool dropRegister(uint32_t targetReg, uint32_t* regs, uint32_t& numRegs) 
 }
 
 void Decoder::dropStackRegister(Instr& instr) {
-    bool dropIn = dropRegister(REG_RSP, instr.inRegs, instr.numInRegs);
-    bool dropOut = dropRegister(REG_RSP, instr.outRegs, instr.numOutRegs);
+    bool dropIn = dropRegister(LEVEL_BASE::REG_RSP, instr.inRegs, instr.numInRegs);
+    bool dropOut = dropRegister(LEVEL_BASE::REG_RSP, instr.outRegs, instr.numOutRegs);
     if (!dropIn && !dropOut) /*reportUnhandledCase(instr, "dropStackRegister (no RSP found)")*/;
     else reportUnhandledCase(instr, "dropStackRegister (RSP found)");
 }
@@ -1136,8 +1136,8 @@ bool Decoder::decodeInstr(INS ins, DynUopVec& uops) {
                     //mov [rdi] <- rax
                     //add rdi, 8
                     //emitBasicOp(instr, uops, 1, PORTS_015); //not really, this emits the store later and there's no dep (the load is direct to reg)
-                    emitStore(instr, 0, uops, REG_RAX);
-                    emitExecUop(REG_RDI, 0, REG_RDI, 0, uops, 1, PORTS_015);
+                    emitStore(instr, 0, uops, LEVEL_BASE::REG_RAX);
+                    emitExecUop(LEVEL_BASE::REG_RDI, 0, LEVEL_BASE::REG_RDI, 0, uops, 1, PORTS_015);
                     break;
                 case XO(LODSB):
                 case XO(LODSW):
@@ -1145,18 +1145,18 @@ bool Decoder::decodeInstr(INS ins, DynUopVec& uops) {
                 case XO(LODSQ):
                     //mov rax <- [rsi]
                     //add rsi, 8
-                    emitLoad(instr, 0, uops, REG_RAX);
-                    emitExecUop(REG_RSI, 0, REG_RSI, 0, uops, 1, PORTS_015);
+                    emitLoad(instr, 0, uops, LEVEL_BASE::REG_RAX);
+                    emitExecUop(LEVEL_BASE::REG_RSI, 0, LEVEL_BASE::REG_RSI, 0, uops, 1, PORTS_015);
                     break;
                 case XO(MOVSB):
                 case XO(MOVSW):
                 case XO(MOVSD):
                 case XO(MOVSQ):
                     //lodsX + stosX
-                    emitLoad(instr, 0, uops, REG_RAX);
-                    emitStore(instr, 0, uops, REG_RAX);
-                    emitExecUop(REG_RSI, 0, REG_RSI, 0, uops, 1, PORTS_015);
-                    emitExecUop(REG_RDI, 0, REG_RDI, 0, uops, 1, PORTS_015);
+                    emitLoad(instr, 0, uops, LEVEL_BASE::REG_RAX);
+                    emitStore(instr, 0, uops, LEVEL_BASE::REG_RAX);
+                    emitExecUop(LEVEL_BASE::REG_RSI, 0, LEVEL_BASE::REG_RSI, 0, uops, 1, PORTS_015);
+                    emitExecUop(LEVEL_BASE::REG_RDI, 0, LEVEL_BASE::REG_RDI, 0, uops, 1, PORTS_015);
                     break;
                 case XO(CMPSB):
                 case XO(CMPSW):
@@ -1167,8 +1167,8 @@ bool Decoder::decodeInstr(INS ins, DynUopVec& uops) {
                     emitLoad(instr, 0, uops, REG_LOAD_TEMP);
                     emitLoad(instr, 0, uops, REG_LOAD_TEMP+1);
                     emitExecUop(REG_LOAD_TEMP, REG_LOAD_TEMP+1, REG_RFLAGS, 0, uops, 1, PORT_5);
-                    emitExecUop(REG_RSI, 0, REG_RSI, 0, uops, 1, PORTS_015);
-                    emitExecUop(REG_RDI, 0, REG_RDI, 0, uops, 1, PORTS_015);
+                    emitExecUop(LEVEL_BASE::REG_RSI, 0, LEVEL_BASE::REG_RSI, 0, uops, 1, PORTS_015);
+                    emitExecUop(LEVEL_BASE::REG_RDI, 0, LEVEL_BASE::REG_RDI, 0, uops, 1, PORTS_015);
                     break;
                 default: //SCAS and other dragons I have not seen yet
                     inaccurate = true;
@@ -1280,12 +1280,12 @@ bool Decoder::decodeFusedInstrs(INS ins, DynUopVec& uops) {
     //instr should have 2 inputs (regs/mem), and 1 output (rflags), and branch should have 2 inputs (rip, rflags) and 1 output (rip)
 
     if (instr.numOutRegs != 1  || instr.outRegs[0] != REG_RFLAGS ||
-        branch.numOutRegs != 1 || branch.outRegs[0] != REG_RIP)
+        branch.numOutRegs != 1 || branch.outRegs[0] != LEVEL_BASE::REG_RIP)
     {
         reportUnhandledCase(instr, "decodeFusedInstrs");
         reportUnhandledCase(branch, "decodeFusedInstrs");
     } else {
-        instr.outRegs[1] = REG_RIP;
+        instr.outRegs[1] = LEVEL_BASE::REG_RIP;
         instr.numOutRegs++;
     }
 

@@ -37,6 +37,9 @@
 
 #include "Bank.h"
 
+namespace nvsim {
+
+
 Bank::Bank() {
 	// TODO Auto-generated constructor stub
 	initialized = false;
@@ -91,3 +94,5 @@ Bank & Bank::operator=(const Bank &rhs) {
 	mat = rhs.mat;
 	return *this;
 }
+
+} // namespace nvsim

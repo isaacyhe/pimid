@@ -38,6 +38,9 @@
 #include "Technology.h"
 #include <math.h>
 
+namespace nvsim {
+
+
 Technology::Technology() {
 	// TODO Auto-generated constructor stub
 	initialized = false;
@@ -1365,3 +1368,5 @@ void Technology::InterpolateWith(Technology rhs, double _alpha) {
 		vdsatPmos = phyGateLength * 1e5 /* Silicon saturatio velocity, Unit: m/s */ / effectiveHoleMobility;
 	}
 }
+
+} // namespace nvsim

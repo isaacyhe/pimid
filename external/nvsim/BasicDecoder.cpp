@@ -39,6 +39,9 @@
 #include "formula.h"
 #include "global.h"
 
+namespace nvsim {
+
+
 BasicDecoder::BasicDecoder() {
 	// TODO Auto-generated constructor stub
 	initialized = false;
@@ -185,3 +188,5 @@ void BasicDecoder::PrintProperty() {
 	cout << numNandInput << " to " << numNandGate << " Decoder Properties:" << endl;
 	FunctionUnit::PrintProperty();
 }
+
+} // namespace nvsim

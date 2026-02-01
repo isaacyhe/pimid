@@ -45,6 +45,9 @@
 #include "Mux.h"
 #include "typedef.h"
 
+namespace nvsim {
+
+
 class SubArray: public FunctionUnit {
 public:
 	SubArray();
@@ -110,4 +113,5 @@ public:
 	SenseAmp	senseAmp;
 };
 
+} // namespace nvsim
 #endif /* SUBARRAY_H_ */

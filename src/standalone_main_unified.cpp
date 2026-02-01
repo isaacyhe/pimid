@@ -40,10 +40,40 @@
 #include <algorithm>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <limits.h>
+#include <libgen.h>
+
+// Helper to get PIMID root directory (from executable path or environment)
+static std::string getPimidRoot() {
+    // Check environment variable first
+    const char* env_root = getenv("PIMID_ROOT");
+    if (env_root && access(env_root, F_OK) == 0) {
+        return std::string(env_root);
+    }
+
+    // Get executable path and derive root
+    char exe_path[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len != -1) {
+        exe_path[len] = '\0';
+        // exe is in build/, go up one level to pimid/
+        std::string path(dirname(exe_path));
+        size_t build_pos = path.rfind("/build");
+        if (build_pos != std::string::npos) {
+            return path.substr(0, build_pos);
+        }
+        // If not in build/, assume exe is in pimid/ root
+        return path;
+    }
+
+    // Fallback to current directory
+    return ".";
+}
 
 // Minimal includes to avoid header conflicts
 // Full model integration happens through runtime configuration
 #include "common/types.h"
+#include "power/mcpat_wrapper.h"
 
 // YAML parsing (if available)
 #ifdef HAVE_YAML_CPP
@@ -201,8 +231,9 @@ void vectorAdd(const float* a, const float* b, float* c, size_t n) {
 //=============================================================================
 
 struct UnifiedConfig {
-    // Simulation mode
-    std::string mode;  // "standalone", "host", "device", "cosim"
+    // Simulation dimensions
+    std::string method;  // "analytical" or "zsim" (cycle-accurate)
+    std::string scope;   // "device" or "cosim"
 
     // Common metadata
     std::string name;
@@ -212,27 +243,42 @@ struct UnifiedConfig {
     std::string memory_tech;
     int num_banks;
     int subarrays_per_bank;
+    int memory_latency_override;  // -1 means auto-derive from tech
 
     // PE configuration
     std::string pe_type;
     std::string placement_level;
     int num_pes;
 
-    // Standalone mode
+    // System configuration
+    int frequency_mhz;
+    int cache_line_size;
+
+    // Cache configuration
+    int l1d_size_kb;
+    int l1d_ways;
+    int l1i_size_kb;
+    int l1i_ways;
+    int l2_size_kb;
+    int l2_ways;
+    bool enable_l2;
+
+    // NoC configuration
+    std::string noc_topology;
+    int noc_router_latency;
+    int noc_link_latency;
+    bool noc_cycle_accurate;
+
+    // Workload (required for both methods)
     std::string workload_binary;
     std::vector<std::string> workload_args;
 
-    // Host mode
-    int host_port;
-    uint64_t host_cycles;
+    // Simulation parameters
+    int phase_length;
+    long long max_instructions;
+    int stats_interval;
 
-    // Device mode
-    std::string device_host;
-    int device_port;
-    uint64_t device_cycles;
-    int device_delay;
-
-    // Co-sim mode
+    // Co-sim specific
     size_t cosim_array_size;
 
     // Output configuration
@@ -241,52 +287,139 @@ struct UnifiedConfig {
 
     // Default constructor
     UnifiedConfig() :
-        mode("standalone"),
+        method("analytical"),
+        scope("device"),
         name("PIMID_Simulation"),
         description(""),
         memory_tech("SRAM"),
         num_banks(4),
         subarrays_per_bank(4),
+        memory_latency_override(-1),
         pe_type("in_order_core"),
         placement_level("BANK"),
         num_pes(4),
-        host_port(9999),
-        host_cycles(10000),
-        device_host("127.0.0.1"),
-        device_port(9999),
-        device_cycles(10000),
-        device_delay(2),
+        frequency_mhz(2000),
+        cache_line_size(64),
+        l1d_size_kb(32),
+        l1d_ways(8),
+        l1i_size_kb(16),
+        l1i_ways(4),
+        l2_size_kb(2048),
+        l2_ways(16),
+        enable_l2(true),
+        noc_topology("MESH_2D"),
+        noc_router_latency(1),
+        noc_link_latency(1),
+        noc_cycle_accurate(false),
+        phase_length(10000),
+        max_instructions(1000000000LL),
+        stats_interval(100000),
         cosim_array_size(1024 * 1024),
         stats_file("results/stats.txt"),
         enable_detailed_stats(true) {}
 };
 
 //=============================================================================
-// Simulation Mode Implementations
+// Simulation Method Implementations
 //=============================================================================
 
-class StandaloneSimulator {
+/**
+ * Parsed Garnet network statistics for McPAT power modeling
+ * Matches the stats output by ZSim's GarnetNetwork::writeStatsFile()
+ */
+struct GarnetParsedStats {
+    uint64_t total_packets = 0;
+    uint64_t total_flits = 0;
+    uint64_t total_hops = 0;
+    uint64_t buffer_reads = 0;
+    uint64_t buffer_writes = 0;
+    uint64_t crossbar_traversals = 0;
+    uint64_t arbiter_events = 0;
+    uint64_t link_traversals = 0;
+    uint64_t total_cycles = 0;
+    uint64_t total_latency = 0;
+    uint32_t num_routers = 0;
+    uint32_t num_rows = 0;
+    uint32_t num_cols = 0;
+    uint32_t flit_size_bits = 128;
+    double clock_mhz = 1000.0;
+};
+
+/**
+ * Cycle-accurate simulation using ZSim/Pin
+ * Provides detailed timing through binary instrumentation
+ */
+class ZSimSimulator {
 public:
-    StandaloneSimulator(const UnifiedConfig& config) : config_(config) {}
+    ZSimSimulator(const UnifiedConfig& config) : config_(config) {}
 
     bool run() {
         std::cout << "\n========================================" << std::endl;
-        std::cout << "PIMID STANDALONE MODE" << std::endl;
+        std::cout << "PIMID CYCLE-ACCURATE MODE (ZSim/Pin)" << std::endl;
         std::cout << "========================================" << std::endl;
 
         if (config_.workload_binary.empty()) {
-            std::cerr << "Error: No workload binary specified for standalone mode" << std::endl;
-            std::cerr << "Use: pimid --mode standalone --workload <binary>" << std::endl;
+            std::cerr << "Error: No workload binary specified" << std::endl;
+            std::cerr << "Use: pimid --method zsim --workload <binary>" << std::endl;
             return false;
         }
 
         std::cout << "Workload: " << config_.workload_binary << std::endl;
-        std::cout << "Memory: " << config_.memory_tech << std::endl;
-        std::cout << "PE Type: " << config_.pe_type << std::endl;
-        std::cout << "Placement: " << config_.placement_level << std::endl;
+        std::cout << std::endl;
+        std::cout << "Configuration:" << std::endl;
+        std::cout << "  System:    " << config_.frequency_mhz << " MHz, "
+                  << config_.cache_line_size << "B cache lines" << std::endl;
+        std::cout << "  PEs:       " << config_.num_pes << "x " << config_.pe_type
+                  << " @ " << config_.placement_level << std::endl;
+        std::cout << "  Memory:    " << config_.memory_tech;
+        if (config_.memory_latency_override >= 0) {
+            std::cout << " (latency=" << config_.memory_latency_override << " cycles)";
+        }
+        std::cout << std::endl;
+        std::cout << "  L1D:       " << config_.l1d_size_kb << "KB, "
+                  << config_.l1d_ways << "-way" << std::endl;
+        std::cout << "  L1I:       " << config_.l1i_size_kb << "KB, "
+                  << config_.l1i_ways << "-way" << std::endl;
+        if (config_.enable_l2) {
+            std::cout << "  L2:        " << config_.l2_size_kb << "KB, "
+                      << config_.l2_ways << "-way (shared)" << std::endl;
+        }
+        std::cout << "  NoC:       " << config_.noc_topology;
+        if (config_.noc_topology == "MESH_2D") {
+            int mesh_size = static_cast<int>(std::sqrt(config_.num_pes));
+            if (mesh_size * mesh_size < config_.num_pes) mesh_size++;
+            std::cout << " (" << mesh_size << "x" << mesh_size << ")";
+        }
+        std::cout << ", router=" << config_.noc_router_latency
+                  << ", link=" << config_.noc_link_latency << " cycles" << std::endl;
         std::cout << std::endl;
 
-        // Execute workload
+        // Generate ZSim configuration file
+        std::string zsim_cfg_path = generateZSimConfig();
+        if (zsim_cfg_path.empty()) {
+            std::cerr << "Error: Failed to generate ZSim config" << std::endl;
+            return false;
+        }
+
+        std::cout << "Generated ZSim config: " << zsim_cfg_path << std::endl;
+
+        // Find ZSim binary
+        std::string zsim_path = findZSimBinary();
+        if (zsim_path.empty()) {
+            std::cerr << "Error: ZSim binary not found" << std::endl;
+            std::cerr << "Expected at: <pimid_root>/external/zsim/build/opt/zsim" << std::endl;
+            return false;
+        }
+
+        std::cout << "Using ZSim: " << zsim_path << std::endl;
+
+        // Set up environment for ZSim/Pin
+        setupZSimEnvironment();
+
+        // Execute ZSim with the workload
+        std::cout << "\nRunning workload through ZSim/Pin instrumentation..." << std::endl;
+        std::cout << "────────────────────────────────────────" << std::endl;
+
         pid_t pid = fork();
         if (pid < 0) {
             std::cerr << "Error: Failed to fork process" << std::endl;
@@ -294,26 +427,32 @@ public:
         }
 
         if (pid == 0) {
-            // Child process
+            // Child process - run ZSim
             std::vector<char*> args;
-            args.push_back(const_cast<char*>(config_.workload_binary.c_str()));
-            for (const auto& arg : config_.workload_args) {
-                args.push_back(const_cast<char*>(arg.c_str()));
-            }
+            args.push_back(const_cast<char*>(zsim_path.c_str()));
+            args.push_back(const_cast<char*>(zsim_cfg_path.c_str()));
             args.push_back(nullptr);
 
-            execvp(config_.workload_binary.c_str(), args.data());
-            std::cerr << "Error: Failed to execute workload" << std::endl;
+            execvp(zsim_path.c_str(), args.data());
+            std::cerr << "Error: Failed to execute ZSim" << std::endl;
             exit(1);
         }
 
-        // Parent process
+        // Parent process - wait for ZSim to complete
         int status;
         waitpid(pid, &status, 0);
 
+        std::cout << "────────────────────────────────────────" << std::endl;
+
         if (WIFEXITED(status)) {
             int exit_code = WEXITSTATUS(status);
-            std::cout << "\nWorkload completed with exit code: " << exit_code << std::endl;
+            std::cout << "\nZSim completed with exit code: " << exit_code << std::endl;
+
+            // Parse and display ZSim statistics
+            if (exit_code == 0) {
+                parseZSimStats();
+            }
+
             return exit_code == 0;
         }
 
@@ -322,73 +461,408 @@ public:
 
 private:
     UnifiedConfig config_;
-};
 
-class HostSimulator {
-public:
-    HostSimulator(const UnifiedConfig& config) : config_(config) {}
+    std::string generateZSimConfig() {
+        // Create a temporary ZSim config file based on PIMID config
+        std::string cfg_path = "/tmp/pimid_zsim_" + std::to_string(getpid()) + ".cfg";
+        std::ofstream cfg(cfg_path);
+        if (!cfg.is_open()) {
+            return "";
+        }
 
-    bool run() {
-        std::cout << "\n========================================" << std::endl;
-        std::cout << "PIMID HOST-ONLY MODE" << std::endl;
-        std::cout << "========================================" << std::endl;
-        std::cout << "Port: " << config_.host_port << std::endl;
-        std::cout << "Cycles: " << config_.host_cycles << std::endl;
-        std::cout << "========================================\n" << std::endl;
+        // Build workload command
+        std::string workload_cmd = config_.workload_binary;
+        for (const auto& arg : config_.workload_args) {
+            workload_cmd += " " + arg;
+        }
 
-#ifdef HAVE_HOST_ENGINE
-        PIMIDConfig pimid_config;
-        pimid_config.memory_tech = MemoryTechnology::DRAM;
-        pimid_config.addressing_mode = AddressingMode::UNIFIED;
-        pimid_config.pe_placement_level = PEPlacementLevel::BANK;
+        // Determine core type
+        std::string core_type = "Simple";  // Default in-order
+        if (config_.pe_type == "ooo_core" || config_.pe_type == "out_of_order") {
+            core_type = "OOO";
+        } else if (config_.pe_type == "alu_core" || config_.pe_type == "alu") {
+            core_type = "ALU";
+        }
 
-        // Run host engine simulation
-        std::cout << "Host engine simulation would run here..." << std::endl;
-        std::cout << "Simulating " << config_.host_cycles << " cycles" << std::endl;
+        // Determine memory latency - use override if specified, otherwise derive from tech
+        int mem_latency;
+        if (config_.memory_latency_override >= 0) {
+            mem_latency = config_.memory_latency_override;
+        } else {
+            // Auto-derive from memory technology
+            mem_latency = 50;  // Default DRAM
+            if (config_.memory_tech == "SRAM") mem_latency = 2;
+            else if (config_.memory_tech == "STT_MRAM") mem_latency = 20;
+            else if (config_.memory_tech == "PCM") mem_latency = 100;
+            else if (config_.memory_tech == "ReRAM") mem_latency = 50;
+        }
 
-        return true;
-#else
-        std::cerr << "Error: Host engine not available (HAVE_HOST_ENGINE not defined)" << std::endl;
-        std::cerr << "Simulating host-only mode..." << std::endl;
-        std::cout << "Simulated " << config_.host_cycles << " host cycles" << std::endl;
-        return true;
-#endif
+        cfg << "// Auto-generated ZSim config by PIMID\n";
+        cfg << "// Memory: " << config_.memory_tech << ", PEs: " << config_.num_pes << "\n";
+        cfg << "// Frequency: " << config_.frequency_mhz << " MHz\n\n";
+
+        cfg << "sys = {\n";
+        cfg << "    lineSize = " << config_.cache_line_size << ";\n";
+        cfg << "    frequency = " << config_.frequency_mhz << ";\n";
+        cfg << "\n";
+        cfg << "    cores = {\n";
+        cfg << "        pim_pes = {\n";
+        cfg << "            type = \"" << core_type << "\";\n";
+        cfg << "            cores = " << config_.num_pes << ";\n";
+        if (core_type != "ALU") {
+            cfg << "            dcache = \"l1d\";\n";
+            cfg << "            icache = \"l1i\";\n";
+        }
+        cfg << "        };\n";
+        cfg << "    };\n";
+        cfg << "\n";
+
+        if (core_type != "ALU") {
+            cfg << "    caches = {\n";
+            cfg << "        l1d = {\n";
+            cfg << "            caches = " << config_.num_pes << ";\n";  // One L1D per PE
+            cfg << "            size = " << (config_.l1d_size_kb * 1024) << ";\n";
+            cfg << "            array = { type = \"SetAssoc\"; ways = " << config_.l1d_ways << "; };\n";
+            cfg << "        };\n";
+            cfg << "        l1i = {\n";
+            cfg << "            caches = " << config_.num_pes << ";\n";  // One L1I per PE
+            cfg << "            size = " << (config_.l1i_size_kb * 1024) << ";\n";
+            cfg << "            array = { type = \"SetAssoc\"; ways = " << config_.l1i_ways << "; };\n";
+            cfg << "        };\n";
+            if (config_.enable_l2) {
+                cfg << "        l2 = {\n";
+                cfg << "            caches = 1;\n";
+                cfg << "            size = " << (config_.l2_size_kb * 1024) << ";\n";
+                cfg << "            array = { type = \"SetAssoc\"; ways = " << config_.l2_ways << "; };\n";
+                cfg << "            children = \"l1i|l1d\";\n";
+                cfg << "        };\n";
+            }
+            cfg << "    };\n";
+            cfg << "\n";
+        }
+
+        cfg << "    mem = {\n";
+        cfg << "        type = \"Simple\";\n";
+        cfg << "        latency = " << mem_latency << ";\n";
+        cfg << "    };\n";
+        cfg << "\n";
+
+        // Configure Garnet-based mesh network if MESH_2D topology is used
+        if (config_.noc_topology == "MESH_2D") {
+            // Calculate mesh dimensions based on number of PEs
+            int mesh_size = static_cast<int>(std::sqrt(config_.num_pes));
+            if (mesh_size * mesh_size < static_cast<int>(config_.num_pes)) {
+                mesh_size++;  // Round up to fit all PEs
+            }
+            cfg << "    networkType = \"garnet\";\n";
+            cfg << "    network = {\n";
+            cfg << "        rows = " << mesh_size << ";\n";
+            cfg << "        cols = " << mesh_size << ";\n";
+            cfg << "        routerLatency = " << config_.noc_router_latency << ";\n";
+            cfg << "        linkLatency = " << config_.noc_link_latency << ";\n";
+            cfg << "        cycleAccurate = " << (config_.noc_cycle_accurate ? "true" : "false") << ";\n";
+            cfg << "    };\n";
+        }
+
+        cfg << "};\n\n";
+
+        cfg << "sim = {\n";
+        cfg << "    phaseLength = " << config_.phase_length << ";\n";
+        cfg << "    maxTotalInstrs = " << config_.max_instructions << "L;\n";
+        cfg << "    statsPhaseInterval = " << config_.stats_interval << ";\n";
+        cfg << "    printHierarchy = true;\n";
+        cfg << "    aslr = false;\n";
+        cfg << "};\n\n";
+
+        cfg << "process0 = {\n";
+        cfg << "    command = \"" << workload_cmd << "\";\n";
+        cfg << "};\n";
+
+        cfg.close();
+        return cfg_path;
     }
 
-private:
-    UnifiedConfig config_;
-};
+    std::string findZSimBinary() {
+        std::string pimid_root = getPimidRoot();
 
-class DeviceSimulator {
-public:
-    DeviceSimulator(const UnifiedConfig& config) : config_(config) {}
+        // Try locations relative to PIMID root
+        std::vector<std::string> paths = {
+            pimid_root + "/external/zsim/build/opt/zsim",
+            pimid_root + "/external/zsim/build/debug/zsim",
+            "./external/zsim/build/opt/zsim"
+        };
 
-    bool run() {
-        std::cout << "\n========================================" << std::endl;
-        std::cout << "PIMID DEVICE-ONLY MODE" << std::endl;
-        std::cout << "========================================" << std::endl;
-        std::cout << "Host: " << config_.device_host << ":" << config_.device_port << std::endl;
-        std::cout << "Cycles: " << config_.device_cycles << std::endl;
-        std::cout << "========================================\n" << std::endl;
-
-#ifdef HAVE_DEVICE_ENGINE
-        // Run device engine simulation
-        std::cout << "Device engine simulation would run here..." << std::endl;
-        std::cout << "Simulating " << config_.device_cycles << " cycles" << std::endl;
-
-        return true;
-#else
-        std::cerr << "Note: Device engine not available (HAVE_DEVICE_ENGINE not defined)" << std::endl;
-        std::cerr << "Simulating device-only mode..." << std::endl;
-        std::cout << "Simulated " << config_.device_cycles << " device cycles" << std::endl;
-        return true;
-#endif
+        for (const auto& path : paths) {
+            if (access(path.c_str(), X_OK) == 0) {
+                return path;
+            }
+        }
+        return "";
     }
 
-private:
-    UnifiedConfig config_;
+    void setupZSimEnvironment() {
+        std::string pimid_root = getPimidRoot();
+
+        // Check PINPATH environment variable first
+        const char* env_pin = getenv("PINPATH");
+        if (env_pin && access(env_pin, F_OK) == 0) {
+            std::cout << "Using Pin from PINPATH: " << env_pin << std::endl;
+        } else {
+            // Try PIN in external/pin (symlink or directory)
+            std::string pin_path = pimid_root + "/external/pin";
+            if (access(pin_path.c_str(), F_OK) == 0) {
+                setenv("PINPATH", pin_path.c_str(), 1);
+                std::cout << "Using Pin: " << pin_path << std::endl;
+            } else {
+                std::cerr << "Warning: PIN not found. Set PINPATH environment variable." << std::endl;
+                std::cerr << "  Expected: " << pin_path << std::endl;
+            }
+        }
+
+        // Set library path for ZSim dependencies
+        std::string ld_path = pimid_root + "/external/zsim/lib";
+        const char* existing = getenv("LD_LIBRARY_PATH");
+        if (existing) {
+            ld_path = ld_path + ":" + existing;
+        }
+        setenv("LD_LIBRARY_PATH", ld_path.c_str(), 1);
+    }
+
+    void parseZSimStats() {
+        // Look for zsim.out in current directory
+        std::ifstream stats("zsim.out");
+        if (!stats.is_open()) {
+            std::cout << "Note: ZSim stats file not found (zsim.out)" << std::endl;
+            return;
+        }
+
+        std::cout << "\n═══════════════════════════════════════════════" << std::endl;
+        std::cout << "ZSIM SIMULATION STATISTICS" << std::endl;
+        std::cout << "═══════════════════════════════════════════════" << std::endl;
+
+        std::string line;
+        while (std::getline(stats, line)) {
+            // Extract key metrics
+            if (line.find("cycles") != std::string::npos ||
+                line.find("instrs") != std::string::npos ||
+                line.find("ipc") != std::string::npos ||
+                line.find("hits") != std::string::npos ||
+                line.find("misses") != std::string::npos) {
+                std::cout << line << std::endl;
+            }
+        }
+
+        std::cout << "═══════════════════════════════════════════════" << std::endl;
+
+        // Parse Garnet NoC statistics for McPAT power modeling
+        parseGarnetStats();
+    }
+
+    /**
+     * Parse Garnet network stats file generated by ZSim
+     * Stats are used for McPAT power modeling of the NoC
+     */
+    void parseGarnetStats() {
+        std::ifstream garnet_stats("garnet_stats.txt");
+        if (!garnet_stats.is_open()) {
+            // Also try looking in output directory
+            garnet_stats.open("./zsim_out/garnet_stats.txt");
+            if (!garnet_stats.is_open()) {
+                std::cout << "Note: Garnet stats not found (network power modeling unavailable)" << std::endl;
+                return;
+            }
+        }
+
+        std::cout << "\n═══════════════════════════════════════════════" << std::endl;
+        std::cout << "GARNET NETWORK STATISTICS (for McPAT)" << std::endl;
+        std::cout << "═══════════════════════════════════════════════" << std::endl;
+
+        // Use the globally defined GarnetParsedStats struct
+        GarnetParsedStats parsed;
+
+        std::string line;
+        while (std::getline(garnet_stats, line)) {
+            // Skip comments
+            if (line.empty() || line[0] == '#') continue;
+
+            // Parse key=value pairs
+            size_t eq_pos = line.find('=');
+            if (eq_pos == std::string::npos) continue;
+
+            std::string key = line.substr(0, eq_pos);
+            std::string value = line.substr(eq_pos + 1);
+
+            // Trim whitespace
+            while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+            while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.erase(0, 1);
+
+            // Parse each stat
+            if (key == "garnet.total_packets") parsed.total_packets = std::stoull(value);
+            else if (key == "garnet.total_flits") parsed.total_flits = std::stoull(value);
+            else if (key == "garnet.total_hops") parsed.total_hops = std::stoull(value);
+            else if (key == "garnet.buffer_reads") parsed.buffer_reads = std::stoull(value);
+            else if (key == "garnet.buffer_writes") parsed.buffer_writes = std::stoull(value);
+            else if (key == "garnet.crossbar_traversals") parsed.crossbar_traversals = std::stoull(value);
+            else if (key == "garnet.arbiter_events") parsed.arbiter_events = std::stoull(value);
+            else if (key == "garnet.link_traversals") parsed.link_traversals = std::stoull(value);
+            else if (key == "garnet.total_cycles") parsed.total_cycles = std::stoull(value);
+            else if (key == "garnet.total_latency") parsed.total_latency = std::stoull(value);
+            else if (key == "garnet.num_routers") parsed.num_routers = std::stoul(value);
+            else if (key == "garnet.num_rows") parsed.num_rows = std::stoul(value);
+            else if (key == "garnet.num_cols") parsed.num_cols = std::stoul(value);
+            else if (key == "garnet.flit_size_bits") parsed.flit_size_bits = std::stoul(value);
+            else if (key == "garnet.clock_mhz") parsed.clock_mhz = std::stod(value);
+        }
+
+        // Display parsed stats
+        std::cout << "Network Topology:" << std::endl;
+        std::cout << "  Mesh:          " << parsed.num_rows << "x" << parsed.num_cols
+                  << " (" << parsed.num_routers << " routers)" << std::endl;
+        std::cout << "  Clock:         " << parsed.clock_mhz << " MHz" << std::endl;
+        std::cout << "  Flit size:     " << parsed.flit_size_bits << " bits" << std::endl;
+        std::cout << std::endl;
+
+        std::cout << "Traffic Statistics:" << std::endl;
+        std::cout << "  Packets:       " << parsed.total_packets << std::endl;
+        std::cout << "  Flits:         " << parsed.total_flits << std::endl;
+        std::cout << "  Total hops:    " << parsed.total_hops << std::endl;
+        if (parsed.total_packets > 0) {
+            std::cout << "  Avg hops/pkt:  " << static_cast<double>(parsed.total_hops) / parsed.total_packets << std::endl;
+            std::cout << "  Avg latency:   " << static_cast<double>(parsed.total_latency) / parsed.total_packets
+                      << " cycles" << std::endl;
+        }
+        std::cout << std::endl;
+
+        std::cout << "Router Activity:" << std::endl;
+        std::cout << "  Buffer reads:  " << parsed.buffer_reads << std::endl;
+        std::cout << "  Buffer writes: " << parsed.buffer_writes << std::endl;
+        std::cout << "  Crossbar:      " << parsed.crossbar_traversals << std::endl;
+        std::cout << "  Arbiter:       " << parsed.arbiter_events << std::endl;
+        std::cout << std::endl;
+
+        std::cout << "Link Activity:" << std::endl;
+        std::cout << "  Link traversals: " << parsed.link_traversals << std::endl;
+        std::cout << "  Total cycles:    " << parsed.total_cycles << std::endl;
+
+        std::cout << "═══════════════════════════════════════════════" << std::endl;
+
+        // Connect to McPAT for NoC power modeling
+        computeNoCPower(parsed);
+    }
+
+    /**
+     * Compute NoC power using McPAT with Garnet statistics
+     */
+    void computeNoCPower(const GarnetParsedStats& garnet_stats) {
+
+        std::cout << "\n═══════════════════════════════════════════════" << std::endl;
+        std::cout << "NOC POWER ANALYSIS (McPAT)" << std::endl;
+        std::cout << "═══════════════════════════════════════════════" << std::endl;
+
+        try {
+            // Configure McPAT with system parameters
+            pimid::McPATWrapper::SystemConfig mcpat_config;
+
+            // Core configuration from PIMID config
+            mcpat_config.num_cores = config_.num_pes;
+            mcpat_config.core_clock_mhz = static_cast<double>(config_.frequency_mhz);
+
+            // Cache configuration
+            mcpat_config.l1i_size_bytes = config_.l1i_size_kb * 1024;
+            mcpat_config.l1d_size_bytes = config_.l1d_size_kb * 1024;
+            mcpat_config.l2_size_bytes = config_.enable_l2 ? config_.l2_size_kb * 1024 : 0;
+
+            // NoC configuration from Garnet stats
+            mcpat_config.has_noc = true;
+            mcpat_config.noc_topology = 0;  // Mesh
+            mcpat_config.noc_num_routers = garnet_stats.num_routers;
+            mcpat_config.noc_num_rows = garnet_stats.num_rows;
+            mcpat_config.noc_num_cols = garnet_stats.num_cols;
+            mcpat_config.noc_flit_size_bits = garnet_stats.flit_size_bits;
+            mcpat_config.noc_clock_mhz = garnet_stats.clock_mhz;
+            mcpat_config.noc_input_ports = 5;   // 4 directions + local
+            mcpat_config.noc_output_ports = 5;
+            mcpat_config.noc_vcs_per_vnet = 4;
+            mcpat_config.noc_vc_buffer_size = 4;
+
+            // Technology parameters (22nm default)
+            mcpat_config.tech_node_nm = 22;
+            mcpat_config.temperature_k = 350;
+
+            // Create McPAT wrapper
+            pimid::McPATWrapper mcpat(mcpat_config);
+            mcpat.initialize();
+
+            // Set simulation cycles
+            mcpat.setTotalCycles(garnet_stats.total_cycles);
+            mcpat.setBusyCycles(garnet_stats.total_cycles);  // Assume fully busy for NoC
+
+            // Create NoCActivityStats from Garnet data
+            pimid::McPATWrapper::NoCActivityStats noc_stats;
+            noc_stats.total_packets = garnet_stats.total_packets;
+            noc_stats.total_flits = garnet_stats.total_flits;
+            noc_stats.total_hops = garnet_stats.total_hops;
+            noc_stats.buffer_reads = garnet_stats.buffer_reads;
+            noc_stats.buffer_writes = garnet_stats.buffer_writes;
+            noc_stats.crossbar_traversals = garnet_stats.crossbar_traversals;
+            noc_stats.arbiter_events = garnet_stats.arbiter_events;
+            noc_stats.link_traversals = garnet_stats.link_traversals;
+            noc_stats.total_cycles = garnet_stats.total_cycles;
+            noc_stats.clock_mhz = garnet_stats.clock_mhz;
+
+            // Feed NoC activity to McPAT
+            mcpat.setNoCActivity(noc_stats);
+
+            // Compute power
+            mcpat.computePower();
+
+            // Get and display NoC power results
+            double noc_power = mcpat.getNoCPower();
+            auto noc_metrics = mcpat.getComponentPower(pimid::McPATWrapper::ComponentType::NOC);
+
+            std::cout << std::endl;
+            std::cout << "NoC Power Breakdown:" << std::endl;
+            std::cout << "  Dynamic Power:     " << std::fixed << std::setprecision(4)
+                      << noc_metrics.runtime_dynamic << " W" << std::endl;
+            std::cout << "  Leakage Power:     " << noc_metrics.total_leakage << " W" << std::endl;
+            std::cout << "    - Subthreshold:  " << noc_metrics.subthreshold_leakage << " W" << std::endl;
+            std::cout << "    - Gate:          " << noc_metrics.gate_leakage << " W" << std::endl;
+            std::cout << "  ────────────────────────────" << std::endl;
+            std::cout << "  Total NoC Power:   " << noc_power << " W" << std::endl;
+
+            // Compute energy
+            if (garnet_stats.total_cycles > 0 && garnet_stats.clock_mhz > 0) {
+                double sim_time_s = static_cast<double>(garnet_stats.total_cycles) /
+                                   (garnet_stats.clock_mhz * 1e6);
+                double noc_energy_j = noc_power * sim_time_s;
+                std::cout << std::endl;
+                std::cout << "NoC Energy:" << std::endl;
+                std::cout << "  Simulation time:   " << std::scientific << sim_time_s << " s" << std::endl;
+                std::cout << "  Total energy:      " << std::fixed << std::setprecision(6)
+                          << (noc_energy_j * 1e6) << " uJ" << std::endl;
+            }
+
+            // Also show system-level power for context
+            auto sys_power = mcpat.getSystemPower();
+            std::cout << std::endl;
+            std::cout << "System Power (estimated):" << std::endl;
+            std::cout << "  Total System:      " << sys_power.total_power << " W" << std::endl;
+            std::cout << "  NoC Fraction:      " << std::setprecision(1)
+                      << (noc_power / sys_power.total_power * 100.0) << "%" << std::endl;
+
+        } catch (const std::exception& e) {
+            std::cerr << "McPAT power analysis failed: " << e.what() << std::endl;
+            std::cout << "Note: Power analysis unavailable" << std::endl;
+        }
+
+        std::cout << "═══════════════════════════════════════════════" << std::endl;
+    }
 };
 
+/**
+ * Co-simulation: Host + PIM Device
+ * Demonstrates data movement between host and PIM
+ */
 class CoSimulator {
 public:
     CoSimulator(const UnifiedConfig& config) : config_(config) {}
@@ -730,6 +1204,8 @@ private:
         std::string network_model;
         int virtual_channels;
         int router_latency_cycles;
+        int noc_num_rows;
+        int noc_num_cols;
 
         uint64_t workload_data_bytes;
         uint64_t workload_compute_ops;
@@ -765,11 +1241,19 @@ private:
         cfg_.l1_hit_latency_cycles = parser_.getInt("processing_element.l1_cache.l1d.hit_latency_cycles", 2);
         cfg_.l1_miss_penalty_cycles = parser_.getInt("processing_element.l1_cache.l1d.miss_penalty_cycles", 20);
 
-        // Network configuration
-        cfg_.network_topology = parser_.getString("network.topology", "H_TREE");
-        cfg_.network_model = parser_.getString("network.model", "GARNET");
-        cfg_.virtual_channels = parser_.getInt("network.virtual_channels_per_vn", 2);
-        cfg_.router_latency_cycles = parser_.getInt("network.router.latency_cycles", 2);
+        // Network configuration (check both 'noc' and 'network' keys for compatibility)
+        cfg_.network_topology = parser_.getString("noc.topology",
+                                    parser_.getString("network.topology", "H_TREE"));
+        cfg_.network_model = parser_.getString("noc.model",
+                                parser_.getString("network.model", "GARNET"));
+        cfg_.virtual_channels = parser_.getInt("noc.virtual_channels_per_vn",
+                                   parser_.getInt("network.virtual_channels_per_vn", 2));
+        cfg_.router_latency_cycles = parser_.getInt("noc.router_latency",
+                                        parser_.getInt("network.router.latency_cycles", 2));
+
+        // NoC mesh dimensions
+        cfg_.noc_num_rows = parser_.getInt("noc.num_rows", 4);
+        cfg_.noc_num_cols = parser_.getInt("noc.num_cols", 4);
 
         // Workload configuration
         cfg_.workload_data_bytes = 16777216 * 4;  // 16M elements * 4 bytes
@@ -817,7 +1301,11 @@ private:
         }
 
         std::cout << "Network Configuration:" << std::endl;
-        std::cout << "  Topology:           " << cfg_.network_topology << std::endl;
+        std::cout << "  Topology:           " << cfg_.network_topology;
+        if (cfg_.network_topology == "MESH_2D") {
+            std::cout << " (" << cfg_.noc_num_rows << "x" << cfg_.noc_num_cols << ")";
+        }
+        std::cout << std::endl;
         std::cout << "  Model:              " << cfg_.network_model << std::endl;
         std::cout << "  Virtual Channels:   " << cfg_.virtual_channels << std::endl;
         std::cout << "  Router Latency:     " << cfg_.router_latency_cycles << " cycles" << std::endl;
@@ -880,7 +1368,11 @@ private:
         }
 
         // Initialize network model
-        std::cout << "  [Network] " << cfg_.network_topology << " topology with " << cfg_.network_model << " model" << std::endl;
+        std::cout << "  [Network] " << cfg_.network_topology;
+        if (cfg_.network_topology == "MESH_2D") {
+            std::cout << " (" << cfg_.noc_num_rows << "x" << cfg_.noc_num_cols << ")";
+        }
+        std::cout << " topology with " << cfg_.network_model << " model" << std::endl;
         std::cout << "           " << cfg_.num_banks << " endpoints, " << cfg_.virtual_channels << " VCs" << std::endl;
 
         // Initialize power model
@@ -1133,43 +1625,41 @@ private:
 
 void printUsage(const char* program_name) {
     std::cout << "PIMID - Unified Processing-In-Memory Simulator" << std::endl;
-    std::cout << "\nUsage: " << program_name << " --mode <mode> [options]" << std::endl;
-    std::cout << "\nSimulation Modes:" << std::endl;
-    std::cout << "  sim           Config-driven PIM architecture simulation (default)" << std::endl;
-    std::cout << "  standalone    PIM-enabled workload execution" << std::endl;
-    std::cout << "  host          Host-only simulation" << std::endl;
-    std::cout << "  device        Device-only simulation" << std::endl;
-    std::cout << "  cosim         Host/Device co-simulation" << std::endl;
+    std::cout << "\nUsage: " << program_name << " --method <method> --scope <scope> [options]" << std::endl;
+    std::cout << "\nSimulation Method (how to simulate):" << std::endl;
+    std::cout << "  analytical    Fast analytical modeling (default)" << std::endl;
+    std::cout << "  zsim          Cycle-accurate simulation via ZSim/Pin" << std::endl;
+    std::cout << "\nSimulation Scope (what to simulate):" << std::endl;
+    std::cout << "  device        PIM device only (default)" << std::endl;
+    std::cout << "  cosim         Host + PIM device co-simulation" << std::endl;
     std::cout << "\nCommon Options:" << std::endl;
-    std::cout << "  --mode MODE          Simulation mode (default: sim)" << std::endl;
-    std::cout << "  --config FILE        Configuration file (YAML)" << std::endl;
-    std::cout << "  --help, -h           Show this help message" << std::endl;
-    std::cout << "  --version, -v        Show version information" << std::endl;
-    std::cout << "\nSim Mode Options (default):" << std::endl;
-    std::cout << "  --config FILE        PIM architecture configuration (YAML)" << std::endl;
-    std::cout << "  --output FILE        Output statistics file" << std::endl;
-    std::cout << "\nStandalone Mode Options:" << std::endl;
+    std::cout << "  --method METHOD      Simulation method (default: analytical)" << std::endl;
+    std::cout << "  --scope SCOPE        Simulation scope (default: device)" << std::endl;
     std::cout << "  --config FILE        Configuration file (YAML)" << std::endl;
     std::cout << "  --workload BINARY    Workload binary to simulate" << std::endl;
-    std::cout << "\nHost Mode Options:" << std::endl;
-    std::cout << "  --port PORT          Port to listen on (default: 9999)" << std::endl;
-    std::cout << "  --cycles CYCLES      Number of cycles to simulate (default: 10000)" << std::endl;
-    std::cout << "\nDevice Mode Options:" << std::endl;
-    std::cout << "  --host HOST          Host address to connect to (default: 127.0.0.1)" << std::endl;
-    std::cout << "  --port PORT          Port to connect to (default: 9999)" << std::endl;
-    std::cout << "  --cycles CYCLES      Number of cycles to simulate (default: 10000)" << std::endl;
-    std::cout << "\nCo-Sim Mode Options:" << std::endl;
-    std::cout << "  --size SIZE          Array size for vector operation (default: 1048576)" << std::endl;
+    std::cout << "  --help, -h           Show this help message" << std::endl;
+    std::cout << "  --version, -v        Show version information" << std::endl;
+    std::cout << "\nAnalytical Method Options:" << std::endl;
+    std::cout << "  --config FILE        PIM architecture configuration (YAML)" << std::endl;
+    std::cout << "  --workload BINARY    Workload for analysis (optional)" << std::endl;
+    std::cout << "\nZSim Method Options:" << std::endl;
+    std::cout << "  --config FILE        Configuration file (YAML)" << std::endl;
+    std::cout << "  --workload BINARY    Workload binary to instrument (required)" << std::endl;
+    std::cout << "  --size SIZE          Array size for co-simulation (default: 1048576)" << std::endl;
     std::cout << "\nExternal Models Integrated:" << std::endl;
     std::cout << "  - Ramulator2: Cycle-accurate DRAM timing simulation" << std::endl;
     std::cout << "  - CACTI:      SRAM/cache timing and power modeling" << std::endl;
     std::cout << "  - NVSim:      Non-volatile memory (STT-MRAM, PCM, ReRAM) modeling" << std::endl;
     std::cout << "  - McPAT:      Processor and system power modeling" << std::endl;
     std::cout << "  - GARNET:     Network-on-chip simulation" << std::endl;
+    std::cout << "  - ZSim/Pin:   Binary instrumentation for cycle-accurate simulation" << std::endl;
     std::cout << "\nExamples:" << std::endl;
-    std::cout << "  " << program_name << " --mode sim --config configs/sttmram_16banks.yaml" << std::endl;
-    std::cout << "  " << program_name << " --mode standalone --workload ./bfs --vertices 100000" << std::endl;
-    std::cout << "  " << program_name << " --mode cosim --size 1000000" << std::endl;
+    std::cout << "  # Analytical device simulation (fast)" << std::endl;
+    std::cout << "  " << program_name << " --method analytical --config configs/sttmram_16banks.yaml" << std::endl;
+    std::cout << "\n  # Cycle-accurate device simulation (detailed)" << std::endl;
+    std::cout << "  " << program_name << " --method zsim --config configs/sttmram_16banks.yaml --workload ./saxpy" << std::endl;
+    std::cout << "\n  # Host+Device co-simulation" << std::endl;
+    std::cout << "  " << program_name << " --scope cosim --size 1000000" << std::endl;
     std::cout << "\nFor more information: https://github.com/isaacyhe/pimid" << std::endl;
 }
 
@@ -1207,8 +1697,9 @@ int main(int argc, char** argv) {
     std::string config_file;
     bool parsing_workload_args = false;
 
-    // Default mode is "sim" for config-driven simulation
-    config.mode = "sim";
+    // Defaults: analytical method, device scope
+    config.method = "analytical";
+    config.scope = "device";
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -1225,27 +1716,32 @@ int main(int argc, char** argv) {
         } else if (arg == "--version" || arg == "-v") {
             printVersion();
             return 0;
+        } else if (arg == "--method" && i + 1 < argc) {
+            config.method = argv[++i];
+        } else if (arg == "--scope" && i + 1 < argc) {
+            config.scope = argv[++i];
         } else if (arg == "--mode" && i + 1 < argc) {
-            config.mode = argv[++i];
+            // Legacy support: map old modes to new method/scope
+            std::string mode = argv[++i];
+            if (mode == "sim") {
+                config.method = "analytical";
+                config.scope = "device";
+            } else if (mode == "standalone") {
+                config.method = "zsim";
+                config.scope = "device";
+            } else if (mode == "cosim") {
+                config.method = "analytical";
+                config.scope = "cosim";
+            } else {
+                std::cerr << "Warning: Unknown legacy mode '" << mode << "', using defaults" << std::endl;
+            }
         } else if (arg == "--config" && i + 1 < argc) {
             config_file = argv[++i];
         } else if (arg == "--workload" && i + 1 < argc) {
             config.workload_binary = argv[++i];
             parsing_workload_args = true;
-        } else if (arg == "--port" && i + 1 < argc) {
-            int port = std::atoi(argv[++i]);
-            config.host_port = port;
-            config.device_port = port;
-        } else if (arg == "--host" && i + 1 < argc) {
-            config.device_host = argv[++i];
-        } else if (arg == "--cycles" && i + 1 < argc) {
-            uint64_t cycles = std::stoull(argv[++i]);
-            config.host_cycles = cycles;
-            config.device_cycles = cycles;
         } else if (arg == "--size" && i + 1 < argc) {
             config.cosim_array_size = std::stoull(argv[++i]);
-        } else if (arg == "--delay" && i + 1 < argc) {
-            config.device_delay = std::atoi(argv[++i]);
         } else if (arg[0] != '-' && config_file.empty()) {
             // Positional argument - treat as config file
             config_file = arg;
@@ -1256,35 +1752,140 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Run appropriate simulator based on mode
+    // Validate method and scope
+    if (config.method != "analytical" && config.method != "zsim") {
+        std::cerr << "Error: Unknown simulation method: " << config.method << std::endl;
+        std::cerr << "Valid methods: analytical, zsim" << std::endl;
+        return 1;
+    }
+
+    if (config.scope != "device" && config.scope != "cosim") {
+        std::cerr << "Error: Unknown simulation scope: " << config.scope << std::endl;
+        std::cerr << "Valid scopes: device, cosim" << std::endl;
+        return 1;
+    }
+
+    // Print simulation configuration
+    std::cout << "╔══════════════════════════════════════════════════════════════════════════════╗" << std::endl;
+    std::cout << "║                    PIMID PIM ARCHITECTURE SIMULATOR                          ║" << std::endl;
+    std::cout << "╚══════════════════════════════════════════════════════════════════════════════╝" << std::endl;
+    std::cout << "  Method: " << config.method << " | Scope: " << config.scope << std::endl;
+    if (!config_file.empty()) {
+        std::cout << "  Config: " << config_file << std::endl;
+    }
+    if (!config.workload_binary.empty()) {
+        std::cout << "  Workload: " << config.workload_binary << std::endl;
+    }
+    std::cout << std::endl;
+
+    // Run appropriate simulator based on method and scope
     bool success = false;
 
-    if (config.mode == "sim") {
-        // Config-driven comprehensive PIM simulation
-        if (config_file.empty()) {
-            std::cerr << "Error: --config FILE required for sim mode" << std::endl;
-            std::cerr << "Use: pimid --mode sim --config <config.yaml>" << std::endl;
-            return 1;
+    if (config.scope == "device") {
+        // Device-only simulation (PIM only)
+        if (config.method == "analytical") {
+            // Analytical device simulation
+            if (config_file.empty()) {
+                std::cerr << "Error: --config FILE required for analytical simulation" << std::endl;
+                return 1;
+            }
+            ComprehensiveSimulator sim(config_file);
+            success = sim.run();
+        } else {
+            // ZSim cycle-accurate device simulation
+            if (config.workload_binary.empty()) {
+                std::cerr << "Error: --workload BINARY required for zsim simulation" << std::endl;
+                return 1;
+            }
+            // Load additional config from YAML if provided
+            if (!config_file.empty()) {
+                try {
+                    YAML::Node yaml_cfg = YAML::LoadFile(config_file);
+
+                    // Load simulation metadata
+                    if (yaml_cfg["name"]) {
+                        config.name = yaml_cfg["name"].as<std::string>();
+                    }
+                    if (yaml_cfg["description"]) {
+                        config.description = yaml_cfg["description"].as<std::string>();
+                    }
+
+                    // Load PE configuration
+                    if (yaml_cfg["pim"]) {
+                        if (yaml_cfg["pim"]["pe"]) {
+                            config.num_pes = yaml_cfg["pim"]["pe"]["count"].as<int>(config.num_pes);
+                            config.pe_type = yaml_cfg["pim"]["pe"]["type"].as<std::string>(config.pe_type);
+                        }
+                        if (yaml_cfg["pim"]["placement"]) {
+                            config.placement_level = yaml_cfg["pim"]["placement"]["level"].as<std::string>(config.placement_level);
+                        }
+                    }
+
+                    // Load system configuration
+                    if (yaml_cfg["system"]) {
+                        config.frequency_mhz = yaml_cfg["system"]["frequency_mhz"].as<int>(config.frequency_mhz);
+                        config.cache_line_size = yaml_cfg["system"]["cache_line_size"].as<int>(config.cache_line_size);
+                    }
+
+                    // Load cache configuration
+                    if (yaml_cfg["cache"]) {
+                        if (yaml_cfg["cache"]["l1d"]) {
+                            config.l1d_size_kb = yaml_cfg["cache"]["l1d"]["size_kb"].as<int>(config.l1d_size_kb);
+                            config.l1d_ways = yaml_cfg["cache"]["l1d"]["ways"].as<int>(config.l1d_ways);
+                        }
+                        if (yaml_cfg["cache"]["l1i"]) {
+                            config.l1i_size_kb = yaml_cfg["cache"]["l1i"]["size_kb"].as<int>(config.l1i_size_kb);
+                            config.l1i_ways = yaml_cfg["cache"]["l1i"]["ways"].as<int>(config.l1i_ways);
+                        }
+                        if (yaml_cfg["cache"]["l2"]) {
+                            config.enable_l2 = yaml_cfg["cache"]["l2"]["enabled"].as<bool>(config.enable_l2);
+                            config.l2_size_kb = yaml_cfg["cache"]["l2"]["size_kb"].as<int>(config.l2_size_kb);
+                            config.l2_ways = yaml_cfg["cache"]["l2"]["ways"].as<int>(config.l2_ways);
+                        }
+                    }
+
+                    // Load NoC configuration
+                    if (yaml_cfg["noc"]) {
+                        config.noc_topology = yaml_cfg["noc"]["topology"].as<std::string>(config.noc_topology);
+                        config.noc_router_latency = yaml_cfg["noc"]["router_latency"].as<int>(config.noc_router_latency);
+                        config.noc_link_latency = yaml_cfg["noc"]["link_latency"].as<int>(config.noc_link_latency);
+                        config.noc_cycle_accurate = yaml_cfg["noc"]["cycle_accurate"].as<bool>(config.noc_cycle_accurate);
+                    }
+
+                    // Load memory configuration
+                    if (yaml_cfg["memory"]) {
+                        config.memory_tech = yaml_cfg["memory"]["technology"].as<std::string>(config.memory_tech);
+                        config.num_banks = yaml_cfg["memory"]["banks"].as<int>(config.num_banks);
+                        config.subarrays_per_bank = yaml_cfg["memory"]["subarrays_per_bank"].as<int>(config.subarrays_per_bank);
+                        config.memory_latency_override = yaml_cfg["memory"]["latency"].as<int>(config.memory_latency_override);
+                    }
+
+                    // Load simulation parameters
+                    if (yaml_cfg["simulation"]) {
+                        config.phase_length = yaml_cfg["simulation"]["phase_length"].as<int>(config.phase_length);
+                        config.max_instructions = yaml_cfg["simulation"]["max_instructions"].as<long long>(config.max_instructions);
+                        config.stats_interval = yaml_cfg["simulation"]["stats_interval"].as<int>(config.stats_interval);
+                    }
+
+                } catch (const YAML::Exception& e) {
+                    std::cerr << "Warning: Failed to load YAML config: " << e.what() << std::endl;
+                }
+            }
+            ZSimSimulator sim(config);
+            success = sim.run();
         }
-        ComprehensiveSimulator sim(config_file);
-        success = sim.run();
-    } else if (config.mode == "standalone") {
-        StandaloneSimulator sim(config);
-        success = sim.run();
-    } else if (config.mode == "host") {
-        HostSimulator sim(config);
-        success = sim.run();
-    } else if (config.mode == "device") {
-        DeviceSimulator sim(config);
-        success = sim.run();
-    } else if (config.mode == "cosim") {
-        CoSimulator sim(config);
-        success = sim.run();
     } else {
-        std::cerr << "Error: Unknown simulation mode: " << config.mode << std::endl;
-        std::cerr << "Valid modes: standalone, host, device, cosim" << std::endl;
-        printUsage(argv[0]);
-        return 1;
+        // Co-simulation (Host + PIM)
+        if (config.method == "analytical") {
+            // Analytical co-simulation
+            CoSimulator sim(config);
+            success = sim.run();
+        } else {
+            // ZSim-based co-simulation (future: would integrate ZSim for device side)
+            std::cout << "Note: ZSim + CoSim uses analytical host model with ZSim device" << std::endl;
+            CoSimulator sim(config);
+            success = sim.run();
+        }
     }
 
     return success ? 0 : 1;

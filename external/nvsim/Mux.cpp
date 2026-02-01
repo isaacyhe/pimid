@@ -39,6 +39,9 @@
 #include "global.h"
 #include "formula.h"
 
+namespace nvsim {
+
+
 Mux::Mux() {
 	// TODO Auto-generated constructor stub
 	initialized = false;
@@ -175,3 +178,5 @@ Mux & Mux::operator=(const Mux &rhs) {
 
 	return *this;
 }
+
+} // namespace nvsim

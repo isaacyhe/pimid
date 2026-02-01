@@ -38,6 +38,9 @@
  * - On each replacement, rank() is called with the req and a list of replacement candidates.
  * - When the replacement is done, replaced() is called. (See below for more detail.)
  */
+// Forward declaration for type checking without RTTI
+class IdealLRUPartReplPolicy;
+
 class ReplPolicy : public GlobAlloc {
     protected:
         CC* cc; //coherence controller, used to figure out whether candidates are valid or number of sharers
@@ -54,6 +57,9 @@ class ReplPolicy : public GlobAlloc {
         virtual uint32_t rankCands(const MemReq* req, ZCands cands) = 0;
 
         virtual void initStats(AggregateStat* parent) {}
+
+        // Virtual type check for use without RTTI (Pin 4.x requires -fno-rtti)
+        virtual IdealLRUPartReplPolicy* asIdealLRUPartReplPolicy() { return nullptr; }
 };
 
 /* Add DECL_RANK_BINDINGS to each class that implements the new interface,

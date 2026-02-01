@@ -253,4 +253,113 @@ bool NetworkConfigParser::validateTopologyConfig(
     return valid;
 }
 
+NetworkConfig NetworkConfigParser::parseNoCConfig(const std::string& config_file) {
+    try {
+        YAML::Node config = YAML::LoadFile(config_file);
+
+        if (config["noc"]) {
+            return parseNoCNode(config["noc"]);
+        }
+
+        // Return defaults if no noc section
+        std::cout << "[NetworkConfigParser] No 'noc' section found, using defaults" << std::endl;
+        return NetworkConfig();
+
+    } catch (const YAML::Exception& e) {
+        throw std::runtime_error("YAML parsing error in NoC config: " + std::string(e.what()));
+    }
+}
+
+NetworkConfig NetworkConfigParser::parseNoCNode(const YAML::Node& noc_node) {
+    NetworkConfig config;
+
+    if (!noc_node) {
+        return config;  // Return defaults
+    }
+
+    // Parse topology
+    if (noc_node["topology"]) {
+        std::string topo = noc_node["topology"].as<std::string>();
+        if (topo == "MESH_2D") config.topology = NetworkTopology::MESH_2D;
+        else if (topo == "MESH_3D") config.topology = NetworkTopology::MESH_3D;
+        else if (topo == "TORUS_2D") config.topology = NetworkTopology::TORUS_2D;
+        else if (topo == "TORUS_3D") config.topology = NetworkTopology::TORUS_3D;
+        else if (topo == "DRAGONFLY") config.topology = NetworkTopology::DRAGONFLY;
+        else if (topo == "FAT_TREE") config.topology = NetworkTopology::FAT_TREE;
+        else if (topo == "H_TREE") config.topology = NetworkTopology::H_TREE;
+        else if (topo == "CROSSBAR") config.topology = NetworkTopology::CROSSBAR;
+        else {
+            std::cerr << "[NetworkConfigParser] Unknown topology: " << topo << ", using MESH_2D" << std::endl;
+        }
+    }
+
+    // Parse routing algorithm
+    if (noc_node["routing"]) {
+        std::string routing = noc_node["routing"].as<std::string>();
+        if (routing == "XY") config.routing = RoutingAlgorithm::XY;
+        else if (routing == "XYZ") config.routing = RoutingAlgorithm::XYZ;
+        else if (routing == "ADAPTIVE") config.routing = RoutingAlgorithm::ADAPTIVE;
+        else if (routing == "WEST_FIRST") config.routing = RoutingAlgorithm::WEST_FIRST;
+        else if (routing == "NORTH_LAST") config.routing = RoutingAlgorithm::NORTH_LAST;
+        else if (routing == "MINIMAL") config.routing = RoutingAlgorithm::MINIMAL;
+        else if (routing == "VALIANT") config.routing = RoutingAlgorithm::VALIANT;
+    }
+
+    // Parse dimensions
+    if (noc_node["num_rows"]) {
+        config.num_rows = noc_node["num_rows"].as<uint32_t>();
+    }
+    if (noc_node["num_cols"]) {
+        config.num_cols = noc_node["num_cols"].as<uint32_t>();
+    }
+    if (noc_node["num_layers"]) {
+        config.num_layers = noc_node["num_layers"].as<uint32_t>();
+    }
+
+    // Parse virtual channels
+    if (noc_node["virtual_channels_per_vn"]) {
+        config.virtual_channels_per_vn = noc_node["virtual_channels_per_vn"].as<uint32_t>();
+    }
+    if (noc_node["virtual_networks"]) {
+        config.virtual_networks = noc_node["virtual_networks"].as<uint32_t>();
+    }
+
+    // Parse link parameters
+    if (noc_node["link_width_bytes"]) {
+        config.link_width_bytes = noc_node["link_width_bytes"].as<uint32_t>();
+    }
+    if (noc_node["link_latency"]) {
+        config.link_latency = noc_node["link_latency"].as<uint32_t>();
+    }
+
+    // Parse router parameters
+    if (noc_node["router_latency"]) {
+        config.router_latency = noc_node["router_latency"].as<uint32_t>();
+    }
+    if (noc_node["enable_router_bypass"]) {
+        config.enable_router_bypass = noc_node["enable_router_bypass"].as<bool>();
+    }
+
+    // Parse buffer parameters
+    if (noc_node["input_buffer_depth"]) {
+        config.input_buffer_depth = noc_node["input_buffer_depth"].as<uint32_t>();
+    }
+    if (noc_node["output_buffer_depth"]) {
+        config.output_buffer_depth = noc_node["output_buffer_depth"].as<uint32_t>();
+    }
+
+    // Parse Garnet config file path
+    if (noc_node["garnet_config_path"]) {
+        config.garnet_config_path = noc_node["garnet_config_path"].as<std::string>();
+    }
+
+    std::cout << "[NetworkConfigParser] NoC configuration parsed:" << std::endl;
+    std::cout << "  Topology: " << config.num_rows << "x" << config.num_cols << " mesh" << std::endl;
+    std::cout << "  VCs per VN: " << config.virtual_channels_per_vn << std::endl;
+    std::cout << "  Link width: " << config.link_width_bytes << " bytes" << std::endl;
+    std::cout << "  Router latency: " << config.router_latency << " cycles" << std::endl;
+
+    return config;
+}
+
 } // namespace pimid

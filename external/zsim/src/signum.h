@@ -1,58 +1,49 @@
-/* Signal number definitions.  Linux version.
-   Copyright (C) 1995-2018 Free Software Foundation, Inc.
-   This file is part of the GNU C Library.
+/* Signal number definitions for ZSim.
+   Provides standard Linux signal numbers without relying on glibc-specific headers.  */
 
-   The GNU C Library is free software; you can redistribute it and/or
-   modify it under the terms of the GNU Lesser General Public
-   License as published by the Free Software Foundation; either
-   version 2.1 of the License, or (at your option) any later version.
+#ifndef ZSIM_SIGNUM_H
+#define ZSIM_SIGNUM_H 1
 
-   The GNU C Library is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-   Lesser General Public License for more details.
+// Standard signal numbers for Linux x86_64
+// These values are ABI-fixed and portable across libc implementations
 
-   You should have received a copy of the GNU Lesser General Public
-   License along with the GNU C Library; if not, see
-   <http://www.gnu.org/licenses/>.  */
-
-#ifndef _BITS_SIGNUM_H
-#define _BITS_SIGNUM_H 1
-
-#ifndef _SIGNAL_H
-#error "Never include <bits/signum.h> directly; use <signal.h> instead."
-#endif
-
-#include <bits/signum-generic.h>
-
-/* Adjustments and additions to the signal number constants for
-   most Linux systems.  */
-
-#define	SIGSTKFLT	16	/* Stack fault (obsolete).  */
-#define	SIGPWR		30	/* Power failure imminent.  */
-
-#undef	SIGBUS
+// Signals defined by POSIX
+#define	SIGHUP		 1
+#define	SIGINT		 2
+#define	SIGQUIT		 3
+#define	SIGILL		 4
+#define	SIGTRAP		 5
+#define	SIGABRT		 6
+#define	SIGIOT		 6
 #define	SIGBUS		 7
-#undef	SIGUSR1
+#define	SIGFPE		 8
+#define	SIGKILL		 9
 #define	SIGUSR1		10
-#undef	SIGUSR2
+#define	SIGSEGV		11
 #define	SIGUSR2		12
-#undef	SIGCHLD
+#define	SIGPIPE		13
+#define	SIGALRM		14
+#define	SIGTERM		15
+#define	SIGSTKFLT	16
 #define	SIGCHLD		17
-#undef	SIGCONT
 #define	SIGCONT		18
-#undef	SIGSTOP
 #define	SIGSTOP		19
-#undef	SIGTSTP
 #define	SIGTSTP		20
-#undef	SIGURG
+#define	SIGTTIN		21
+#define	SIGTTOU		22
 #define	SIGURG		23
-#undef	SIGPOLL
+#define	SIGXCPU		24
+#define	SIGXFSZ		25
+#define	SIGVTALRM	26
+#define	SIGPROF		27
+#define	SIGWINCH	28
 #define	SIGPOLL		29
-#undef	SIGSYS
-#define SIGSYS		31
+#define	SIGIO		29
+#define	SIGPWR		30
+#define	SIGSYS		31
 
-#undef	__SIGRTMAX
+// Real-time signals
+#define	SIGRTMIN	32
 #define __SIGRTMAX	64
 
-#endif	/* <signal.h> included.  */
+#endif	/* ZSIM_SIGNUM_H */

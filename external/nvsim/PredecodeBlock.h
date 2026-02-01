@@ -42,6 +42,9 @@
 #include "RowDecoder.h"
 #include "BasicDecoder.h"
 
+namespace nvsim {
+
+
 class PredecodeBlock: public FunctionUnit {
 public:
 	PredecodeBlock();
@@ -81,4 +84,5 @@ public:
 	/* TO-DO: Predecoder so far does not take OptPriority input because the output driver is already quite fixed in this module */
 };
 
+} // namespace nvsim
 #endif /* PREDECODEBLOCK_H_ */

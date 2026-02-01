@@ -128,12 +128,20 @@ class MemObject : public GlobAlloc {
         virtual const char* getName() = 0;
 };
 
+// Forward declarations for type checking without RTTI
+class FilterCache;
+class TraceDriverProxyCache;
+
 /* Base class for all cache objects */
 class BaseCache : public MemObject {
     public:
         virtual void setParents(uint32_t _childId, const g_vector<MemObject*>& parents, Network* network) = 0;
         virtual void setChildren(const g_vector<BaseCache*>& children, Network* network) = 0;
         virtual uint64_t invalidate(const InvReq& req) = 0;
+
+        // Virtual type checks for use without RTTI (Pin 4.x requires -fno-rtti)
+        virtual FilterCache* asFilterCache() { return nullptr; }
+        virtual TraceDriverProxyCache* asTraceDriverProxyCache() { return nullptr; }
 };
 
 #endif  // MEMORY_HIERARCHY_H_

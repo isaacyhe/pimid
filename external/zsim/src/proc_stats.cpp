@@ -57,11 +57,12 @@ class ProcStats::ProcessVectorCounter : public VectorCounter {
 
 static uint64_t StatSize(Stat* s) {
     uint64_t sz = 0;
-     if (AggregateStat* as = dynamic_cast<AggregateStat*>(s)) {
+    // Use virtual methods instead of dynamic_cast for -fno-rtti compatibility
+     if (AggregateStat* as = s->asAggregate()) {
          for (uint32_t i = 0; i < as->size(); i++) sz += StatSize(as->get(i));
-     } else if (dynamic_cast<ScalarStat*>(s)) {
+     } else if (s->asScalar()) {
          sz = 1;
-     } else if (VectorStat* vs = dynamic_cast<VectorStat*>(s)) {
+     } else if (VectorStat* vs = s->asVector()) {
          sz = vs->size();
      } else {
          panic("Unrecognized stat type");
@@ -70,13 +71,14 @@ static uint64_t StatSize(Stat* s) {
 }
 
 static uint64_t* DumpWalk(Stat* s, uint64_t* curPtr) {
-    if (AggregateStat* as = dynamic_cast<AggregateStat*>(s)) {
+    // Use virtual methods instead of dynamic_cast for -fno-rtti compatibility
+    if (AggregateStat* as = s->asAggregate()) {
         for (uint32_t i = 0; i < as->size(); i++) {
             curPtr = DumpWalk(as->get(i), curPtr);
         }
-    } else if (ScalarStat* ss = dynamic_cast<ScalarStat*>(s)) {
+    } else if (ScalarStat* ss = s->asScalar()) {
         *(curPtr++) = ss->get();
-    } else if (VectorStat* vs = dynamic_cast<VectorStat*>(s)) {
+    } else if (VectorStat* vs = s->asVector()) {
         for (uint32_t i = 0; i < vs->size(); i++) {
             *(curPtr++) = vs->count(i);
         }
@@ -87,13 +89,14 @@ static uint64_t* DumpWalk(Stat* s, uint64_t* curPtr) {
 }
 
 static uint64_t* IncWalk(Stat* s, uint64_t* curPtr) {
-    if (AggregateStat* as = dynamic_cast<AggregateStat*>(s)) {
+    // Use virtual methods instead of dynamic_cast for -fno-rtti compatibility
+    if (AggregateStat* as = s->asAggregate()) {
         for (uint32_t i = 0; i < as->size(); i++) {
             curPtr = IncWalk(as->get(i), curPtr);
         }
-    } else if (Counter* cs = dynamic_cast<Counter*>(s)) {
+    } else if (Counter* cs = s->asCounter()) {
         cs->inc(*(curPtr++));
-    } else if (VectorCounter* vs = dynamic_cast<VectorCounter*>(s)) {
+    } else if (VectorCounter* vs = s->asVectorCounter()) {
         for (uint32_t i = 0; i < vs->size(); i++) {
             vs->inc(i, *(curPtr++));
         }
@@ -106,18 +109,19 @@ static uint64_t* IncWalk(Stat* s, uint64_t* curPtr) {
 Stat* ProcStats::replStat(Stat* s, const char* name, const char* desc) {
     if (!name) name = s->name();
     if (!desc) desc = s->desc();
-    if (AggregateStat* as = dynamic_cast<AggregateStat*>(s)) {
+    // Use virtual methods instead of dynamic_cast for -fno-rtti compatibility
+    if (AggregateStat* as = s->asAggregate()) {
         AggregateStat* res = new AggregateStat(as->isRegular());
         res->init(name, desc);
         for (uint32_t i = 0; i < as->size(); i++) {
             res->append(replStat(as->get(i)));
         }
         return res;
-    } else if (dynamic_cast<ScalarStat*>(s)) {
+    } else if (s->asScalar()) {
         Counter* res = new ProcessCounter(this);
         res->init(name, desc);
         return res;
-    } else if (VectorStat* vs = dynamic_cast<VectorStat*>(s)) {
+    } else if (VectorStat* vs = s->asVector()) {
         VectorCounter* res = new ProcessVectorCounter(this);
         assert(!vs->hasCounterNames());  // FIXME: Implement counter name copying
         res->init(name, desc, vs->size());
@@ -137,7 +141,8 @@ ProcStats::ProcStats(AggregateStat* parentStat, AggregateStat* _coreStats) : cor
     assert(coreStats);
     for (uint32_t i = 0; i < coreStats->size(); i++) {
         Stat* s = coreStats->get(i);
-        AggregateStat* as = dynamic_cast<AggregateStat*>(s);
+        // Use virtual method instead of dynamic_cast for -fno-rtti compatibility
+        AggregateStat* as = s->asAggregate();
         auto err = [s](const char* reason) {
             panic("Stat %s is not per-core (%s)", s->name(), reason);
         };
@@ -159,7 +164,8 @@ ProcStats::ProcStats(AggregateStat* parentStat, AggregateStat* _coreStats) : cor
         const char* name = gm_strdup(("procStats-" + Str(p)).c_str());
         ps->init(name, "Per-process stats");
         for (uint32_t i = 0; i < coreStats->size(); i++) {
-            AggregateStat* as = dynamic_cast<AggregateStat*>(coreStats->get(i));
+            // Use virtual method instead of dynamic_cast for -fno-rtti compatibility
+            AggregateStat* as = coreStats->get(i)->asAggregate();
             assert(as && as->isRegular());
             ps->append(replStat(as->get(0), as->name(), as->desc()));
         }
@@ -183,14 +189,15 @@ void ProcStats::update() {
     // Now lastBuf has been updated and buf has the differences of all the counters
     uint64_t start = 0;
     for (uint32_t i = 0; i < coreStats->size(); i++) {
-        AggregateStat* as = dynamic_cast<AggregateStat*>(coreStats->get(i));
+        // Use virtual method instead of dynamic_cast for -fno-rtti compatibility
+        AggregateStat* as = coreStats->get(i)->asAggregate();
 
         for (uint32_t c = 0; c < as->size(); c++) {
-            AggregateStat* cs = dynamic_cast<AggregateStat*>(as->get(c));
+            AggregateStat* cs = as->get(c)->asAggregate();
             uint32_t p = zinfo->sched->getScheduledPid(c);
             if (p == (uint32_t)-1) p = zinfo->lineSize - 1;  // FIXME
             else p = zinfo->procArray[p]->getGroupIdx();
-            Stat* ps = dynamic_cast<AggregateStat*>(procStats->get(p))->get(i);
+            Stat* ps = procStats->get(p)->asAggregate()->get(i);
             assert(StatSize(cs) == StatSize(ps));
             IncWalk(ps, buf + start);
             start += StatSize(cs);

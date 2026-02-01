@@ -41,6 +41,9 @@
 #include "FunctionUnit.h"
 #include "constant.h"
 
+namespace nvsim {
+
+
 class Comparator: public FunctionUnit {
 public:
 	Comparator();
@@ -69,4 +72,5 @@ public:
 	double rampInput, rampOutput;
 };
 
+} // namespace nvsim
 #endif /* COMPARATOR_H_ */

@@ -46,6 +46,9 @@
 
 using namespace std;
 
+
+
+namespace nvsim {
 class InputParameter {
 public:
 	InputParameter();
@@ -131,4 +134,5 @@ public:
 	int maxIsGlobalWireLowSwing;		/* This one is actually boolean */
 };
 
+} // namespace nvsim
 #endif /* INPUTPARAMETER_H_ */

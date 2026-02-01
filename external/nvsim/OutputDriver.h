@@ -42,6 +42,9 @@
 #include "constant.h"
 #include "typedef.h"
 
+namespace nvsim {
+
+
 class OutputDriver: public FunctionUnit {
 public:
 	OutputDriver();
@@ -75,4 +78,5 @@ public:
 	double rampInput, rampOutput;
 };
 
+} // namespace nvsim
 #endif /* OUTPUTDRIVER_H_ */

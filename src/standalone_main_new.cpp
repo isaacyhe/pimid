@@ -41,12 +41,12 @@
 #include <sys/wait.h>
 
 // Memory models
-#include "memory_models/include/memory_model.h"
-#include "memory_models/include/sram_model.h"
-#include "memory_models/include/dram_model.h"
-#include "memory_models/include/sttmram_model.h"
-#include "memory_models/include/pcm_model.h"
-#include "memory_models/include/reram_model.h"
+#include "memory/memory_model.h"
+#include "memory/sram_model.h"
+#include "memory/dram_model.h"
+#include "memory/sttmram_model.h"
+#include "memory/pcm_model.h"
+#include "memory/reram_model.h"
 
 using namespace pimid;
 
