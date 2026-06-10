@@ -1946,12 +1946,26 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
                     int endpoints = (config.total_mem_orgs > 1) ? config.total_mem_orgs : 2;
                     int chan_eps = endpoints / std::max(1, num_chan);
                     if (chan_eps < 2) chan_eps = 2;
+                    // Cap at 128: the detailed model's ground-truth replay
+                    // tree is fixed at 128 endpoints for every technology, so
+                    // the analytical depth normalization never assumes a tree
+                    // deeper than that reference. Only DDR5 (256 per-channel
+                    // endpoints) exceeds it -- DDR4 sits exactly at 128 and
+                    // every other tech is below. Lifts DDR5 from 0.65x of
+                    // detailed; all other techs provably unchanged.
+                    if (chan_eps > 128) chan_eps = 128;
                     double actual_hops = std::ceil(std::log2((double)chan_eps));
                     if (actual_hops < 1.0) actual_hops = 1.0;
                     lat_cycles *= (REF_HOPS / actual_hops);
 
                     int ll = static_cast<int>(std::lround(lat_cycles));
                     if (ll < 1) ll = 1;
+                    if (getenv("PIMID_LL_DIAG")) {
+                        fprintf(stderr, "[LLDIAG] tech=%s agg_mbs=%.0f num_chan=%d "
+                                "per_chan_mbs=%.0f endpoints=%d chan_eps=%d hops=%.0f ll=%d\n",
+                                tech.c_str(), agg_mbs, num_chan, per_chan_mbs,
+                                endpoints, chan_eps, actual_hops, ll);
+                    }
                     config.noc_link_latency = ll;
                     config.noc_router_latency = 1;  // minimal router; link dominates
 

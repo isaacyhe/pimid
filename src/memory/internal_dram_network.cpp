@@ -1479,6 +1479,11 @@ uint64_t InternalDRAMNetwork::getTierLatency(int level,
     double svcTime = serialization;  // per-link service time in flits
     if (svcTime < 1.0) svcTime = 1.0;
     double N = static_cast<double>(link.num_nodes);
+    // state.smoothedArrivalRate is the AGGREGATE per-tier access rate
+    // (accesses/cycle summed over all injectors), NOT a per-node rate.
+    // The branches below must therefore not multiply it by N again --
+    // doing so overstated offered load by N/injectors on big tiers
+    // (same bug as the zsim-side networkContentionLatency, fixed 2026-06-11).
     double arrivalRate = state.smoothedArrivalRate;
 
     // VCs reduce head-of-line blocking: 1/sqrt(VCs) factor (Dally & Towles)
@@ -1488,9 +1493,9 @@ uint64_t InternalDRAMNetwork::getTierLatency(int level,
     double wait_time = 0.0;
 
     if (link.topology == "bus") {
-        // Shared bus: all N nodes compete for 1 flit/cycle.
-        // ρ = N × injRate × svcTime.  Steeper divergence for round-robin + HOL.
-        double rho = N * arrivalRate * svcTime;
+        // Shared bus: every access crosses the single shared medium.
+        // ρ = aggregate rate × svcTime. Steeper divergence for round-robin + HOL.
+        double rho = arrivalRate * svcTime;
         if (rho >= 0.90) {
             wait_time = 10.0 * static_cast<double>(base);
         } else if (rho > 0.01) {
@@ -1498,9 +1503,10 @@ uint64_t InternalDRAMNetwork::getTierLatency(int level,
             wait_time = rho * svcTime / denom;
         }
     } else if (link.topology == "crossbar") {
-        // N output ports, each 1 flit/cycle.  Per-output arrival ≈ injRate.
+        // N output ports, each 1 flit/cycle. Aggregate load spreads
+        // uniformly over N outputs; per-output arrival = aggregate/N.
         // Input HOL blocking factor ~1.58 (Karol/Hluchyj/Morgan).
-        double rhoPerOutput = arrivalRate * svcTime;
+        double rhoPerOutput = (arrivalRate / std::max(N, 1.0)) * svcTime;
         double rhoEff = std::min(rhoPerOutput * 1.58, 0.95);
         if (rhoEff > 0.01) {
             wait_time = rhoEff * svcTime / (1.0 - rhoEff);
@@ -1510,8 +1516,8 @@ uint64_t InternalDRAMNetwork::getTierLatency(int level,
         int channels = totalChannels(link.topology, link.num_nodes);
         double hopCount = std::max(hops, 0.01);
 
-        // Per-channel average utilization
-        double totalFlitHops = arrivalRate * N * svcTime * hopCount;
+        // Aggregate flit-hops per cycle spread over all channels
+        double totalFlitHops = arrivalRate * svcTime * hopCount;
         double rhoAvg = totalFlitHops / static_cast<double>(channels);
 
         // Bottleneck channel (hotspot-adjusted)

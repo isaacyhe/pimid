@@ -5,7 +5,7 @@
 #
 # Run with:
 #   ./build/pimid --method exec --scope system \
-#       --config configs/cosim/multi_device.yaml \
+#       --config examples/cosim/multi_device.yaml \
 #       --workload test/benchmarks/host_device_cosim/reduction_tree_cosim \
 #       1024 4 0
 

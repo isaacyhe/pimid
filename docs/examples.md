@@ -17,9 +17,10 @@ dimension; they are also shipped in the Docker image as a smoke set.
 Multi-process MPI, host/device cosim, trace-gen, and power on/off are
 selected via CLI flags, not by extra YAMLs.
 
-Subdirectories: `benchmarks/` (per-benchmark run configs), `cosim/`,
-`dram/`, `integration/` (external-model adapter example -- see
-[external_models.md](external_models.md)).
+Subdirectories: `cosim/` (host-device and multi-device reference configs)
+and `integration/` (external-model adapter example -- see
+[external_models.md](external_models.md)). Per-benchmark run configs live
+with each suite under `benchmarks/` (see [benchmarks.md](benchmarks.md)).
 
 ## Run one
 
