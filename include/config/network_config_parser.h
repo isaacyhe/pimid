@@ -1,0 +1,154 @@
+/**
+ * @file network_config_parser.h
+ * @brief Parser for network topology and external model configuration
+ */
+
+#ifndef PIMID_NETWORK_CONFIG_PARSER_H
+#define PIMID_NETWORK_CONFIG_PARSER_H
+
+#include <string>
+#include <yaml-cpp/yaml.h>
+#include "memory/internal_dram_network.h"
+#include "external_model_interface.h"
+#include "network/network_model.h"
+
+namespace pimid {
+
+/**
+ * @brief Configuration for external models
+ */
+struct ExternalModelConfig {
+    bool enabled;
+    std::string library_path;
+    std::string model_name;
+    std::string config_file;
+
+    ExternalModelConfig() : enabled(false) {}
+};
+
+/**
+ * @brief Combined configuration from YAML file
+ */
+struct NetworkTopologyConfig {
+    // Custom topology settings
+    bool custom_topology_enabled;
+    SwitchHierarchyConfig switch_config;
+
+    // External model settings
+    ExternalModelConfig network_model;
+    ExternalModelConfig memory_model;
+
+    NetworkTopologyConfig() : custom_topology_enabled(false) {}
+};
+
+/**
+ * @brief Parse network topology configuration from YAML
+ */
+class NetworkConfigParser {
+public:
+    /**
+     * @brief Parse custom topology configuration from YAML node
+     *
+     * @param config_node YAML node containing network configuration
+     * @param num_channels Number of channels (from memory config)
+     * @param ranks_per_channel Number of ranks per channel
+     * @param dram_type DRAM technology string (e.g., "DDR4", "HBM2")
+     * @return SwitchHierarchyConfig parsed configuration
+     */
+    static SwitchHierarchyConfig parseCustomTopology(
+        const YAML::Node& config_node,
+        int num_channels,
+        int ranks_per_channel,
+        const std::string& dram_type = "DDR4");
+
+    /**
+     * @brief Parse external model configuration from YAML node
+     *
+     * @param models_node YAML node containing external_models section
+     * @return NetworkTopologyConfig with external model settings
+     */
+    static ExternalModelConfig parseExternalModel(
+        const YAML::Node& model_node);
+
+    /**
+     * @brief Parse complete network topology configuration
+     *
+     * @param config_file Path to YAML configuration file
+     * @return NetworkTopologyConfig complete configuration
+     */
+    static NetworkTopologyConfig parseConfigFile(const std::string& config_file);
+
+    /**
+     * @brief Parse topology type from string
+     *
+     * @param topology_str String representation (e.g., "BUS", "CROSSBAR")
+     * @return TopologyType enum value
+     */
+    static TopologyType parseTopologyType(const std::string& topology_str);
+
+    /**
+     * @brief Validate custom topology configuration against physical hierarchy
+     *
+     * @param config Configuration to validate
+     * @param num_subarrays_per_bank Expected number of subarrays per bank (L0)
+     * @param num_banks_per_bg Expected number of banks per BG (L1)
+     * @param num_bg_per_chip Expected number of BGs per chip (L2)
+     * @param num_chips_per_rank Expected number of chips per rank (L3)
+     * @param num_ranks_per_channel Expected number of ranks per channel (L4)
+     * @param num_channels Expected number of channels (L5)
+     * @return true if valid, false otherwise
+     */
+    static bool validateTopologyConfig(
+        const SwitchHierarchyConfig& config,
+        int num_subarrays_per_bank,
+        int num_banks_per_bg,
+        int num_bg_per_chip,
+        int num_chips_per_rank,
+        int num_ranks_per_channel,
+        int num_channels);
+
+private:
+    /**
+     * @brief Parse a single network level configuration
+     *
+     * @param level_node YAML node for the level
+     * @param level_num Level number (0-6)
+     * @return NetworkLevelConfig parsed level configuration
+     */
+    static NetworkLevelConfig parseNetworkLevel(
+        const YAML::Node& level_node,
+        int level_num);
+
+    /**
+     * @brief Parse NoC configuration for Garnet network model
+     *
+     * Parses the 'noc:' section from YAML config file:
+     *   noc:
+     *     topology: "MESH_2D"
+     *     num_rows: 4
+     *     num_cols: 4
+     *     virtual_channels_per_vn: 4
+     *     virtual_networks: 3
+     *     link_width_bytes: 16
+     *     link_latency: 1
+     *     router_latency: 1
+     *     input_buffer_depth: 4
+     *     routing: "XY"
+     *
+     * @param config_file Path to YAML configuration file
+     * @return NetworkConfig for Garnet wrapper
+     */
+    static NetworkConfig parseNoCConfig(const std::string& config_file);
+
+    /**
+     * @brief Parse NoC configuration from YAML node
+     *
+     * @param noc_node YAML node containing 'noc' section
+     * @return NetworkConfig for Garnet wrapper
+     */
+    static NetworkConfig parseNoCNode(const YAML::Node& noc_node);
+};
+
+} // namespace pimid
+
+#endif // PIMID_NETWORK_CONFIG_PARSER_H

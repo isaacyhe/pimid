@@ -1,0 +1,86 @@
+/* histogram_mpi.c — Histogram construction: random scatter into bins
+ * MPI domain decomposition. Each rank processes N/nprocs data elements
+ * into a local histogram, then MPI_Reduce sums all local histograms. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <mpi.h>
+#include "zsim_hooks.h"
+
+#define DEFAULT_SIZE 16384
+#define DEFAULT_BINS 256
+
+static uint32_t bench_rand(uint32_t* s) {
+    *s = *s * 1103515245 + 12345;
+    return (*s >> 16) & 0x7FFF;
+}
+
+static int parse_int_arg(int argc, char** argv, const char* flag, int def) {
+    for (int i = 1; i < argc - 1; i++)
+        if (strcmp(argv[i], flag) == 0) return atoi(argv[i + 1]);
+    return def;
+}
+
+int main(int argc, char* argv[]) {
+    MPI_Init(&argc, &argv);
+
+    int rank, nprocs;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+
+    int N = parse_int_arg(argc, argv, "--size", DEFAULT_SIZE);
+    int nbins = parse_int_arg(argc, argv, "--bins", DEFAULT_BINS);
+
+    /* All ranks generate the full data array with the same seed,
+     * but each rank only processes its chunk */
+    uint32_t seed = 42;
+
+    /* Domain decomposition */
+    int base = N / nprocs;
+    int rem  = N % nprocs;
+    int local_start = rank * base + (rank < rem ? rank : rem);
+    int local_n = base + (rank < rem ? 1 : 0);
+
+    /* Generate data: advance RNG to local_start, then generate local_n values */
+    int* local_data = (int*)malloc(local_n * sizeof(int));
+    if (!local_data) { fprintf(stderr, "rank %d: malloc failed\n", rank); MPI_Abort(MPI_COMM_WORLD, 1); }
+
+    /* Advance seed past elements before local_start */
+    for (int i = 0; i < local_start; i++)
+        bench_rand(&seed);
+
+    for (int i = 0; i < local_n; i++)
+        local_data[i] = bench_rand(&seed) % nbins;
+
+    int* local_hist = (int*)calloc(nbins, sizeof(int));
+    int* global_hist = NULL;
+    if (rank == 0)
+        global_hist = (int*)calloc(nbins, sizeof(int));
+
+    if (!local_hist) { fprintf(stderr, "rank %d: malloc failed\n", rank); MPI_Abort(MPI_COMM_WORLD, 1); }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (rank == 0) zsim_roi_begin();
+
+    /* Kernel: each rank builds a local histogram from its data chunk */
+    for (int i = 0; i < local_n; i++)
+        local_hist[local_data[i]]++;
+
+    if (rank == 0) zsim_roi_end();
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    /* Reduce local histograms to global histogram on rank 0 */
+    MPI_Reduce(local_hist, global_hist, nbins, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    if (rank == 0) {
+        long checksum = 0;
+        for (int i = 0; i < nbins; i++) checksum += global_hist[i];
+        printf("BENCH_CHECKSUM: %ld\n", checksum);
+        printf("BENCH_DONE\n");
+        free(global_hist);
+    }
+
+    free(local_data); free(local_hist);
+    MPI_Finalize();
+    return 0;
+}

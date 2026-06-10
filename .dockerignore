@@ -1,0 +1,49 @@
+# Exclude everything not needed for the docker image.
+# The image ships prebuilt binaries from build/, not source.
+
+# Source we don't need (image has prebuilt binaries)
+src/
+include/
+external/
+!external/qemu/build/qemu-x86_64
+!external/qemu/pc-bios/
+!external/ramulator/libramulator.so
+!external/cacti/tech_params/
+!external/cacti/data/
+!external/nvsim/sample_PCRAM.cell
+!external/nvsim/sample_RRAM.cell
+!external/nvsim/sample_STTRAM.cell
+!external/nvsim/sample_STTRAM_aggressive.cell
+!external/nvsim/sample_SLCNAND.cell
+!external/nvsim/SRAM.cell
+
+# Build outputs we don't COPY
+build/
+!build/pimid
+!build/libpimid_plugin.so
+!build/libpimid_mpi.so
+!build/external/zsim/libzsim_qemu.so
+!build/external/zsim/libpimid_trace.so
+
+# Misc dev artifacts
+misc/
+.git/
+.github/
+.claude/
+docs/superpowers/
+results/
+*.pimtrace
+*.trace
+**/__pycache__/
+*.pyc
+.vscode/
+.idea/
+
+# Large pre-existing benchmark binaries we don't need in the image
+benchmarks/babelstream/babelstream/
+benchmarks/parsec/**/blackscholes
+benchmarks/parsec/**/canneal
+benchmarks/parsec/**/freqmine
+
+# But DO ship benchmarks/ source + simple kernels for examples
+# (the !exclusions above handle the prebuilt paths we need)

@@ -1,0 +1,56 @@
+# Basic host-device co-simulation reference config.
+#
+# 1 host (OOO core, full L1+L2 cache hierarchy) + 1 PIM device (8 ALU PEs at
+# BANK placement). The host runs the workload's setup/verify code, calls
+# pimid_offload_sync() which transitions the same thread into DOMAIN_DEVICE,
+# runs the kernel under DEVICE accounting (cycles attributed to ALU PEs),
+# transitions back, and continues with the host's post-processing.
+#
+# Run with:
+#   ./build/pimid --method exec --scope system \
+#       --config configs/cosim/host_device_basic.yaml \
+#       --workload test/benchmarks/host_device_cosim/reduction_tree_cosim \
+#       1024 8 0
+#
+# Replace the workload with any of the cosim kernels — the same config
+# fits matmul_tiled_cosim, spmv_csr_cosim, reduction_tree_cosim,
+# histogram_merge_cosim, bfs_iterative_cosim, pagerank_cosim, etc.
+
+scope: system
+
+system:
+  hosts:
+    - name: host
+      core_type: ooo_core
+      num_cores: 1
+      frequency_mhz: 2000
+      tech_node_nm: 22
+      cache:
+        l1d_kb: 32
+        l1i_kb: 32
+        l2_kb: 256
+      memory:
+        technology: SRAM
+
+  devices:
+    - name: device
+      type: compute
+      attachment: internal     # interposer-like, low latency
+      frequency_mhz: 2000
+      tech_node_nm: 22
+      pe_type: alu_core
+      num_pes: 8
+      pim:
+        placement:
+          level: BANK
+        mc:
+          type: simple
+      memory:
+        technology: SRAM
+      noc:
+        topology: MESH_2D
+        model: simple
+
+  network:
+    topology: crossbar
+    model: simple

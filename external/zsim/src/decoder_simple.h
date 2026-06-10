@@ -1,0 +1,80 @@
+/** Simplified BBL decoder for QEMU-based instrumentation.
+ *
+ * Creates BblInfo from instruction count and byte size, which is sufficient
+ * for SimpleCore (IPC=1 model). For OOO cores, a full x86 decoder (e.g.
+ * Capstone) would be needed to decompose instructions into micro-ops.
+ *
+ * This replaces decoder.h's dependency on Pin/XED when building with
+ * ZSIM_USE_QEMU.
+ */
+
+#ifndef DECODER_SIMPLE_H_
+#define DECODER_SIMPLE_H_
+
+#include <stdint.h>
+#include <cstddef>
+#include "zsim_types.h"
+
+// Minimal uop types (needed by core.h / BblInfo)
+enum UopType : uint8_t {UOP_GENERAL, UOP_LOAD, UOP_STORE, UOP_STORE_ADDR, UOP_FENCE};
+
+#define MAX_UOP_SRC_REGS 2
+#define MAX_UOP_DST_REGS 2
+
+struct DynUop {
+    uint16_t rs[MAX_UOP_SRC_REGS];
+    uint16_t rd[MAX_UOP_DST_REGS];
+    uint16_t lat;
+    uint16_t decCycle;
+    UopType type;
+    uint8_t portMask;
+    uint8_t extraSlots;
+    uint8_t pad;
+
+    void clear() {
+        rs[0] = rs[1] = 0;
+        rd[0] = rd[1] = 0;
+        lat = 0;
+        decCycle = 0;
+        type = UOP_GENERAL;
+        portMask = 0;
+        extraSlots = 0;
+        pad = 0;
+    }
+};
+
+struct DynBbl {
+    uint64_t addr;
+    uint32_t uops;
+    uint32_t approxInstrs;
+    DynUop uop[1];
+
+    static uint32_t bytes(uint32_t uops) {
+        return offsetof(DynBbl, uop) + sizeof(DynUop) * uops;
+    }
+
+    void init(uint64_t _addr, uint32_t _uops, uint32_t _approxInstrs) {
+        uops = _uops;
+        approxInstrs = _approxInstrs;
+    }
+};
+
+struct BblInfo;  // defined in core.h
+
+// Temporary register offsets (same formulas as decoder.h)
+#define MAX_INSTR_LOADS 4
+#define MAX_INSTR_STORES 4
+#define REG_LOAD_TEMP (REG_LAST + 1)
+#define REG_STORE_TEMP (REG_LOAD_TEMP + MAX_INSTR_LOADS)
+#define REG_STORE_ADDR_TEMP (REG_STORE_TEMP + MAX_INSTR_STORES)
+#define REG_EXEC_TEMP (REG_STORE_ADDR_TEMP + MAX_INSTR_STORES)
+#define MAX_REGISTERS (REG_EXEC_TEMP + 64)
+
+/** Create a BblInfo for a basic block with given instruction count and byte size.
+ *
+ * This allocates from the global heap (gm_malloc) so it persists across
+ * phases. The BblInfo is suitable for SimpleCore which only uses instrs/bytes.
+ */
+BblInfo* createSimpleBblInfo(uint32_t instrs, uint32_t bytes);
+
+#endif  // DECODER_SIMPLE_H_

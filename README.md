@@ -1,0 +1,105 @@
+# PIMID: Processing-In-Memory Infrastructure for Design-space Exploration
+
+[![License](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
+[![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
+[![Version](https://img.shields.io/badge/version-1.0.2-green.svg)]()
+
+PIMID is a cycle-accurate simulator for Processing-in-Memory (PIM)
+architectures. Workloads execute under QEMU user-mode emulation; a TCG plugin
+drives ZSim microarchitectural models backed by Ramulator2, CACTI, NVSim,
+McPAT, and Garnet for timing, power, and area.
+
+## Features
+
+- **11 memory technologies** — 7 DRAM (DDR3/4/5, LPDDR5, GDDR6, HBM2, HBM3),
+  SRAM, 3 NVM (STT-MRAM, PCM, ReRAM) → [docs/memory.md](docs/memory.md)
+- **5 PE core models** — `alu_core`, `simple_core`, `in_order_core`,
+  `ooo_core`, `null_core` → [docs/cores.md](docs/cores.md)
+- **2 network models** — `detailed` (cycle-accurate Garnet, per-technology
+  DRAM trees, deadlock-free; the default) and `analytical` (closed-form
+  hop + M/D/1 + MLP) over 8 topologies → [docs/network.md](docs/network.md)
+- **6 PE placement levels** — subarray to host-MC → [docs/memory.md](docs/memory.md)
+- **Host-device co-simulation** — offload over interposer / CXL / PCIe /
+  NVLink-class links → [docs/cosim.md](docs/cosim.md)
+- **4 simulation methods** — `exec`, `trace-gen`, `trace`, `synthetic`
+  → [docs/architecture.md](docs/architecture.md)
+- **48 benchmarks** across 7 suites, plus cosim kernels
+  → [docs/benchmarks.md](docs/benchmarks.md)
+- **Power/area** via McPAT → [docs/power.md](docs/power.md)
+
+## Project layout
+
+```
+pimid/
+├── src/  include/        simulator core (ZSim integration, models, config)
+├── external/             bundled backends: zsim, qemu, ramulator, cacti,
+│                         nvsim, mcpat, garnet
+├── benchmarks/           48-benchmark suite + cosim/ + host/ kernels
+├── examples/             runnable example configs (techs, cores, topologies,
+│                         placements, cosim) + integration/ extension demo
+├── docs/                 full documentation (see below)
+├── docker/  Dockerfile   container image
+└── CMakeLists.txt  LICENSE  README.md
+```
+
+## Build
+
+```bash
+# dependencies (Ubuntu/Debian): see docs/build.md
+mkdir -p build && cd build && cmake .. && make -j$(nproc)
+make -C ../benchmarks all
+```
+
+QEMU with TCG plugins is required for execution-driven mode — build it once
+into `external/qemu/build/` ([docs/build.md](docs/build.md)).
+Or skip building entirely:
+
+```bash
+docker pull ghcr.io/isaacyhe/pimid:latest
+```
+
+## Run
+
+```bash
+# cycle-accurate run of an example config
+./build/pimid --method exec --config examples/tech_HBM3.yaml --no-power
+
+# synthetic NoC traffic, no workload needed
+./build/pimid --method synthetic --config examples/topo_MESH_2D.yaml
+
+# bit-stable timing (disable ASLR)
+setarch -R ./build/pimid --method exec --config examples/tech_DDR4.yaml
+```
+
+A minimal config:
+
+```yaml
+scope: device
+workload: { binary: benchmarks/pim_kernels/stream_triad/stream_triad,
+            args: ["--size", "8192"] }
+pim:
+  pe: { type: alu_core, count: 8, frequency_mhz: 1000 }
+  placement: { level: BANK }
+memory: { technology: HBM3 }
+noc: { model: detailed }      # default; 'analytical' for fast sweeps
+```
+
+## Documentation
+
+| | |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | engine, methods, scopes, two-Garnet hierarchy |
+| [docs/memory.md](docs/memory.md) | technologies, backends, placement, characterization cache |
+| [docs/network.md](docs/network.md) | the two NoC models, topologies, DRAM trees, synthetic traffic |
+| [docs/cores.md](docs/cores.md) | PE core models, ALU scaling, MLP |
+| [docs/cosim.md](docs/cosim.md) | host-device offload, link types, MPI semantics |
+| [docs/benchmarks.md](docs/benchmarks.md) | suites, building, running |
+| [docs/power.md](docs/power.md) | McPAT power/area |
+| [docs/build.md](docs/build.md) | build details, HPC notes, Docker, reproducibility |
+| [docs/yaml_reference.md](docs/yaml_reference.md) | every configuration key |
+| [docs/dram_specs.md](docs/dram_specs.md) | per-technology JEDEC mapping |
+| [docs/cache_warehouse.md](docs/cache_warehouse.md) | characterization cache internals |
+
+## License
+
+GPL-2.0. See [LICENSE](LICENSE).

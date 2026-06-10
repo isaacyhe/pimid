@@ -1,0 +1,1215 @@
+#include "power/mcpat_wrapper.h"
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+#include <cmath>
+#include <iomanip>
+#include <stdexcept>
+#include <vector>
+#include <climits>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/types.h>
+#include <cstdio>
+#include <cstring>
+#include <cerrno>
+#include <fcntl.h>
+
+#include "globalvar.h"
+#include "XML_Parse.h"
+#include "processor.h"
+
+namespace pimid {
+
+//=============================================================================
+// McPATWrapper Implementation
+//=============================================================================
+
+McPATWrapper::McPATWrapper(const SystemConfig& config)
+    : config_(config)
+    , mcpat_parser_(nullptr)
+    , mcpat_processor_(nullptr)
+    , total_cycles_(0)
+    , busy_cycles_(0)
+    , total_instructions_(0)
+    , l1i_reads_(0)
+    , l1i_read_misses_(0)
+    , l1d_reads_(0)
+    , l1d_writes_(0)
+    , l1d_read_misses_(0)
+    , l1d_write_misses_(0)
+    , l2_reads_(0)
+    , l2_writes_(0)
+    , l2_read_misses_(0)
+    , l2_write_misses_(0)
+    , l3_reads_(0)
+    , l3_writes_(0)
+    , l3_read_misses_(0)
+    , l3_write_misses_(0)
+    , mc_reads_(0)
+    , mc_writes_(0)
+    , device_profile_(DeviceProfile::DEVICE_INORDER)
+    , initialized_(false)
+    , valid_(false)
+    , power_computed_(false)
+    , user_provided_xml_(!config.xml_file.empty())
+    , error_message_("")
+{
+}
+
+McPATWrapper::~McPATWrapper() {
+    delete mcpat_processor_;
+    delete mcpat_parser_;
+    mcpat_processor_ = nullptr;
+    mcpat_parser_ = nullptr;
+}
+
+void McPATWrapper::initialize() {
+    if (initialized_) {
+        std::cerr << "[McPATWrapper] Warning: Already initialized" << std::endl;
+        return;
+    }
+
+    validateConfiguration();
+    if (!valid_) {
+        throw std::runtime_error("[McPATWrapper] Invalid configuration: " + error_message_);
+    }
+
+    try {
+        createMcPATInput();
+        initialized_ = true;
+
+        std::cout << "[McPATWrapper] Initialized with:" << std::endl;
+        std::cout << "  Cores: " << config_.num_cores << std::endl;
+        std::cout << "  Core Clock: " << config_.core_clock_mhz << " MHz" << std::endl;
+        std::cout << "  L1I/L1D: " << (config_.l1i_size_bytes/1024) << "/"
+                  << (config_.l1d_size_bytes/1024) << " KB" << std::endl;
+        std::cout << "  L2: " << (config_.l2_size_bytes/1024) << " KB" << std::endl;
+        std::cout << "  L3: " << (config_.l3_size_bytes/(1024*1024)) << " MB" << std::endl;
+        std::cout << "  Technology: " << config_.tech_node_nm << " nm" << std::endl;
+        if (device_profile_ == DeviceProfile::HOST_OOO)
+            std::cout << "  Profile: HOST_OoO (x86 out-of-order)" << std::endl;
+        else if (device_profile_ == DeviceProfile::DEVICE_ALU)
+            std::cout << "  Profile: DEVICE_ALU (no caches)" << std::endl;
+        else
+            std::cout << "  Profile: DEVICE_INORDER" << std::endl;
+
+    } catch (const std::exception& e) {
+        valid_ = false;
+        error_message_ = std::string("Initialization failed: ") + e.what();
+        throw;
+    }
+}
+
+void McPATWrapper::reconfigure(const SystemConfig& config) {
+    config_ = config;
+    initialized_ = false;
+    power_computed_ = false;
+    initialize();
+}
+
+void McPATWrapper::validateConfiguration() {
+    valid_ = true;
+    error_message_ = "";
+
+    if (config_.num_cores < 1 || config_.num_cores > 1024) {
+        valid_ = false;
+        error_message_ = "Number of cores out of range (1-1024)";
+        return;
+    }
+
+    if (config_.core_clock_mhz < 100 || config_.core_clock_mhz > 10000) {
+        valid_ = false;
+        error_message_ = "Core clock out of range (100-10000 MHz)";
+        return;
+    }
+
+    if (config_.tech_node_nm < 7 || config_.tech_node_nm > 90) {
+        valid_ = false;
+        error_message_ = "Technology node out of range (7nm - 90nm)";
+        return;
+    }
+}
+
+void McPATWrapper::setTotalCycles(uint64_t cycles) {
+    total_cycles_ = cycles;
+    power_computed_ = false;
+}
+
+void McPATWrapper::setBusyCycles(uint64_t cycles) {
+    busy_cycles_ = cycles;
+    power_computed_ = false;
+}
+
+void McPATWrapper::setTotalInstructions(uint64_t instructions) {
+    total_instructions_ = instructions;
+    power_computed_ = false;
+}
+
+void McPATWrapper::setL1IAccesses(uint64_t reads, uint64_t read_misses) {
+    l1i_reads_ = reads;
+    l1i_read_misses_ = read_misses;
+    power_computed_ = false;
+}
+
+void McPATWrapper::setL1DAccesses(uint64_t reads, uint64_t writes,
+                                   uint64_t read_misses, uint64_t write_misses) {
+    l1d_reads_ = reads;
+    l1d_writes_ = writes;
+    l1d_read_misses_ = read_misses;
+    l1d_write_misses_ = write_misses;
+    power_computed_ = false;
+}
+
+void McPATWrapper::setL2Accesses(uint64_t reads, uint64_t writes,
+                                  uint64_t read_misses, uint64_t write_misses) {
+    l2_reads_ = reads;
+    l2_writes_ = writes;
+    l2_read_misses_ = read_misses;
+    l2_write_misses_ = write_misses;
+    power_computed_ = false;
+}
+
+void McPATWrapper::setL3Accesses(uint64_t reads, uint64_t writes,
+                                  uint64_t read_misses, uint64_t write_misses) {
+    l3_reads_ = reads;
+    l3_writes_ = writes;
+    l3_read_misses_ = read_misses;
+    l3_write_misses_ = write_misses;
+    power_computed_ = false;
+}
+
+void McPATWrapper::setMemControllerAccesses(uint64_t reads, uint64_t writes) {
+    mc_reads_ = reads;
+    mc_writes_ = writes;
+    power_computed_ = false;
+}
+
+void McPATWrapper::setMCTechParams(const MCTechParams& params) {
+    mc_tech_ = params;
+    power_computed_ = false;
+}
+
+void McPATWrapper::setNoCLevels(const std::vector<NoCLevelConfig>& levels) {
+    noc_levels_ = levels;
+    power_computed_ = false;
+}
+
+void McPATWrapper::setNoCActivity(const NoCActivityStats& stats) {
+    noc_activity_ = stats;
+    power_computed_ = false;
+}
+
+void McPATWrapper::setPCIeStats(const PCIeStats& stats) {
+    pcie_stats_ = stats;
+    power_computed_ = false;
+}
+
+void McPATWrapper::setDeviceProfile(DeviceProfile profile) {
+    device_profile_ = profile;
+    power_computed_ = false;
+}
+
+void McPATWrapper::createMcPATInput() {
+    std::cout << "[McPATWrapper] Creating McPAT configuration" << std::endl;
+
+    if (!config_.xml_file.empty() && user_provided_xml_) {
+        std::cout << "  Using XML file: " << config_.xml_file << std::endl;
+        valid_ = true;
+        return;
+    }
+
+    // Generate XML configuration from parameters
+    std::string xml_content = generateXMLConfig();
+
+    // Write to temporary file for McPAT
+    // Unique per call so cosim per-node analysis doesn't overwrite the host
+    // XML before we can examine it (diagnostic only — no functional effect).
+    static int xml_call_idx = 0;
+    std::string temp_xml = "/tmp/mcpat_input_" +
+                           std::to_string(xml_call_idx++) + ".xml";
+    std::ofstream xml_file(temp_xml);
+    if (!xml_file) {
+        throw std::runtime_error("Failed to create McPAT XML file");
+    }
+
+    xml_file << xml_content;
+    xml_file.close();
+
+    config_.xml_file = temp_xml;
+    valid_ = true;
+
+    std::cout << "  Generated XML configuration: " << temp_xml << std::endl;
+}
+
+void McPATWrapper::runMcPAT() {
+    // CACTI reliably supports tech nodes 22-180nm. Clamp before XML generation.
+    if (config_.tech_node_nm < 22) {
+        std::cerr << "[McPATWrapper] Warning: " << config_.tech_node_nm
+                  << "nm not supported by CACTI (min 22nm). Clamping to 22nm for power estimation."
+                  << std::endl;
+        config_.tech_node_nm = 22;
+    } else if (config_.tech_node_nm > 180) {
+        std::cerr << "[McPATWrapper] Warning: " << config_.tech_node_nm
+                  << "nm not supported by CACTI (max 180nm). Clamping to 180nm for power estimation."
+                  << std::endl;
+        config_.tech_node_nm = 180;
+    }
+
+    // Regenerate XML with current stats (uses clamped tech_node_nm)
+    createMcPATInput();
+
+    if (config_.xml_file.empty()) {
+        throw std::runtime_error("[McPATWrapper] No XML file available for McPAT");
+    }
+
+    // Save CWD and stdout early so they can be restored in both success and error paths
+    char saved_cwd[PATH_MAX];
+    bool cwd_saved = (getcwd(saved_cwd, sizeof(saved_cwd)) != nullptr);
+    std::streambuf* orig_cout = std::cout.rdbuf();
+
+    try {
+        // Clean up any previous McPAT objects
+        delete mcpat_processor_;
+        mcpat_processor_ = nullptr;
+        delete mcpat_parser_;
+        mcpat_parser_ = nullptr;
+
+        // McPAT global: optimize for target clock rate
+        opt_for_clk = true;
+
+        // Parse XML
+        mcpat_parser_ = new ParseXML();
+        std::string xml_path = config_.xml_file;
+        std::vector<char> path_buf(xml_path.begin(), xml_path.end());
+        path_buf.push_back('\0');
+        mcpat_parser_->parse(path_buf.data());
+
+        // CACTI reads tech_params/*.dat via relative paths — chdir to CACTI data dir
+#ifdef CACTI_DATA_DIR
+        if (chdir(CACTI_DATA_DIR) != 0) {
+            std::cerr << "[McPATWrapper] Warning: Could not chdir to CACTI data directory: "
+                      << CACTI_DATA_DIR << std::endl;
+        }
+#endif
+
+        // Suppress McPAT/CACTI verbose output.
+        // When running inside a subprocess-isolated McPAT child (env var set by
+        // computePower()), skip the rdbuf swap entirely: CACTI may call exit(0)
+        // on error_checking() failure, and the atexit cleanup of std::cout
+        // would then dereference an rdbuf whose stack lifetime ended via the
+        // throw/unwind path — producing a spurious SIGSEGV in the child even
+        // when CACTI itself exited cleanly. fd-level redirection (done by the
+        // child) handles silencing for the subprocess case.
+        const bool in_isolated_child = (getenv("PIMID_MCPAT_CHILD") != nullptr);
+        std::ostringstream suppress;
+        if (!in_isolated_child) {
+            std::cout.rdbuf(suppress.rdbuf());
+        }
+
+        // Processor constructor does all computation
+        mcpat_processor_ = new Processor(mcpat_parser_);
+
+        // Restore stdout
+        if (!in_isolated_child) {
+            std::cout.rdbuf(orig_cout);
+        }
+
+        // Restore original working directory
+        if (cwd_saved) {
+            if (chdir(saved_cwd) != 0) { /* ignore */ }
+        }
+
+        valid_ = true;
+        std::cout << "[McPATWrapper] McPAT power analysis complete" << std::endl;
+    } catch (const std::exception& e) {
+        // CRITICAL: Restore stdout and CWD before propagating error
+        std::cout.rdbuf(orig_cout);
+        if (cwd_saved) {
+            if (chdir(saved_cwd) != 0) { /* ignore */ }
+        }
+
+        delete mcpat_processor_;
+        mcpat_processor_ = nullptr;
+        delete mcpat_parser_;
+        mcpat_parser_ = nullptr;
+        valid_ = false;
+        throw std::runtime_error(std::string("[McPATWrapper] McPAT failed: ") + e.what());
+    } catch (...) {
+        std::cout.rdbuf(orig_cout);
+        if (cwd_saved) {
+            if (chdir(saved_cwd) != 0) { /* ignore */ }
+        }
+
+        delete mcpat_processor_;
+        mcpat_processor_ = nullptr;
+        delete mcpat_parser_;
+        mcpat_parser_ = nullptr;
+        valid_ = false;
+        throw std::runtime_error("[McPATWrapper] McPAT failed with unknown error");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Subprocess-isolated power analysis.
+//
+// McPAT links CACTI 6.5-P, which carries non-reentrant globals (interface_ip
+// in particular). A second McPAT::Processor() constructor in the same process
+// inherits dirty globals from the first call and reliably crashes inside CACTI
+// (e.g. "Must have at least one port") during dual-McPAT cosim runs. Restarting
+// the process between calls is the only realistic isolation for that library.
+//
+// Implementation: fork() per computePower(). The child runs the existing
+// in-process McPAT pipeline and serializes the result-cache fields it would
+// have populated (POD doubles + a small vector of PowerMetrics) to a temp
+// file, then _exits. The parent waits, reads the blob, populates its own
+// cache. Existing getXxxPower()/area accessors are unchanged because they
+// read from those cache fields, not the Processor object itself.
+//
+// On child crash (non-zero exit / signal), the parent throws — same surface
+// as the original in-process exception path.
+// ---------------------------------------------------------------------------
+namespace {
+struct ResultBlob {
+    // Cached PowerMetrics for ComponentType enum entries we extract.
+    // 7 entries today: CORE, L1_CACHE, L2_CACHE, L3_CACHE, MEMORY_CONTROLLER,
+    // NOC, PCIE. Fixed-size to keep the blob layout trivially POD.
+    static constexpr int kNumComponents = 7;
+    McPATWrapper::PowerMetrics component_power[kNumComponents];
+    McPATWrapper::PowerMetrics system_power;
+    double peak_power;
+    double core_area_mm2;
+    double l2_area_mm2;
+    double l3_area_mm2;
+    double noc_area_mm2;
+    double mc_area_mm2;
+    double total_area_mm2;
+    int num_noc_levels;          // entries that follow, can be 0
+    // After this struct, num_noc_levels * sizeof(PowerMetrics) bytes follow.
+};
+constexpr McPATWrapper::ComponentType kComponentOrder[ResultBlob::kNumComponents] = {
+    McPATWrapper::ComponentType::CORE,
+    McPATWrapper::ComponentType::L1_CACHE,
+    McPATWrapper::ComponentType::L2_CACHE,
+    McPATWrapper::ComponentType::L3_CACHE,
+    McPATWrapper::ComponentType::MEMORY_CONTROLLER,
+    McPATWrapper::ComponentType::NOC,
+    McPATWrapper::ComponentType::PCIE,
+};
+}  // namespace
+
+void McPATWrapper::computePower() {
+    if (!initialized_) {
+        throw std::runtime_error("[McPATWrapper] Not initialized");
+    }
+
+    // Generate the XML in the parent so the child reads the same file path
+    // we configured (avoids races on /tmp/mcpat_input.xml when callers chain
+    // host/device power analyses).
+    createMcPATInput();
+
+    char blob_path[64];
+    std::snprintf(blob_path, sizeof(blob_path),
+                  "/tmp/pimid_mcpat_blob_%d.bin", (int)getpid());
+
+    pid_t child = fork();
+    if (child < 0) {
+        throw std::runtime_error("[McPATWrapper] fork() failed for McPAT isolation");
+    }
+
+    if (child == 0) {
+        // Child: do the in-process McPAT work, serialize, exit. Any CACTI
+        // global pollution dies with this process.
+        //
+        // Silence McPAT/CACTI chatter at the fd level (not std::cout.rdbuf).
+        // CACTI calls exit(0) on error_checking() failure; std::cout cleanup
+        // during atexit then reads from an rdbuf whose stack lifetime ended
+        // inside runMcPAT() — that produces a spurious SIGSEGV in the child
+        // even when CACTI's own logic exited cleanly. fd-level redirect
+        // survives atexit because it does not require any C++ object state.
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            close(devnull);
+        }
+        // Tell runMcPAT() to skip the std::cout.rdbuf swap (would crash in
+        // atexit if CACTI calls exit() during the new Processor() ctor).
+        setenv("PIMID_MCPAT_CHILD", "1", 1);
+        try {
+            runMcPAT();
+            extractResults();
+
+            FILE* f = std::fopen(blob_path, "wb");
+            if (!f) std::_Exit(20);
+
+            ResultBlob blob{};
+            for (int i = 0; i < ResultBlob::kNumComponents; i++) {
+                auto it = component_power_.find(kComponentOrder[i]);
+                if (it != component_power_.end()) blob.component_power[i] = it->second;
+            }
+            blob.system_power    = system_power_;
+            blob.peak_power      = peak_power_;
+            blob.core_area_mm2   = mcpat_core_area_mm2_;
+            blob.l2_area_mm2     = mcpat_l2_area_mm2_;
+            blob.l3_area_mm2     = mcpat_l3_area_mm2_;
+            blob.noc_area_mm2    = mcpat_noc_area_mm2_;
+            blob.mc_area_mm2     = mcpat_mc_area_mm2_;
+            blob.total_area_mm2  = mcpat_total_area_mm2_;
+            blob.num_noc_levels  = static_cast<int>(noc_level_power_.size());
+
+            std::fwrite(&blob, sizeof(blob), 1, f);
+            if (blob.num_noc_levels > 0) {
+                std::fwrite(noc_level_power_.data(),
+                            sizeof(PowerMetrics), blob.num_noc_levels, f);
+            }
+            std::fflush(f);
+            std::fclose(f);
+            std::_Exit(0);
+        } catch (const std::exception& e) {
+            // Write a one-line diagnostic to the original stderr so the
+            // parent's output reflects WHY the child failed (otherwise we
+            // see just "exit code 21" and lose the McPAT/CACTI message).
+            const char* prefix = "[McPATWrapper child] exception: ";
+            (void)!write(STDERR_FILENO, prefix, std::strlen(prefix));
+            const char* msg = e.what();
+            (void)!write(STDERR_FILENO, msg, std::strlen(msg));
+            (void)!write(STDERR_FILENO, "\n", 1);
+            std::_Exit(21);
+        } catch (...) {
+            std::_Exit(21);
+        }
+    }
+
+    // Parent: wait and reap.
+    int status = 0;
+    pid_t w;
+    do { w = waitpid(child, &status, 0); } while (w < 0 && errno == EINTR);
+    if (w < 0) {
+        std::remove(blob_path);
+        throw std::runtime_error("[McPATWrapper] waitpid failed for McPAT child");
+    }
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        std::remove(blob_path);
+        std::string detail;
+        if (WIFSIGNALED(status)) {
+            detail = "killed by signal " + std::to_string(WTERMSIG(status));
+        } else if (WIFEXITED(status)) {
+            detail = "exit code " + std::to_string(WEXITSTATUS(status));
+        } else {
+            detail = "unknown status";
+        }
+        throw std::runtime_error(
+            "[McPATWrapper] McPAT child failed (" + detail + ")");
+    }
+
+    // Read the serialized result blob back into our cache fields.
+    FILE* f = std::fopen(blob_path, "rb");
+    if (!f) {
+        throw std::runtime_error("[McPATWrapper] Could not open result blob");
+    }
+    ResultBlob blob{};
+    if (std::fread(&blob, sizeof(blob), 1, f) != 1) {
+        std::fclose(f);
+        std::remove(blob_path);
+        throw std::runtime_error("[McPATWrapper] Short read on result blob");
+    }
+    component_power_.clear();
+    for (int i = 0; i < ResultBlob::kNumComponents; i++) {
+        component_power_[kComponentOrder[i]] = blob.component_power[i];
+    }
+    system_power_         = blob.system_power;
+    peak_power_           = blob.peak_power;
+    mcpat_core_area_mm2_  = blob.core_area_mm2;
+    mcpat_l2_area_mm2_    = blob.l2_area_mm2;
+    mcpat_l3_area_mm2_    = blob.l3_area_mm2;
+    mcpat_noc_area_mm2_   = blob.noc_area_mm2;
+    mcpat_mc_area_mm2_    = blob.mc_area_mm2;
+    mcpat_total_area_mm2_ = blob.total_area_mm2;
+
+    noc_level_power_.clear();
+    if (blob.num_noc_levels > 0) {
+        noc_level_power_.resize(blob.num_noc_levels);
+        if (std::fread(noc_level_power_.data(),
+                       sizeof(PowerMetrics), blob.num_noc_levels, f)
+            != static_cast<size_t>(blob.num_noc_levels)) {
+            std::fclose(f);
+            std::remove(blob_path);
+            throw std::runtime_error("[McPATWrapper] Short read on NoC level blob");
+        }
+    }
+    std::fclose(f);
+    std::remove(blob_path);
+
+    power_computed_ = true;
+
+    std::cout << "[McPATWrapper] Power analysis complete" << std::endl;
+    std::cout << "  Total Power: " << system_power_.total_power << " W" << std::endl;
+}
+
+void McPATWrapper::extractResults() {
+    if (!mcpat_processor_) {
+        throw std::runtime_error("[McPATWrapper] McPAT processor object is null — cannot extract results");
+    }
+
+    // Extract real results from McPAT Processor object
+    bool long_channel = (config_.longer_channel_device != 0);
+
+    // Helper lambda to extract power from a McPAT Component
+    auto extractComponent = [long_channel](const Component& comp) -> PowerMetrics {
+        PowerMetrics pm;
+        double dyn = comp.rt_power.readOp.dynamic;
+        pm.runtime_dynamic = (std::isfinite(dyn)) ? dyn : 0.0;
+        pm.subthreshold_leakage = long_channel
+            ? comp.power.readOp.longer_channel_leakage
+            : comp.power.readOp.leakage;
+        pm.gate_leakage = comp.power.readOp.gate_leakage;
+        pm.total_leakage = pm.subthreshold_leakage + pm.gate_leakage;
+        pm.total_dynamic = pm.runtime_dynamic;
+        pm.total_power = pm.total_dynamic + pm.total_leakage;
+        return pm;
+    };
+
+    // Core (includes L1 caches in McPAT's model)
+    component_power_[ComponentType::CORE] = extractComponent(mcpat_processor_->core);
+    // L1 is embedded in core — zero out separate L1 to avoid double-counting
+    component_power_[ComponentType::L1_CACHE] = PowerMetrics();
+
+    // L2
+    component_power_[ComponentType::L2_CACHE] = extractComponent(mcpat_processor_->l2);
+
+    // L3
+    component_power_[ComponentType::L3_CACHE] = extractComponent(mcpat_processor_->l3);
+
+    // Memory Controller
+    component_power_[ComponentType::MEMORY_CONTROLLER] = extractComponent(mcpat_processor_->mcs);
+
+    // NoC — use Processor-level aggregate (already normalized energy→Watts)
+    // The per-NoC nocs[i]->rt_power stores raw energy; Processor multiplies
+    // by 1/executionTime during aggregation into noc.rt_power (Watts).
+    noc_level_power_.clear();
+    if (mcpat_processor_->numNOC > 0) {
+        // Per-level breakdown: divide each nocs[i] energy by executionTime
+        for (int i = 0; i < mcpat_processor_->numNOC; i++) {
+            double execTime = mcpat_processor_->nocs[i]->nocdynp.executionTime;
+            if (execTime <= 0) execTime = 1.0;
+            PowerMetrics level_pm;
+            double rawDyn = mcpat_processor_->nocs[i]->rt_power.readOp.dynamic;
+            level_pm.runtime_dynamic = (std::isfinite(rawDyn)) ? rawDyn / execTime : 0.0;
+            level_pm.subthreshold_leakage = long_channel
+                ? mcpat_processor_->nocs[i]->power.readOp.longer_channel_leakage
+                : mcpat_processor_->nocs[i]->power.readOp.leakage;
+            level_pm.gate_leakage = mcpat_processor_->nocs[i]->power.readOp.gate_leakage;
+            level_pm.total_leakage = level_pm.subthreshold_leakage + level_pm.gate_leakage;
+            level_pm.total_dynamic = level_pm.runtime_dynamic;
+            level_pm.total_power = level_pm.total_dynamic + level_pm.total_leakage;
+            noc_level_power_.push_back(level_pm);
+        }
+        // Aggregate: use Processor's pre-computed noc (already in Watts)
+        component_power_[ComponentType::NOC] = extractComponent(mcpat_processor_->noc);
+    } else {
+        component_power_[ComponentType::NOC] = PowerMetrics();
+    }
+
+    // PCIe
+    if (mcpat_processor_->pcie) {
+        component_power_[ComponentType::PCIE] = extractComponent(*mcpat_processor_->pcie);
+    }
+
+    // Store areas from McPAT (um^2 -> mm^2)
+    mcpat_core_area_mm2_ = mcpat_processor_->core.area.get_area() * 1e-6;
+    mcpat_l2_area_mm2_ = mcpat_processor_->l2.area.get_area() * 1e-6;
+    mcpat_l3_area_mm2_ = mcpat_processor_->l3.area.get_area() * 1e-6;
+    mcpat_noc_area_mm2_ = mcpat_processor_->noc.area.get_area() * 1e-6;
+    mcpat_mc_area_mm2_ = mcpat_processor_->mcs.area.get_area() * 1e-6;
+    mcpat_total_area_mm2_ = mcpat_processor_->area.get_area() * 1e-6;
+
+    // System total
+    system_power_ = PowerMetrics();
+    for (const auto& pair : component_power_) {
+        system_power_.runtime_dynamic += pair.second.runtime_dynamic;
+        system_power_.subthreshold_leakage += pair.second.subthreshold_leakage;
+        system_power_.gate_leakage += pair.second.gate_leakage;
+        system_power_.total_leakage += pair.second.total_leakage;
+    }
+    system_power_.total_dynamic = system_power_.runtime_dynamic;
+    system_power_.total_power = system_power_.total_dynamic + system_power_.total_leakage;
+
+    // Extract real peak power from McPAT design-time power (power.readOp.dynamic)
+    // This is the maximum power assuming all units active at peak frequency,
+    // as opposed to rt_power.readOp.dynamic which is scaled by runtime activity.
+    bool long_channel_peak = long_channel;
+    auto peakDynamic = [](const Component& comp) -> double {
+        double d = comp.power.readOp.dynamic;
+        return (std::isfinite(d)) ? d : 0.0;
+    };
+    auto peakLeakage = [long_channel_peak](const Component& comp) -> double {
+        double sub = long_channel_peak
+            ? comp.power.readOp.longer_channel_leakage
+            : comp.power.readOp.leakage;
+        double gate = comp.power.readOp.gate_leakage;
+        return ((std::isfinite(sub)) ? sub : 0.0) + ((std::isfinite(gate)) ? gate : 0.0);
+    };
+
+    double peak_dyn = 0.0;
+    double peak_leak = 0.0;
+    peak_dyn += peakDynamic(mcpat_processor_->core);
+    peak_leak += peakLeakage(mcpat_processor_->core);
+    peak_dyn += peakDynamic(mcpat_processor_->l2);
+    peak_leak += peakLeakage(mcpat_processor_->l2);
+    peak_dyn += peakDynamic(mcpat_processor_->l3);
+    peak_leak += peakLeakage(mcpat_processor_->l3);
+    peak_dyn += peakDynamic(mcpat_processor_->mcs);
+    peak_leak += peakLeakage(mcpat_processor_->mcs);
+    peak_dyn += peakDynamic(mcpat_processor_->noc);
+    peak_leak += peakLeakage(mcpat_processor_->noc);
+    if (mcpat_processor_->pcie) {
+        peak_dyn += peakDynamic(*mcpat_processor_->pcie);
+        peak_leak += peakLeakage(*mcpat_processor_->pcie);
+    }
+    peak_power_ = peak_dyn + peak_leak;
+}
+
+//=============================================================================
+// Query functions
+//=============================================================================
+
+McPATWrapper::PowerMetrics McPATWrapper::getComponentPower(ComponentType component) const {
+    auto it = component_power_.find(component);
+    if (it != component_power_.end()) {
+        return it->second;
+    }
+    return PowerMetrics();
+}
+
+McPATWrapper::PowerMetrics McPATWrapper::getSystemPower() const {
+    return system_power_;
+}
+
+double McPATWrapper::getCorePower() const {
+    return getComponentPower(ComponentType::CORE).total_power;
+}
+
+double McPATWrapper::getCachePower() const {
+    double total = 0.0;
+    total += getComponentPower(ComponentType::L1_CACHE).total_power;
+    total += getComponentPower(ComponentType::L2_CACHE).total_power;
+    total += getComponentPower(ComponentType::L3_CACHE).total_power;
+    return total;
+}
+
+double McPATWrapper::getMemoryControllerPower() const {
+    return getComponentPower(ComponentType::MEMORY_CONTROLLER).total_power;
+}
+
+double McPATWrapper::getNoCPower() const {
+    return getComponentPower(ComponentType::NOC).total_power;
+}
+
+double McPATWrapper::getComponentArea(ComponentType component) const {
+    if (mcpat_processor_) {
+        switch (component) {
+            case ComponentType::CORE:
+                return mcpat_core_area_mm2_;
+            case ComponentType::L1_CACHE:
+                return 0.0;  // included in core
+            case ComponentType::L2_CACHE:
+                return mcpat_l2_area_mm2_;
+            case ComponentType::L3_CACHE:
+                return mcpat_l3_area_mm2_;
+            case ComponentType::MEMORY_CONTROLLER:
+                return mcpat_mc_area_mm2_;
+            case ComponentType::NOC:
+                return mcpat_noc_area_mm2_;
+            default:
+                return 0.0;
+        }
+    }
+    return 0.0;
+}
+
+double McPATWrapper::getTotalArea() const {
+    if (mcpat_processor_) {
+        return mcpat_total_area_mm2_;
+    }
+    return 0.0;
+}
+
+double McPATWrapper::getPeakPower() const {
+    return peak_power_;
+}
+
+double McPATWrapper::getEnergyForPeriod(double time_seconds) const {
+    return system_power_.total_power * time_seconds;
+}
+
+bool McPATWrapper::isValid() const {
+    return valid_;
+}
+
+std::string McPATWrapper::getErrorMessage() const {
+    return error_message_;
+}
+
+void McPATWrapper::printDetailedResults() const {
+    if (!power_computed_) {
+        std::cout << "[McPATWrapper] Power not yet computed" << std::endl;
+        return;
+    }
+
+    std::cout << "\n=== McPAT Power Analysis Results ===" << std::endl;
+    std::cout << "Configuration:" << std::endl;
+    std::cout << "  Cores: " << config_.num_cores << " @ " << config_.core_clock_mhz << " MHz" << std::endl;
+    std::cout << "  Technology: " << config_.tech_node_nm << " nm" << std::endl;
+
+    printComponentBreakdown();
+
+    // Per-level NoC breakdown
+    if (!noc_level_power_.empty() && !noc_levels_.empty()) {
+        std::cout << "\nNoC Power Breakdown (" << noc_level_power_.size() << " levels):" << std::endl;
+        for (size_t i = 0; i < noc_level_power_.size() && i < noc_levels_.size(); i++) {
+            const auto& pm = noc_level_power_[i];
+            const auto& cfg = noc_levels_[i];
+            std::cout << "  " << cfg.name
+                      << " (" << cfg.horizontal_nodes << "x" << cfg.vertical_nodes
+                      << (cfg.type == 0 ? " bus" : " NoC") << "):"
+                      << "  " << pm.runtime_dynamic << "W dynamic, "
+                      << pm.total_leakage << "W leakage" << std::endl;
+        }
+    }
+
+    std::cout << "\nSystem Totals:" << std::endl;
+    std::cout << "  Total Dynamic Power: " << system_power_.total_dynamic << " W" << std::endl;
+    std::cout << "  Total Leakage Power: " << system_power_.total_leakage << " W" << std::endl;
+    std::cout << "  Total Power: " << system_power_.total_power << " W" << std::endl;
+    std::cout << "  Peak Power: " << getPeakPower() << " W" << std::endl;
+    std::cout << "  Total Area: " << getTotalArea() << " mm^2" << std::endl;
+    std::cout << "=====================================\n" << std::endl;
+}
+
+void McPATWrapper::printSummaryLine() const {
+    if (!power_computed_) return;
+    std::cout << "Power: " << std::fixed << std::setprecision(2)
+              << system_power_.total_power << "W ("
+              << system_power_.total_dynamic << "W dynamic + "
+              << system_power_.total_leakage << "W leakage), Area: "
+              << getTotalArea() << " mm^2"
+              << std::defaultfloat << std::endl;
+}
+
+void McPATWrapper::printComponentBreakdown() const {
+    std::cout << "\nComponent Power Breakdown:" << std::endl;
+
+    auto print_component = [](const std::string& name, const PowerMetrics& power) {
+        std::cout << "  " << name << ":" << std::endl;
+        std::cout << "    Dynamic: " << power.runtime_dynamic << " W" << std::endl;
+        std::cout << "    Leakage: " << power.total_leakage << " W" << std::endl;
+        std::cout << "    Total: " << power.total_power << " W" << std::endl;
+    };
+
+    print_component("Cores", getComponentPower(ComponentType::CORE));
+    print_component("L1 Caches", getComponentPower(ComponentType::L1_CACHE));
+    print_component("L2 Caches", getComponentPower(ComponentType::L2_CACHE));
+    print_component("L3 Cache", getComponentPower(ComponentType::L3_CACHE));
+    print_component("Memory Controllers", getComponentPower(ComponentType::MEMORY_CONTROLLER));
+    if (config_.has_noc || !noc_levels_.empty()) {
+        print_component("NoC", getComponentPower(ComponentType::NOC));
+    }
+    if (pcie_stats_.number_units > 0) {
+        print_component("PCIe", getComponentPower(ComponentType::PCIE));
+    }
+}
+
+//=============================================================================
+// XML Generation for McPAT
+//=============================================================================
+
+std::string McPATWrapper::generateXMLConfig() const {
+    std::ostringstream xml;
+
+    // ALU-only config: no caches; also skip L3 if size is 0
+    bool alu_only = (config_.l1i_size_bytes == 0);
+    int num_l2s = alu_only ? 0 : config_.num_cores;
+    bool has_l3 = !alu_only && (config_.l3_size_bytes > 0);
+    int num_l3s = has_l3 ? 1 : 0;
+    int num_cache_levels = alu_only ? 0 : (has_l3 ? 3 : 2);
+
+    // Determine number of NoC instances
+    // McPAT XML parser uses positional component counting; with 0 NoCs + 0 L2s +
+    // 0 L3s the counter never advances past core0, causing MC parse to fail.
+    // Always emit at least 1 NoC (with minimal activity) to keep parsing correct.
+    int num_nocs = 1;
+    if (!noc_levels_.empty()) {
+        num_nocs = static_cast<int>(noc_levels_.size());
+    } else if (config_.has_noc) {
+        num_nocs = 1;
+    }
+
+    // Device profile settings
+    bool is_ooo = (device_profile_ == DeviceProfile::HOST_OOO);
+    int machine_type = is_ooo ? 0 : 1;
+    int x86 = is_ooo ? 1 : 0;
+    int rob_size = is_ooo ? 192 : 0;
+    int inst_window_size = is_ooo ? 64 : 0;
+    int fp_inst_window_size = is_ooo ? 32 : 0;
+    int phy_regs_irf = is_ooo ? 180 : 32;
+    int phy_regs_frf = is_ooo ? 180 : 32;
+    int rename_scheme = is_ooo ? 0 : 0;  // RAT-based for both
+    const char* lsu_order = is_ooo ? "OOO" : "inorder";
+    int pipeline_depth = is_ooo ? 19 : config_.pipeline_depth;
+    int issue_width = is_ooo ? 4 : config_.issue_width;
+    int store_buffer = is_ooo ? 32 : 4;
+    int load_buffer = is_ooo ? 32 : 4;
+
+    xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    xml << "<component id=\"root\" name=\"root\">\n";
+
+    // System parameters
+    xml << "  <component id=\"system\" name=\"system\">\n";
+    xml << "    <param name=\"number_of_cores\" value=\"" << config_.num_cores << "\"/>\n";
+    xml << "    <param name=\"number_of_L1Directories\" value=\"0\"/>\n";
+    xml << "    <param name=\"number_of_L2Directories\" value=\"0\"/>\n";
+    xml << "    <param name=\"number_of_L2s\" value=\"" << num_l2s << "\"/>\n";
+    xml << "    <param name=\"Private_L2\" value=\"" << (alu_only ? 0 : 1) << "\"/>\n";
+    xml << "    <param name=\"number_of_L3s\" value=\"" << num_l3s << "\"/>\n";
+    xml << "    <param name=\"number_of_NoCs\" value=\"" << num_nocs << "\"/>\n";
+    xml << "    <param name=\"homogeneous_cores\" value=\"1\"/>\n";
+    xml << "    <param name=\"homogeneous_L2s\" value=\"" << (num_l2s > 0 ? 1 : 0) << "\"/>\n";
+    xml << "    <param name=\"homogeneous_L1Directories\" value=\"0\"/>\n";
+    xml << "    <param name=\"homogeneous_L2Directories\" value=\"0\"/>\n";
+    xml << "    <param name=\"homogeneous_L3s\" value=\"" << (num_l3s > 0 ? 1 : 0) << "\"/>\n";
+    xml << "    <param name=\"homogeneous_ccs\" value=\"1\"/>\n";
+    xml << "    <param name=\"homogeneous_NoCs\" value=\"" << (num_nocs == 1 ? 1 : 0) << "\"/>\n";
+    xml << "    <param name=\"core_tech_node\" value=\"" << config_.tech_node_nm << "\"/>\n";
+    xml << "    <param name=\"target_core_clockrate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
+    xml << "    <param name=\"temperature\" value=\"" << config_.temperature_k << "\"/>\n";
+    xml << "    <param name=\"number_cache_levels\" value=\"" << num_cache_levels << "\"/>\n";
+    xml << "    <param name=\"interconnect_projection_type\" value=\"" << config_.interconnect_projection_type << "\"/>\n";
+    xml << "    <param name=\"device_type\" value=\"" << config_.device_type << "\"/>\n";
+    xml << "    <param name=\"longer_channel_device\" value=\"" << config_.longer_channel_device << "\"/>\n";
+    xml << "    <param name=\"power_gating\" value=\"0\"/>\n";
+    xml << "    <param name=\"machine_bits\" value=\"64\"/>\n";
+    xml << "    <param name=\"virtual_address_width\" value=\"48\"/>\n";
+    xml << "    <param name=\"physical_address_width\" value=\"48\"/>\n";
+    xml << "    <param name=\"virtual_memory_page_size\" value=\"4096\"/>\n";
+
+    // System statistics
+    xml << "    <stat name=\"total_cycles\" value=\"" << total_cycles_ << "\"/>\n";
+    xml << "    <stat name=\"idle_cycles\" value=\"" << (total_cycles_ - busy_cycles_) << "\"/>\n";
+    xml << "    <stat name=\"busy_cycles\" value=\"" << busy_cycles_ << "\"/>\n";
+
+    // Core component — homogeneous_cores=1 means emit exactly ONE core template
+    for (int i = 0; i < 1; i++) {
+        xml << "    <component id=\"system.core" << i << "\" name=\"core" << i << "\">\n";
+        xml << "      <param name=\"clock_rate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
+        xml << "      <param name=\"vdd\" value=\"0\"/>\n";
+        xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
+        xml << "      <param name=\"opt_local\" value=\"0\"/>\n";
+        xml << "      <param name=\"instruction_length\" value=\"32\"/>\n";
+        xml << "      <param name=\"opcode_width\" value=\"7\"/>\n";
+        xml << "      <param name=\"x86\" value=\"" << x86 << "\"/>\n";
+        xml << "      <param name=\"micro_opcode_width\" value=\"8\"/>\n";
+        xml << "      <param name=\"machine_type\" value=\"" << machine_type << "\"/>\n";
+        xml << "      <param name=\"number_hardware_threads\" value=\"" << config_.number_hardware_threads << "\"/>\n";
+        xml << "      <param name=\"fetch_width\" value=\"" << issue_width << "\"/>\n";
+        xml << "      <param name=\"number_instruction_fetch_ports\" value=\"1\"/>\n";
+        xml << "      <param name=\"decode_width\" value=\"" << issue_width << "\"/>\n";
+        xml << "      <param name=\"issue_width\" value=\"" << issue_width << "\"/>\n";
+        xml << "      <param name=\"peak_issue_width\" value=\"" << issue_width << "\"/>\n";
+        xml << "      <param name=\"commit_width\" value=\"" << issue_width << "\"/>\n";
+        xml << "      <param name=\"pipelines_per_core\" value=\"1,1\"/>\n";
+        xml << "      <param name=\"pipeline_depth\" value=\"" << pipeline_depth << ","
+            << pipeline_depth << "\"/>\n";
+        xml << "      <param name=\"ALU_per_core\" value=\"" << config_.num_alus << "\"/>\n";
+        xml << "      <param name=\"MUL_per_core\" value=\"" << config_.num_muls << "\"/>\n";
+        xml << "      <param name=\"FPU_per_core\" value=\"" << config_.num_fpus << "\"/>\n";
+        xml << "      <param name=\"instruction_buffer_size\" value=\"32\"/>\n";
+        xml << "      <param name=\"decoded_stream_buffer_size\" value=\"16\"/>\n";
+        xml << "      <param name=\"instruction_window_scheme\" value=\"0\"/>\n";
+        xml << "      <param name=\"instruction_window_size\" value=\"" << inst_window_size << "\"/>\n";
+        xml << "      <param name=\"fp_instruction_window_size\" value=\"" << fp_inst_window_size << "\"/>\n";
+        xml << "      <param name=\"ROB_size\" value=\"" << rob_size << "\"/>\n";
+        xml << "      <param name=\"archi_Regs_IRF_size\" value=\"32\"/>\n";
+        xml << "      <param name=\"archi_Regs_FRF_size\" value=\"32\"/>\n";
+        xml << "      <param name=\"phy_Regs_IRF_size\" value=\"" << phy_regs_irf << "\"/>\n";
+        xml << "      <param name=\"phy_Regs_FRF_size\" value=\"" << phy_regs_frf << "\"/>\n";
+        xml << "      <param name=\"rename_scheme\" value=\"" << rename_scheme << "\"/>\n";
+        xml << "      <param name=\"register_windows_size\" value=\"0\"/>\n";
+        xml << "      <param name=\"LSU_order\" value=\"" << lsu_order << "\"/>\n";
+        xml << "      <param name=\"store_buffer_size\" value=\"" << store_buffer << "\"/>\n";
+        xml << "      <param name=\"load_buffer_size\" value=\"" << load_buffer << "\"/>\n";
+        xml << "      <param name=\"memory_ports\" value=\"1\"/>\n";
+        xml << "      <param name=\"RAS_size\" value=\"16\"/>\n";
+
+        // Core statistics
+        uint64_t inst_per_core = total_instructions_ / std::max(1, config_.num_cores);
+        double pipeline_duty_cycle = (total_cycles_ > 0)
+            ? static_cast<double>(busy_cycles_) / total_cycles_
+            : 0.0;
+
+        xml << "      <stat name=\"total_instructions\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"int_instructions\" value=\"" << (inst_per_core * 70 / 100) << "\"/>\n";
+        xml << "      <stat name=\"fp_instructions\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"branch_instructions\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"branch_mispredictions\" value=\"" << (inst_per_core * 1 / 100) << "\"/>\n";
+        xml << "      <stat name=\"load_instructions\" value=\"" << (inst_per_core * 20 / 100) << "\"/>\n";
+        xml << "      <stat name=\"store_instructions\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"committed_instructions\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"committed_int_instructions\" value=\"" << (inst_per_core * 70 / 100) << "\"/>\n";
+        xml << "      <stat name=\"committed_fp_instructions\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"pipeline_duty_cycle\" value=\"" << pipeline_duty_cycle << "\"/>\n";
+        xml << "      <stat name=\"total_cycles\" value=\"" << total_cycles_ << "\"/>\n";
+        xml << "      <stat name=\"idle_cycles\" value=\"" << (total_cycles_ - busy_cycles_) << "\"/>\n";
+        xml << "      <stat name=\"busy_cycles\" value=\"" << busy_cycles_ << "\"/>\n";
+        xml << "      <stat name=\"ROB_reads\" value=\"" << (is_ooo ? inst_per_core : 0ULL) << "\"/>\n";
+        xml << "      <stat name=\"ROB_writes\" value=\"" << (is_ooo ? inst_per_core : 0ULL) << "\"/>\n";
+        xml << "      <stat name=\"rename_reads\" value=\"" << (is_ooo ? inst_per_core : 0ULL) << "\"/>\n";
+        xml << "      <stat name=\"rename_writes\" value=\"" << (is_ooo ? inst_per_core : 0ULL) << "\"/>\n";
+        xml << "      <stat name=\"fp_rename_reads\" value=\"" << (is_ooo ? inst_per_core * 10 / 100 : 0ULL) << "\"/>\n";
+        xml << "      <stat name=\"fp_rename_writes\" value=\"" << (is_ooo ? inst_per_core * 10 / 100 : 0ULL) << "\"/>\n";
+        xml << "      <stat name=\"inst_window_reads\" value=\"" << (is_ooo ? inst_per_core : 0ULL) << "\"/>\n";
+        xml << "      <stat name=\"inst_window_writes\" value=\"" << (is_ooo ? inst_per_core : 0ULL) << "\"/>\n";
+        xml << "      <stat name=\"inst_window_wakeup_accesses\" value=\"" << (is_ooo ? inst_per_core : 0ULL) << "\"/>\n";
+        xml << "      <stat name=\"fp_inst_window_reads\" value=\"" << (is_ooo ? inst_per_core * 10 / 100 : 0ULL) << "\"/>\n";
+        xml << "      <stat name=\"fp_inst_window_writes\" value=\"" << (is_ooo ? inst_per_core * 10 / 100 : 0ULL) << "\"/>\n";
+        xml << "      <stat name=\"fp_inst_window_wakeup_accesses\" value=\"" << (is_ooo ? inst_per_core * 10 / 100 : 0ULL) << "\"/>\n";
+        xml << "      <stat name=\"int_regfile_reads\" value=\"" << (inst_per_core * 2) << "\"/>\n";
+        xml << "      <stat name=\"int_regfile_writes\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"float_regfile_reads\" value=\"" << (inst_per_core * 20 / 100) << "\"/>\n";
+        xml << "      <stat name=\"float_regfile_writes\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"function_calls\" value=\"" << (inst_per_core / 100) << "\"/>\n";
+        xml << "      <stat name=\"context_switches\" value=\"0\"/>\n";
+        xml << "      <stat name=\"ialu_accesses\" value=\"" << (inst_per_core * 70 / 100) << "\"/>\n";
+        xml << "      <stat name=\"fpu_accesses\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"mul_accesses\" value=\"" << (inst_per_core * 5 / 100) << "\"/>\n";
+        xml << "      <stat name=\"cdb_alu_accesses\" value=\"" << inst_per_core << "\"/>\n";
+        xml << "      <stat name=\"cdb_mul_accesses\" value=\"" << (inst_per_core * 5 / 100) << "\"/>\n";
+        xml << "      <stat name=\"cdb_fpu_accesses\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+
+        if (!alu_only) {
+            // L1 icache — use actual per-core stats
+            uint64_t l1i_reads_per_core = l1i_reads_ / std::max(1, config_.num_cores);
+            uint64_t l1i_misses_per_core = l1i_read_misses_ / std::max(1, config_.num_cores);
+            xml << "      <component id=\"system.core" << i << ".icache\" name=\"icache\">\n";
+            xml << "        <param name=\"icache_config\" value=\"" << config_.l1i_size_bytes
+                << ",64,8,1,1,3,64,0\"/>\n";
+            xml << "        <param name=\"buffer_sizes\" value=\"16,16,16,0\"/>\n";
+            xml << "        <stat name=\"read_accesses\" value=\"" << l1i_reads_per_core << "\"/>\n";
+            xml << "        <stat name=\"read_misses\" value=\"" << l1i_misses_per_core << "\"/>\n";
+            xml << "        <stat name=\"conflicts\" value=\"0\"/>\n";
+            xml << "      </component>\n";
+
+            // L1 dcache — use actual per-core stats
+            uint64_t l1d_reads_per_core = l1d_reads_ / std::max(1, config_.num_cores);
+            uint64_t l1d_writes_per_core = l1d_writes_ / std::max(1, config_.num_cores);
+            uint64_t l1d_rmisses_per_core = l1d_read_misses_ / std::max(1, config_.num_cores);
+            uint64_t l1d_wmisses_per_core = l1d_write_misses_ / std::max(1, config_.num_cores);
+            xml << "      <component id=\"system.core" << i << ".dcache\" name=\"dcache\">\n";
+            xml << "        <param name=\"dcache_config\" value=\"" << config_.l1d_size_bytes
+                << ",64,8,1,1,3,64,0\"/>\n";
+            xml << "        <param name=\"buffer_sizes\" value=\"16,16,16,16\"/>\n";
+            xml << "        <stat name=\"read_accesses\" value=\"" << l1d_reads_per_core << "\"/>\n";
+            xml << "        <stat name=\"write_accesses\" value=\"" << l1d_writes_per_core << "\"/>\n";
+            xml << "        <stat name=\"read_misses\" value=\"" << l1d_rmisses_per_core << "\"/>\n";
+            xml << "        <stat name=\"write_misses\" value=\"" << l1d_wmisses_per_core << "\"/>\n";
+            xml << "        <stat name=\"conflicts\" value=\"0\"/>\n";
+            xml << "      </component>\n";
+        }
+        xml << "    </component>\n";  // close coreN
+    }
+
+    // L2 cache — homogeneous_L2s=1 means emit exactly ONE L2 template
+    if (!alu_only) {
+        for (int i = 0; i < 1; i++) {
+            uint64_t l2_reads_per = l2_reads_ / std::max(1, config_.num_cores);
+            uint64_t l2_writes_per = l2_writes_ / std::max(1, config_.num_cores);
+            uint64_t l2_rmisses_per = l2_read_misses_ / std::max(1, config_.num_cores);
+            uint64_t l2_wmisses_per = l2_write_misses_ / std::max(1, config_.num_cores);
+            xml << "    <component id=\"system.L2" << i << "\" name=\"L2" << i << "\">\n";
+            xml << "      <param name=\"L2_config\" value=\"" << config_.l2_size_bytes
+                << ",64,8,8,8,23,64,1\"/>\n";
+            xml << "      <param name=\"buffer_sizes\" value=\"16,16,16,16\"/>\n";
+            xml << "      <param name=\"clockrate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
+            xml << "      <param name=\"ports\" value=\"1,1,1\"/>\n";
+            xml << "      <param name=\"device_type\" value=\"0\"/>\n";
+            xml << "      <stat name=\"read_accesses\" value=\"" << l2_reads_per << "\"/>\n";
+            xml << "      <stat name=\"write_accesses\" value=\"" << l2_writes_per << "\"/>\n";
+            xml << "      <stat name=\"read_misses\" value=\"" << l2_rmisses_per << "\"/>\n";
+            xml << "      <stat name=\"write_misses\" value=\"" << l2_wmisses_per << "\"/>\n";
+            xml << "      <stat name=\"conflicts\" value=\"0\"/>\n";
+            xml << "      <stat name=\"duty_cycle\" value=\""
+                << (total_cycles_ > 0 ? static_cast<double>(busy_cycles_) / total_cycles_ * 0.5 : 0.0) << "\"/>\n";
+            xml << "    </component>\n";
+        }
+    }
+
+    // L3 cache (shared) — skip if ALU-only or no L3
+    if (has_l3) {
+        xml << "    <component id=\"system.L3\" name=\"L3\">\n";
+        xml << "      <param name=\"L3_config\" value=\"" << (config_.l3_size_bytes/(1024*1024))
+            << ",64,16,16,16,23,64,1\"/>\n";
+        xml << "      <param name=\"clockrate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
+        xml << "      <param name=\"ports\" value=\"1,1,1\"/>\n";
+        xml << "      <param name=\"device_type\" value=\"0\"/>\n";
+        xml << "      <param name=\"buffer_sizes\" value=\"16,16,16,16\"/>\n";
+        xml << "      <stat name=\"read_accesses\" value=\"" << l3_reads_ << "\"/>\n";
+        xml << "      <stat name=\"write_accesses\" value=\"" << l3_writes_ << "\"/>\n";
+        xml << "      <stat name=\"read_misses\" value=\"" << l3_read_misses_ << "\"/>\n";
+        xml << "      <stat name=\"write_misses\" value=\"" << l3_write_misses_ << "\"/>\n";
+        xml << "      <stat name=\"conflicts\" value=\"0\"/>\n";
+        xml << "      <stat name=\"duty_cycle\" value=\""
+            << (total_cycles_ > 0 ? static_cast<double>(busy_cycles_) / total_cycles_ * 0.3 : 0.0) << "\"/>\n";
+        xml << "    </component>\n";
+    }
+
+    // NoC — N instances from noc_levels_ (or single legacy instance)
+    if (!noc_levels_.empty()) {
+        // N heterogeneous NoC instances
+        for (size_t ni = 0; ni < noc_levels_.size(); ni++) {
+            const auto& lvl = noc_levels_[ni];
+            xml << "    <component id=\"system.noc" << ni << "\" name=\"noc" << ni << "\">\n";
+            xml << "      <param name=\"clockrate\" value=\"" << static_cast<int>(lvl.clock_mhz) << "\"/>\n";
+            xml << "      <param name=\"vdd\" value=\"0\"/>\n";
+            xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
+            xml << "      <param name=\"type\" value=\"" << lvl.type << "\"/>\n";
+            xml << "      <param name=\"horizontal_nodes\" value=\"" << lvl.horizontal_nodes << "\"/>\n";
+            xml << "      <param name=\"vertical_nodes\" value=\"" << lvl.vertical_nodes << "\"/>\n";
+            xml << "      <param name=\"has_global_link\" value=\"0\"/>\n";
+            xml << "      <param name=\"link_throughput\" value=\"1\"/>\n";
+            xml << "      <param name=\"link_latency\" value=\"1\"/>\n";
+            xml << "      <param name=\"input_ports\" value=\"" << lvl.input_ports << "\"/>\n";
+            xml << "      <param name=\"output_ports\" value=\"" << lvl.output_ports << "\"/>\n";
+            xml << "      <param name=\"virtual_channel_per_port\" value=\""
+                << std::max(1, config_.noc_vcs_per_vnet) << "\"/>\n";
+            xml << "      <param name=\"input_buffer_entries_per_vc\" value=\""
+                << std::max(1, config_.noc_vc_buffer_size) << "\"/>\n";
+            xml << "      <param name=\"flit_bits\" value=\"" << lvl.flit_bits << "\"/>\n";
+            xml << "      <param name=\"chip_coverage\" value=\"" << lvl.chip_coverage << "\"/>\n";
+            xml << "      <param name=\"link_routing_over_percentage\" value=\"0.5\"/>\n";
+            xml << "      <stat name=\"total_accesses\" value=\"" << lvl.total_accesses << "\"/>\n";
+            xml << "      <stat name=\"duty_cycle\" value=\"" << lvl.duty_cycle << "\"/>\n";
+            xml << "    </component>\n";
+        }
+    } else if (config_.has_noc) {
+        // Single legacy NoC instance
+        int grid = static_cast<int>(std::sqrt(config_.num_cores));
+        if (grid < 1) grid = 1;
+        int noc_type = (config_.noc_topology == 2) ? 0 : 1;  // bus=0, else router=1
+        uint64_t noc_accesses = (noc_activity_.total_packets > 0) ? noc_activity_.total_packets
+                                : (mc_reads_ + mc_writes_);
+        double noc_duty_cycle = (total_cycles_ > 0)
+            ? static_cast<double>(noc_accesses) / total_cycles_
+            : 0.0;
+
+        xml << "    <component id=\"system.noc0\" name=\"noc0\">\n";
+        xml << "      <param name=\"clockrate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
+        xml << "      <param name=\"vdd\" value=\"0\"/>\n";
+        xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
+        xml << "      <param name=\"type\" value=\"" << noc_type << "\"/>\n";
+        xml << "      <param name=\"horizontal_nodes\" value=\"" << grid << "\"/>\n";
+        xml << "      <param name=\"vertical_nodes\" value=\"" << grid << "\"/>\n";
+        xml << "      <param name=\"has_global_link\" value=\"0\"/>\n";
+        xml << "      <param name=\"link_throughput\" value=\"1\"/>\n";
+        xml << "      <param name=\"link_latency\" value=\"1\"/>\n";
+        xml << "      <param name=\"input_ports\" value=\"5\"/>\n";
+        xml << "      <param name=\"output_ports\" value=\"5\"/>\n";
+        xml << "      <param name=\"virtual_channel_per_port\" value=\""
+            << std::max(1, config_.noc_vcs_per_vnet) << "\"/>\n";
+        xml << "      <param name=\"input_buffer_entries_per_vc\" value=\""
+            << std::max(1, config_.noc_vc_buffer_size) << "\"/>\n";
+        xml << "      <param name=\"flit_bits\" value=\"128\"/>\n";
+        xml << "      <param name=\"chip_coverage\" value=\"1\"/>\n";
+        xml << "      <param name=\"link_routing_over_percentage\" value=\"0.5\"/>\n";
+        xml << "      <stat name=\"total_accesses\" value=\"" << noc_accesses << "\"/>\n";
+        xml << "      <stat name=\"duty_cycle\" value=\"" << noc_duty_cycle << "\"/>\n";
+        xml << "    </component>\n";
+    } else {
+        // Minimal NoC stub — McPAT's positional XML parser requires at least 1 NoC
+        // component to correctly offset to the MC section
+        xml << "    <component id=\"system.noc0\" name=\"noc0\">\n";
+        xml << "      <param name=\"clockrate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
+        xml << "      <param name=\"vdd\" value=\"0\"/>\n";
+        xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
+        xml << "      <param name=\"type\" value=\"0\"/>\n";
+        xml << "      <param name=\"horizontal_nodes\" value=\"1\"/>\n";
+        xml << "      <param name=\"vertical_nodes\" value=\"1\"/>\n";
+        xml << "      <param name=\"has_global_link\" value=\"0\"/>\n";
+        xml << "      <param name=\"link_throughput\" value=\"1\"/>\n";
+        xml << "      <param name=\"link_latency\" value=\"1\"/>\n";
+        xml << "      <param name=\"input_ports\" value=\"1\"/>\n";
+        xml << "      <param name=\"output_ports\" value=\"1\"/>\n";
+        xml << "      <param name=\"flit_bits\" value=\"64\"/>\n";
+        xml << "      <param name=\"chip_coverage\" value=\"0\"/>\n";
+        xml << "      <param name=\"link_routing_over_percentage\" value=\"0\"/>\n";
+        xml << "      <stat name=\"total_accesses\" value=\"0\"/>\n";
+        xml << "      <stat name=\"duty_cycle\" value=\"0\"/>\n";
+        xml << "    </component>\n";
+    }
+
+    // Memory controller — uses actual mc_reads_/mc_writes_ and mc_tech_ params
+    xml << "    <component id=\"system.mc\" name=\"mc\">\n";
+    xml << "      <param name=\"type\" value=\"0\"/>\n";
+    xml << "      <param name=\"mc_clock\" value=\"" << static_cast<int>(config_.mc_clock_mhz) << "\"/>\n";
+    xml << "      <param name=\"vdd\" value=\"0\"/>\n";
+    xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
+    xml << "      <param name=\"peak_transfer_rate\" value=\"" << mc_tech_.peak_transfer_rate << "\"/>\n";
+    xml << "      <param name=\"block_size\" value=\"64\"/>\n";
+    xml << "      <param name=\"number_mcs\" value=\"" << mc_tech_.number_mcs << "\"/>\n";
+    xml << "      <param name=\"memory_channels_per_mc\" value=\"1\"/>\n";
+    xml << "      <param name=\"number_ranks\" value=\"" << mc_tech_.number_ranks << "\"/>\n";
+    xml << "      <param name=\"withPHY\" value=\"0\"/>\n";
+    xml << "      <param name=\"req_window_size_per_channel\" value=\"32\"/>\n";
+    xml << "      <param name=\"IO_buffer_size_per_channel\" value=\"32\"/>\n";
+    xml << "      <param name=\"databus_width\" value=\"" << mc_tech_.databus_width << "\"/>\n";
+    xml << "      <param name=\"addressbus_width\" value=\"51\"/>\n";
+    {
+        int num_mcs = std::max(1, mc_tech_.number_mcs);
+        xml << "      <stat name=\"memory_accesses\" value=\"" << (mc_reads_ + mc_writes_) / num_mcs << "\"/>\n";
+        xml << "      <stat name=\"memory_reads\" value=\"" << mc_reads_ / num_mcs << "\"/>\n";
+        xml << "      <stat name=\"memory_writes\" value=\"" << mc_writes_ / num_mcs << "\"/>\n";
+    }
+    xml << "    </component>\n";
+
+    // NIU — mandatory stub
+    xml << "    <component id=\"system.niu\" name=\"niu\">\n";
+    xml << "      <param name=\"type\" value=\"1\"/>\n";
+    xml << "      <param name=\"clockrate\" value=\"350\"/>\n";
+    xml << "      <param name=\"vdd\" value=\"0\"/>\n";
+    xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
+    xml << "      <param name=\"number_units\" value=\"0\"/>\n";
+    xml << "      <stat name=\"duty_cycle\" value=\"0\"/>\n";
+    xml << "      <stat name=\"total_load_perc\" value=\"0\"/>\n";
+    xml << "    </component>\n";
+
+    // PCIe — active when co-sim transfers present, otherwise stub
+    xml << "    <component id=\"system.pcie\" name=\"pcie\">\n";
+    xml << "      <param name=\"type\" value=\"1\"/>\n";
+    xml << "      <param name=\"withPHY\" value=\"1\"/>\n";
+    xml << "      <param name=\"clockrate\" value=\"350\"/>\n";
+    xml << "      <param name=\"vdd\" value=\"0\"/>\n";
+    xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
+    xml << "      <param name=\"number_units\" value=\"" << pcie_stats_.number_units << "\"/>\n";
+    xml << "      <param name=\"num_channels\" value=\"" << pcie_stats_.num_channels << "\"/>\n";
+    xml << "      <stat name=\"duty_cycle\" value=\"" << pcie_stats_.duty_cycle << "\"/>\n";
+    xml << "      <stat name=\"total_load_perc\" value=\"" << pcie_stats_.total_load_perc << "\"/>\n";
+    xml << "    </component>\n";
+
+    // Flash controller — mandatory stub
+    xml << "    <component id=\"system.flashc\" name=\"flashc\">\n";
+    xml << "      <param name=\"number_flashcs\" value=\"0\"/>\n";
+    xml << "      <param name=\"type\" value=\"1\"/>\n";
+    xml << "      <param name=\"withPHY\" value=\"1\"/>\n";
+    xml << "      <param name=\"peak_transfer_rate\" value=\"200\"/>\n";
+    xml << "      <param name=\"vdd\" value=\"0\"/>\n";
+    xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
+    xml << "      <stat name=\"duty_cycle\" value=\"0\"/>\n";
+    xml << "    </component>\n";
+
+    xml << "  </component>\n";
+    xml << "</component>\n";
+
+    return xml.str();
+}
+
+} // namespace pimid

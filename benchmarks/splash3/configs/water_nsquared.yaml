@@ -1,0 +1,20 @@
+scope: device
+workload:
+  binary: benchmarks/splash3/water_nsquared/water_nsquared
+  args: ["--size", "343", "--threads", "2"]
+pim:
+  pe:
+    type: alu_core
+    count: 2
+    frequency_mhz: 1000
+    placement:
+      level: BANK
+  mc:
+    type: simple
+memory:
+  technology: SRAM
+noc:
+  topology: MESH_2D
+  model: simple
+simulation:
+  max_instructions: 10000000

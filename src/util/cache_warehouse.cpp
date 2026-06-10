@@ -1,0 +1,185 @@
+/**
+ * @file cache_warehouse.cpp
+ * @brief Implementation of the centralized PIMID cache warehouse.
+ */
+#include "util/cache_warehouse.h"
+
+#include <cstdlib>
+#include <cctype>
+#include <ctime>
+#include <fstream>
+#include <mutex>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+namespace pimid {
+namespace cache {
+
+namespace {
+
+// Bump when the cached artifact format / characterization semantics change,
+// so the manifest can distinguish entries produced by older PIMID builds.
+const char* kToolVersion = "1.0.0";
+
+struct State {
+    Mode mode = Mode::RW;
+    std::string root;
+    bool configured = false;
+};
+
+State& state() {
+    static State s;
+    return s;
+}
+
+std::mutex& mtx() {
+    static std::mutex m;
+    return m;
+}
+
+std::string lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+const char* env(const char* name) {
+    const char* v = std::getenv(name);
+    return (v && v[0]) ? v : nullptr;
+}
+
+std::string defaultRoot() {
+    const char* home = env("HOME");
+    if (home) return std::string(home) + "/.cache/pimid";
+    return std::string("/tmp/pimid-cache");
+}
+
+// mkdir -p
+void ensureDir(const std::string& path) {
+    if (path.empty()) return;
+    std::string acc;
+    for (size_t i = 0; i < path.size(); ++i) {
+        acc += path[i];
+        if (path[i] == '/' && acc.size() > 1) {
+            mkdir(acc.c_str(), 0755);  // ignore EEXIST
+        }
+    }
+    mkdir(acc.c_str(), 0755);
+}
+
+// Resolve once, honoring full precedence. Idempotent.
+void resolveIfNeeded() {
+    State& s = state();
+    if (s.configured) return;
+    // configure() not called yet → resolve from env + defaults only.
+    configure("", "", "", "");
+}
+
+}  // namespace
+
+Mode parseMode(const std::string& s) {
+    std::string m = lower(s);
+    if (m == "ro" || m == "read-only" || m == "readonly")  return Mode::RO;
+    if (m == "wo" || m == "write-only" || m == "writeonly") return Mode::WO;
+    if (m == "off" || m == "none" || m == "disable" || m == "disabled") return Mode::OFF;
+    return Mode::RW;  // "rw", "on", "", anything else
+}
+
+const char* modeName(Mode m) {
+    switch (m) {
+        case Mode::RW:  return "rw";
+        case Mode::RO:  return "ro";
+        case Mode::WO:  return "wo";
+        case Mode::OFF: return "off";
+    }
+    return "rw";
+}
+
+void configure(const std::string& cli_mode, const std::string& cli_dir,
+               const std::string& yaml_mode, const std::string& yaml_dir) {
+    std::lock_guard<std::mutex> lk(mtx());
+    State& s = state();
+
+    // ---- Mode: CLI > env > YAML > default(RW) ----
+    std::string mode_str;
+    if (!cli_mode.empty())            mode_str = cli_mode;
+    else if (env("PIMID_CACHE_DISABLE")) mode_str = "off";
+    else if (env("PIMID_CACHE_MODE")) mode_str = env("PIMID_CACHE_MODE");
+    else if (env("PIMID_NVSIM_CACHE_DISABLE")) mode_str = "off";  // back-compat
+    else if (!yaml_mode.empty())      mode_str = yaml_mode;
+    s.mode = parseMode(mode_str);  // empty → RW
+
+    // ---- Dir: CLI > env > YAML > default ----
+    std::string dir;
+    if (!cli_dir.empty())                  dir = cli_dir;
+    else if (env("PIMID_CACHE_DIR"))       dir = env("PIMID_CACHE_DIR");
+    else if (env("PIMID_NVSIM_CACHE_DIR")) {
+        // Back-compat: this historically pointed at the nvsim *subdir*. Treat
+        // its parent as the warehouse root so the new per-backend layout holds.
+        std::string legacy = env("PIMID_NVSIM_CACHE_DIR");
+        size_t slash = legacy.find_last_of('/');
+        dir = (slash != std::string::npos) ? legacy.substr(0, slash) : legacy;
+    }
+    else if (!yaml_dir.empty())            dir = yaml_dir;
+    else                                   dir = defaultRoot();
+    s.root = dir;
+
+    s.configured = true;
+}
+
+Mode mode() {
+    resolveIfNeeded();
+    return state().mode;
+}
+
+bool readEnabled() {
+    Mode m = mode();
+    return m == Mode::RW || m == Mode::RO;
+}
+
+bool writeEnabled() {
+    Mode m = mode();
+    return m == Mode::RW || m == Mode::WO;
+}
+
+const std::string& warehouseRoot() {
+    resolveIfNeeded();
+    return state().root;
+}
+
+std::string backendDir(const std::string& backend) {
+    std::string d = warehouseRoot() + "/" + backend;
+    ensureDir(d);
+    return d;
+}
+
+std::string toolVersion() {
+    return kToolVersion;
+}
+
+void recordManifest(const std::string& backend, const std::string& key,
+                    const std::string& params_json, const std::string& value_json) {
+    if (!writeEnabled()) return;
+    const std::string root = warehouseRoot();
+    ensureDir(root);
+    const std::string manifest = root + "/index.jsonl";
+
+    std::time_t now = std::time(nullptr);
+
+    // Append one self-contained JSON object on its own line. Append-only keeps
+    // concurrent sweep processes from corrupting each other; a reader dedups by
+    // (backend,key) taking the last line, and can flag tool_version mismatches.
+    std::lock_guard<std::mutex> lk(mtx());
+    std::ofstream f(manifest, std::ios::app);
+    if (!f.is_open()) return;
+    f << "{"
+      << "\"backend\":\"" << backend << "\","
+      << "\"key\":\"" << key << "\","
+      << "\"tool_version\":\"" << kToolVersion << "\","
+      << "\"timestamp\":" << static_cast<long long>(now) << ","
+      << "\"params\":{" << params_json << "},"
+      << "\"value\":{" << value_json << "}"
+      << "}\n";
+}
+
+}  // namespace cache
+}  // namespace pimid

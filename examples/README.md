@@ -1,0 +1,31 @@
+# Example configs
+
+Runnable YAML configs covering every PIMID feature dimension. Used by the
+regression harness and shipped in the Docker image as a smoke set.
+
+## Coverage
+
+| Group | Files | Values |
+|---|---|---|
+| Memory tech (11) | `tech_*.yaml` | DDR3, DDR4, DDR5, LPDDR5, GDDR6, HBM2, HBM3, SRAM, STT_MRAM, PCM, ReRAM |
+| Core / PE type (5) | `core_*.yaml` | ooo_core, in_order_core (cycle-detailed in-order), simple_core, alu_core, null_core |
+| NoC topology (6) | `topo_*.yaml` | MESH_2D, CROSSBAR, RING, TORUS_2D, FAT_TREE, BUS |
+| Network model (2) | `netmodel_*.yaml` | detailed (cycle-accurate Garnet; the default), analytical (hop-count + M/D/1 + MLP closed form, `noc.mlp` knob) |
+| Hierarchical DRAM placement (5) | `placement_*.yaml` | SUBARRAY, BANK, BANK_GROUP, CHIP, RANK |
+| HBM logic-die placement (2) | `logicdie_*.yaml` | HBM2, HBM3 |
+
+Multi-process MPI, host/device cosim, trace-gen, and power on/off are
+exercised by the regression script via CLI flags, not by extra YAMLs.
+
+## Run one
+
+```bash
+./build/pimid --method exec --config examples/examples/tech_DDR4.yaml
+```
+
+## NVSim characterization is slow
+
+The three NVSim-backed techs (STT_MRAM, PCM, ReRAM) run NVSim's first-pass
+characterization on each launch — that takes ~5+ minutes per run. Either
+allow long timeouts when smoke-testing them, or run once and reuse the
+cached output.

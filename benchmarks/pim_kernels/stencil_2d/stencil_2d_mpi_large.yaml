@@ -1,0 +1,22 @@
+scope: device
+workload:
+  binary: benchmarks/pim_kernels/stencil_2d/stencil_2d_mpi
+  args: ["--size", "256", "--iters", "20"]
+  type: mpi
+  mpi_ranks: 4
+pim:
+  pe:
+    type: alu_core
+    count: 8
+    frequency_mhz: 1000
+    placement:
+      level: BANK
+  mc:
+    type: simple
+memory:
+  technology: SRAM
+noc:
+  topology: MESH_2D
+  model: simple
+simulation:
+  max_instructions: 1000000000

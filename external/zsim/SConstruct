@@ -1,0 +1,417 @@
+import os, sys
+from os.path import join as joinpath
+
+useIcc = False
+#useIcc = True
+
+# PIN 4.1 ONLY - No support for PIN 2.x or 3.x
+
+def buildSim(cppFlags, dir, type, pgo=None):
+    ''' Build the simulator with a specific base buid dir and config type'''
+
+    buildDir = joinpath(dir, type)
+    print("Building " + type + " zsim at " + buildDir)
+
+    env = Environment(ENV = os.environ, tools = ['default', 'textfile'])
+    env["CPPFLAGS"] = cppFlags
+
+    allSrcs = [f for dir, subdirs, files in os.walk("src") for f in Glob(dir + "/*")]
+    versionFile = joinpath(buildDir, "version.h")
+    # Check if .git is a directory (normal repo) vs file (submodule)
+    if os.path.isdir(".git"):
+        env.Command(versionFile, allSrcs + [".git/index", "SConstruct"],
+            'printf "#define ZSIM_BUILDDATE \\"`date`\\"\\n#define ZSIM_BUILDVERSION \\"`python misc/gitver.py`\\"" >>' + versionFile)
+    else:
+        # .git is a file (submodule) or doesn't exist
+        env.Command(versionFile, allSrcs + ["SConstruct"],
+            'printf "#define ZSIM_BUILDDATE \\"`date`\\"\\n#define ZSIM_BUILDVERSION \\"submodule/no git\\"" >>' + versionFile)
+
+    # Parallel builds?
+    #env.SetOption('num_jobs', 32)
+
+    # Use link-time optimization? It's still a bit buggy, so be careful
+    #env['CXX'] = 'g++ -flto -flto-report -fuse-linker-plugin'
+    #env['CC'] = 'gcc -flto'
+    #env["LINKFLAGS"] = " -O3 -finline "
+
+    # Pin 4.x native mode - use Pin's compiler wrapper for full compatibility
+    usePin4Native = os.environ.get("ZSIM_PIN4_NATIVE", "0") == "1"
+    # Legacy options (less reliable)
+    useClang = os.environ.get("ZSIM_USE_CLANG", "0") == "1"
+    useMusl = os.environ.get("ZSIM_USE_MUSL", "0") == "1"
+
+    if usePin4Native:
+        # Use Pin 4.x's pin-g++ compiler wrapper - this is the recommended approach
+        # pin-g++ sets up the correct musl/libc++ environment automatically
+        print("Using Pin 4.x native mode with pin-g++ compiler")
+    elif useClang:
+        env['CC'] = 'clang'
+        env['CXX'] = 'clang++'
+        env["CPPFLAGS"] = env["CPPFLAGS"].replace("-fabi-version=2", "")
+        env["CPPFLAGS"] = env["CPPFLAGS"].replace("-D_GLIBCXX_USE_CXX11_ABI=0", "")
+        print("Using clang with libc++ for Pin 4.x compatibility")
+    elif useMusl:
+        env['CC'] = 'musl-gcc'
+        env['CXX'] = 'musl-gcc'
+        env["LINKFLAGS"] = " -lstdc++ "
+        print("Using musl-gcc for Pin 4.x compatibility")
+    elif useIcc:
+        env['CC'] = 'icc'
+        env['CXX'] = 'icpc -ipo'
+
+    # Required paths - PIN 4.1 ONLY
+    ROOT = Dir('.').abspath
+
+    # First check if PINPATH is set, then check for bundled PIN in external/pin
+    if "PINPATH" in os.environ:
+        PINPATH = os.environ["PINPATH"]
+    else:
+        # Try bundled PIN 4.1 in external/pin
+        bundledPinPath = joinpath(ROOT, "..", "pin")
+        if os.path.exists(bundledPinPath):
+            PINPATH = os.path.realpath(bundledPinPath)
+            print("Using bundled PIN 4.1 from:", PINPATH)
+        else:
+            print("=" * 80)
+            print("ERROR: PIN 4.1 not found!")
+            print("=" * 80)
+            print("Option 1: Use bundled PIN (recommended)")
+            print("  cd pimid/external")
+            print("  ln -s /path/to/pin-external-4.1-99687-gd9b8f822c-gcc-linux pin")
+            print("")
+            print("Option 2: Set PINPATH environment variable")
+            print("  export PINPATH=/path/to/pin-external-4.1-99687-gd9b8f822c-gcc-linux")
+            print("")
+            print("Download PIN 4.1 from:")
+            print("  https://software.intel.com/sites/landingpage/pintool/downloads/pin-external-4.1-99687-gd9b8f822c-gcc-linux.tar.gz")
+            print("=" * 80)
+            sys.exit(1)
+
+    # Verify PINPATH exists
+    if not os.path.exists(PINPATH):
+        print("=" * 80)
+        print("ERROR: PIN directory does not exist!")
+        print("=" * 80)
+        print("PINPATH is set to:", PINPATH)
+        print("But this directory does not exist.")
+        print("")
+        print("Please verify your PINPATH and try again.")
+        print("=" * 80)
+        sys.exit(1)
+
+    # Pin 4.x native mode uses pin-g++ which handles everything automatically
+    if usePin4Native:
+        pinGxx = joinpath(PINPATH, "intel64/pinrt/bin/pin-g++")
+        pinGcc = joinpath(PINPATH, "intel64/pinrt/bin/pin-gcc")
+        if os.path.exists(pinGxx):
+            env['CXX'] = pinGxx
+            env['CC'] = pinGcc
+            # Pin 4.x uses C++17 and different flags
+            env["CPPFLAGS"] = cppFlags  # Reset to just optimization flags
+            env["CPPFLAGS"] += " -std=c++17 -Wall -Wno-unknown-pragmas -fno-exceptions -funwind-tables"
+            env["CPPFLAGS"] += " -fasynchronous-unwind-tables -fno-rtti -fPIC -fomit-frame-pointer -fno-stack-protector"
+            env["CPPFLAGS"] += " -DBIGARRAY_MULTIPLIER=1 -DUSING_XED -DTARGET_IA32E -DHOST_IA32E -DTARGET_LINUX"
+            env["CPPFLAGS"] += " -DPIN_CRT=1 -DPIN_RT"  # Required for Pin 4.x runtime
+            # Disable HDF5 for Pin 4.x native (no musl-compatible HDF5 available)
+            env["CPPFLAGS"] += " -DZSIM_NO_HDF5=1"
+            print("  Using pin-g++:", pinGxx)
+        else:
+            print("ERROR: pin-g++ not found at", pinGxx)
+            sys.exit(1)
+    else:
+        # Standard build flags for Pin 4.x with glibc compatibility
+        env["CPPFLAGS"] += " -g -std=c++17 -Wall -Wno-unknown-pragmas -Wno-deprecated -Wno-unused-function -Wno-catch-value -fomit-frame-pointer -fno-stack-protector"
+        env["CPPFLAGS"] += " -MMD -DBIGARRAY_MULTIPLIER=1 -DUSING_XED -DTARGET_IA32E -DHOST_IA32E -fPIC -DTARGET_LINUX"
+        # ABI compatibility for PIN
+        if os.environ.get("ZSIM_USE_CLANG", "0") != "1":
+            env["CPPFLAGS"] += " -fabi-version=2 -D_GLIBCXX_USE_CXX11_ABI=0"
+
+    # PIN 4.x ONLY - Verify PIN 4.x structure
+    pinInclDir = joinpath(PINPATH, "source/include/pin")
+    pinrtAdaptorPath = joinpath(PINPATH, "intel64/pinrt/include/adaptor/pinrt_adaptor.PH")
+
+    if not os.path.exists(pinrtAdaptorPath):
+        print("=" * 80)
+        print("ERROR: PIN 4.x required!")
+        print("=" * 80)
+        print("This build requires Intel PIN 4.1 (or compatible 4.x version).")
+        print("Checked for PIN 4.x marker:", pinrtAdaptorPath)
+        print("")
+        print("Please download PIN 4.1 from:")
+        print("  https://software.intel.com/sites/landingpage/pintool/downloads/pin-external-4.1-99687-gd9b8f822c-gcc-linux.tar.gz")
+        print("")
+        print("Then set PINPATH:")
+        print("  export PINPATH=/path/to/pin-external-4.1-99687-gd9b8f822c-gcc-linux")
+        print("=" * 80)
+        sys.exit(1)
+
+    if not os.path.exists(joinpath(pinInclDir, "pin.H")):
+        print("=" * 80)
+        print("ERROR: PIN 4.x headers not found!")
+        print("=" * 80)
+        print("Checked:", joinpath(pinInclDir, "pin.H"))
+        print("=" * 80)
+        sys.exit(1)
+
+    detected_pin_version = "4.x"
+    print("PIN 4.x detected")
+
+    # PIN 4.x uses xed-intel64
+    xedName = "xed"
+    xedPath = joinpath(PINPATH, "extras/" + xedName + "-intel64/include")
+    if not os.path.exists(xedPath):
+        print("=" * 80)
+        print("ERROR: XED library not found!")
+        print("=" * 80)
+        print("Could not find XED headers in", PINPATH)
+        print("Checked:", joinpath(PINPATH, "extras/xed-intel64/include"))
+        print("")
+        print("Please verify PIN 4.1 installation is complete.")
+        print("=" * 80)
+        sys.exit(1)
+
+    # Print detected configuration
+    print("-" * 80)
+    print("PIN Configuration:")
+    print("  PINPATH:", PINPATH)
+    print("  Version:", detected_pin_version)
+    print("  Headers:", pinInclDir)
+    print("  XED Library:", xedName + "-intel64")
+    print("-" * 80)
+
+    env["CPPPATH"] = [xedPath, joinpath(xedPath, "xed"),  # Pin 3.x has xed subdir
+            pinInclDir, joinpath(pinInclDir, "gen"),
+            joinpath(PINPATH, "extras/components/include"),
+            "/usr/include/hdf5/serial"]  # Ubuntu HDF5 location
+
+    # Pin 4.x requires pinrt includes for pinrt_adaptor.PH
+    # Use -isystem to give lower priority than system headers to avoid conflicts
+    # with glibc. The pinrt headers are based on musl and conflict with glibc.
+    # NOTE: We DON'T add pinos/pbits - it contains errno.h that shadows system errno
+    # The QUERY_MEM_* constants from __mman.h are defined in pin_types.h instead.
+    pinrtInclDir = joinpath(PINPATH, "intel64/pinrt/include")
+    if os.path.exists(pinrtInclDir):
+        # Only add pinos and adaptor paths - they contain pinrt_adaptor.PH dependencies
+        env["CPPFLAGS"] += " -isystem " + joinpath(pinrtInclDir, "pinos")
+        env["CPPFLAGS"] += " -isystem " + joinpath(pinrtInclDir, "adaptor")
+        # DON'T add:
+        # - main pinrt include - contains full C library (stdlib.h, stdio.h, etc.)
+        # - pinos/pbits - contains errno.h that conflicts with glibc
+        # - pinos/pbits/intel64 - contains stdint.h that conflicts
+
+    # Pin 4.x requires some CRT headers (types_marker.h, os-apis.h)
+    # But the full CRT path conflicts with glibc (xlocale.h, time.h, wchar.h)
+    # Solution: Use pre-created pin_stubs directory with only non-conflicting headers
+    pinStubDir = joinpath(ROOT, "pin_stubs")
+
+    # Add pin_stubs to include path (before Pin includes, after system includes)
+    env["CPPPATH"].insert(0, pinStubDir)
+
+    # Perform trace logging?
+    ##env["CPPFLAGS"] += " -D_LOG_TRACE_=1"
+
+    # Uncomment to get logging messages to stderr
+    ##env["CPPFLAGS"] += " -DDEBUG=1"
+
+    # Disable -Werror for GCC 13 compatibility with PIN 3.28
+    # The glibc_prereq warnings are not fatal but -Werror makes them so
+    # env["CPPFLAGS"] += " -Werror "
+
+    # Pre-include our Pin types stub before any Pin headers
+    pinStubDir = joinpath(ROOT, "pin_stubs")
+    env["CPPFLAGS"] += ' -include ' + joinpath(pinStubDir, "pin_types.h") + ' '
+
+    # PIN_CRT resolves USIZE ambiguity - types_foundation.PH uses "using ::USIZE"
+    # instead of redefining USIZE, avoiding conflict with components/types.h
+    env["CPPFLAGS"] += ' -DPIN_CRT '
+
+    # Enables lib and harness to use the same info/log code,
+    # but only lib uses pin locks for thread safety
+    env["PINCPPFLAGS"] = " -DMT_SAFE_LOG "
+
+    # PIN-specific libraries - different for Pin 4.x native vs Pin 2.x/3.x
+    if usePin4Native:
+        # Pin 4.x native mode uses pin-g++ which links automatically
+        env["PINLINKFLAGS"] = " -Wl,-Bsymbolic -Wl,--version-script=" + joinpath(pinInclDir, "pintool.ver")
+        env["PINLIBPATH"] = [joinpath(PINPATH, "intel64/lib"), joinpath(PINPATH, "extras/" + xedName + "-intel64/lib")]
+        # Pin 4.x uses different library names
+        env["PINLIBS"] = ["pin", "pinrt-adaptor-static", "xed", "pindwarf", "dwarf", "unwind-dynamic"]
+        # Non-pintool libraries - libconfig++ needs to be built with musl for Pin 4.x
+        # For now, we'll try to use a static version or disable config file support
+        env["LIBPATH"] = []
+        env["LIBS"] = []  # Will be handled specially in SConscript
+        print("  Pin 4.x native: Using Pin's runtime libraries")
+    else:
+        # Pin 4.x with glibc - add RPATH so Pin's loader can find system libraries
+        # Use custom libconfig++ built with --hash-style=both for Pin's loader compatibility
+        customLibDir = joinpath(ROOT, "lib")
+        env["PINLINKFLAGS"] = " -Wl,--hash-style=sysv -Wl,-Bsymbolic -Wl,--version-script=" + joinpath(pinInclDir, "pintool.ver")
+        env["PINLINKFLAGS"] += " -static-libstdc++ -static-libgcc"  # Static C++ runtime for Pin compatibility
+        env["PINLINKFLAGS"] += " -Wl,--as-needed"  # Only add NEEDED for actually-used shared libs
+        env["PINLINKFLAGS"] += " -Wl,-rpath," + customLibDir + " -Wl,-rpath,/lib/x86_64-linux-gnu -Wl,-rpath,/usr/lib/x86_64-linux-gnu -Wl,-rpath,/usr/lib/x86_64-linux-gnu/hdf5/serial"
+
+        # Put custom lib directory FIRST so our hash-style=both libconfig++ is found before system's
+        env["PINLIBPATH"] = [customLibDir, "/usr/lib", "/usr/lib/x86_64-linux-gnu", joinpath(PINPATH, "extras/" + xedName + "-intel64/lib"),
+                joinpath(PINPATH, "intel64/lib"), joinpath(PINPATH, "intel64/lib-ext")]
+
+        # Use pindwarf from Pin 4.x
+        pindwarfPath = joinpath(PINPATH, "intel64/lib-ext/libdwarf.a")
+        pindwarfLib = File(pindwarfPath)
+        if not os.path.exists(pindwarfPath):
+            pindwarfLib = "pindwarf"
+
+        env["PINLIBS"] = ["pin", "xed", pindwarfLib, "elf", "dl", "rt"]
+
+        # Non-pintool libraries - use static libconfig++ for Pin compatibility
+        env["LIBPATH"] = []
+        customStaticLib = joinpath(customLibDir, "libconfig++.a")
+        customStaticLibC = joinpath(customLibDir, "libconfig.a")
+        if os.path.exists(customStaticLib):
+            env["LIBS"] = [File(customStaticLib), File(customStaticLibC)]
+            print("  Using static libconfig++ from: " + customLibDir)
+        elif os.path.exists("/usr/lib/x86_64-linux-gnu/libconfig++.a"):
+            env["LIBS"] = [File("/usr/lib/x86_64-linux-gnu/libconfig++.a"), File("/usr/lib/x86_64-linux-gnu/libconfig.a")]
+            print("  WARNING: Using system static libconfig++ (may need -fPIC rebuild)")
+        else:
+            env["LIBS"] = ["config++"]
+            print("  WARNING: Using dynamic libconfig++ (may fail with Pin's loader)")
+
+    env["LINKFLAGS"] = ""
+    env["RPATH"] = []
+
+    if useIcc:
+        # icc libs
+        env["LINKFLAGS"] += " -Wl,-R/data/sanchez/tools/intel/composer_xe_2013.1.117/compiler/lib/intel64/"
+
+    # Use non-standard library paths if defined
+    if "LIBCONFIGPATH" in os.environ:
+        LIBCONFIGPATH = os.environ["LIBCONFIGPATH"]
+        env["LINKFLAGS"] += " -Wl,-R" + joinpath(LIBCONFIGPATH, "lib")
+        env["LIBPATH"] += [joinpath(LIBCONFIGPATH, "lib")]
+        env["CPPPATH"] += [joinpath(LIBCONFIGPATH, "include")]
+
+    if "HDF5PATH" in os.environ:
+        HDF5PATH = os.getenv("HDF5PATH")
+        env["CPPPATH"] += [joinpath(HDF5PATH, "include/")]
+        env["LIBPATH"] += [joinpath(HDF5PATH, "lib/")]
+        env["RPATH"]   += [joinpath(HDF5PATH, "lib/")]
+
+    if "POLARSSLPATH" in os.environ:
+        POLARSSLPATH = os.environ["POLARSSLPATH"]
+        env["PINLIBPATH"] += [joinpath(POLARSSLPATH, "library")]
+        env["CPPPATH"] += [joinpath(POLARSSLPATH, "include")]
+        env["PINLIBS"] += ["polarssl"]
+        env["CPPFLAGS"] += " -D_WITH_POLARSSL_=1 "
+
+    # Only include DRAMSim if available
+    if "DRAMSIMPATH" in os.environ:
+        DRAMSIMPATH = os.environ["DRAMSIMPATH"]
+        env["LINKFLAGS"] += " -Wl,-R" + DRAMSIMPATH
+        env["PINLIBPATH"] += [DRAMSIMPATH]
+        env["CPPPATH"] += [DRAMSIMPATH]
+        env["PINLIBS"] += ["dramsim"]
+        env["CPPFLAGS"] += " -D_WITH_DRAMSIM_=1 "
+
+    env["CPPPATH"] += ["."]
+
+    # HDF5 - optionally disable to reduce dependencies
+    # Set ZSIM_NO_HDF5=1 to disable HDF5 support (useful for Pin 4.x compatibility)
+    noHdf5 = os.environ.get("ZSIM_NO_HDF5", "0") == "1"
+    if not usePin4Native and not noHdf5:
+        # For Pin 4.x glibc mode: statically link HDF5 into libzsim.so to avoid
+        # Pin's musl-based loader failing on IRELATIVE relocations in HDF5's
+        # transitive glibc dependencies. Use HDF5PATH for custom sysv-hash builds.
+        if "HDF5PATH" in os.environ:
+            HDF5PATH = os.environ["HDF5PATH"]
+            hdf5_hl_static = File(joinpath(HDF5PATH, "lib/libhdf5_hl.a"))
+            hdf5_static = File(joinpath(HDF5PATH, "lib/libhdf5.a"))
+            if os.path.exists(joinpath(HDF5PATH, "lib/libhdf5.a")):
+                env["PINLIBS"] += [hdf5_hl_static, hdf5_static, "z"]
+                print("  Using static HDF5 from: " + HDF5PATH)
+            else:
+                env["PINLIBS"] += ["hdf5", "hdf5_hl"]
+                print("  Using dynamic HDF5 from: " + HDF5PATH)
+        else:
+            env["PINLIBPATH"] += ["/usr/lib/x86_64-linux-gnu/hdf5/serial"]  # Ubuntu 24.04
+            env["PINLIBS"] += ["hdf5", "hdf5_hl"]
+    else:
+        print("  HDF5 disabled - stats output will use text format only")
+
+    # Harness needs these defined
+    # Use the 'pin' launcher instead of 'pinbin' directly for all Pin versions
+    # The launcher sets up LD_LIBRARY_PATH for runtime libraries (libc++, libxed, etc.)
+    env["CPPFLAGS"] += ' -DPIN_PATH="' + joinpath(PINPATH, "pin") + '" '
+    env["CPPFLAGS"] += ' -DZSIM_PATH="' + joinpath(ROOT, joinpath(buildDir, "libzsim.so")) + '" '
+
+    # Do PGO?
+    if pgo == "generate":
+        genFlags = " -prof-gen " if useIcc else " -fprofile-generate "
+        env["PINCPPFLAGS"] += genFlags
+        env["PINLINKFLAGS"] += genFlags
+    elif pgo == "use":
+        if useIcc: useFlags = " -prof-use "
+        else: useFlags = " -fprofile-use -fprofile-correction "
+        # even single-threaded sims use internal threads, so we need correction
+        env["PINCPPFLAGS"] += useFlags
+        env["PINLINKFLAGS"] += useFlags
+
+    env.SConscript("src/SConscript", variant_dir=buildDir, exports= {'env' : env.Clone()})
+
+####
+
+AddOption('--buildDir', dest='buildDir', type='string', default="build/", nargs=1, action='store', metavar='DIR', help='Base build directory')
+AddOption('--d', dest='debugBuild', default=False, action='store_true', help='Do a debug build')
+AddOption('--o', dest='optBuild', default=False, action='store_true', help='Do an opt build (optimized, with assertions and symbols)')
+AddOption('--r', dest='releaseBuild', default=False, action='store_true', help='Do a release build (optimized, no assertions, no symbols)')
+AddOption('--p', dest='pgoBuild', default=False, action='store_true', help='Enable PGO')
+AddOption('--pgoPhase', dest='pgoPhase', default="none", action='store', help='PGO phase (just run with --p to do them all)')
+
+
+baseBuildDir = GetOption('buildDir')
+buildTypes = []
+if GetOption('debugBuild'): buildTypes.append("debug")
+if GetOption('releaseBuild'): buildTypes.append("release")
+if GetOption('optBuild') or len(buildTypes) == 0: buildTypes.append("opt")
+
+march = "core2" # ensure compatibility across condor nodes
+#march = "native" # for profiling runs
+
+buildFlags = {"debug": "-g -O0",
+              "opt": "-march=%s -g -O3 -funroll-loops" % march, # unroll loops tends to help in zsim, but in general it can cause slowdown
+              "release": "-march=%s -O3 -DNASSERT -funroll-loops -fweb" % march} # fweb saves ~4% exec time, but makes debugging a world of pain, so careful
+
+pgoPhase = GetOption('pgoPhase')
+
+# The PGO flow calls scons recursively. Hacky, but pretty much the only option:
+# scons can't build the same file twice, and although gcc enables you to change
+# the fprofile path, it considers the whole relative path as the filename
+# (e.g., build/opt/zsim.os), and all hell breaks loose when it tries to create
+# files in another dir. And because it uses checksums for filenames, it breaks
+# when you move the files. Check the repo for a version that tries this.
+if GetOption('pgoBuild'):
+    for type in buildTypes:
+        print("Building PGO binary")
+        root = Dir('.').abspath
+        testsDir = joinpath(root, "tests")
+        trainCfgs = [f for f in os.listdir(testsDir) if f.startswith("pgo")]
+        print("Using training configs", trainCfgs)
+
+        baseDir = joinpath(baseBuildDir, "pgo-" + type)
+        genCmd = "scons -j16 --pgoPhase=generate-" + type
+        runCmds = []
+        for cfg in trainCfgs:
+            runCmd = "mkdir -p pgo-tmp && cd pgo-tmp && ../" + baseDir + "/zsim ../tests/" + cfg + " && cd .."
+            runCmds.append(runCmd)
+        useCmd = "scons -j16 --pgoPhase=use-" + type
+        Environment(ENV = os.environ).Command("dummyTgt-" + type, [], " && ".join([genCmd] + runCmds + [useCmd]))
+elif pgoPhase.startswith("generate"):
+    type = pgoPhase.split("-")[1]
+    buildSim(buildFlags[type], baseBuildDir, "pgo-" + type, "generate")
+elif pgoPhase.startswith("use"):
+    type = pgoPhase.split("-")[1]
+    buildSim(buildFlags[type], baseBuildDir, "pgo-" + type, "use")
+    baseDir = joinpath(baseBuildDir, "pgo-" + type)
+    Depends(Glob(joinpath(baseDir, "*.os")), "pgo-tmp/zsim.out") #force a rebuild
+else:
+    for type in buildTypes:
+        buildSim(buildFlags[type], baseBuildDir, type)

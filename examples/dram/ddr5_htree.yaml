@@ -1,0 +1,67 @@
+# DDR5 DRAM with GARNET H-tree Internal Network Configuration
+# Memory Technology: DDR5
+# Topology: H-tree (hierarchical tree for subarray interconnect)
+
+dram:
+  type: "DDR5"
+  organization:
+    num_subarrays: 32  # DDR5 has more subarrays
+    num_banks: 4
+    num_bank_groups: 8
+    num_chips: 8
+
+  # Timing parameters (ns)
+  timing:
+    tCK: 0.3125    # DDR5-6400 clock period
+    tCL: 20        # CAS latency
+    tRCD: 20       # RAS to CAS delay
+    tRP: 20        # Precharge time
+    tRAS: 40       # Row active time
+
+# GARNET H-tree Network Configuration
+network:
+  topology: "H_TREE"
+  model: "GARNET"
+
+  # Virtual Networks (VN) - Message Classes
+  virtual_networks: 2  # VN0: Reads, VN1: Writes
+
+  # Virtual Channels (VC) per VN - Deadlock Avoidance
+  virtual_channels_per_vn: 1
+
+  # Router Pipeline Complexity - MINIMAL for DRAM
+  router_pipeline: "MINIMAL"
+
+  # Router latency (cycles)
+  router_latency: 1
+
+  # Router bypass optimization
+  enable_router_bypass: true
+
+  # Buffer depths (minimal for DRAM)
+  input_buffer_depth: 2
+  output_buffer_depth: 2
+
+  # Link parameters - Subarray level
+  subarray_network:
+    link_width_bits: 128   # DDR5: 16-byte prefetch
+    frequency_GHz: 3.2     # DDR5-6400
+    latency_cycles: 4
+
+  # Link parameters - Bank level
+  bank_network:
+    link_width_bits: 16
+    frequency_GHz: 3.2
+    latency_cycles: 8
+
+  # Link parameters - Bank Group level
+  bank_group_network:
+    link_width_bits: 16
+    frequency_GHz: 3.2
+    latency_cycles: 12
+
+  # Link parameters - Chip level
+  chip_network:
+    link_width_bits: 16
+    frequency_GHz: 3.2
+    latency_cycles: 16

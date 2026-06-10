@@ -1,0 +1,117 @@
+# Build directories
+build/
+*/build/
+*/build-*/
+cmake-build-*/
+
+# Compiled files
+*.o
+*.so
+*.a
+*.out
+*.exe
+*.app
+
+# Log files
+*.log
+*.log.*
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+**/build/Makefile
+**/cmake_build/Makefile
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Intel PIN (large binary, download separately)
+pin-*/
+pin-external-*/
+external/pin-*
+
+# External downloaded tools (large, not tracked)
+external/hdf5-sysv/
+external/zsim/lib/
+external/zsim/.sconsign.dblite
+
+# Compiled workload binaries
+workloads/hybrid_mpi_omp
+workloads/simple_vector_add
+
+# Archives
+*.tar.gz
+
+# Build artifacts - MPICH workloads
+test/benchmarks/workloads/mpich_examples/vector_dotproduct
+test/benchmarks/workloads/mpich_examples/matrix_multiply
+test/benchmarks/workloads/mpich_examples/graph_pagerank
+
+# Build artifacts - BFS workload
+test/benchmarks/workloads/bfs/bfs
+test/benchmarks/workloads/bfs/bfs_omp
+test/benchmarks/workloads/bfs/bfs_pimid
+test/benchmarks/workloads/bfs/bfs_pimid_omp
+
+# Test configuration files
+test/benchmarks/workloads/*/test_config.yaml
+
+# Test executables (keep source)
+test/test_*
+!test/test_*.cpp
+!test/test_*.sh
+!test/test_*.py
+ext/
+
+# Benchmark and test results
+benchmark_results/
+test_results*/
+test_configs_scale/
+benchmark_test_results/
+comprehensive_benchmark_results/
+results/
+
+# Compiled cosim workload binaries (build artifacts; rebuilt via make all)
+test/benchmarks/host_device_cosim/*_cosim
+!test/benchmarks/host_device_cosim/*_cosim.cpp
+!test/benchmarks/host_device_cosim/*_cosim.c
+
+# Internal agent/session artifacts -- never ship in the repo
+MESSAGE_TO_NEXT_AGENT.md
+HANDOFF.md
+DRAM_TIER_STATUS_FOR_OWNER.md
+BUILD_FROM_SOURCE_CLOUD.md
+.claude/
+results/
+# Generated DRAM topology files (detailed NoC emits <TECH>_pe<N>_<pid>.topo in CWD)
+*.topo
+
+
+misc/
+/config/
+
+# (merged from pimid/.gitignore at flatten)
+# External dependencies fetched by CMake
+# Simulation output files
+*.csv
+pim_sim_results.csv
+# Temporary workaround files
+fake_osrelease.c
+fake_osrelease*.so
+
+# Built workload binaries (sources are tracked; build with workloads/*/Makefile)
+benchmarks/cosim/**/*_message_passing
+benchmarks/cosim/**/*_serial
+benchmarks/cosim/**/*_shared_memory
+benchmarks/cosim/reduction_tree/rt_peer
+!benchmarks/cosim/**/*_peer.cpp
+!benchmarks/cosim/**/*.h

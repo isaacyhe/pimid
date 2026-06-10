@@ -1,0 +1,184 @@
+# -*- mode:python -*-
+
+import os
+Import("env")
+
+commonSrcs = ["config.cpp", "galloc.cpp", "log.cpp", "pin_cmd.cpp"]
+harnessSrcs = ["zsim_harness.cpp", "debug_harness.cpp"]
+
+# By default, we compile all cpp files in libzsim.so. List the cpp files that
+# should be excluded below (one per line and in order, to ease merges)
+excludeSrcs = [
+"fftoggle.cpp",
+"dumptrace.cpp",
+"sorttrace.cpp",
+]
+excludeSrcs += harnessSrcs
+
+# Pin 4.x native mode detection
+usePin4Native = os.environ.get("ZSIM_PIN4_NATIVE", "0") == "1"
+# No-HDF5 mode detection - for reducing dependencies with Pin 4.x
+noHdf5 = os.environ.get("ZSIM_NO_HDF5", "0") == "1"
+PINPATH = os.environ.get("PINPATH", "")
+from os.path import join as joinpath
+
+libEnv = env.Clone()
+libEnv["CPPFLAGS"] += libEnv["PINCPPFLAGS"]
+libEnv["LINKFLAGS"] += libEnv["PINLINKFLAGS"]
+libEnv["LIBPATH"] += libEnv["PINLIBPATH"]
+
+if usePin4Native:
+    # Pin 4.x native mode - dependencies must be built with Pin's compiler
+    # or we need to compile them from source
+    print("Pin 4.x native: Building with libconfig from source, without HDF5")
+    # Exclude HDF5-dependent files and files requiring system libs not in musl
+    excludeSrcs += ["hdf5_stats.cpp", "access_tracing.cpp", "detailed_mem.cpp", "detailed_mem_params.cpp"]
+    # Build libconfig from source with Pin's compiler
+    # Try multiple paths to find libconfig
+    possiblePaths = [
+        os.path.join(os.path.dirname(Dir('#').abspath), "libconfig", "lib"),  # ../libconfig/lib from zsim root
+        "/home/he/Workspace/pimid-dev/pimid/external/libconfig/lib",  # absolute fallback
+    ]
+    libconfigSrcPath = None
+    for p in possiblePaths:
+        if os.path.exists(os.path.join(p, "libconfig.c")):
+            libconfigSrcPath = p
+            break
+    if libconfigSrcPath:
+        print("  Building libconfig from source:", libconfigSrcPath)
+        libEnv["CPPPATH"] += [libconfigSrcPath]
+        env["CPPPATH"] += [libconfigSrcPath]
+        libconfigCSrcs = [
+            os.path.join(libconfigSrcPath, "libconfig.c"),
+            os.path.join(libconfigSrcPath, "grammar.c"),
+            os.path.join(libconfigSrcPath, "scanner.c"),
+            os.path.join(libconfigSrcPath, "scanctx.c"),
+            os.path.join(libconfigSrcPath, "strbuf.c"),
+            os.path.join(libconfigSrcPath, "strvec.c"),
+            os.path.join(libconfigSrcPath, "util.c"),
+        ]
+    else:
+        print("  ERROR: libconfig source not found. Tried paths:")
+        for p in possiblePaths:
+            print("    -", p)
+        print("  Please clone: git clone https://github.com/hyperrealm/libconfig.git")
+        import sys
+        sys.exit(1)
+elif noHdf5:
+    # No-HDF5 mode - exclude only HDF5-dependent files but keep other features
+    print("No-HDF5 mode: Excluding HDF5-dependent files")
+    excludeSrcs += ["hdf5_stats.cpp"]
+    # Build libconfig from source with Pin's compiler
+    # Try multiple paths to find libconfig
+    possiblePaths = [
+        os.path.join(os.path.dirname(Dir('#').abspath), "libconfig", "lib"),  # ../libconfig/lib from zsim root
+        "/home/he/Workspace/pimid-dev/pimid/external/libconfig/lib",  # absolute fallback
+    ]
+    libconfigSrcPath = None
+    for p in possiblePaths:
+        if os.path.exists(os.path.join(p, "libconfig.c")):
+            libconfigSrcPath = p
+            break
+    if libconfigSrcPath:
+        print("  Building libconfig from source:", libconfigSrcPath)
+        # Add include path to both libEnv (pintool) and env (harness)
+        libEnv["CPPPATH"] += [libconfigSrcPath]
+        env["CPPPATH"] += [libconfigSrcPath]
+        # libconfig C sources
+        libconfigCSrcs = [
+            os.path.join(libconfigSrcPath, "libconfig.c"),
+            os.path.join(libconfigSrcPath, "grammar.c"),
+            os.path.join(libconfigSrcPath, "scanner.c"),
+            os.path.join(libconfigSrcPath, "scanctx.c"),
+            os.path.join(libconfigSrcPath, "strbuf.c"),
+            os.path.join(libconfigSrcPath, "strvec.c"),
+            os.path.join(libconfigSrcPath, "util.c"),
+        ]
+        # libconfig C++ wrapper
+        libconfigCppSrcs = [
+            os.path.join(libconfigSrcPath, "libconfigcpp.c++"),
+        ]
+    else:
+        print("  ERROR: libconfig source not found. Tried paths:")
+        for p in possiblePaths:
+            print("    -", p)
+        print("  Please clone: git clone https://github.com/hyperrealm/libconfig.git")
+        print("  into the parent directory of zsim")
+        import sys
+        sys.exit(1)
+else:
+    # Legacy modes for Pin 2.x/3.x
+    useMusl = os.environ.get("ZSIM_USE_MUSL", "0") == "1"
+    if useMusl:
+        libEnv["CC"] = "musl-gcc"
+        libEnv["CXX"] = "musl-gcc -lstdc++"
+        print("WARNING: ZSIM_USE_MUSL requires musl-compiled dependencies")
+
+    # libconfig++ is now linked statically in SConstruct for Pin compatibility
+    # No need to add it again here
+
+libEnv["LIBS"] += libEnv["PINLIBS"]
+
+# Build syscall name file
+def getSyscalls(): return os.popen("python ../../misc/list_syscalls.py").read().strip()
+syscallSrc = libEnv.Substfile("virt/syscall_name.cpp", "virt/syscall_name.cpp.in",
+        SUBST_DICT = {"SYSCALL_NAME_LIST" : getSyscalls()})
+
+# Build libzsim.so
+globSrcNodes = Glob("*.cpp") + Glob("virt/*.cpp")
+libSrcs = [str(x) for x in globSrcNodes if str(x) not in excludeSrcs]
+libSrcs += [str(x) for x in syscallSrc]
+libSrcs = list(set(libSrcs)) # ensure syscallSrc is not duplicated
+
+# Add libconfig sources for Pin 4.x native mode
+# Note: Only use C API sources (libconfigCSrcs), not C++ wrapper (libconfigCppSrcs)
+# because the C++ wrapper uses exceptions which are disabled in Pin 4.x native mode
+if usePin4Native:
+    libSrcs += libconfigCSrcs
+
+zsimLib = libEnv.SharedLibrary("zsim.so", libSrcs)
+
+# Pin 4.x post-build: remove ld-linux-x86-64.so.2 from NEEDED entries.
+# On Ubuntu 24.04+, the linker adds ld-linux as NEEDED (transitively via libc.so.6),
+# but Pin's musl-based loader can't handle ld-linux's IRELATIVE relocations.
+# Pin provides its own C runtime, so ld-linux is unnecessary for the pintool.
+import shutil
+zsimLibDir = os.path.join(Dir('#').abspath, "lib")
+if shutil.which("patchelf"):
+    libEnv.AddPostAction(zsimLib, "patchelf --remove-needed ld-linux-x86-64.so.2 $TARGET 2>/dev/null || true")
+    # Convert RUNPATH to RPATH so it applies to transitive dependencies (libelf→libz→libc)
+    # and ensure zsim/lib/ (with patched system libs) is searched first
+    rpath = ":".join([
+        zsimLibDir,
+        joinpath(PINPATH, "intel64/lib"),
+        joinpath(PINPATH, "intel64/lib-ext"),
+    ])
+    libEnv.AddPostAction(zsimLib, "patchelf --force-rpath --set-rpath '%s' $TARGET" % rpath)
+
+# Build tracing utilities (need hdf5 & dynamic linking)
+# These are not available in Pin 4.x native mode due to HDF5 and glibc dependencies
+if not usePin4Native:
+    traceEnv = env.Clone()
+    if "HDF5PATH" in os.environ:
+        traceEnv["LIBPATH"] += [joinpath(os.environ["HDF5PATH"], "lib")]
+    else:
+        traceEnv["LIBPATH"] += ["/usr/lib/x86_64-linux-gnu/hdf5/serial"]  # Ubuntu 24.04
+    traceEnv["LIBS"] += ["hdf5", "hdf5_hl"]
+    traceEnv["OBJSUFFIX"] += "t"
+    traceEnv.Program("dumptrace", ["dumptrace.cpp", "access_tracing.cpp", "memory_hierarchy.cpp"] + commonSrcs)
+    traceEnv.Program("sorttrace", ["sorttrace.cpp", "access_tracing.cpp"] + commonSrcs)
+
+# Build harness and utilities
+# In Pin 4.x native mode, we skip building these as the main focus is libzsim.so
+# The harness can be built separately with system compiler if needed
+if not usePin4Native:
+    # Legacy mode: static linking
+    env["LINKFLAGS"] += " --static "
+    env["LIBS"] += ["pthread"]
+    env.Program("zsim", harnessSrcs + commonSrcs)
+    # Build additional utilities below
+    env.Program("fftoggle", ["fftoggle.cpp"] + commonSrcs)
+else:
+    # Pin 4.x native mode: skip harness and utilities for now
+    # The main output is libzsim.so which is built above
+    print("  Pin 4.x native: Skipping harness and utility builds (use system compiler separately if needed)")
