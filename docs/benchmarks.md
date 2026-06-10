@@ -9,18 +9,116 @@
 | BabelStream (1) | babelstream | OpenMP |
 | Rodinia (10) | hotspot, needle, pathfinder, srad, kmeans, lud, backprop, lavamd, particlefilter, myocyte | OpenMP |
 | Classic (6) | dhrystone, whetstone, binary_search, quicksort, sha256, naive_matmul | serial |
-| NPB (5) | IS, CG, EP, MG, FT | OpenMP |
+| NPB (5) | IS, CG, EP, MG, FT | OpenMP / MPI |
 | SPLASH-3 (12) | FFT, Radix, Barnes, Ocean, LU, Water-Nsq, Water-Sp, Cholesky, FMM, Radiosity, Raytrace, Volrend | pthreads |
 | PARSEC (6) | blackscholes, canneal, streamcluster, swaptions, fluidanimate, freqmine | pthreads |
 
 Additionally:
-- `benchmarks/cosim/` — host-device co-simulation kernels (bfs_iterative,
+- `benchmarks/cosim/` -- host-device co-simulation kernels (bfs_iterative,
   histogram_merge, reduction_tree, spmv_csr, vector_add) in serial /
   message-passing / shared-memory variants.
-- `benchmarks/host/` — host-side variants of the core kernels.
+- `benchmarks/host/` -- host-side variants of the core kernels.
 
 ```bash
 make -C benchmarks all        # build everything
 ```
 
 Per-benchmark run configs live in `examples/benchmarks/`.
+
+## Directory layout
+
+```
+benchmarks/
+|-- pim_kernels/   # device kernels (run on PIM PEs): bfs, gemv, histogram,
+|                  #   reduction, spmv_csr -- each as <k>, <k>_omp, <k>_mpi
+|-- host/          # host-side variants of the core kernels:
+|                  #   <k>_serial, <k>_shared_memory, <k>_message_passing
+|-- cosim/         # a serial host offloads a parallel region to device PEs
+|-- babelstream/   # BabelStream (OpenMP)
+|-- rodinia/       # 10 Rodinia kernels (OpenMP)
+|-- classic/       # serial classics (dhrystone, whetstone, sha256, ...)
+|-- npb/           # 5 NAS Parallel Benchmark kernels
+|-- splash3/       # 12 SPLASH-3 benchmarks (pthreads)
+`-- parsec/        # 6 PARSEC benchmarks (pthreads)
+```
+
+## Data-model variants
+
+The core kernels come in **three data-model variants**:
+
+| variant | parallel workers share data via | models |
+|---------|---------------------------------|--------|
+| `serial` | (no parallelism -- single worker) | baseline reference |
+| `shared_memory` (`_omp` / `_sm`) | one address space -- workers read/write the **same buffers** (zero-copy) | a coherent, shared-memory machine |
+| `message_passing` (`_mpi` / `_mp`) | **explicit copies** between disjoint buffers via a mailbox | a non-coherent / distributed machine |
+
+> **Naming is by *data model*, not by API.** "shared_memory" and
+> "message_passing" describe how data moves, not which threading library is
+> used. PIMID models the *timing* of these two communication styles; it does
+> not require (or fully implement) the OpenMP or MPI standards.
+
+### How each variant is realized
+
+The realization differs between standalone programs (`pim_kernels/`, `host/`)
+and `cosim/` (host-offloads-to-device), because the offload model is
+single-process:
+
+| folder | `shared_memory` | `message_passing` |
+|--------|-----------------|-------------------|
+| **pim_kernels**, **host** | OpenMP threads over one address space (`#pragma omp`, `g++ -fopenmp`) | **forked ranks** + POSIX shm-mailbox transport (PIMID forks N QEMU children; `libpimid_mpi.so`), built with `mpicxx` |
+| **cosim** | offload region spawns one pthread **per PE**, all reading/writing the host's buffers via shared pointers (zero-copy) | offload region spawns one pthread per PE in a **full-DMA** model: each PE `pimid_pe_recv`s its input chunk from host into a **private** buffer, computes on the copy, then `pimid_pe_send`s its result back -- both transfers charged on the host-device link |
+
+**Why cosim/message_passing is in-process, not forked:** the host-to-device
+offload (`pimid_offload_sync` + WORK_BEGIN/END domain switching) operates within
+a single process. A forked MPI rank is a separate process with no host to
+offload from, so forking is incompatible with the offload model. cosim therefore
+expresses message-passing as explicit in-process **DMA copies** -- `pimid_pe_recv`
+/ `pimid_pe_send` in `cosim_pe_message.h`, each calling `zsim_work_begin_sized`
+so the link's M/D/1 cost tracks the real payload -- same *data model* (no shared
+pointers; data moves by value across a costed link), different mechanism than the
+forked ranks.
+
+> **Build note.** The `message_passing` variants in `pim_kernels`/`host` need
+> an MPI C++ wrapper for `<mpi.h>`; the Makefile auto-discovers `mpicxx` and
+> skips those targets with a note if none is found. `serial`/`shared_memory`
+> build with `g++`. The `cosim` variants need no MPI toolchain -- all build
+> with `g++` alone (in-process pthreads + DMA).
+
+## Running
+
+- **pim_kernels** / **host**: `--scope device`, select the data model with
+  `--workload-type {serial|openmp|mpi}` (openmp -> shared_memory binary,
+  mpi -> message_passing binary). Host vs device is chosen by the config's
+  core type + placement (`ooo_core`/`HOST_MC` vs `alu_core`/`BANK`).
+- **cosim**: `--scope system` with a host+device config; the binary already
+  encodes the device-side data model (the `_sm` / `_mp` suffix).
+
+See [cosim.md](cosim.md) for the host-device link model used by cosim.
+
+## NPB (NAS Parallel Benchmarks)
+
+Self-contained single-file C implementations of 5 NPB kernels with zsim
+hooks, in `benchmarks/npb/`:
+
+| Kernel | Algorithm | Memory Pattern |
+|--------|-----------|----------------|
+| **IS** | Integer Sort (bucket sort + ranking) | Random scatter (histogram-like) |
+| **CG** | Conjugate Gradient (sparse CG with CSR SpMV) | Indirect gather + streaming |
+| **EP** | Embarrassingly Parallel (Gaussian pairs) | Pure compute, minimal memory |
+| **MG** | Multi-Grid (3D V-cycle) | 3D stencil + multi-scale |
+| **FT** | 3D FFT (Cooley-Tukey radix-2) | Strided butterfly access |
+
+`make -C benchmarks/npb` places binaries in each subdirectory (`is/is`,
+`cg/cg`, ...). Run configs live in `benchmarks/npb/configs/` as
+`<kernel>_class<S|W|A>_<omp|mpi>.yaml` (5 kernels x 3 classes x 2 variants
+= 30 files):
+
+| Class | IS | CG | EP | MG | FT | max_instructions |
+|-------|----|----|----|----|----|----|
+| S | 4,096 | 256 | 256 | 16 | 16 | 10M |
+| W | 65,536 | 1,024 | 4,096 | 32 | 32 | 100M |
+| A | 1,048,576 | 4,096 | 65,536 | 64 | 64 | 1B |
+
+`./run_npb.sh` runs all of them (`PIMID_BIN=/path/to/pimid` overrides the
+binary). Each benchmark also runs standalone without PIMID, e.g.
+`./is/is --size 1024 --threads 4`.

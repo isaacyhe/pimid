@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
-[![Version](https://img.shields.io/badge/version-1.0.2-green.svg)]()
+[![Version](https://img.shields.io/badge/version-1.0.3-green.svg)]()
 
 PIMID is a cycle-accurate simulator for Processing-in-Memory (PIM)
 architectures. Workloads execute under QEMU user-mode emulation; a TCG plugin
@@ -93,12 +93,16 @@ noc: { model: detailed }      # default; 'analytical' for fast sweeps
 | [docs/network.md](docs/network.md) | the two NoC models, topologies, DRAM trees, synthetic traffic |
 | [docs/cores.md](docs/cores.md) | PE core models, ALU scaling, MLP |
 | [docs/cosim.md](docs/cosim.md) | host-device offload, link types, MPI semantics |
-| [docs/benchmarks.md](docs/benchmarks.md) | suites, building, running |
+| [docs/benchmarks.md](docs/benchmarks.md) | suites, data-model variants, building, running |
+| [docs/examples.md](docs/examples.md) | the example config set |
 | [docs/power.md](docs/power.md) | McPAT power/area |
 | [docs/build.md](docs/build.md) | build details, HPC notes, Docker, reproducibility |
 | [docs/yaml_reference.md](docs/yaml_reference.md) | every configuration key |
 | [docs/dram_specs.md](docs/dram_specs.md) | per-technology JEDEC mapping |
+| [docs/memory_spec_structs.md](docs/memory_spec_structs.md) | C++ architecture-spec structs |
 | [docs/cache_warehouse.md](docs/cache_warehouse.md) | characterization cache internals |
+| [docs/external.md](docs/external.md) | vendored external simulators |
+| [docs/external_models.md](docs/external_models.md) | plugging in your own models |
 
 ## License
 

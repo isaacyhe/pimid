@@ -7,9 +7,13 @@
 | [network.md](network.md) | The two NoC models (analytical closed form + detailed Garnet), 8 topologies, DRAM-as-Garnet-tree, synthetic traffic |
 | [cores.md](cores.md) | The five PE core models, MLP intensity, ALU scaling factors |
 | [cosim.md](cosim.md) | Host-device co-simulation, interconnect link types, MPI semantics |
-| [benchmarks.md](benchmarks.md) | 48-benchmark suite + cosim/host kernels, building and running |
+| [benchmarks.md](benchmarks.md) | 48-benchmark suite, data-model variants, NPB details, building and running |
+| [examples.md](examples.md) | The example YAML config set and what each group covers |
 | [power.md](power.md) | McPAT power/area integration |
 | [build.md](build.md) | Building from source, custom QEMU, no-root/HPC notes, Docker, reproducibility |
 | [yaml_reference.md](yaml_reference.md) | Complete configuration key reference |
 | [dram_specs.md](dram_specs.md) | Per-technology JEDEC organization mapping |
+| [memory_spec_structs.md](memory_spec_structs.md) | C++ architecture-spec structs (internal port bitwidths, scaling studies) |
 | [cache_warehouse.md](cache_warehouse.md) | Characterization cache warehouse internals |
+| [external.md](external.md) | Vendored external simulators (QEMU, ZSim, Ramulator2, CACTI, NVSim, McPAT, Garnet) |
+| [external_models.md](external_models.md) | Integrating your own network/memory model via the adapter interface |
