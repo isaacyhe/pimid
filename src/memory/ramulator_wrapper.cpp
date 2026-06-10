@@ -117,9 +117,13 @@ void RamulatorWrapper::parseConfiguration() {
             bandwidth_ = 12800;  // 12.8 GB/s per channel for LPDDR5-6400
         } else if (dt == "GDDR6") {
             config_yaml_ = makeConfig("GDDR6", "GDDR6_8Gb_x16", "GDDR6_2000_1.35V_x16");
-            channels_ = 1; ranks_per_channel_ = 1; banks_per_rank_ = 16;
+            // GDDR6 is a dual-channel part (2 x 16-bit channels per device,
+            // JESD250; see docs/dram_specs.md: 32 GB/s/channel x 2 = 64 GB/s).
+            // channels_ = 1 here used to contradict that spec and made the
+            // analytical model treat the full 64 GB/s as one channel's rate.
+            channels_ = 2; ranks_per_channel_ = 1; banks_per_rank_ = 16;
             capacity_ = 8ULL * 1024 * 1024 * 1024;
-            bandwidth_ = 64000;  // 64 GB/s for GDDR6 16Gbps
+            bandwidth_ = 64000;  // 64 GB/s aggregate for GDDR6 16Gbps (2 ch)
         } else if (dt == "HBM2") {
             config_yaml_ = makeConfig("HBM2", "HBM2_4Gb", "HBM2_2.4Gbps");
             channels_ = 8; ranks_per_channel_ = 1; banks_per_rank_ = 16;

@@ -5,7 +5,7 @@ workload:
 pim:
   pe:
     type: ooo_core
-    num_pes: 4
+    count: 4
   placement:
     level: BANK
   mc:

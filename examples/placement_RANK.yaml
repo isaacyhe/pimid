@@ -5,7 +5,7 @@ workload:
 pim:
   pe:
     type: alu_core
-    num_pes: 4
+    count: 4
   placement:
     level: RANK
   mc:

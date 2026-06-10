@@ -1909,11 +1909,20 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
                                 config.noc_topology != "CUSTOM");
             if (force_htree && agg_mbs > 0.0) {
                 config.noc_topology = "H_TREE";
-                // bytes/cycle at a fixed reference network clock (GHz):
+                // PER-CHANNEL bytes/cycle at a fixed reference network clock.
+                // A single access traverses ONE channel's DQ datapath, so the
+                // per-hop cost follows the PER-CHANNEL bandwidth (= agg/c).
+                // Aggregate (multi-channel) bandwidth is expressed by the
+                // analytical model's bandwidth floor (P*D/c), not by making
+                // each individual hop cheaper. Using aggregate BW here crushed
+                // HBM2/HBM3 per-access network cost ~10-20x below the detailed
+                // ground truth (single-channel techs were unaffected: agg ==
+                // per-channel for c=1). Validated vs detailed at 4PE/size-1024:
+                // GDDR6/HBM2 went from 0.55-0.59x of detailed to within ~20%.
                 const double NET_GHz = 2.0;
                 const double FLIT_BYTES = 64.0;
-                // agg bytes/sec = agg_mbs * 1e6 ; bytes/cycle = that / (NET_GHz*1e9)
-                double bytes_per_cycle = (agg_mbs * 1e6) / (NET_GHz * 1e9);
+                double chan_mbs = (per_chan_mbs > 0.0) ? per_chan_mbs : agg_mbs;
+                double bytes_per_cycle = (chan_mbs * 1e6) / (NET_GHz * 1e9);
                 if (bytes_per_cycle > 0.0) {
                     // RES scales sub-cycle differences into integer link latencies so
                     // very-high-bandwidth techs (HBM2 vs HBM3) remain distinguishable,
@@ -1929,10 +1938,15 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
                     // fewer hops and appear faster than its bandwidth warrants. We scale
                     // the per-hop link latency by REF_HOPS / actual_hops so that the
                     // total network cost (link_latency × hops) reflects effective
-                    // bandwidth alone, not tree depth. actual_hops ≈ ceil(log2(endpoints)).
+                    // bandwidth alone, not tree depth.
+                    // Depth = the PER-CHANNEL subtree: an access fans down one
+                    // channel's bank subtree (orgs/c leaves), so channel count
+                    // widens the tree without lengthening the path.
                     const double REF_HOPS = 8.0;
                     int endpoints = (config.total_mem_orgs > 1) ? config.total_mem_orgs : 2;
-                    double actual_hops = std::ceil(std::log2((double)endpoints));
+                    int chan_eps = endpoints / std::max(1, num_chan);
+                    if (chan_eps < 2) chan_eps = 2;
+                    double actual_hops = std::ceil(std::log2((double)chan_eps));
                     if (actual_hops < 1.0) actual_hops = 1.0;
                     lat_cycles *= (REF_HOPS / actual_hops);
 

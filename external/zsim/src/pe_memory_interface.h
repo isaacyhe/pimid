@@ -288,6 +288,27 @@ public:
                 }
                 double te = (overlapped > bwFloor) ? overlapped : bwFloor;
                 totalLat = (te >= 1.0) ? (uint32_t)(te + 0.5) : 1;
+                // Env-gated term dump (PIMID_MLP_DIAG=1): aggregated means so
+                // per-tech cross-checks against detailed are one grep away.
+                if (mlpDiagEnabled()) {
+                    static std::atomic<uint64_t> dN(0), dL(0), dNet(0), dRem(0),
+                                                 dWq(0), dHier(0);
+                    dN.fetch_add(1, std::memory_order_relaxed);
+                    dL.fetch_add(L, std::memory_order_relaxed);
+                    dNet.fetch_add(networkLat, std::memory_order_relaxed);
+                    dRem.fetch_add(remoteLat, std::memory_order_relaxed);
+                    dWq.fetch_add(nocContentionLat, std::memory_order_relaxed);
+                    dHier.fetch_add(hierLat, std::memory_order_relaxed);
+                    uint64_t n = dN.load(std::memory_order_relaxed);
+                    if ((n & 0xFFFF) == 0) {
+                        fprintf(stderr, "[MLPDIAG] n=%lu avgL=%.1f avgNet=%.1f "
+                                "avgHier=%.1f avgRem=%.1f avgWq=%.1f M=%u "
+                                "bwFloor=%.2f te=%.1f\n",
+                                (unsigned long)n, (double)dL/n, (double)dNet/n,
+                                (double)dHier/n, (double)dRem/n, (double)dWq/n,
+                                M, bwFloor, te);
+                    }
+                }
             } else if (zinfo->hierarchy.nocCurveModel && zinfo->hierarchy.nocCurveN > 0) {
                 // Curve model (2b): estimate the offered per-node load and
                 // interpolate the latency-vs-load curve probed at init. Unlike
@@ -352,6 +373,15 @@ public:
             profRemoteLatency_.inc(totalLat);
             return req.cycle + totalLat;
         }
+    }
+
+    // Analytical-model term dump toggle (PIMID_MLP_DIAG=1). Diagnostic only.
+    static bool mlpDiagEnabled() {
+        static const bool en = []() {
+            const char* e = getenv("PIMID_MLP_DIAG");
+            return (e != nullptr) && (e[0] == '1');
+        }();
+        return en;
     }
 
     // Async detailed-NoC coordination toggle. Default ON for detailed mode;
@@ -533,10 +563,21 @@ protected:
                 uint32_t topoClass = zinfo->hierarchy.nocTopologyClass;
                 double waitCycles = 0.0;
 
+                // RATE-SEMANTICS FIX: arrivalRate above is the AGGREGATE
+                // injection rate (total remote accesses/cycle across ALL
+                // injecting PEs), NOT a per-node rate. The old code multiplied
+                // it by N (total network endpoints, mostly passive memory
+                // banks) as if it were per-node, inflating offered load by
+                // N/P. Harmless when P ~= N (the calibrated mesh cells), but
+                // on deep DRAM trees (4 PEs on a 256-endpoint HBM3 tree) it
+                // overstated load ~64x and pinned W_q at the saturation clamp,
+                // inverting the cross-tech ordering. All three branches now
+                // use the aggregate rate directly.
                 if (topoClass == 0) {
-                    // BUS: all N nodes compete for 1 flit/cycle.
-                    // Steeper divergence: (1-ρ)^1.5 for round-robin + HOL.
-                    double rho = N * arrivalRate * svcTime;
+                    // BUS: every access crosses the single shared medium.
+                    // Offered load = aggregate rate x service time.
+                    // Steeper divergence: (1-rho)^1.5 for round-robin + HOL.
+                    double rho = arrivalRate * svcTime;
                     if (rho >= 0.90) {
                         waitCycles = 10.0 * baseLatency;
                     } else if (rho > 0.01) {
@@ -544,8 +585,9 @@ protected:
                         waitCycles = rho * svcTime / denom;
                     }
                 } else if (topoClass == 1) {
-                    // CROSSBAR: per-output M/M/1 with HOL factor 1.58.
-                    double rhoPerOutput = arrivalRate * svcTime;
+                    // CROSSBAR: aggregate load spreads uniformly over N output
+                    // ports; per-output M/M/1 with HOL factor 1.58.
+                    double rhoPerOutput = (arrivalRate / N) * svcTime;
                     double rhoEff = std::min(rhoPerOutput * 1.58, 0.95);
                     if (rhoEff > 0.01) {
                         waitCycles = rhoEff * svcTime / (1.0 - rhoEff);
@@ -558,8 +600,8 @@ protected:
                     if (channels < 1) channels = 1;
                     double hotspot = (double)zinfo->hierarchy.nocHotspotFactor100 / 100.0;
 
-                    // Per-channel average utilization
-                    double totalFlitHops = arrivalRate * N * svcTime * avgHops;
+                    // Aggregate flit-hops per cycle spread over all channels
+                    double totalFlitHops = arrivalRate * svcTime * avgHops;
                     double rhoAvg = totalFlitHops / (double)channels;
 
                     // Bottleneck channel (hotspot-adjusted)

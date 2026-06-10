@@ -27,8 +27,13 @@ Per-access effective latency:
 t_eff = max( (L + W_q) / M ,  P * D / c )
 ```
 
-- `L` — unloaded latency: hop-count round trip + serialization + memory access
-- `W_q` — M/D/1 queuing contention at the bottleneck channel
+- `L` — unloaded latency: hop-count round trip + serialization + memory access.
+  For DRAM the per-hop link latency derives from the technology's
+  **per-channel** bandwidth (the DQ datapath one access actually traverses),
+  hop-normalized to the per-channel subtree depth; aggregate multi-channel
+  bandwidth enters through the floor term instead.
+- `W_q` — M/D/1 queuing contention at the bottleneck channel, computed from
+  the aggregate injection rate spread over the topology's channels
 - `M` — memory-level-parallelism intensity (`noc.mlp`; omit for the
   calibrated per-core-model default)
 - `P * D / c` — aggregate-bandwidth floor: P PEs sharing c channels of
