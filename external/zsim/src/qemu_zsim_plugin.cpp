@@ -1171,8 +1171,22 @@ static void syscall_cb(qemu_plugin_id_t id,
         case 35:  /* nanosleep */
         case 43:  /* accept */
         case 45:  /* recvfrom */
+        case 47:  /* recvmsg */
         case 202: /* futex */
+        case 230: /* clock_nanosleep — glibc >= 2.31 implements ALL sleeps
+                   * with this, never plain nanosleep(35) */
         case 232: /* epoll_wait */
+        case 270: /* pselect6 */
+        case 271: /* ppoll — glibc poll() uses this on modern kernels */
+        case 281: /* epoll_pwait */
+        case 288: /* accept4 */
+        case 449: /* futex_waitv — glibc >= 2.35 pthread waits use this on
+                   * kernels >= 5.16. Without a syscallLeave here a guest
+                   * thread blocking in it kept its core slot and starved the
+                   * phase barrier: cosim hung at device-thread startup with
+                   * image-built (glibc 2.39) workloads on new kernels, while
+                   * the same run passed natively with glibc-2.34 binaries
+                   * (those fall back to futex(202)). */
         {
             /* Use syscall number as synthetic PC for the blacklist.
              * Offset by 0x1000 to avoid address 0 (which could confuse

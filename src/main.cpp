@@ -5180,7 +5180,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.0.5" << std::endl;
+    std::cout << "Version 1.0.6" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -5971,6 +5971,20 @@ int main(int argc, char** argv) {
             if (yaml_cfg["host"]) {
                 auto h = yaml_cfg["host"];
                 config.host_core_type = h["core_type"].as<std::string>(config.host_core_type);
+                // STRICT: same whitelist as pim.pe.type. Unknown host core
+                // types used to fall through to the "Simple" default at zsim
+                // emission silently (e.g. the removed timing_core).
+                if (config.host_core_type != "ooo_core" &&
+                    config.host_core_type != "in_order_core" &&
+                    config.host_core_type != "simple_core" &&
+                    config.host_core_type != "alu_core" &&
+                    config.host_core_type != "null_core") {
+                    std::cerr << "Error: unknown host.core_type '"
+                              << config.host_core_type
+                              << "'. Valid: ooo_core | in_order_core | simple_core"
+                              << " | alu_core | null_core" << std::endl;
+                    return 1;
+                }
                 config.host_num_cores = h["num_cores"].as<int>(config.host_num_cores);
                 config.host_frequency_mhz = h["frequency_mhz"].as<double>(config.host_frequency_mhz);
                 config.host_tech_node_nm = h["tech_node_nm"].as<int>(config.host_tech_node_nm);
@@ -6000,7 +6014,19 @@ int main(int argc, char** argv) {
                     if (ct == "ALU" || ct == "alu") return "alu_core";
                     if (ct == "Simple" || ct == "simple") return "simple_core";
                     if (ct == "Null" || ct == "null") return "null_core";
-                    return ct;  // already normalized (e.g., "ooo_core")
+                    // STRICT: anything else must already be a canonical name.
+                    // Unknown values used to pass through and silently fall to
+                    // the "Simple" default at zsim emission (e.g. the removed
+                    // timing_core ran hosts as Simple cores). Hard error now,
+                    // same policy as the pim.pe.type gate.
+                    if (ct == "ooo_core" || ct == "in_order_core" ||
+                        ct == "alu_core" || ct == "simple_core" || ct == "null_core")
+                        return ct;
+                    std::cerr << "ERROR: unknown core type '" << ct << "' in "
+                              << "system.hosts[].core_type / devices[].pe_type.\n"
+                              << "Valid: ooo_core, in_order_core, simple_core, "
+                              << "alu_core, null_core.\n";
+                    exit(1);
                 };
 
                 // Parse hosts
@@ -6564,7 +6590,7 @@ int main(int argc, char** argv) {
 
     // Print simulation configuration
     std::cout << "╔══════════════════════════════════════════════════════════════════════════════╗" << std::endl;
-    std::cout << "║                    PIMID Simulation Infrastructure v1.0.5                      ║" << std::endl;
+    std::cout << "║                    PIMID Simulation Infrastructure v1.0.6                      ║" << std::endl;
     std::cout << "╚══════════════════════════════════════════════════════════════════════════════╝" << std::endl;
     std::cout << "  Method: " << config.method;
     if (config.method == "exec") {
