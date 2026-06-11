@@ -16,6 +16,7 @@ external/
 !external/nvsim/sample_STTRAM_aggressive.cell
 !external/nvsim/sample_SLCNAND.cell
 !external/nvsim/SRAM.cell
+!external/zsim/misc/hooks/
 
 # Build outputs we don't COPY
 build/

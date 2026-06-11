@@ -49,49 +49,54 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         vim-tiny \
     && rm -rf /var/lib/apt/lists/*
 
-# PIMID binaries + libraries
+# PIMID binaries + libraries. All paths the pimid binary searches are
+# relative to PIMID_ROOT=/opt/pimid, so everything ships under /opt/pimid.
 RUN mkdir -p /opt/pimid/bin /opt/pimid/lib \
-             /opt/external/qemu/build \
-             /opt/build/external/zsim
+             /opt/pimid/external/qemu/build \
+             /opt/pimid/build/external/zsim
 COPY build/pimid                                /opt/pimid/bin/pimid
 COPY build/libpimid_plugin.so                   /opt/pimid/lib/libpimid_plugin.so
 COPY build/libpimid_mpi.so                      /opt/pimid/lib/libpimid_mpi.so
 COPY external/ramulator/libramulator.so         /opt/pimid/lib/libramulator.so
 # libpimid_mpi.so also at ${PIMID_ROOT}/build/ so findPimidMpiLib() finds it.
-RUN mkdir -p /opt/pimid/build && \
-    ln -s /opt/pimid/lib/libpimid_mpi.so /opt/build/libpimid_mpi.so
+RUN ln -s /opt/pimid/lib/libpimid_mpi.so /opt/pimid/build/libpimid_mpi.so
 # Plugins must live at the same path pimid binary searches: ${PIMID_ROOT}/build/external/zsim
-COPY build/external/zsim/libzsim_qemu.so        /opt/build/external/zsim/libzsim_qemu.so
-COPY build/external/zsim/libpimid_trace.so      /opt/build/external/zsim/libpimid_trace.so
+COPY build/external/zsim/libzsim_qemu.so        /opt/pimid/build/external/zsim/libzsim_qemu.so
+COPY build/external/zsim/libpimid_trace.so      /opt/pimid/build/external/zsim/libpimid_trace.so
 # QEMU at the path pimid binary searches: ${PIMID_ROOT}/external/qemu/build
-COPY external/qemu/build/qemu-x86_64            /opt/external/qemu/build/qemu-x86_64
+COPY external/qemu/build/qemu-x86_64            /opt/pimid/external/qemu/build/qemu-x86_64
 # QEMU needs its data files (bios, keymaps) shipped alongside the binary
-COPY external/qemu/pc-bios/                     /opt/external/qemu/pc-bios/
+COPY external/qemu/pc-bios/                     /opt/pimid/external/qemu/pc-bios/
 
 # CACTI tech_params + NVSim sample cells. Baked CACTI_DATA_DIR / NVSim
 # defaults reference the build-time absolute host path; we ship the data at
-# /opt/external and symlink the baked host path to it for compat.
-COPY external/cacti/tech_params/                /opt/external/cacti/tech_params/
-COPY external/nvsim/sample_PCRAM.cell           /opt/external/nvsim/sample_PCRAM.cell
-COPY external/nvsim/sample_RRAM.cell            /opt/external/nvsim/sample_RRAM.cell
-COPY external/nvsim/sample_STTRAM.cell          /opt/external/nvsim/sample_STTRAM.cell
-COPY external/nvsim/sample_STTRAM_aggressive.cell  /opt/external/nvsim/sample_STTRAM_aggressive.cell
-COPY external/nvsim/sample_SLCNAND.cell         /opt/external/nvsim/sample_SLCNAND.cell
-COPY external/nvsim/SRAM.cell                   /opt/external/nvsim/SRAM.cell
-RUN mkdir -p /home/he/Workspace/pimid-dev/external && \
-    ln -s /opt/external/cacti /home/he/Workspace/pimid-dev/external/cacti && \
-    ln -s /opt/external/nvsim /home/he/Workspace/pimid-dev/external/nvsim
+# /opt/pimid/external and symlink the baked host path to it for compat.
+COPY external/cacti/tech_params/                /opt/pimid/external/cacti/tech_params/
+COPY external/nvsim/sample_PCRAM.cell           /opt/pimid/external/nvsim/sample_PCRAM.cell
+COPY external/nvsim/sample_RRAM.cell            /opt/pimid/external/nvsim/sample_RRAM.cell
+COPY external/nvsim/sample_STTRAM.cell          /opt/pimid/external/nvsim/sample_STTRAM.cell
+COPY external/nvsim/sample_STTRAM_aggressive.cell  /opt/pimid/external/nvsim/sample_STTRAM_aggressive.cell
+COPY external/nvsim/sample_SLCNAND.cell         /opt/pimid/external/nvsim/sample_SLCNAND.cell
+COPY external/nvsim/SRAM.cell                   /opt/pimid/external/nvsim/SRAM.cell
+RUN mkdir -p /home/he/Workspace/pimid-dev/pimid/external && \
+    ln -s /opt/pimid/external/cacti /home/he/Workspace/pimid-dev/pimid/external/cacti && \
+    ln -s /opt/pimid/external/nvsim /home/he/Workspace/pimid-dev/pimid/external/nvsim
 
 # Examples + workloads. Layout mirrors the repo (examples,
 # benchmarks) so that example YAMLs with relative paths
 # "benchmarks/..." resolve correctly when CWD is /opt/pimid.
 COPY examples/                                  /opt/pimid/examples/
-COPY benchmarks/                                /opt/benchmarks/
+COPY benchmarks/                                /opt/pimid/benchmarks/
 
-# Convenience symlinks at the top-level so users can find them without
-# remembering the pimid/ prefix.
+# Cosim workloads ship as source (benchmarks/cosim); build them now so the
+# image carries ready-to-run binaries. Needs the zsim hooks headers.
+COPY external/zsim/misc/hooks/                  /opt/pimid/external/zsim/misc/hooks/
+RUN make -C /opt/pimid/benchmarks/cosim all
+
+# Convenience symlinks at the /opt level, plus stable aliases under /opt/pimid.
 RUN ln -s examples /opt/pimid/configs && \
-    ln -s benchmarks /opt/benchmarks && \
+    ln -s /opt/pimid/examples /opt/examples && \
+    ln -s /opt/pimid/benchmarks /opt/benchmarks && \
     ln -s benchmarks/cosim /opt/pimid/cosim_workloads
 
 # In-image smoke harness (matches host harness, paths adjusted)

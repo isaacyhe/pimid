@@ -4,9 +4,9 @@
 set -uo pipefail
 cd /opt/pimid
 PIMID=/opt/pimid/bin/pimid
-EXAMPLES=/opt/configs/examples
-COSIM_CFG=/opt/pimid/configs/cosim
-COSIM_WL=/opt/pimid/test/benchmarks/host_device_cosim
+EXAMPLES=/opt/pimid/examples
+COSIM_CFG=/opt/pimid/examples/cosim
+COSIM_WL=/opt/pimid/benchmarks/cosim
 OUT=${1:-/tmp/pimid_smoke}
 rm -rf $OUT
 mkdir -p $OUT
@@ -67,16 +67,17 @@ done
 run "power_off" $PIMID --method exec --config $EXAMPLES/tech_DDR4.yaml --no-power
 run "power_on"  $PIMID --method exec --config $EXAMPLES/tech_DDR4.yaml --power
 
-# ── Cosim
-for kernel in reduction_tree_cosim matmul_tiled_cosim histogram_merge_cosim; do
-  run "cosim_basic_$(echo $kernel | cut -d_ -f1)" \
+# ── Cosim (shared_memory variants; bfs_iterative excluded — iterative
+#    offload is a known limitation, see README)
+for kernel in reduction_tree spmv_csr histogram_merge; do
+  run "cosim_basic_$kernel" \
       $PIMID --method exec --scope system \
       --config $COSIM_CFG/host_device_basic.yaml \
-      --workload $COSIM_WL/$kernel 256 4 0
+      --workload $COSIM_WL/$kernel/${kernel}_shared_memory 256 4 0
 done
 run "cosim_multidev_reduction" $PIMID --method exec --scope system \
     --config $COSIM_CFG/multi_device.yaml \
-    --workload $COSIM_WL/reduction_tree_cosim 256 4 0
+    --workload $COSIM_WL/reduction_tree/reduction_tree_shared_memory 256 4 0
 
 # ── CLI surface
 run "cli_help"    $PIMID --help
