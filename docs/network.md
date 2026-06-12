@@ -12,6 +12,16 @@ credit-based flow control, deadlock-free routing.
   computes -- deterministic up to OS thread/process interleaving. There is no
   approximate fast path inside `detailed`; if you need speed over cycle
   accounting, use `noc.model: analytical`.
+- **Known issue (multi-process MPI runs):** rarely (~8% of runs in our
+  sweeps), a 16-rank detailed-MPI simulation stops making progress and sits
+  silent indefinitely. The failure is loud, never silent: a hung run
+  produces no result rather than a wrong one, and a rerun normally
+  completes. Wrap MPI sweeps with a per-run timeout and retry (our figure
+  harness uses timeout + up to 3 attempts). Root cause is under
+  investigation (suspects: a glibc<2.41 condvar signal race widened by
+  syscall interception, or futex wake matching across rank processes);
+  `PIMID_MPI_TRACE=1` dumps per-rank transport wait events to /tmp for
+  diagnosis.
 
 - **DRAM device networks are trees.** A DRAM device's internal datapath is a
   hierarchical distribution fabric, not a mesh — PIMID emits a per-technology
