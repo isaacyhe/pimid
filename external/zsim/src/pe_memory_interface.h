@@ -201,17 +201,16 @@ public:
                     // isolated networks).
                     gn->recordBatchAccess(srcNode, dstNode, req.cycle);
 
-                    if (nocAsyncEnabled()) {
-                        // ── ASYNC (default): a background coordinator thread runs
-                        // the expensive cycle-accurate processBatch OFF the
-                        // critical path and publishes a rolling EWMA latency. PE
-                        // threads NEVER block on the drain -- they just record
-                        // above and read the published value (lock-free) here.
-                        gn->startAsyncCoordinator();  // idempotent / once
-                    } else if (zinfo->numPhases > batchLastPhase_) {
-                        // ── Legacy synchronous path (PIMID_NOC_ASYNC=0): drain the
-                        // batch on the critical path at each phase boundary.
+                    if (zinfo->numPhases > batchLastPhase_) {
+                        // ── Synchronous drain (the ONLY detailed accounting;
+                        // the async EWMA coordinator was removed -- it biased
+                        // results up to 2x): drain the batch on the critical
+                        // path at each phase boundary. Flag the drain so the
+                        // watchdog does not misread the frozen phase clock as
+                        // a fake-leave stall and blacklist hot futex sites.
+                        __sync_fetch_and_add(&zinfo->hierarchy.nocInlineDrain, 1);
                         gn->processBatch(zinfo->numPhases, zinfo->phaseLength);
+                        __sync_fetch_and_sub(&zinfo->hierarchy.nocInlineDrain, 1);
                         batchLastPhase_ = zinfo->numPhases;
                     }
 
@@ -384,16 +383,11 @@ public:
         return en;
     }
 
-    // Async detailed-NoC coordination toggle. Default ON for detailed mode;
-    // set PIMID_NOC_ASYNC=0 to fall back to the legacy synchronous per-phase
-    // processBatch (slow). Evaluated once (env read is process-wide).
-    static bool nocAsyncEnabled() {
-        static const bool en = []() {
-            const char* e = getenv("PIMID_NOC_ASYNC");
-            return (e == nullptr) || (e[0] != '0');
-        }();
-        return en;
-    }
+    // (The async EWMA coordinator and its PIMID_NOC_ASYNC toggle were REMOVED
+    // 2026-06-11: measured bias vs the synchronous reference was up to 2x on
+    // MPI (with a 30-76% run-to-run tail) and 0.8-36% on OMP. detailed now
+    // always drains synchronously; use noc.model=analytical when speed
+    // matters more than cycle accounting.)
 
     // Topology-aware calibrated toggle (Fix B). Default ON: on GRID topologies
     // the calibrated model ADDS the M/D/1 contention + memory terms back onto
@@ -486,10 +480,10 @@ protected:
             // MC node for memory org `targetUnit` is modeled as node `targetUnit`.
             uint32_t mcNode = targetUnit % gn->getNumNodes();
             gn->recordBatchAccess(srcNode, mcNode, cycle);
-            if (nocAsyncEnabled()) {
-                gn->startAsyncCoordinator();  // idempotent
-            } else if (zinfo->numPhases > batchLastPhase_) {
+            if (zinfo->numPhases > batchLastPhase_) {
+                __sync_fetch_and_add(&zinfo->hierarchy.nocInlineDrain, 1);
                 gn->processBatch(zinfo->numPhases, zinfo->phaseLength);
+                __sync_fetch_and_sub(&zinfo->hierarchy.nocInlineDrain, 1);
                 batchLastPhase_ = zinfo->numPhases;
             }
             uint32_t garnetLat = gn->getBatchAvgLatency();

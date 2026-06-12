@@ -361,12 +361,7 @@ void SimEnd() {
     }
 
     if (zinfo->garnetNetwork) {
-#ifdef HAVE_GARNET
-        // Stop & join the async detailed-OMP coordinator (if running) so the
-        // final EWMA is settled and no background thread touches Garnet while we
-        // read stats below. No-op if the coordinator was never started.
-        zinfo->garnetNetwork->stopAsyncCoordinator();
-#endif
+        // (async coordinator removed -- detailed always drains synchronously)
         zinfo->garnetNetwork->setTotalCycles(zinfo->globPhaseCycles);
         std::string garnetStatsPath = std::string(zinfo->outputDir) + "/garnet_stats.txt";
         zinfo->garnetNetwork->writeStatsFile(garnetStatsPath.c_str());

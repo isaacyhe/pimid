@@ -662,18 +662,10 @@ private:
     volatile uint64_t batchLastPhase_ = 0;
     lock_t batchLock_;
 
-    // ── Async detailed-mode coordinator (in-process, OMP) ──
-    // A dedicated background thread periodically drains the shared phaseBatch_
-    // (cross-thread accumulated remote accesses), runs the cycle-accurate Garnet
-    // drain OFF the critical path, and publishes batchAvgLatency_ (EWMA). PE
-    // threads never call processBatch -> no per-phase serialization. The
-    // published latency stays the real cross-thread-contended value, just
-    // slightly rolling/stale (same approximation envelope as detailed-MPI).
-    std::thread asyncCoordThread_;
-    std::atomic<bool> asyncCoordStarted_{false};
-    std::atomic<bool> asyncCoordStop_{false};
-    // Drain cadence: poll this often; only run a drain when work is queued.
-    static constexpr int kAsyncPollMs_ = 1;
+    // (The former async background-coordinator was REMOVED 2026-06-11: its
+    // wall-clock-coupled rolling-EWMA accounting biased detailed results by
+    // up to 2x (MPI) / 36% (OMP) vs the synchronous reference. detailed now
+    // ALWAYS drains synchronously; use noc.model=analytical for speed.)
 
     void recordTraffic_(uint32_t src, uint32_t dst, uint64_t time) {
         recentTraffic_.push_back({src, dst, time});
@@ -751,33 +743,6 @@ public:
         futex_unlock(&batchLock_);
 
         runBatchDrain_(std::move(batch), phaseNum);
-    }
-
-    /**
-     * ASYNC drain (in-process detailed-OMP coordinator).
-     *
-     * Atomically take whatever cross-thread remote accesses have accumulated in
-     * phaseBatch_ (NO per-phase guard -- this is called off the critical path by
-     * the background coordinator thread, not by PE threads) and run them through
-     * the shared Garnet, publishing the rolling EWMA latency. Returns the number
-     * of records drained (0 if nothing was queued).
-     */
-    size_t processBatchAsync() {
-        futex_lock(&batchLock_);
-        if (phaseBatch_.empty()) {
-            futex_unlock(&batchLock_);
-            return 0;
-        }
-        auto batch = std::move(phaseBatch_);
-        phaseBatch_.clear();
-        size_t n = batch.size();
-        // Use the highest issue cycle present as the "phase" label for logging.
-        uint64_t phaseLabel = batchLastPhase_ + 1;
-        batchLastPhase_ = phaseLabel;
-        futex_unlock(&batchLock_);
-
-        runBatchDrain_(std::move(batch), phaseLabel);
-        return n;
     }
 
 private:
@@ -934,41 +899,6 @@ private:
     }
 
 public:
-    /**
-     * Start the background async coordinator (detailed-OMP). Idempotent / once.
-     *
-     * PE threads call this on their first remote access in detailed mode; the
-     * first caller spawns ONE coordinator thread that loops:
-     *   sleep(kAsyncPollMs_) -> if work queued, processBatchAsync() -> publish.
-     * Thereafter PE threads only recordBatchAccess() (brief batchLock_) and read
-     * getBatchAvgLatency() (lock-free) -- they NEVER block on the Garnet drain.
-     */
-    void startAsyncCoordinator() {
-        if (asyncCoordStarted_.exchange(true)) return;  // once
-        asyncCoordStop_.store(false, std::memory_order_relaxed);
-        asyncCoordThread_ = std::thread([this]() {
-            while (!asyncCoordStop_.load(std::memory_order_relaxed)) {
-                size_t n = processBatchAsync();   // drains queue if any; else 0
-                if (n == 0) {
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(kAsyncPollMs_));
-                }
-                // If work was found, loop immediately to keep draining (busy
-                // bursts) so the published latency stays fresh.
-            }
-            // Final drain so trailing accesses still update the EWMA.
-            processBatchAsync();
-        });
-        info("[GarnetNetwork] async detailed-OMP coordinator started "
-             "(poll=%dms)", kAsyncPollMs_);
-    }
-
-    /** Stop and join the background coordinator (call at shutdown). */
-    void stopAsyncCoordinator() {
-        if (!asyncCoordStarted_.load(std::memory_order_relaxed)) return;
-        asyncCoordStop_.store(true, std::memory_order_relaxed);
-        if (asyncCoordThread_.joinable()) asyncCoordThread_.join();
-    }
 #endif
 
     // ── Statistics ───────────────────────────────────────────

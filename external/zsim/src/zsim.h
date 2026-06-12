@@ -282,6 +282,14 @@ struct GlobSimInfo {
         uint32_t nocMlpModel  = 0;   // 1 => use the unified hop+M/D/1+MLP model
         uint32_t nocMlpDegree = 1;   // M, the outstanding-access window (>=1)
 
+        // Set (via __sync) while an inline Garnet batch drain runs on a PE
+        // thread (detailed mode's only accounting path). The phase clock
+        // legitimately stands still during the drain; the scheduler watchdog
+        // must not count those wall-clock ticks toward its fake-leave stall
+        // heuristic, or it blacklists hot futex sites mid-drain and every
+        // later wait pays a full leave/join (the "performance cliff").
+        volatile uint32_t nocInlineDrain = 0;
+
         // -- "curve" NoC model (noc.model: curve) ----------------------------
         // nocCurveModel: 1 => at startup, probe the network at SEVERAL increasing
         //   injection rates (a latency-vs-load curve), store the (rate->avgLatency)

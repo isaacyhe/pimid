@@ -7,6 +7,12 @@ PIMID has exactly two NoC models (`noc.model`):
 The full Garnet 3.0 engine (extracted from gem5): routers, virtual channels,
 credit-based flow control, deadlock-free routing.
 
+- **Synchronous NoC accounting, always.** Garnet batches drain inline at
+  phase boundaries, so every access is charged the latency the model actually
+  computes -- deterministic up to OS thread/process interleaving. There is no
+  approximate fast path inside `detailed`; if you need speed over cycle
+  accounting, use `noc.model: analytical`.
+
 - **DRAM device networks are trees.** A DRAM device's internal datapath is a
   hierarchical distribution fabric, not a mesh — PIMID emits a per-technology
   CUSTOM tree topology (banks -> channel-DQ -> system root) with per-link

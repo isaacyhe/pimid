@@ -123,8 +123,27 @@ void Scheduler::watchdogThreadFunc() {
 
         futex_lock(&schedLock);
 
-        if (lastPhase == curPhase && !fakeLeaves.empty() && (fakeLeaves.front()->th->futexJoin.action != FJA_WAKE)) {
-            if (++fakeLeaveStalls >= WATCHDOG_STALL_THRESHOLD) {
+        // Stall-escalation policy around synchronous NoC draining:
+        //  1. While a LOCAL inline Garnet drain runs (nocInlineDrain), the
+        //     frozen phase clock is legitimate -- skip escalation entirely.
+        //  2. In a synchronous-NoC MPI rank, long mailbox futex waits are
+        //     usually normal (a PEER process may be draining, invisible
+        //     here), but a genuine cross-rank freeze also exists (observed:
+        //     all 16 ranks parked at one phase for 45+ min with escalation
+        //     fully suppressed). So escalate in SOFT-RESCUE mode: fire at 4x
+        //     the threshold (rare), force the real leaves (breaks the
+        //     freeze), but NEVER insert into the permanent blacklist -- the
+        //     blacklist made every later mailbox wait pay a full leave/join
+        //     (a wedging storm: 32 firings, 198s cell -> >45 min).
+        static const bool syncMpiRank =
+            (getenv("PIMID_MPI_RANK") != nullptr);  // detailed is always sync now
+        bool skipStallEscalation = (zinfo->hierarchy.nocInlineDrain != 0);
+        const uint64_t stallThreshold =
+            syncMpiRank ? 4 * WATCHDOG_STALL_THRESHOLD : WATCHDOG_STALL_THRESHOLD;
+
+        if (!skipStallEscalation &&
+            lastPhase == curPhase && !fakeLeaves.empty() && (fakeLeaves.front()->th->futexJoin.action != FJA_WAKE)) {
+            if (++fakeLeaveStalls >= stallThreshold) {
                 info("Detected possible stall due to fake leaves (%ld current)", fakeLeaves.size());
                 // Uncomment to print all leaves
                 FakeLeaveInfo* pfl = fakeLeaves.front();
@@ -147,7 +166,10 @@ void Scheduler::watchdogThreadFunc() {
                     // Over time, this will blacklist every blocking syscall
                     // The root reason for being conservative though is that we don't have a sure-fire
                     // way to distinguish IO waits from truly blocking syscalls (TODO)
-                    if (fakeLeaves.size() == 1) {
+                    // SOFT-RESCUE (sync MPI): force the leaves but never
+                    // blacklist -- mailbox waits are normal there and a
+                    // blacklisted mailbox PC wedges the run.
+                    if (fakeLeaves.size() == 1 && !syncMpiRank) {
                         info("Blacklisting from future fake leaves: [%d] %s @ 0x%lx | arg0 0x%lx arg1 0x%lx", pid, GetSyscallName(fl->syscallNumber), fl->pc, fl->arg0, fl->arg1);
                         blockingSyscalls[pid].insert(fl->pc);
                     }

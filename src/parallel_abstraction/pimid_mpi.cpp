@@ -259,13 +259,35 @@ static bool open_or_create_shm(int rank, int nranks, const char* shm_name) {
     return true;
 }
 
+/* ---- Wait-event tracing (PIMID_MPI_TRACE=1; diagnostic only) ----
+ * One line per wait ENTER/EXIT to an unbuffered per-rank file, recording the
+ * wait site and the protocol state visible at that moment. At a freeze, the
+ * union of per-rank traces shows every rank's last protocol action. */
+static FILE* g_trace = nullptr;
+static void trace_init(int rank) {
+    const char* e = getenv("PIMID_MPI_TRACE");
+    if (!e || e[0] != '1') return;
+    char p[300];
+    snprintf(p, sizeof(p), "/tmp/pimid_mpi_trace_%d_rank%d.log",
+             (int)getppid(), rank);  /* launcher pid: instances don't clobber */
+    g_trace = fopen(p, "w");
+    if (g_trace) setvbuf(g_trace, nullptr, _IONBF, 0);
+}
+#define MPITRACE(fmt, ...) do { if (g_trace) { \
+    struct timespec _ts; clock_gettime(CLOCK_MONOTONIC, &_ts); \
+    fprintf(g_trace, "%ld.%03ld r%d " fmt "\n", (long)_ts.tv_sec, \
+            _ts.tv_nsec/1000000L, g_rank, ##__VA_ARGS__); } } while (0)
+
 /* ---- Send / Recv core ---- */
 
 /* Push one chunk to the dest mailbox. Blocks if ring is full. */
 static int send_chunk(int dest, int tag, const char* data, uint32_t size,
                       uint32_t chunk_idx, uint32_t n_chunks, uint32_t msg_id) {
     Mailbox* mb = &g_shared->mailboxes[dest];
+    MPITRACE("send_enter dest=%d tag=%d chunk=%u/%u", dest, tag, chunk_idx, n_chunks);
     pthread_mutex_lock(&mb->mu);
+    if (mb->count >= PIMID_MPI_RING_SLOTS)
+        MPITRACE("send_WAIT_full dest=%d count=%u", dest, mb->count);
     while (mb->count >= PIMID_MPI_RING_SLOTS) {
         pthread_cond_wait(&mb->cv_nonfull, &mb->mu);
     }
@@ -281,13 +303,16 @@ static int send_chunk(int dest, int tag, const char* data, uint32_t size,
     mb->count++;
     pthread_cond_signal(&mb->cv_nonempty);
     pthread_mutex_unlock(&mb->mu);
+    MPITRACE("send_done dest=%d count_now=%u", dest, mb->count);
     return 0;
 }
 
 /* Pop one message from the local mailbox. Blocks if empty. */
 static void recv_slot(MessageSlot* out) {
     Mailbox* mb = &g_shared->mailboxes[g_rank];
+    MPITRACE("recv_enter");
     pthread_mutex_lock(&mb->mu);
+    if (mb->count == 0) MPITRACE("recv_WAIT_empty");
     while (mb->count == 0) {
         pthread_cond_wait(&mb->cv_nonempty, &mb->mu);
     }
@@ -296,6 +321,7 @@ static void recv_slot(MessageSlot* out) {
     mb->count--;
     pthread_cond_signal(&mb->cv_nonfull);
     pthread_mutex_unlock(&mb->mu);
+    MPITRACE("recv_done src=%d tag=%d count_now=%u", out->src, out->tag, mb->count);
 }
 
 /* ---- MPI API ---- */
@@ -313,6 +339,8 @@ int MPI_Init(int *argc, char ***argv) {
     g_rank   = env_r ? atoi(env_r) : 0;
     if (g_nranks < 1) g_nranks = 1;
     if (g_rank < 0)   g_rank = 0;
+
+    trace_init(g_rank);
 
     if (g_nranks == 1) {
         /* Solo run: no shm needed, MPI is a no-op transport. */
@@ -468,19 +496,23 @@ int MPI_Barrier(MPI_Comm comm) {
         return MPI_SUCCESS;
     }
 
+    MPITRACE("barrier_enter");
     pthread_mutex_lock(&g_shared->barrier_mu);
     int gen = g_shared->barrier_gen;
     g_shared->barrier_count++;
+    MPITRACE("barrier_in gen=%d count=%d/%d", gen, g_shared->barrier_count, g_nranks);
     if (g_shared->barrier_count >= g_nranks) {
         g_shared->barrier_count = 0;
         g_shared->barrier_gen++;
         pthread_cond_broadcast(&g_shared->barrier_cv);
+        MPITRACE("barrier_release gen=%d", g_shared->barrier_gen);
     } else {
         while (g_shared->barrier_gen == gen) {
             pthread_cond_wait(&g_shared->barrier_cv, &g_shared->barrier_mu);
         }
     }
     pthread_mutex_unlock(&g_shared->barrier_mu);
+    MPITRACE("barrier_exit gen=%d", g_shared->barrier_gen);
 
     zsim_magic_op(ZSIM_MAGIC_OP_MPI_BARRIER);
     return MPI_SUCCESS;
