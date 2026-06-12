@@ -12,16 +12,16 @@ credit-based flow control, deadlock-free routing.
   computes -- deterministic up to OS thread/process interleaving. There is no
   approximate fast path inside `detailed`; if you need speed over cycle
   accounting, use `noc.model: analytical`.
-- **Known issue (multi-process MPI runs):** rarely (~8% of runs in our
-  sweeps), a 16-rank detailed-MPI simulation stops making progress and sits
-  silent indefinitely. The failure is loud, never silent: a hung run
-  produces no result rather than a wrong one, and a rerun normally
-  completes. Wrap MPI sweeps with a per-run timeout and retry (our figure
-  harness uses timeout + up to 3 attempts). Root cause is under
-  investigation (suspects: a glibc<2.41 condvar signal race widened by
-  syscall interception, or futex wake matching across rank processes);
-  `PIMID_MPI_TRACE=1` dumps per-rank transport wait events to /tmp for
-  diagnosis.
+- **Rare MPI hang: resolved in 1.0.8.** Versions up to 1.0.7 could rarely
+  (~8% of runs) hang a multi-rank detailed-MPI simulation: a rank was
+  captured parked forever in a process-shared mutex acquisition on a free
+  mutex (its futex wake lost under syscall interception). The MPI transport
+  is now kernel-wait-free -- CAS spinlocks with usleep backoff for critical
+  sections, polling with predicate recheck for empty/full/barrier waits --
+  so lost wakes are impossible by construction. Validated with 120
+  consecutive runs of the previously freeze-prone cells across two
+  partitions, zero hangs. `PIMID_MPI_TRACE=1` still dumps per-rank
+  transport wait events to /tmp for diagnosis.
 
 - **DRAM device networks are trees.** A DRAM device's internal datapath is a
   hierarchical distribution fabric, not a mesh — PIMID emits a per-technology

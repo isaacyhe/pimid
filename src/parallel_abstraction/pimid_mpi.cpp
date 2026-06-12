@@ -22,7 +22,6 @@
 
 #include "parallel_abstraction/pimid_mpi.h"
 
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -89,28 +88,50 @@ struct MessageSlot {
     char      payload[PIMID_MPI_MAX_MSG_BYTES];
 };
 
+/* KERNEL-WAIT-FREE TRANSPORT (2026-06-12, the 1.0.8 freeze fix).
+ *
+ * The previous transport used process-shared pthread mutex+condvars. Under
+ * the simulator, a rank was captured (PIMID_MPI_TRACE) stuck forever in
+ * pthread_mutex_lock on the barrier mutex that NO other rank held: its
+ * futex wake was lost (15/16 ranks waiting in gen-2, the 16th parked on a
+ * free mutex). Whether glibc's pshared paths or the simulator's syscall
+ * interception eats the wake, the robust cure is the same: NO kernel
+ * blocking waits anywhere in the transport. Critical sections are guarded
+ * by a CAS spinlock with usleep backoff; empty/full/barrier waits poll
+ * with predicate recheck. A lost wake is impossible by construction (there
+ * are no wakes), and polling threads keep re-entering the simulator's
+ * scheduler instead of parking in futexes. The 50-200us poll granularity
+ * is invisible at simulation timescales (waits are wall-clock-only). */
+
 struct Mailbox {
-    pthread_mutex_t mu;
-    pthread_cond_t  cv_nonempty;
-    pthread_cond_t  cv_nonfull;
+    volatile uint32_t lk;          /* 0=free, 1=held (CAS spinlock) */
     uint32_t        head;          /* next slot to read */
     uint32_t        tail;          /* next slot to write */
     uint32_t        count;         /* slots currently filled */
-    uint32_t        _pad;
     MessageSlot     slots[PIMID_MPI_RING_SLOTS];
 };
 
 struct SharedHeader {
-    /* Barrier */
-    pthread_mutex_t  barrier_mu;
-    pthread_cond_t   barrier_cv;
-    int              barrier_count;
-    int              barrier_gen;
+    /* Barrier: lock-free generation barrier (atomics only) */
+    volatile int     barrier_count;
+    volatile int     barrier_gen;
     int              nranks;
     int              _pad;
     /* Mailboxes follow: g_shared->mailboxes[0..nranks-1] */
     Mailbox          mailboxes[0];
 };
+
+static inline void mb_lock(Mailbox* mb) {
+    for (int spin = 0; ; spin++) {
+        if (__sync_bool_compare_and_swap(&mb->lk, 0u, 1u)) return;
+        if (spin < 64) { __asm__ __volatile__("pause"); continue; }
+        usleep(50);
+    }
+}
+static inline void mb_unlock(Mailbox* mb) {
+    __sync_synchronize();
+    mb->lk = 0;
+}
 
 /* ---- Process-local state ---- */
 
@@ -163,22 +184,6 @@ static size_t shared_bytes_for(int nranks) {
     return sizeof(SharedHeader) + (size_t)nranks * sizeof(Mailbox);
 }
 
-static void init_pshared_mutex(pthread_mutex_t* m) {
-    pthread_mutexattr_t a;
-    pthread_mutexattr_init(&a);
-    pthread_mutexattr_setpshared(&a, PTHREAD_PROCESS_SHARED);
-    pthread_mutex_init(m, &a);
-    pthread_mutexattr_destroy(&a);
-}
-
-static void init_pshared_cond(pthread_cond_t* c) {
-    pthread_condattr_t a;
-    pthread_condattr_init(&a);
-    pthread_condattr_setpshared(&a, PTHREAD_PROCESS_SHARED);
-    pthread_cond_init(c, &a);
-    pthread_condattr_destroy(&a);
-}
-
 /* Rank 0 creates and initializes the shm segment; other ranks attach.
  * Synchronization on attach: each non-zero rank busy-waits for the
  * "initialized" sentinel in the header (barrier_gen >= 0 after init,
@@ -229,17 +234,14 @@ static bool open_or_create_shm(int rank, int nranks, const char* shm_name) {
     g_shared = (SharedHeader*)p;
 
     if (rank == 0) {
-        /* Initialize pshared primitives + barrier state. */
-        init_pshared_mutex(&g_shared->barrier_mu);
-        init_pshared_cond(&g_shared->barrier_cv);
+        /* Initialize barrier + mailbox state (plain fields; no pthread
+         * primitives left in the kernel-wait-free transport). */
         g_shared->barrier_count = 0;
         g_shared->barrier_gen   = 0;
         g_shared->nranks        = nranks;
         for (int i = 0; i < nranks; i++) {
             Mailbox* mb = &g_shared->mailboxes[i];
-            init_pshared_mutex(&mb->mu);
-            init_pshared_cond(&mb->cv_nonempty);
-            init_pshared_cond(&mb->cv_nonfull);
+            mb->lk = 0;
             mb->head = mb->tail = mb->count = 0;
         }
         /* Publish "ready" marker — non-zero ranks busy-wait on this. */
@@ -285,11 +287,13 @@ static int send_chunk(int dest, int tag, const char* data, uint32_t size,
                       uint32_t chunk_idx, uint32_t n_chunks, uint32_t msg_id) {
     Mailbox* mb = &g_shared->mailboxes[dest];
     MPITRACE("send_enter dest=%d tag=%d chunk=%u/%u", dest, tag, chunk_idx, n_chunks);
-    pthread_mutex_lock(&mb->mu);
-    if (mb->count >= PIMID_MPI_RING_SLOTS)
-        MPITRACE("send_WAIT_full dest=%d count=%u", dest, mb->count);
-    while (mb->count >= PIMID_MPI_RING_SLOTS) {
-        pthread_cond_wait(&mb->cv_nonfull, &mb->mu);
+    bool waited = false;
+    for (;;) {
+        mb_lock(mb);
+        if (mb->count < PIMID_MPI_RING_SLOTS) break;   /* lock held */
+        mb_unlock(mb);
+        if (!waited) { MPITRACE("send_WAIT_full dest=%d", dest); waited = true; }
+        usleep(200);   /* ring full: poll until the consumer drains a slot */
     }
     MessageSlot* slot = &mb->slots[mb->tail];
     slot->src       = g_rank;
@@ -301,9 +305,9 @@ static int send_chunk(int dest, int tag, const char* data, uint32_t size,
     if (data && size > 0) memcpy(slot->payload, data, size);
     mb->tail = (mb->tail + 1) % PIMID_MPI_RING_SLOTS;
     mb->count++;
-    pthread_cond_signal(&mb->cv_nonempty);
-    pthread_mutex_unlock(&mb->mu);
-    MPITRACE("send_done dest=%d count_now=%u", dest, mb->count);
+    uint32_t cnow = mb->count;
+    mb_unlock(mb);
+    MPITRACE("send_done dest=%d count_now=%u", dest, cnow);
     return 0;
 }
 
@@ -311,17 +315,20 @@ static int send_chunk(int dest, int tag, const char* data, uint32_t size,
 static void recv_slot(MessageSlot* out) {
     Mailbox* mb = &g_shared->mailboxes[g_rank];
     MPITRACE("recv_enter");
-    pthread_mutex_lock(&mb->mu);
-    if (mb->count == 0) MPITRACE("recv_WAIT_empty");
-    while (mb->count == 0) {
-        pthread_cond_wait(&mb->cv_nonempty, &mb->mu);
+    bool waited = false;
+    for (;;) {
+        mb_lock(mb);
+        if (mb->count > 0) break;   /* lock held */
+        mb_unlock(mb);
+        if (!waited) { MPITRACE("recv_WAIT_empty"); waited = true; }
+        usleep(200);   /* empty: poll until a producer pushes */
     }
     *out = mb->slots[mb->head];
     mb->head = (mb->head + 1) % PIMID_MPI_RING_SLOTS;
     mb->count--;
-    pthread_cond_signal(&mb->cv_nonfull);
-    pthread_mutex_unlock(&mb->mu);
-    MPITRACE("recv_done src=%d tag=%d count_now=%u", out->src, out->tag, mb->count);
+    uint32_t cnow = mb->count;
+    mb_unlock(mb);
+    MPITRACE("recv_done src=%d tag=%d count_now=%u", out->src, out->tag, cnow);
 }
 
 /* ---- MPI API ---- */
@@ -497,21 +504,22 @@ int MPI_Barrier(MPI_Comm comm) {
     }
 
     MPITRACE("barrier_enter");
-    pthread_mutex_lock(&g_shared->barrier_mu);
+    /* Lock-free generation barrier: snapshot gen BEFORE arriving; the last
+     * arriver resets the count and bumps the generation; everyone else
+     * polls the generation. No mutex, no condvar, no kernel waits. */
     int gen = g_shared->barrier_gen;
-    g_shared->barrier_count++;
-    MPITRACE("barrier_in gen=%d count=%d/%d", gen, g_shared->barrier_count, g_nranks);
-    if (g_shared->barrier_count >= g_nranks) {
+    int pos = __sync_add_and_fetch(&g_shared->barrier_count, 1);
+    MPITRACE("barrier_in gen=%d count=%d/%d", gen, pos, g_nranks);
+    if (pos >= g_nranks) {
         g_shared->barrier_count = 0;
-        g_shared->barrier_gen++;
-        pthread_cond_broadcast(&g_shared->barrier_cv);
+        __sync_synchronize();
+        __sync_add_and_fetch(&g_shared->barrier_gen, 1);
         MPITRACE("barrier_release gen=%d", g_shared->barrier_gen);
     } else {
         while (g_shared->barrier_gen == gen) {
-            pthread_cond_wait(&g_shared->barrier_cv, &g_shared->barrier_mu);
+            usleep(100);
         }
     }
-    pthread_mutex_unlock(&g_shared->barrier_mu);
     MPITRACE("barrier_exit gen=%d", g_shared->barrier_gen);
 
     zsim_magic_op(ZSIM_MAGIC_OP_MPI_BARRIER);
