@@ -4175,13 +4175,22 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
         cfg << "            cores = " << node.num_cores << ";\n";
 
         if (is_alu) {
-            // Apply frequency scaling to ALU factors. accessFactor is the
-            // user's flat per-access knob ONLY -- the memory-technology cost
-            // comes from the device model itself (PE-MI -> device NoC ->
-            // memory), the same path device scope uses. Never bake tech
-            // latency in here: it would double-count the device model.
-            double scaled_compute = node.alu_compute_factor * node.freq_scale;
-            double scaled_access = node.alu_access_factor * node.freq_scale;
+            // ALU factors are clock-INVARIANT: a device PE's cycle count must be
+            // the same whether the coupled co-sim runs it at the reference clock
+            // or a slower domain clock. The compute/access factors are therefore
+            // emitted exactly as device scope emits them (no freq_scale). Baking
+            // freq_scale here inflated the device's reported curCycle by
+            // freq_scale (e.g. x4 for a 500 MHz device under a 2000 MHz
+            // reference), so a device-scope-equivalent run reported ~4x its true
+            // cycle count purely because the host clock was faster. The clock
+            // difference is a downstream wall-clock effect (cycles / node_freq),
+            // NOT a change in the simulated cycle count. accessFactor is the
+            // user's flat per-access knob ONLY -- the memory-technology cost comes
+            // from the device model itself (PE-MI -> device NoC -> memory), the
+            // same path device scope uses. Never bake tech latency in here: it
+            // would double-count the device model.
+            double scaled_compute = node.alu_compute_factor;
+            double scaled_access = node.alu_access_factor;
             cfg << std::fixed << std::setprecision(2);
             cfg << "            computeFactor = " << scaled_compute << ";\n";
             cfg << "            accessFactor = " << scaled_access << ";\n";
@@ -5186,7 +5195,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.1.1" << std::endl;
+    std::cout << "Version 1.2.0" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -6653,7 +6662,7 @@ int main(int argc, char** argv) {
 
     // Print simulation configuration
     std::cout << "╔══════════════════════════════════════════════════════════════════════════════╗" << std::endl;
-    std::cout << "║                    PIMID Simulation Infrastructure v1.1.1                      ║" << std::endl;
+    std::cout << "║                    PIMID Simulation Infrastructure v1.2.0                      ║" << std::endl;
     std::cout << "╚══════════════════════════════════════════════════════════════════════════════╝" << std::endl;
     std::cout << "  Method: " << config.method;
     if (config.method == "exec") {
@@ -8005,6 +8014,24 @@ int main(int argc, char** argv) {
                     if (pid == 0) {
                         setenv("ZSIM_CFG_FILE", zsim_cfg_path.c_str(), 1);
                         setenv("ZSIM_OUTPUT_DIR", output_dir.c_str(), 1);
+                        // Same OpenMP team cap as the single-binary system fork
+                        // below: without it libgomp oversubscribes the device PEs
+                        // (HOST core count under qemu-user) and the coupled co-sim
+                        // livelocks. Cap to the largest compute-device PE count.
+                        if (config.workload_type == "openmp") {
+                            int omp_threads = 0;
+                            for (const auto& n : config.system_nodes) {
+                                if (n.role == UnifiedConfig::SystemNode::DEVICE &&
+                                    n.num_pes > omp_threads)
+                                    omp_threads = n.num_pes;
+                            }
+                            if (omp_threads <= 0)
+                                omp_threads = (config.num_pes > 0) ? config.num_pes : 1;
+                            setenv("OMP_NUM_THREADS", std::to_string(omp_threads).c_str(), 0);
+                            setenv("OMP_DYNAMIC", "FALSE", 0);
+                            setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
+                            setenv("GOMP_SPINCOUNT", "0", 0);
+                        }
                         for (const auto& [key, val] : config.workload_env) {
                             setenv(key.c_str(), val.c_str(), 1);
                         }
@@ -8050,6 +8077,31 @@ int main(int argc, char** argv) {
                 if (pid == 0) {
                     setenv("ZSIM_CFG_FILE", zsim_cfg_path.c_str(), 1);
                     setenv("ZSIM_OUTPUT_DIR", output_dir.c_str(), 1);
+                    // Cap the OpenMP team to the simulated device-PE count. Unlike
+                    // the device-scope launch paths, this system (coupled co-sim)
+                    // fork previously set NO OMP_NUM_THREADS, so libgomp sized the
+                    // team to omp_get_num_procs() = the HOST core count under
+                    // qemu-user (e.g. 192). Those surplus threads oversubscribe the
+                    // few device-PE contexts: they never get a PE, the workload's
+                    // parallel region never completes, ROI_END never fires, and the
+                    // co-sim livelocks (unbounded "Thread N starting (domain=DEVICE)"
+                    // respawn). Cap to the largest compute-device PE count.
+                    // overwrite=0 so an explicit workload_env entry (applied just
+                    // below) still wins.
+                    if (config.workload_type == "openmp") {
+                        int omp_threads = 0;
+                        for (const auto& n : config.system_nodes) {
+                            if (n.role == UnifiedConfig::SystemNode::DEVICE &&
+                                n.num_pes > omp_threads)
+                                omp_threads = n.num_pes;
+                        }
+                        if (omp_threads <= 0)
+                            omp_threads = (config.num_pes > 0) ? config.num_pes : 1;
+                        setenv("OMP_NUM_THREADS", std::to_string(omp_threads).c_str(), 0);
+                        setenv("OMP_DYNAMIC", "FALSE", 0);
+                        setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
+                        setenv("GOMP_SPINCOUNT", "0", 0);
+                    }
                     for (const auto& [key, val] : config.workload_env) {
                         setenv(key.c_str(), val.c_str(), 1);
                     }
