@@ -6,7 +6,7 @@
 # Run with:
 #   ./build/pimid --method exec --scope system \
 #       --config examples/cosim/multi_device.yaml \
-#       --workload test/benchmarks/host_device_cosim/reduction_tree_cosim \
+#       --workload benchmarks/pim_kernels/reduction/reduction_omp \
 #       1024 4 0
 
 scope: system

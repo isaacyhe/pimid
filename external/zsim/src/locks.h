@@ -165,7 +165,11 @@ static inline void futex_lock(volatile uint32_t* lock) {
         //At this point, we will block
         c = __sync_lock_test_and_set(lock, 2); //this is not exactly T&S, but atomic exchange; see GCC docs
         if (c == 0) return;
-        syscall(SYS_futex, lock, FUTEX_WAIT, 2, nullptr, nullptr, 0);
+        /* BOUNDED wait: a futex wake lost under syscall interception (seen
+         * in-image on kernel 6.6) must not park us forever -- time out and
+         * retry the exchange; the loop predicate makes this always correct. */
+        { const struct timespec _fto = {0, 50000000}; /* 50 ms */
+          syscall(SYS_futex, lock, FUTEX_WAIT, 2, &_fto, nullptr, 0); }
         c = __sync_lock_test_and_set(lock, 2); //atomic exchange
     } while (c != 0);
 }
@@ -180,7 +184,8 @@ static inline void futex_lock_nospin(volatile uint32_t* lock) {
         //At this point, we will block
         c = __sync_lock_test_and_set(lock, 2); //this is not exactly T&S, but atomic exchange; see GCC docs
         if (c == 0) return;
-        syscall(SYS_futex, lock, FUTEX_WAIT, 2, nullptr, nullptr, 0);
+        { const struct timespec _fto = {0, 50000000}; /* 50 ms, see futex_lock */
+          syscall(SYS_futex, lock, FUTEX_WAIT, 2, &_fto, nullptr, 0); }
         c = __sync_lock_test_and_set(lock, 2); //atomic exchange
     } while (c != 0);
 }

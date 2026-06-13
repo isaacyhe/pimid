@@ -1,5 +1,10 @@
 # Architecture
 
+![PIMID system architecture](figures/PIMID_arch.png)
+
+*(Regenerate with `python3 figures/gen_pimid_arch.py` -- PDF for the paper,
+PNG for this page.)*
+
 PIMID is an execution-driven, cycle-accurate simulator for Processing-in-Memory
 architectures. A workload binary runs under QEMU user-mode emulation; a TCG
 plugin (`libzsim_qemu.so`) intercepts every instruction and drives ZSim

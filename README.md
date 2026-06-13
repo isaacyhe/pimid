@@ -2,12 +2,14 @@
 
 [![License](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
-[![Version](https://img.shields.io/badge/version-1.0.8-green.svg)]()
+[![Version](https://img.shields.io/badge/version-1.1.1-green.svg)]()
 
 PIMID is a cycle-accurate simulator for Processing-in-Memory (PIM)
 architectures. Workloads execute under QEMU user-mode emulation; a TCG plugin
 drives ZSim microarchitectural models backed by Ramulator2, CACTI, NVSim,
 McPAT, and Garnet for timing, power, and area.
+
+![PIMID system architecture](docs/figures/PIMID_arch.png)
 
 ## Features
 
@@ -23,8 +25,8 @@ McPAT, and Garnet for timing, power, and area.
   NVLink-class links → [docs/cosim.md](docs/cosim.md)
 - **4 simulation methods** — `exec`, `trace-gen`, `trace`, `synthetic`
   → [docs/architecture.md](docs/architecture.md)
-- **48 benchmarks** across 7 suites, plus cosim kernels
-  → [docs/benchmarks.md](docs/benchmarks.md)
+- **48 benchmarks** across 7 suites; any of them runs in co-sim (no
+  co-sim-specific workloads) → [docs/benchmarks.md](docs/benchmarks.md)
 - **Power/area** via McPAT → [docs/power.md](docs/power.md)
 
 ## Project layout

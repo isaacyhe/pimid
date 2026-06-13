@@ -865,11 +865,14 @@ static void InitSystem(Config& config) {
     } // hasCaches
 
     //Build the memory controllers
-    //If PE-MCs are configured (totalMCs > 0), create distributed PE-MCs
-    //instead of host memory controllers.  Each PE-MC covers a contiguous
-    //range of memory units and handles local/remote routing via the hierarchy.
+    //If PE-MCs are configured (totalMCs > 0), create distributed PE-MCs.
+    //Standalone device: they ARE the memory system (mems). Co-sim (a host is
+    //present, marked by sys.nodeMap): the SAME PE-MIs serve the device PEs
+    //via their mi_ pointers, and the host keeps its own memory controllers --
+    //the device is the device, the host is the host.
     g_vector<MemObject*> mems;
     g_vector<PEMemoryInterface*> rawMIs;  // saved before SplitAddrMemory wrapping, for ALU core wiring
+    bool cosimMode = config.exists("sys.nodeMap");
 
     if (zinfo->hierarchy.enabled && zinfo->hierarchy.totalMCs > 0) {
         uint32_t mcCount = zinfo->hierarchy.totalMCs;
@@ -947,15 +950,24 @@ static void InitSystem(Config& config) {
         for (uint32_t i = 0; i < mcCount; i++)
             rawMIs[i] = static_cast<PEMemoryInterface*>(mems[i]);
 
-        // Use SplitAddrMemory if multiple PE-MIs to fan out addresses
-        if (mcCount > 1) {
+        if (cosimMode) {
+            // Co-sim: the PE-MIs serve the device PEs directly (mi_ wiring
+            // below); the cache hierarchy's memory side belongs to the HOST,
+            // built in the host branch that follows.
+            mems.clear();
+            info("[ZSim] Co-sim: %u PE-MIs serve the device; host keeps its own MCs", mcCount);
+        } else if (mcCount > 1) {
+            // Use SplitAddrMemory if multiple PE-MIs to fan out addresses
             MemObject* splitter = new SplitAddrMemory(mems, "pe-mi-splitter");
             mems.resize(1);
             mems[0] = splitter;
         }
-    } else {
-        // HOST_MC mode: use standard host memory controllers
-        // Skip if SystemRouter — that path builds per-device MCs below
+    }
+
+    if (mems.empty()) {
+        // Host memory controllers (standalone host-MC mode, or the host side
+        // of a co-sim). Skip if SystemRouter — that path builds per-device
+        // MCs below.
         string memType = config.get<const char*>("sys.mem.type", "");
         if (memType != "SystemRouter") {
             uint32_t memControllers = config.get<uint32_t>("sys.mem.controllers", 1);
@@ -1317,6 +1329,7 @@ static void InitSystem(Config& config) {
                 }
             } else {
                 assert(type == "ALU");
+                static uint32_t aluCoreIdx = 0;  // PE ordinal across ALU groups (PE-mem map index)
                 double computeFactor    = config.get<double>(prefix + "computeFactor", 1.0);
                 double accessFactor     = config.get<double>(prefix + "accessFactor", 1.0);
                 double throughputFactor  = config.get<double>(prefix + "throughputFactor", 1.0);
@@ -1326,19 +1339,23 @@ static void InitSystem(Config& config) {
                     stringstream ss;
                     ss << group << "-" << j;
                     g_string name(ss.str().c_str());
-                    // Wire PE memory interface if hierarchy PE-MIs exist
-                    // Assign core to MI by home bank (not sequential grouping)
+                    // Wire PE memory interface if hierarchy PE-MIs exist.
+                    // Assign core to MI by home bank (not sequential grouping).
+                    // The PE-mem map is indexed by PE ORDINAL (aluCoreIdx),
+                    // not global core index: in co-sim, host cores precede
+                    // the device PEs in the global core array, but the device
+                    // model's map covers only its own PEs.
                     PEMemoryInterface* mi = nullptr;
                     if (!rawMIs.empty()) {
                         uint32_t miIdx = 0;
-                        if (zinfo->hierarchy.peMemMapSize > 0 && coreIdx < zinfo->hierarchy.peMemMapSize) {
-                            uint32_t off0 = zinfo->hierarchy.peMemMapOffsets[coreIdx];
-                            uint32_t off1 = (coreIdx + 1 <= zinfo->hierarchy.peMemMapSize)
-                                            ? zinfo->hierarchy.peMemMapOffsets[coreIdx + 1] : off0;
+                        if (zinfo->hierarchy.peMemMapSize > 0 && aluCoreIdx < zinfo->hierarchy.peMemMapSize) {
+                            uint32_t off0 = zinfo->hierarchy.peMemMapOffsets[aluCoreIdx];
+                            uint32_t off1 = (aluCoreIdx + 1 <= zinfo->hierarchy.peMemMapSize)
+                                            ? zinfo->hierarchy.peMemMapOffsets[aluCoreIdx + 1] : off0;
                             if (off0 < off1 && off0 < 4096)
                                 miIdx = zinfo->hierarchy.peMemMapData[off0]; // home bank
                         } else {
-                            miIdx = coreIdx / std::max(zinfo->hierarchy.pesPerMC, 1u);
+                            miIdx = aluCoreIdx / std::max(zinfo->hierarchy.pesPerMC, 1u);
                         }
                         if (miIdx < rawMIs.size()) mi = rawMIs[miIdx];
                     }
@@ -1347,6 +1364,7 @@ static void InitSystem(Config& config) {
                                                              mi, coreIdx);
                     coreMap[group].push_back(core);
                     coreIdx++;
+                    aluCoreIdx++;
                 }
             }
         }

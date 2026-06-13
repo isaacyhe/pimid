@@ -109,6 +109,9 @@ static std::atomic<uint64_t> roi_transition_count{0};
 #define ZSIM_MAGIC_OP_MPI_SEND      2049
 #define ZSIM_MAGIC_OP_MPI_RECV      2050
 #define ZSIM_MAGIC_OP_MPI_BARRIER   2051
+#define ZSIM_MAGIC_OP_REG_DEVBUF    2052  /* register a device-owned buffer range (v1.1.1) */
+#define ZSIM_MAGIC_OP_PRICE_PAUSE   2053  /* suspend address-routed pricing (DMA window) */
+#define ZSIM_MAGIC_OP_PRICE_RESUME  2054  /* resume address-routed pricing */
 
 /* Co-simulation: per-thread domain tracking and core-type masks */
 enum SimDomain { DOMAIN_HOST = 0, DOMAIN_DEVICE = 1 };
@@ -117,6 +120,16 @@ static bool thread_initialized[MAX_THREADS];            // false until ensureThr
 static g_vector<bool> host_mask;     // true for OOO cores
 static g_vector<bool> device_mask;   // true for ALU cores
 static std::atomic<uint64_t> offload_count{0};
+/* Co-sim mode: a real host and a real device coexist; ROI = offload region. */
+static bool g_cosim_mode = false;
+/* Env-gated thread-lifecycle trace for the in-image startup-hang hunt
+ * (PIMID_COSIM_TRACE=1): timestamps around scheduler start/join at thread
+ * birth and offload migration. Zero overhead when unset. */
+static bool g_cosim_trace = false;
+#define COSIMTRACE(fmt, ...) do { if (g_cosim_trace) { \
+    struct timespec _ts; clock_gettime(CLOCK_MONOTONIC, &_ts); \
+    fprintf(stderr, "[cosim-trace %ld.%03ld] " fmt "\n", \
+            (long)_ts.tv_sec, _ts.tv_nsec/1000000, ##__VA_ARGS__); } } while (0)
 /* True while the process is inside a host->device offload region (between
  * WORK_BEGIN and WORK_END on the launching thread). Threads spawned during
  * this window are device workers and must be born DOMAIN_DEVICE so they map
@@ -418,15 +431,24 @@ static void ensureThreadInit(uint32_t tid) {
     if (tid >= MAX_THREADS) {
         panic("tid >= MAX_THREADS");
     }
+    COSIMTRACE("tid=%u sched->start enter (domain=%s)", tid,
+               thread_domain[tid].load() == DOMAIN_DEVICE ? "DEV" : "HOST");
     zinfo->sched->start(procIdx, tid, mask);
+    COSIMTRACE("tid=%u sched->start done", tid);
     fPtrs[tid] = joinPtrs;
     clearCid(tid);
 }
 
 /* ---- Join functions (thread waits for scheduler) ---- */
 
+static std::atomic<uint32_t> trace_join_count[MAX_THREADS];
+
 static void Join(uint32_t tid) {
+    /* trace only each thread's first few joins -- the startup hang window */
+    bool tr = g_cosim_trace && tid < MAX_THREADS && trace_join_count[tid]++ < 6;
+    if (tr) COSIMTRACE("tid=%u sched->join enter", tid);
     uint32_t cid = zinfo->sched->join(procIdx, tid);
+    if (tr) COSIMTRACE("tid=%u sched->join done cid=%u", tid, cid);
     setCid(tid, cid);
 
     if (unlikely(zinfo->terminationConditionMet)) {
@@ -561,6 +583,23 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         return;
     }
 
+    if (op == ZSIM_MAGIC_OP_REG_DEVBUF) {
+        /* Retired (the device model owns its addresses; nothing to register).
+         * Kept as an explicit no-op so old binaries don't fall through to
+         * the MPI send/recv params path. */
+        return;
+    }
+
+    if (op == ZSIM_MAGIC_OP_PRICE_PAUSE || op == ZSIM_MAGIC_OP_PRICE_RESUME) {
+        /* DMA window: an explicit staging memcpy is about to run whose
+         * transfer cost is charged as a sized link transfer -- suspend
+         * per-access pricing so the copy loop is not double-charged. */
+        if (zinfo && cores[tid]) {
+            cores[tid]->setMemPricingPaused(op == ZSIM_MAGIC_OP_PRICE_PAUSE);
+        }
+        return;
+    }
+
     if (op == ZSIM_MAGIC_OP_MPI_BARRIER) {
         /* Barrier: all ranks synchronize via tree reduction.
          * With Garnet: inject real traffic for log2(N) rounds of exchanges.
@@ -690,7 +729,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
  * Check if a magic op code is an MPI op.
  */
 static inline bool isMpiMagicOp(uint64_t op) {
-    return op >= ZSIM_MAGIC_OP_MPI_REGISTER && op <= ZSIM_MAGIC_OP_MPI_BARRIER;
+    return op >= ZSIM_MAGIC_OP_MPI_REGISTER && op <= ZSIM_MAGIC_OP_PRICE_RESUME;
 }
 
 /**
@@ -801,7 +840,45 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
         // array-init/setup that otherwise runs on the launcher PE and dominates.
         for (uint32_t c = 0; c < zinfo->numCores; c++)
             if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
+        // Co-sim: the ROI IS the offload region. The launching thread (and
+        // every thread spawned inside the region) executes on the DEVICE;
+        // out-of-ROI code executes on the host. Ordinary workloads are
+        // co-sim workloads -- there is no special kind.
+        if (g_cosim_mode && tid < MAX_THREADS) {
+            thread_domain[tid].store(DOMAIN_DEVICE);
+            g_in_device_region.store(true);
+            ++offload_count;
+            if (thread_initialized[tid]) {
+                uint32_t cid = cids[tid];
+                if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
+                    zinfo->sched->leave(procIdx, tid, cid);
+                }
+                zinfo->sched->finish(procIdx, tid);
+                thread_initialized[tid] = false;
+                clearCid(tid);
+            }
+            ensureThreadInit(tid);  // device mask
+            info("Thread %d: ROI offload begin (co-sim)", tid);
+        }
     } else if (opcode == ZSIM_MAGIC_OP_ROI_END) {
+        // Co-sim: return the launching thread to a host core BEFORE the
+        // termination flag, so the host core rejoin fast-forwards to the
+        // global phase clock and host cycles absorb the device execution.
+        if (g_cosim_mode && tid < MAX_THREADS) {
+            g_in_device_region.store(false);
+            thread_domain[tid].store(DOMAIN_HOST);
+            if (thread_initialized[tid]) {
+                uint32_t cid = cids[tid];
+                if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
+                    zinfo->sched->leave(procIdx, tid, cid);
+                }
+                zinfo->sched->finish(procIdx, tid);
+                thread_initialized[tid] = false;
+                clearCid(tid);
+            }
+            ensureThreadInit(tid);  // host mask
+            info("Thread %d: ROI offload end (co-sim)", tid);
+        }
         in_roi.store(false);
         zinfo->terminationConditionMet = true;  // Let watchdog trigger SimEnd()
     } else if (opcode == ZSIM_MAGIC_OP_WORK_BEGIN) {
@@ -834,7 +911,27 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
     } else if (opcode == ZSIM_MAGIC_OP_WORK_END) {
         g_in_device_region.store(false);
         if (tid < MAX_THREADS) {
-            /* PCIe/CXL return timing: device→host transfer latency */
+            /* Migrate the offloading thread BACK to a host core (mirror of
+             * WORK_BEGIN). Without this it stays on a device PE forever, so
+             * all post-offload host work (final merge, verification) accrues
+             * on device_pes-0 -- and under address-routed pricing is
+             * mispriced as device-issued host accesses (host latency plus
+             * attach tolls per read). The host-core rejoin also fast-forwards
+             * its cycle counter to the global phase clock, so host cycles
+             * correctly absorb the device execution it waited for. */
+            thread_domain[tid].store(DOMAIN_HOST);
+            if (thread_initialized[tid]) {
+                uint32_t cid = cids[tid];
+                if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
+                    zinfo->sched->leave(procIdx, tid, cid);
+                }
+                zinfo->sched->finish(procIdx, tid);
+                thread_initialized[tid] = false;
+                clearCid(tid);
+            }
+            ensureThreadInit(tid);  // will use host_mask
+            /* PCIe/CXL return timing: device→host transfer latency,
+             * charged on the host core (it pays for the return DMA wait) */
             uint32_t pcieLat = getPCIeLatency(payload_size);
             if (pcieLat > 0) {
                 BblInfo* bbl = createSimpleBblInfo(pcieLat, pcieLat * 4);
@@ -901,7 +998,39 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         // array-init/setup that otherwise runs on the launcher PE and dominates.
         for (uint32_t c = 0; c < zinfo->numCores; c++)
             if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
+        // Co-sim: ROI = offload region (see the twin handler above).
+        if (g_cosim_mode && tid < MAX_THREADS) {
+            thread_domain[tid].store(DOMAIN_DEVICE);
+            g_in_device_region.store(true);
+            ++offload_count;
+            if (thread_initialized[tid]) {
+                uint32_t cid = cids[tid];
+                if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
+                    zinfo->sched->leave(procIdx, tid, cid);
+                }
+                zinfo->sched->finish(procIdx, tid);
+                thread_initialized[tid] = false;
+                clearCid(tid);
+            }
+            ensureThreadInit(tid);  // device mask
+            info("Thread %d: ROI offload begin (co-sim)", tid);
+        }
     } else if (opcode == ZSIM_MAGIC_OP_ROI_END) {
+        if (g_cosim_mode && tid < MAX_THREADS) {
+            g_in_device_region.store(false);
+            thread_domain[tid].store(DOMAIN_HOST);
+            if (thread_initialized[tid]) {
+                uint32_t cid = cids[tid];
+                if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
+                    zinfo->sched->leave(procIdx, tid, cid);
+                }
+                zinfo->sched->finish(procIdx, tid);
+                thread_initialized[tid] = false;
+                clearCid(tid);
+            }
+            ensureThreadInit(tid);  // host mask
+            info("Thread %d: ROI offload end (co-sim)", tid);
+        }
         in_roi.store(false);
         zinfo->terminationConditionMet = true;  // Let watchdog trigger SimEnd()
     } else if (opcode == ZSIM_MAGIC_OP_WORK_BEGIN) {
@@ -931,6 +1060,18 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         return;
     } else if (opcode == ZSIM_MAGIC_OP_WORK_END) {
         g_in_device_region.store(false);
+        /* Migrate back to a host core -- see the WORK_END handler above. */
+        thread_domain[tid].store(DOMAIN_HOST);
+        if (thread_initialized[tid]) {
+            uint32_t cid = cids[tid];
+            if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
+                zinfo->sched->leave(procIdx, tid, cid);
+            }
+            zinfo->sched->finish(procIdx, tid);
+            thread_initialized[tid] = false;
+            clearCid(tid);
+        }
+        ensureThreadInit(tid);  // will use host_mask
         /* PCIe/CXL return timing: device→host transfer latency */
         uint32_t pcieLat = getPCIeLatency(payload_size);
         if (pcieLat > 0) {
@@ -1407,6 +1548,18 @@ int qemu_plugin_install(qemu_plugin_id_t id,
     for (uint32_t i = 0; i < zinfo->numCores; i++) {
         if (host_mask[i]) nHostCores++;
         if (device_mask[i]) nDeviceCores++;
+    }
+
+    /* Co-sim = a real host AND a real device are both present. Then the ROI
+     * IS the offload region: any ordinary workload's kernel executes on the
+     * device, its out-of-ROI code on the host. No special cosim workloads. */
+    g_cosim_mode = (nHostCores > 0 && nDeviceCores > 0 && nDeviceCores < zinfo->numCores);
+    if (g_cosim_mode) {
+        info("[ZSim] Co-sim mode: ROI = offload region (host runs out-of-ROI code, device runs the kernel)");
+    }
+    g_cosim_trace = (getenv("PIMID_COSIM_TRACE") != nullptr);
+    if (g_cosim_trace) {
+        info("[ZSim] Co-sim thread-lifecycle trace enabled (PIMID_COSIM_TRACE)");
     }
 
     char msg[512];

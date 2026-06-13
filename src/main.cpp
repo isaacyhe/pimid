@@ -917,6 +917,7 @@ struct UnifiedConfig {
         // Memory
         std::string memory_tech = "DDR4";
         int ports_per_bank = 1;
+        int banks = 0;                 // 0 = use global default
 
         // PIM config (DEVICE+COMPUTE only)
         std::string pe_type;
@@ -4155,7 +4156,8 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
 
     // ── Cores ──
     cfg << "    cores = {\n";
-    for (const auto& node : config.system_nodes) {
+    for (size_t node_idx = 0; node_idx < config.system_nodes.size(); node_idx++) {
+        const auto& node = config.system_nodes[node_idx];
         if (node.num_cores == 0) continue;  // memory-only
 
         std::string group_name = node.name + (node.role == UnifiedConfig::SystemNode::HOST ? "_cores" : "_pes");
@@ -4173,7 +4175,11 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
         cfg << "            cores = " << node.num_cores << ";\n";
 
         if (is_alu) {
-            // Apply frequency scaling to ALU factors
+            // Apply frequency scaling to ALU factors. accessFactor is the
+            // user's flat per-access knob ONLY -- the memory-technology cost
+            // comes from the device model itself (PE-MI -> device NoC ->
+            // memory), the same path device scope uses. Never bake tech
+            // latency in here: it would double-count the device model.
             double scaled_compute = node.alu_compute_factor * node.freq_scale;
             double scaled_access = node.alu_access_factor * node.freq_scale;
             cfg << std::fixed << std::setprecision(2);
@@ -5180,7 +5186,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.0.8" << std::endl;
+    std::cout << "Version 1.1.1" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -5237,6 +5243,29 @@ int main(int argc, char** argv) {
             return 0;
         } else if (arg == "--version" || arg == "-v") {
             printVersion();
+            return 0;
+        } else if (arg == "--print-mem-info" && i + 1 < argc) {
+            // Composer helper: print the simulator's own per-tech memory
+            // parameters (access latency at the given clock + rank bandwidth)
+            // so the composed co-sim driver shares ONE source of truth with
+            // the simulator instead of a hand-copied table.
+            std::string mtech = argv[++i];
+            double mfreq = (i + 1 < argc) ? std::atof(argv[i + 1]) : 2000.0;
+            if (mfreq <= 0.0) mfreq = 2000.0; else ++i;
+            std::string mtech_up = mtech;
+            std::transform(mtech_up.begin(), mtech_up.end(), mtech_up.begin(), ::toupper);
+            int lat_cy = std::max(1, getMemoryLatencyCycles(mtech, mfreq, false, 0.0));
+            double bw_gbs = 12.8;
+            if (pimid::isDRAM(pimid::parseMemoryTechnology(mtech))) {
+                try {
+                    pimid::RamulatorWrapper bw_query("", mtech_up);
+                    bw_query.initialize();
+                    bw_gbs = bw_query.getRankBandwidth();
+                } catch (...) {}
+            }
+            std::cout << "tech=" << mtech_up << " freq_mhz=" << mfreq
+                      << " access_latency_cycles=" << lat_cy
+                      << " rank_bandwidth_GBs=" << bw_gbs << std::endl;
             return 0;
         } else if (arg == "--method" && i + 1 < argc) {
             config.method = argv[++i];
@@ -6083,6 +6112,7 @@ int main(int argc, char** argv) {
                         if (d["memory"]) {
                             node.memory_tech = d["memory"]["technology"].as<std::string>(node.memory_tech);
                             node.ports_per_bank = d["memory"]["ports_per_bank"].as<int>(node.ports_per_bank);
+                            node.banks = d["memory"]["banks"].as<int>(node.banks);
                         }
 
                         // PIM config (only for compute devices)
@@ -6199,9 +6229,42 @@ int main(int argc, char** argv) {
     // Auto-derive memory controller type and parameters from technology
     getMemControllerConfig(config);
 
-    // Pre-compute internal DRAM hierarchy latencies (for device scope / first device)
+    // Pre-compute internal DRAM hierarchy latencies. The device in a co-sim
+    // IS the device: system scope adopts the first compute device node's
+    // parameters and runs the SAME derivation device scope runs, so init
+    // builds the same PE memory interfaces / device NoC / memory model.
     if (config.scope != "system") {
         computeHierarchyLatencies(config);
+    } else {
+        for (const auto& n : config.system_nodes) {
+            if (n.role != UnifiedConfig::SystemNode::DEVICE) continue;
+            if (n.device_type != UnifiedConfig::SystemNode::COMPUTE) continue;
+            if (n.num_pes <= 0) continue;
+            config.memory_tech = n.memory_tech;
+            config.num_pes = n.num_pes;
+            if (n.banks > 0) config.num_banks = n.banks;
+            if (!n.placement_level.empty()) config.placement_level = n.placement_level;
+            config.pe_mc_enabled = !n.pe_mc_type.empty();
+            if (n.pes_per_mc > 0) config.pes_per_mc = n.pes_per_mc;
+            if (n.ports_per_bank > 0) config.ports_per_bank = n.ports_per_bank;
+            // Device NoC model selection: same switch as the top-level noc parse
+            if (n.noc_model == "detailed") {
+                config.noc_cycle_accurate = true;
+                config.noc_mlp_model = 0;
+                for (int i = 0; i < 7; ++i) config.network_level_model[i] = "detailed";
+            } else if (n.noc_model == "analytical") {
+                config.noc_cycle_accurate = false;
+                config.noc_mlp_model = 1;
+                for (int i = 0; i < 7; ++i) config.network_level_model[i] = "simple";
+            }
+            if (!n.noc_topology.empty()) {
+                config.noc_topology = n.noc_topology;
+                std::transform(config.noc_topology.begin(), config.noc_topology.end(),
+                               config.noc_topology.begin(), ::toupper);
+            }
+            computeHierarchyLatencies(config);
+            break;  // first compute device defines the (single) device model for now
+        }
     }
 
     // Synthesize system nodes from device/cosim config (backward compat)
@@ -6590,7 +6653,7 @@ int main(int argc, char** argv) {
 
     // Print simulation configuration
     std::cout << "╔══════════════════════════════════════════════════════════════════════════════╗" << std::endl;
-    std::cout << "║                    PIMID Simulation Infrastructure v1.0.8                      ║" << std::endl;
+    std::cout << "║                    PIMID Simulation Infrastructure v1.1.1                      ║" << std::endl;
     std::cout << "╚══════════════════════════════════════════════════════════════════════════════╝" << std::endl;
     std::cout << "  Method: " << config.method;
     if (config.method == "exec") {

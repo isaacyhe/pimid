@@ -67,6 +67,9 @@ class ALUCore : public Core {
         // PE memory interface (nullptr = simple model only, no hierarchy)
         PEMemoryInterface* mi_;
         uint32_t srcId_;           // global core index for MemReq.srcId
+        volatile bool dmaWindow_ = false;  // staging memcpy in flight: its bulk
+                                           // cost is charged on the link, so the
+                                           // copy loop charges flat accessFactor
 
     public:
         ALUCore(g_string& _name, double _computeFactor = 1.0, double _accessFactor = 1.0,
@@ -88,8 +91,11 @@ class ALUCore : public Core {
         // Snapshot current counters as the ROI baseline (called on roi_begin).
         void markRoiBegin() override { roiBaseInstrs = instrs; roiBaseCycle = curCycle; }
 
+        void setMemPricingPaused(bool paused) override { dmaWindow_ = paused; }
+
     protected:
         inline void bbl(BblInfo* bblInstrs);
+
 
         static void LoadFunc(THREADID tid, ADDRINT addr);
         static void StoreFunc(THREADID tid, ADDRINT addr);

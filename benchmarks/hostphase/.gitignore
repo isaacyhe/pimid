@@ -1,0 +1,6 @@
+reduction_hostphase
+histogram_hostphase
+spmv_hostphase
+stencil_hostphase
+stream_hostphase
+gemv_hostphase

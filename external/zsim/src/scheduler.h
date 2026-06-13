@@ -592,7 +592,9 @@ class Scheduler : public GlobAlloc, public Callee {
             //printState();
             futex_unlock(&schedLock);
             while (true) {
-                int futex_res = syscall(SYS_futex, &th->futexWord, FUTEX_WAIT, 1 /*a racing thread waking us up will change value to 0, and we won't block*/, nullptr, nullptr, 0);
+                /* BOUNDED wait: lost wakes recover via predicate recheck */
+                const struct timespec _fto = {0, 50000000};
+                int futex_res = syscall(SYS_futex, &th->futexWord, FUTEX_WAIT, 1 /*a racing thread waking us up will change value to 0, and we won't block*/, &_fto, nullptr, 0);
                 if (futex_res == 0 || th->futexWord != 1) break;
             }
             //info("%d out of sched wait, got cid = %d, needsJoin = %d", th->gid, th->cid, th->needsJoin);

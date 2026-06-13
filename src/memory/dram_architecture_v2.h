@@ -564,8 +564,8 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified() {
 
     arch->timing.clock_freq_mhz = 1000;  // VERIFIED: 1 GHz core
     arch->timing.data_rate_mtps = 2000;  // VERIFIED: 2.0 GT/s
-    arch->timing.tRCD_ns = 12.5;  // VERIFIED
-    arch->timing.tCAS_ns = 12.5;  // VERIFIED
+    arch->timing.tRCD_ns = 16.0;  // JESD235C spec-minimum (was 12.5, pre-audit optimistic)
+    arch->timing.tCAS_ns = 16.0;  // JESD235C
     arch->timing.tRP_ns = 12.5;  // VERIFIED
     arch->timing.tRAS_ns = 28.0;  // VERIFIED
     arch->timing.tBurst_ns = 2.0;  // VERIFIED
@@ -898,8 +898,8 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM3_Verified() {
 
     arch->timing.clock_freq_mhz = 2000;  // VERIFIED: 2 GHz core (faster than HBM2)
     arch->timing.data_rate_mtps = 4000;  // VERIFIED: 4.0 GT/s (2x HBM2)
-    arch->timing.tRCD_ns = 10.0;  // VERIFIED: Faster than HBM2
-    arch->timing.tCAS_ns = 10.0;  // VERIFIED
+    arch->timing.tRCD_ns = 16.0;  // JESD238 spec-minimum (was 10.0, below physical minimum)
+    arch->timing.tCAS_ns = 16.0;  // JESD238
     arch->timing.tRP_ns = 10.0;  // VERIFIED
     arch->timing.tRAS_ns = 24.0;  // VERIFIED
     arch->timing.tBurst_ns = 2.0;  // VERIFIED: 8 beats @ 4000 MT/s

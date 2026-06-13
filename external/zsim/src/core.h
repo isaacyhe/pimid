@@ -110,6 +110,14 @@ class Core : public GlobAlloc {
         // Snapshot the ROI baseline so per-core cycle/instr stats report only
         // the region of interest (roi_begin..roi_end). Default no-op.
         virtual void markRoiBegin() {}
+
+        // Address-routed pricing DMA window (v1.1.1): while paused, loads and
+        // stores are NOT priced by the serving memory -- used to bracket an
+        // explicit staging memcpy whose transfer cost is already charged as a
+        // sized M/D/1 link transfer (otherwise the copy loop would pay the
+        // attach toll per element AND the link charge: double counting).
+        // Default no-op (only ALUCore consults address-routed pricing).
+        virtual void setMemPricingPaused(bool /*paused*/) {}
 };
 
 #endif  // CORE_H_

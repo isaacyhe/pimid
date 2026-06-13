@@ -6,7 +6,7 @@ cd /opt/pimid
 PIMID=/opt/pimid/bin/pimid
 EXAMPLES=/opt/pimid/examples
 COSIM_CFG=/opt/pimid/examples/cosim
-COSIM_WL=/opt/pimid/benchmarks/cosim
+PIM_KERNELS=/opt/pimid/benchmarks/pim_kernels
 OUT=${1:-/tmp/pimid_smoke}
 rm -rf $OUT
 mkdir -p $OUT
@@ -67,17 +67,19 @@ done
 run "power_off" $PIMID --method exec --config $EXAMPLES/tech_DDR4.yaml --no-power
 run "power_on"  $PIMID --method exec --config $EXAMPLES/tech_DDR4.yaml --power
 
-# ── Cosim (shared_memory variants; bfs_iterative excluded — iterative
-#    offload is a known limitation, see README)
-for kernel in reduction_tree spmv_csr histogram_merge; do
+# ── Cosim: ordinary workloads (the ROI region executes on the device, the
+#    out-of-ROI code on the host -- there are NO special cosim workloads)
+for kernel in reduction histogram spmv_csr; do
   run "cosim_basic_$kernel" \
       $PIMID --method exec --scope system \
       --config $COSIM_CFG/host_device_basic.yaml \
-      --workload $COSIM_WL/$kernel/${kernel}_shared_memory 256 4 0
+      --workload $PIM_KERNELS/$kernel/${kernel}_omp --size 1024 \
+      --workload-type openmp
 done
 run "cosim_multidev_reduction" $PIMID --method exec --scope system \
     --config $COSIM_CFG/multi_device.yaml \
-    --workload $COSIM_WL/reduction_tree/reduction_tree_shared_memory 256 4 0
+    --workload $PIM_KERNELS/reduction/reduction_omp --size 1024 \
+    --workload-type openmp
 
 # ── CLI surface
 run "cli_help"    $PIMID --help

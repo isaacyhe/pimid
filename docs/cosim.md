@@ -1,12 +1,36 @@
 # Host-Device Co-simulation
 
-In `scope: system`, a host node (OoO/in-order core + caches) offloads an
-annotated region to device PEs and reads results back.
+Co-simulation (`scope: system`) composes the two models the simulator
+already has -- **the host is the host, the device is the device** -- and
+models only the interactions between them:
 
-- `pimid_offload_sync` switches the calling context into the device domain;
-  threads spawned inside the region map onto distinct device PEs.
-- Devices with `attachment: internal` share the host die (no link charge);
-  any other attachment goes through the system interconnect.
+- **Out-of-ROI code executes on the host model** (OoO/in-order cores, the
+  cache hierarchy, host memory through its own controller).
+- **The ROI region executes on the device model**: PEs behind the device's
+  own NoC in front of the device's own memory technology -- the *identical*
+  code path a standalone `scope: device` simulation uses (same PE memory
+  interfaces, same Garnet/analytical NoC, same JEDEC-derived memory timing).
+  Threads spawned inside the region map onto distinct device PEs.
+- **Boundary crossings are charged with the link + memory technology
+  models.** A device with `attachment: internal` is the host's main memory
+  (no outside transfer; data reorganization at the device's own bandwidth);
+  any other attachment pays the configured link.
+
+There are **no special co-sim workloads**: any ordinary workload runs in
+co-sim unchanged. In a standalone device simulation, only the ROI (the
+kernel) is counted; in co-sim, the host phases and boundary costs are added
+around that same region:
+
+```bash
+./build/pimid --method exec --scope system \
+    --config examples/cosim/host_device_basic.yaml \
+    --workload benchmarks/pim_kernels/reduction/reduction_omp --size 4096 \
+    --workload-type openmp
+```
+
+**Parity invariant** (enforced by validation): the device-side cycles of a
+co-sim run agree with a standalone device-scope run of the same kernel.
+If they ever diverge, a second device model has crept in -- file a bug.
 
 ## Interconnect link types (`system.network.links[].type`)
 
@@ -20,6 +44,12 @@ annotated region to device PEs and reads results back.
 
 Link latency/bandwidth/coherence drive both the inter-node hop latency and the
 M/D/1 offload-transfer charge.
+
+## Diagnostics
+
+`PIMID_COSIM_TRACE=1` logs timestamped thread-lifecycle events (scheduler
+start/join at thread birth, offload migrations) to stderr -- use it when
+reporting a startup hang or scheduling anomaly.
 
 ## MPI semantics
 

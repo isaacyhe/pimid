@@ -88,16 +88,16 @@ RUN mkdir -p /home/he/Workspace/pimid-dev/pimid/external && \
 COPY examples/                                  /opt/pimid/examples/
 COPY benchmarks/                                /opt/pimid/benchmarks/
 
-# Cosim workloads ship as source (benchmarks/cosim); build them now so the
-# image carries ready-to-run binaries. Needs the zsim hooks headers.
+# Co-sim has NO special workloads: ordinary workloads (pim_kernels) run in
+# co-sim directly (ROI region -> device, out-of-ROI -> host). The host-phase
+# programs of the figure harness are ordinary serial workloads.
 COPY external/zsim/misc/hooks/                  /opt/pimid/external/zsim/misc/hooks/
-RUN make -C /opt/pimid/benchmarks/cosim all
+RUN make -C /opt/pimid/benchmarks/hostphase all
 
 # Convenience symlinks at the /opt level, plus stable aliases under /opt/pimid.
 RUN ln -s examples /opt/pimid/configs && \
     ln -s /opt/pimid/examples /opt/examples && \
-    ln -s /opt/pimid/benchmarks /opt/benchmarks && \
-    ln -s benchmarks/cosim /opt/pimid/cosim_workloads
+    ln -s /opt/pimid/benchmarks /opt/benchmarks
 
 # In-image smoke harness (matches host harness, paths adjusted)
 COPY docker/pimid_smoke.sh                            /opt/pimid/bin/pimid_smoke

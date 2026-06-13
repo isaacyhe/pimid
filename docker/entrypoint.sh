@@ -13,9 +13,9 @@ Quick start:
   pimid --method exec --config examples/tech_DDR4.yaml --no-power
 
 Configs:   /opt/pimid/examples/         (11 mem techs, 5 cores, 8 NoC topos, 2 net models)
-Cosim:     /opt/pimid/examples/cosim/   (host+device YAMLs)
+Cosim:     /opt/pimid/examples/cosim/   (host+device YAMLs; run ANY ordinary
+           workload in them -- the ROI region executes on the device)
 Workloads: /opt/pimid/benchmarks/       (built PIM kernels, classic, NPB)
-Cosim wl:  /opt/pimid/benchmarks/cosim/ (built cosim kernels)
 Source:    https://github.com/isaacyhe/pimid
 
 EOF

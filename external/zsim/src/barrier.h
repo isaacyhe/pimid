@@ -154,7 +154,9 @@ class Barrier : public GlobAlloc {
             if (threadList[tid].state == WAITING) {
                 DEBUG_BARRIER("[%d] Waiting on join", tid);
                 while (true) {
-                    int futex_res = syscall(SYS_futex, &threadList[tid].futexWord, FUTEX_WAIT, 1 /*a racing thread waking us up will change value to 0, and we won't block*/, nullptr, nullptr, 0);
+                    /* BOUNDED wait: lost wakes recover via predicate recheck */
+                    const struct timespec _fto = {0, 50000000};
+                    int futex_res = syscall(SYS_futex, &threadList[tid].futexWord, FUTEX_WAIT, 1 /*a racing thread waking us up will change value to 0, and we won't block*/, &_fto, nullptr, 0);
                     if (futex_res == 0 || threadList[tid].futexWord != 1) break;
                 }
                 //The thread that wakes us up changes this
@@ -189,7 +191,9 @@ class Barrier : public GlobAlloc {
 
             if (threadList[tid].state == WAITING) {
                 while (true) {
-                    int futex_res = syscall(SYS_futex, &threadList[tid].futexWord, FUTEX_WAIT, 1 /*a racing thread waking us up will change value to 0, and we won't block*/, nullptr, nullptr, 0);
+                    /* BOUNDED wait: lost wakes recover via predicate recheck */
+                    const struct timespec _fto = {0, 50000000};
+                    int futex_res = syscall(SYS_futex, &threadList[tid].futexWord, FUTEX_WAIT, 1 /*a racing thread waking us up will change value to 0, and we won't block*/, &_fto, nullptr, 0);
                     if (futex_res == 0 || threadList[tid].futexWord != 1) break;
                 }
                 //The thread that wakes us up changes this

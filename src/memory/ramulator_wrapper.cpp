@@ -731,6 +731,12 @@ double RamulatorWrapper::getEffectiveBandwidthPerPE(PIMGranularity granularity,
 // ============================================================================
 
 double RamulatorWrapper::getTRCD() const {
+    // Techs WITHOUT their own spec struct borrow the DDR4 struct as an
+    // organization proxy (initialize()), so per-tech timing must take
+    // precedence over dram_arch_ here.
+    if (dram_type_ == "GDDR6") return 14.8;   // JESD250 16 Gb/s vendor spec
+    if (dram_type_ == "LPDDR5") return 18.0;  // JESD209-5 tRCDpb
+    if (dram_type_ == "DDR3") return 13.75;   // DDR3-1600K
     if (dram_arch_) {
         return dram_arch_->timing.tRCD_ns;
     }
@@ -738,6 +744,9 @@ double RamulatorWrapper::getTRCD() const {
 }
 
 double RamulatorWrapper::getTCAS() const {
+    if (dram_type_ == "GDDR6") return 14.8;   // JESD250
+    if (dram_type_ == "LPDDR5") return 18.0;  // JESD209-5
+    if (dram_type_ == "DDR3") return 13.75;   // DDR3-1600K CL11
     if (dram_arch_) {
         return dram_arch_->timing.tCAS_ns;
     }

@@ -107,12 +107,16 @@ void ALUCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
     }
 }
 
-// Load — local: accessFactor cycles; remote: accessFactor + MI hierarchy traversal
+// Load — local: accessFactor cycles; remote: accessFactor + MI hierarchy
+// traversal. ONE rule everywhere: a device PE's accesses go through ITS OWN
+// device model (the PE-MI), in device scope and co-sim alike. The only
+// exception is a DMA window (dmaWindow_): the staging copy's bulk cost is
+// already charged on the host-device link, so the loop charges flat cost.
 void ALUCore::LoadFunc(THREADID tid, ADDRINT addr) {
     ALUCore* core = static_cast<ALUCore*>(cores[tid]);
     Address lineAddr = addr >> lineBits;
-    if (!core->mi_ || core->mi_->isLocalAddress(lineAddr)) {
-        // No MI or local address: direct array access cost
+    if (!core->mi_ || core->dmaWindow_ || core->mi_->isLocalAddress(lineAddr)) {
+        // No MI, DMA window, or local address: direct array access cost
         core->curCycle += (uint64_t)(core->accessFactor);
     } else {
         // Remote: PE overhead + hierarchy traversal via MI
@@ -126,7 +130,7 @@ void ALUCore::LoadFunc(THREADID tid, ADDRINT addr) {
 void ALUCore::StoreFunc(THREADID tid, ADDRINT addr) {
     ALUCore* core = static_cast<ALUCore*>(cores[tid]);
     Address lineAddr = addr >> lineBits;
-    if (!core->mi_ || core->mi_->isLocalAddress(lineAddr)) {
+    if (!core->mi_ || core->dmaWindow_ || core->mi_->isLocalAddress(lineAddr)) {
         core->curCycle += (uint64_t)(core->accessFactor);
     } else {
         core->curCycle += (uint64_t)(core->accessFactor);
@@ -140,7 +144,7 @@ void ALUCore::PredLoadFunc(THREADID tid, ADDRINT addr, BOOL pred) {
     if (pred) {
         ALUCore* core = static_cast<ALUCore*>(cores[tid]);
         Address lineAddr = addr >> lineBits;
-        if (!core->mi_ || core->mi_->isLocalAddress(lineAddr)) {
+        if (!core->mi_ || core->dmaWindow_ || core->mi_->isLocalAddress(lineAddr)) {
             core->curCycle += (uint64_t)(core->accessFactor);
         } else {
             core->curCycle += (uint64_t)(core->accessFactor);
@@ -155,7 +159,7 @@ void ALUCore::PredStoreFunc(THREADID tid, ADDRINT addr, BOOL pred) {
     if (pred) {
         ALUCore* core = static_cast<ALUCore*>(cores[tid]);
         Address lineAddr = addr >> lineBits;
-        if (!core->mi_ || core->mi_->isLocalAddress(lineAddr)) {
+        if (!core->mi_ || core->dmaWindow_ || core->mi_->isLocalAddress(lineAddr)) {
             core->curCycle += (uint64_t)(core->accessFactor);
         } else {
             core->curCycle += (uint64_t)(core->accessFactor);

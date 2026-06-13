@@ -14,10 +14,12 @@
 | PARSEC (6) | blackscholes, canneal, streamcluster, swaptions, fluidanimate, freqmine | pthreads |
 
 Additionally:
-- `benchmarks/cosim/` -- host-device co-simulation kernels (bfs_iterative,
-  histogram_merge, reduction_tree, spmv_csr, vector_add) in serial /
-  message-passing / shared-memory variants.
 - `benchmarks/host/` -- host-side variants of the core kernels.
+
+Co-simulation has NO separate workload family: any ordinary workload runs in
+co-sim (`--scope system`). Its ROI region executes on the device, the
+out-of-ROI code on the host, and boundary crossings are charged with the
+host-device link and memory technology models (see [cosim.md](cosim.md)).
 
 ```bash
 make -C benchmarks all        # build everything
