@@ -51,6 +51,15 @@ M/D/1 offload-transfer charge.
 start/join at thread birth, offload migrations) to stderr -- use it when
 reporting a startup hang or scheduling anomaly.
 
+**Coupled livelock with mismatched clocks: resolved in 1.2.0.** A `scope:
+system` co-simulation with the host and device at different clocks (for
+example host 2 GHz, device 500 MHz) could previously fail to terminate: the
+device OpenMP team was sized to the host core count and oversubscribed the
+device PEs, so the offload region never finished. 1.2.0 caps the team to the
+device PE count. Host and device may run at independent clocks; device cycle
+counts are clock-invariant, and the clock ratio appears only as wall-clock
+time (cycles / frequency).
+
 ## MPI semantics
 
 `libpimid_mpi.so` provides the MPI ABI (Init, Send/Recv, Sendrecv, Bcast,

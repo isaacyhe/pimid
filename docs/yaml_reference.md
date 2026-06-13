@@ -1,6 +1,6 @@
 # PIMID YAML Configuration Reference
 
-Complete reference for all YAML configuration keys supported by PIMID v1.0.0.
+Complete reference for all YAML configuration keys supported by PIMID.
 
 ## Table of Contents
 
