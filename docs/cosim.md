@@ -56,9 +56,11 @@ system` co-simulation with the host and device at different clocks (for
 example host 2 GHz, device 500 MHz) could previously fail to terminate: the
 device OpenMP team was sized to the host core count and oversubscribed the
 device PEs, so the offload region never finished. 1.2.0 caps the team to the
-device PE count. Host and device may run at independent clocks; device cycle
-counts are clock-invariant, and the clock ratio appears only as wall-clock
-time (cycles / frequency).
+device PE count. Host and device may run at independent clocks: as of 1.2.2
+the device cycle count is independent of the host clock, so the host/device
+clock difference shows up only as wall-clock time (cycles / frequency).
+Device cycles for bandwidth-bound kernels scale with the device's own clock,
+as expected.
 
 ## MPI semantics
 
