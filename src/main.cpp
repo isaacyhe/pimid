@@ -2146,9 +2146,22 @@ static void emitZSimPcieBlock(std::ostream& out, const UnifiedConfig& config) {
     out << "    };\n";
 }
 
-static void emitZSimHierarchyBlock(std::ostream& out, const UnifiedConfig& config) {
+static void emitZSimHierarchyBlock(std::ostream& out, const UnifiedConfig& config,
+                                   double device_bw_freq_mhz = 0.0) {
     if (!config.hierarchy_enabled) return;
     out << "\n    hierarchy = {\n";
+    // Clock (MHz) used to convert device memory bandwidth into bytes/cycle for
+    // the M/D/1 + bandwidth-floor contention. MUST be the DEVICE's own clock so
+    // the device cycle count is invariant to the host/reference clock. Device
+    // scope: config.frequency_mhz already IS the device. System-scope co-sim:
+    // sys.frequency = max = HOST, so the caller passes the DEVICE node's
+    // frequency here (device_bw_freq_mhz) to override it.
+    {
+        double bw_freq = (device_bw_freq_mhz > 0.0)
+                         ? device_bw_freq_mhz : config.frequency_mhz;
+        out << "        nocBandwidthFreqMHz = "
+            << static_cast<int>(bw_freq) << ";\n";
+    }
     out << "        placementLevel = " << config.pe_hierarchy_level << ";\n";
     out << "        subarraysPerBank = " << config.subarrays_per_bank << ";\n";
     out << "        banksPerBG = " << config.hierarchy_banks_per_bg << ";\n";
@@ -4287,6 +4300,19 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
         if (n.role == UnifiedConfig::SystemNode::DEVICE) num_mem_devices++;
     }
 
+    // The DEVICE's own clock, captured here so the hierarchy block can clock the
+    // device memory-bandwidth contention at the device frequency (not the
+    // reference/host clock = sys.frequency). First device node wins; the device
+    // memory hierarchy belongs to the device. 0 -> falls back to ref in the
+    // emitter (single-host degenerate case).
+    double sys_device_bw_freq_mhz = 0.0;
+    for (const auto& n : config.system_nodes) {
+        if (n.role == UnifiedConfig::SystemNode::DEVICE && n.frequency_mhz > 0.0) {
+            sys_device_bw_freq_mhz = n.frequency_mhz;
+            break;
+        }
+    }
+
     if (num_mem_devices > 1) {
         // Multi-device: SystemAddressRouter
         cfg << "    mem = {\n";
@@ -4299,7 +4325,15 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
 
             // Auto-derive MC type from technology
             std::string mc_type = "Simple";
-            int mem_latency = getMemoryLatencyCycles(node.memory_tech, ref_freq, false, 0.0);
+            // CLOCK-INVARIANT device memory latency: the access latency in cycles
+            // must use the DEVICE's own clock, not the reference/max (host) clock.
+            // getMemoryLatencyCycles converts latency_ns -> cycles via freq_mhz;
+            // passing ref_freq (= max(all node freqs) = host) inflated the device's
+            // memory cycles by host/device (e.g. x5 at host4000/dev800), leaking the
+            // host clock into the DEVICE cycle count. Device scope uses the device's
+            // own frequency here (see config.frequency_mhz path), so match it.
+            double dev_freq = (node.frequency_mhz > 0.0) ? node.frequency_mhz : ref_freq;
+            int mem_latency = getMemoryLatencyCycles(node.memory_tech, dev_freq, false, 0.0);
             mem_latency = std::max(1, mem_latency);
 
             std::string tech_upper = node.memory_tech;
@@ -4351,7 +4385,13 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
         // Single device: use standard MC
         for (const auto& node : config.system_nodes) {
             if (node.role != UnifiedConfig::SystemNode::DEVICE) continue;
-            int mem_latency = getMemoryLatencyCycles(node.memory_tech, ref_freq, false, 0.0);
+            // CLOCK-INVARIANT device memory latency: convert the access latency to
+            // cycles at the DEVICE's own clock, not the reference/max (host) clock.
+            // Using ref_freq here inflated the device memory cycles by host/device
+            // (e.g. x5 at host4000/dev800) and leaked the host clock into the
+            // device cycle count. Device scope uses the device's own clock.
+            double dev_freq = (node.frequency_mhz > 0.0) ? node.frequency_mhz : ref_freq;
+            int mem_latency = getMemoryLatencyCycles(node.memory_tech, dev_freq, false, 0.0);
             mem_latency = std::max(1, mem_latency);
             // Use the main config's MC type (already derived)
             emitZSimMemBlock(cfg, config, mem_latency);
@@ -4391,7 +4431,10 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
 
     // ── Hierarchy (for device-internal DRAM hierarchy) ──
     if (config.hierarchy_enabled) {
-        emitZSimHierarchyBlock(cfg, config);
+        // Pass the DEVICE node's clock so the device memory-bandwidth contention
+        // (M/D/1 service rate + bandwidth floor) is clocked at the device freq,
+        // NOT sys.frequency (= max = host) -- the host-clock invariance fix.
+        emitZSimHierarchyBlock(cfg, config, sys_device_bw_freq_mhz);
     } else {
         // No DRAM hierarchy block, but still emit the host↔device offload-link
         // pcie* keys so getPCIeLatency charges the chosen link_type.
@@ -5195,7 +5238,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.2.1" << std::endl;
+    std::cout << "Version 1.2.2" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -6662,7 +6705,7 @@ int main(int argc, char** argv) {
 
     // Print simulation configuration
     std::cout << "╔══════════════════════════════════════════════════════════════════════════════╗" << std::endl;
-    std::cout << "║                    PIMID Simulation Infrastructure v1.2.1                      ║" << std::endl;
+    std::cout << "║                    PIMID Simulation Infrastructure v1.2.2                      ║" << std::endl;
     std::cout << "╚══════════════════════════════════════════════════════════════════════════════╝" << std::endl;
     std::cout << "  Method: " << config.method;
     if (config.method == "exec") {
@@ -8031,6 +8074,16 @@ int main(int argc, char** argv) {
                             setenv("OMP_DYNAMIC", "FALSE", 0);
                             setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
                             setenv("GOMP_SPINCOUNT", "0", 0);
+                            // DETERMINISM: force a fixed loop->thread mapping at the
+                            // offload boundary. The coupled device cycle count is
+                            // sensitive to OpenMP scheduling order (run-to-run spread
+                            // ~+/-3.6% at matched clocks). Static scheduling pins each
+                            // loop iteration to a fixed thread, and PROC_BIND/PLACES
+                            // pin threads to cores, so the per-PE work split (and thus
+                            // the device curCycle) is reproducible across runs.
+                            setenv("OMP_SCHEDULE", "static", 0);
+                            setenv("OMP_PROC_BIND", "true", 0);
+                            setenv("OMP_PLACES", "cores", 0);
                         }
                         for (const auto& [key, val] : config.workload_env) {
                             setenv(key.c_str(), val.c_str(), 1);
@@ -8101,6 +8154,13 @@ int main(int argc, char** argv) {
                         setenv("OMP_DYNAMIC", "FALSE", 0);
                         setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
                         setenv("GOMP_SPINCOUNT", "0", 0);
+                        // DETERMINISM: force a fixed loop->thread mapping at the
+                        // offload boundary so the coupled device cycle count is
+                        // reproducible run-to-run (static schedule pins iterations
+                        // to threads; PROC_BIND/PLACES pin threads to cores).
+                        setenv("OMP_SCHEDULE", "static", 0);
+                        setenv("OMP_PROC_BIND", "true", 0);
+                        setenv("OMP_PLACES", "cores", 0);
                     }
                     for (const auto& [key, val] : config.workload_env) {
                         setenv(key.c_str(), val.c_str(), 1);

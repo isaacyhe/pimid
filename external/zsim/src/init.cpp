@@ -476,6 +476,10 @@ static void InitSystem(Config& config) {
         zinfo->hierarchy.channelsPerSystem = config.get<uint32_t>("sys.hierarchy.channelsPerSystem", 1);
         zinfo->hierarchy.dramChannels = config.get<uint32_t>("sys.hierarchy.dramChannels", 1);
         zinfo->hierarchy.nocAggBandwidthMBs = config.get<uint64_t>("sys.hierarchy.nocAggBandwidthMBs", 0);
+        // Device clock used for bandwidth->cycle conversion (see zsim.h). 0 =>
+        // use the global sys.frequency. In system-scope co-sim PIMID emits the
+        // DEVICE node frequency here so device contention is not host-clocked.
+        zinfo->hierarchy.nocBandwidthFreqMHz = config.get<uint32_t>("sys.hierarchy.nocBandwidthFreqMHz", 0);
         for (int i = 0; i < 7; i++) {
             char key[64]; snprintf(key, sizeof(key), "sys.hierarchy.levelLatency%d", i);
             zinfo->hierarchy.levelLatency[i] = config.get<uint32_t>(key, 0);
@@ -878,6 +882,14 @@ static void InitSystem(Config& config) {
         uint32_t mcCount = zinfo->hierarchy.totalMCs;
         uint32_t totalUnits = zinfo->hierarchy.totalUnits;
         uint32_t linkLat = zinfo->hierarchy.localLinkLatency;
+        // Clock used to convert each PE-MI's bandwidth (bytes/s) into bytes/cycle
+        // for its M/D/1 service rate. Must be the DEVICE clock, not the global
+        // sys.frequency (= host in system-scope co-sim), or the device's memory
+        // contention scales with the host clock. 0 => freqMHz already is the
+        // device clock (standalone device scope).
+        uint32_t peMiFreqMHz = (zinfo->hierarchy.nocBandwidthFreqMHz > 0)
+                               ? zinfo->hierarchy.nocBandwidthFreqMHz
+                               : zinfo->freqMHz;
 
         // Build per-MI coverage sets from the mapping table
         // Each MI covers a group of PEs; the coverage = union of all mapped mem orgs
@@ -926,7 +938,7 @@ static void InitSystem(Config& config) {
 
                 mems[i] = new PEMemoryInterface(
                     i, coverage, totalUnits, lat,
-                    linkLat, bw, zinfo->lineSize, zinfo->freqMHz, mcName,
+                    linkLat, bw, zinfo->lineSize, peMiFreqMHz, mcName,
                     zinfo->hierarchy.dramChannels);
             } else {
                 // Legacy contiguous coverage
@@ -937,7 +949,7 @@ static void InitSystem(Config& config) {
 
                 mems[i] = new PEMemoryInterface(
                     i, start, end, totalUnits, lat,
-                    linkLat, bw, zinfo->lineSize, zinfo->freqMHz, mcName,
+                    linkLat, bw, zinfo->lineSize, peMiFreqMHz, mcName,
                     zinfo->hierarchy.dramChannels);
             }
         }

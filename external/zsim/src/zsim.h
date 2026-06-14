@@ -211,6 +211,18 @@ struct GlobSimInfo {
         // per-MI M/D/1 servers permit ~10× the real DDR4 channel BW). 0 = no
         // cap (pre-fix behavior / non-DRAM).
         uint64_t nocAggBandwidthMBs = 0;
+        // Frequency (MHz) used to convert DEVICE memory bandwidth (bytes/s) into
+        // bytes/cycle for the M/D/1 + bandwidth-floor contention terms. In a
+        // standalone device-scope run this equals sys.frequency (the single
+        // node IS the device). In a coupled system-scope co-sim sys.frequency =
+        // max(all node freqs) = the HOST clock, so converting the device's
+        // bandwidth with sys.frequency leaks the host clock into the device's
+        // cycle count (a faster host shrinks bytes/cycle -> longer device
+        // contention waits). This field carries the DEVICE's own clock so the
+        // device memory timing is clocked at the device frequency, matching the
+        // standalone device-scope result. 0 => fall back to zinfo->freqMHz
+        // (legacy / non-system paths where freqMHz already IS the device clock).
+        uint32_t nocBandwidthFreqMHz = 0;
         uint32_t levelLatency[7] = {};
         uint32_t bridgeLatency[6] = {};
         // Bridge model strings: "auto", "simple", "md1", "detailed"

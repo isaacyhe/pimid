@@ -278,7 +278,15 @@ public:
                 double bwFloor = 0.0;
                 if (zinfo->hierarchy.nocAggBandwidthMBs > 0) {
                     double aggBps = (double)zinfo->hierarchy.nocAggBandwidthMBs * 1e6;
-                    double freqHz = (double)zinfo->freqMHz * 1e6;
+                    // Convert at the DEVICE clock, not the global (host) clock:
+                    // in system-scope co-sim sys.frequency = max = host, so using
+                    // zinfo->freqMHz here would scale the device's bandwidth floor
+                    // with the host clock (the host-clock leak). 0 => not system
+                    // scope -> freqMHz already IS the device clock.
+                    double bwFreqMHz = (zinfo->hierarchy.nocBandwidthFreqMHz > 0)
+                        ? (double)zinfo->hierarchy.nocBandwidthFreqMHz
+                        : (double)zinfo->freqMHz;
+                    double freqHz = bwFreqMHz * 1e6;
                     double lsz    = (zinfo->lineSize > 0) ? (double)zinfo->lineSize : 64.0;
                     double aggLinesPerCyc =
                         (freqHz > 0.0) ? (aggBps / freqHz) / lsz : 0.0;
@@ -679,7 +687,14 @@ protected:
                     if (e && e[0]) { long long v = atoll(e); if (v > 0) aggMBs = (uint64_t)v; }
                 }
                 double aggBytesPerSec = (double)aggMBs * 1e6;
-                double freqHz = (double)zinfo->freqMHz * 1e6;
+                // Device clock (not the global/host clock) for bytes->cycle. See
+                // the matching note in the MLP bwFloor path: in system-scope
+                // co-sim sys.frequency = host, so using it here would host-clock
+                // the device channel-BW wait. 0 => freqMHz is already the device.
+                double bwFreqMHz = (zinfo->hierarchy.nocBandwidthFreqMHz > 0)
+                    ? (double)zinfo->hierarchy.nocBandwidthFreqMHz
+                    : (double)zinfo->freqMHz;
+                double freqHz = bwFreqMHz * 1e6;
                 double lineSize = (double)zinfo->lineSize;
                 if (lineSize < 1.0) lineSize = 64.0;
                 double aggLinesPerCycle = (freqHz > 0.0)
