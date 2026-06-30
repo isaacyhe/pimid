@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_set>
+#include <list>
 #include "g_std/g_string.h"
 #include "garnet_network.h"
 #include "memory_hierarchy.h"
@@ -23,6 +25,25 @@
 #include "pad.h"
 #include "stats.h"
 #include "zsim.h"
+
+// Per-PE LRU residency for WSS/capacity-gated near-data (SOFT limit): the PE's
+// local store at the placement level holds `cap` lines; a resident line hits
+// (served local), a miss evicts the LRU line and spills to the remote path.
+// Driven by the real access stream, so subarray (small cap) is fastest only
+// while the working set fits; large WSS -> capacity misses -> coarser wins.
+struct PELocalCache {
+    size_t cap;
+    std::list<uint64_t> order;  // front = MRU, back = LRU
+    std::unordered_map<uint64_t, std::list<uint64_t>::iterator> pos;
+    explicit PELocalCache(size_t c) : cap(c ? c : 1) {}
+    bool access(uint64_t key) {
+        auto it = pos.find(key);
+        if (it != pos.end()) { order.splice(order.begin(), order, it->second); return true; }
+        order.push_front(key); pos[key] = order.begin();
+        if (pos.size() > cap) { pos.erase(order.back()); order.pop_back(); }
+        return false;  // miss
+    }
+};
 
 /**
  * PE Memory Interface: coverage routing + hierarchy traversal + M/D/1 queuing.
@@ -119,6 +140,11 @@ public:
     }
 
     bool isLocalAddress(Address lineAddr) const {
+        // Device-only near-data (option 1): route ALL of a PE's accesses through
+        // the PE-MI (the placement-aware local path), not the ALU core's flat
+        // direct path -- so every access shares one comparable cost model and the
+        // in-coverage / out-of-coverage split does not confound placement levels.
+        if (zinfo->hierarchy.assumeLocal) return false;
         uint32_t unit = addrToUnit(lineAddr);
         return isLocal(unit);
     }
@@ -133,8 +159,83 @@ public:
 
         uint32_t targetUnit = addrToUnit(req.lineAddr);
 
-        if (isLocal(targetUnit)) {
+        // Perfect data prep. assumeLocal => the data ends up in the PE's local
+        // unit, so an access takes the LOCAL placement-sensitive fast path
+        // (applied here in the PE-MI cost branch, NOT in isLocal()/isLocalAddress()
+        // which the ALU core uses for routing). In co-sim (chargePrep), the host's
+        // de-interleave is paid on FIRST TOUCH of each line: the first access
+        // routes through the REMOTE path (cross-unit reorg + host-device link via
+        // the network levels), every reuse is local. So reuse / arithmetic
+        // intensity decides whether fine placement's prep is worth its faster
+        // compute. Device-only (chargePrep=false) assumes prep done -> always local.
+        // WSS/capacity-gated near-data (SOFT limit). With perfect data prep
+        // (assumeLocal) the PE's local store at the placement level holds C lines
+        // (C = the level-unit capacity = pagesPerUnit pages). A RESIDENT line is
+        // served LOCAL (placement-sensitive fast path); a capacity MISS spills to
+        // the REMOTE path (fetched from other units; in co-sim it also re-pays the
+        // host->device transfer). Residency is tracked per-PE from the REAL access
+        // stream (LRU) -- so subarray (small C) is fastest only while the WSS fits,
+        // and coarser placement (larger C) wins for large WSS. First touch = first
+        // miss. Without assumeLocal: the static coverage test (no capacity model).
+        bool wantLocal;
+        if (zinfo->hierarchy.assumeLocal) {
+            static thread_local PELocalCache* lcache = nullptr;
+            static thread_local std::unordered_set<uint64_t>* preppedEver = nullptr;
+            if (!lcache) {
+                uint64_t cap = (uint64_t)zinfo->hierarchy.pagesPerUnit * 4096ull
+                               / (zinfo->lineSize ? zinfo->lineSize : 64);
+                lcache = new PELocalCache((size_t)cap);
+                preppedEver = new std::unordered_set<uint64_t>();
+            }
+            // Co-sim: the first-EVER touch of a line is the ONE-TIME host->device
+            // prep (reorganize + transfer into the device's contiguous space),
+            // charged once. The device has a flat address space across units joined
+            // by the in-device net, so later CAPACITY overflow is device-internal --
+            // the data is already on the device, just in another unit -> reached via
+            // the net (remote path), NOT re-transferred from the host.
+            if (zinfo->hierarchy.chargePrep && preppedEver->insert((uint64_t)req.lineAddr).second)
+                req.cycle += zinfo->hierarchy.hostLinkXferCycles;
+            // Local-unit residency: hit = local near-data fast path; miss = capacity
+            // overflow -> remote via the in-device net (the existing remote path).
+            wantLocal = lcache->access((uint64_t)req.lineAddr);
+        } else {
+            wantLocal = isLocal(targetUnit);
+        }
+        if (wantLocal) {
             uint32_t lat = localAccessLatency(req) + localLinkLat_;
+
+            // Near-data PROXIMITY-LATENCY gradient (perfect-prep, option A).
+            // PHYSICS (grounded): a near-data PE reads operands through the COLUMN
+            // datapath, whose per-unit rate is the channel rate at EVERY level --
+            // prefetch is a tCCD-gated serializer, so the internal datapath is
+            // BANDWIDTH-NEUTRAL (a wider row buffer does NOT give one unit more read
+            // BW; egress == channel rate regardless of placement). Finer placement
+            // is faster NOT because of a wider per-unit datapath, but because the
+            // access is served CLOSER to the data and crosses LESS of the shared,
+            // contended egress path before reaching a private datapath (fewer
+            // arbitration/queueing cycles). The aggregate-BANDWIDTH win of fine
+            // placement (bypassing the shared channel-DQ) is modeled SEPARATELY in
+            // channelBandwidthWait(); THIS term is the always-charged proximity
+            // LATENCY (not saturation-gated), so it shapes MLP-bound (unsaturated)
+            // throughput -> a monotone placement gradient (subarray fastest).
+            // serBase ~ one internal-hop latency; the per-level factor is the
+            // monotone proximity weight (levels of shared egress between the
+            // placement point and the data). Tunable via PIMID_LOCAL_SER_BASE
+            // (default 8 cyc); the span is calibrated (8 -> ~2.1x subarray:rank).
+            {
+                static const uint32_t serBase = []() {
+                    const char* e = getenv("PIMID_LOCAL_SER_BASE");
+                    return (uint32_t)(e && e[0] ? atoi(e) : 8);
+                }();
+                uint32_t lvl = zinfo->hierarchy.placementLevel;
+                // strictly monotone proximity weight (finer = closer to data, less
+                // shared-egress contention = fewer cycles): subarray 1x (its own
+                // open row) < bank 2x < bank-group 3x < rank 4x < channel 6x <
+                // logic-die 8x (host interface, most shared / most distant).
+                uint32_t f = (lvl == 0) ? 1u : (lvl == 1) ? 2u : (lvl == 2) ? 3u
+                           : (lvl == 4) ? 4u : (lvl == 5) ? 6u : (lvl >= 6) ? 8u : 4u;
+                lat += serBase * f;
+            }
 
             // DRAM channel bandwidth bottleneck (accuracy fix): even a "local"
             // bank access consumes the shared DRAM channel's DQ bandwidth. In
@@ -154,6 +255,11 @@ public:
             // endpoint (one per memory org), so even a local PE access must
             // cross the NoC to reach the MC (core → MC node → memory). Charge an
             // extra one-RTT NoC hop to the MC node on top of the local access.
+            // Standalone MC: each memory org fronts a separate NoC endpoint, so a
+            // PE access crosses the NoC to its MC node. This hop is the near-data
+            // LATENCY differentiator: finer placement co-locates the PE with its
+            // own MC (fewest hops -> fastest), coarser placement reaches a distant
+            // shared MC (more hops). Keep it for device-only AND co-sim.
             if (zinfo->hierarchy.mcStandalone) {
                 lat += mcHopLatency(targetUnit, req.cycle);
             }
@@ -277,7 +383,9 @@ public:
                 double overlapped = (double)(L + nocContentionLat) / (double)M;
                 double bwFloor = 0.0;
                 if (zinfo->hierarchy.nocAggBandwidthMBs > 0) {
-                    double aggBps = (double)zinfo->hierarchy.nocAggBandwidthMBs * 1e6;
+                    uint32_t lvl_ = zinfo->hierarchy.placementLevel;
+                    uint32_t bwmul_ = (lvl_ == 0) ? 4u : ((lvl_ == 1 || lvl_ == 2) ? 2u : 1u);
+                    double aggBps = (double)zinfo->hierarchy.nocAggBandwidthMBs * 1e6 * bwmul_;
                     // Convert at the DEVICE clock, not the global (host) clock:
                     // in system-scope co-sim sys.frequency = max = host, so using
                     // zinfo->freqMHz here would scale the device's bandwidth floor
@@ -504,9 +612,16 @@ protected:
     }
 
     uint32_t addrToUnit(Address lineAddr) const {
-        // Page-interleaved mapping: 4KB page / 64B line = 64 lines/page
+        // Device-local CONTIGUOUS block mapping (point-1 fix): each unit owns a
+        // contiguous address range (pagesPerUnit 4KB-pages, sized by subarray
+        // capacity x subarrays-per-unit), so a PE's contiguous working set lands
+        // in its contiguous coverage and is served locally -- instead of the
+        // host's page-interleaved layout (page % totalUnits) that scattered every
+        // PE's data across all units (the flat-placement bug).
         uint32_t page = (uint32_t)(lineAddr >> 6);
-        return page % totalUnits_;
+        uint32_t ppu = (zinfo->hierarchy.pagesPerUnit > 0)
+                       ? zinfo->hierarchy.pagesPerUnit : 1;
+        return (page / ppu) % totalUnits_;
     }
 
     bool isLocal(uint32_t unit_id) const {
@@ -682,6 +797,23 @@ protected:
                 // Datasheet aggregate BW (MB/s); overridable via PIMID_NOC_AGGBW_MBS
                 // for validation A/B (force-saturate to prove the cap engages).
                 uint64_t aggMBs = zinfo->hierarchy.nocAggBandwidthMBs;
+                // Near-data aggregate-BANDWIDTH uplift -- THE bandwidth win of fine
+                // placement (the latency win is the separate proximity term above).
+                // nocAggBandwidthMBs is the external channel-DQ datasheet ceiling:
+                // the wall a HOST access hits. A near-data PE does NOT egress through
+                // that shared DQ -- many fine units each drain their own open row in
+                // parallel -- so the effective aggregate cap rises ABOVE the DQ
+                // ceiling. Per-unit egress is still only the channel rate (prefetch
+                // is BW-neutral); the gain is PARALLELISM, bounded by activation/
+                // power limits (tFAW, refresh, shared global structures) -- i.e. the
+                // ~4-16x realistic PIM regime (HBM-PIM measures ~4x), NOT the
+                // page/tRC full-row figure (that is in-situ/Ambit compute, a
+                // different machine). Conservative monotone uplift: subarray 4x,
+                // bank/bank-group 2x, rank+ (still funnels to the DQ) 1x.
+                {
+                    uint32_t lvl = zinfo->hierarchy.placementLevel;
+                    aggMBs *= (lvl == 0) ? 4u : ((lvl == 1 || lvl == 2) ? 2u : 1u);
+                }
                 {
                     const char* e = getenv("PIMID_NOC_AGGBW_MBS");
                     if (e && e[0]) { long long v = atoll(e); if (v > 0) aggMBs = (uint64_t)v; }

@@ -231,6 +231,10 @@ struct GlobSimInfo {
 
         // Distributed PE-MI fields
         uint32_t totalUnits = 128;        // total units at placement level
+        uint32_t pagesPerUnit = 32;       // contiguous block (4KB-pages) per unit (device-local addressing)
+        bool assumeLocal = false;         // perfect data prep: device computes on its local working set
+        bool chargePrep = false;          // co-sim: first touch of a line pays reorg (cross-unit) + transfer
+        uint32_t hostLinkXferCycles = 0;  // per first-touch host->device link transfer (0 = internal/on-package)
         uint32_t totalMCs = 0;            // 0 = no PE-MIs (host MC mode)
         uint32_t pesPerMC = 1;            // PEs sharing each MI
         uint32_t localLatency = 10;       // default PE-MI local access latency

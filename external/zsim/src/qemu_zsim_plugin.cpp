@@ -112,6 +112,17 @@ static std::atomic<uint64_t> roi_transition_count{0};
 #define ZSIM_MAGIC_OP_REG_DEVBUF    2052  /* register a device-owned buffer range (v1.1.1) */
 #define ZSIM_MAGIC_OP_PRICE_PAUSE   2053  /* suspend address-routed pricing (DMA window) */
 #define ZSIM_MAGIC_OP_PRICE_RESUME  2054  /* resume address-routed pricing */
+#define ZSIM_MAGIC_OP_MPI_COMM_BEGIN 2055 /* open MPI comm window (keep core attached) */
+#define ZSIM_MAGIC_OP_MPI_COMM_END   2056 /* close MPI comm window */
+
+/* Per-thread MPI comm-window flag. While set (bracketed by COMM_BEGIN/END from
+ * libpimid_mpi), the rank's blocking transport sleeps do NOT trigger a
+ * syscallLeave (the core stays attached, so post-comm compute is counted) and
+ * the transport's own instructions are NOT counted (so the wall-clock poll is
+ * invisible and per-rank counts stay deterministic). Set only by the MPI
+ * transport; OMP and co-sim paths never touch it, so their behavior is
+ * byte-for-byte unchanged. */
+static std::atomic<bool> mpi_comm_window[MAX_THREADS];
 
 /* Co-simulation: per-thread domain tracking and core-type masks */
 enum SimDomain { DOMAIN_HOST = 0, DOMAIN_DEVICE = 1 };
@@ -533,6 +544,10 @@ static void mem_cb(unsigned int vcpu_index,
     if (tid >= MAX_THREADS) return;
     ensureThreadInit(tid);
 
+    /* Inside an MPI comm window: skip counting the transport's own accesses
+     * (keeps the core attached but the wall-clock poll invisible). */
+    if (mpi_comm_window[tid].load(std::memory_order_acquire)) return;
+
     if (vcpu_index < MAX_VCPUS) in_zsim[vcpu_index] = true;
     if (qemu_plugin_mem_is_store(info)) {
         fPtrs[tid].storePtr(tid, vaddr);
@@ -554,6 +569,10 @@ static void insn_exec_cb(unsigned int vcpu_index, void *userdata) {
     uint32_t tid = getOrAssignTid(vcpu_index);
     if (tid >= MAX_THREADS) return;
     ensureThreadInit(tid);
+
+    /* Inside an MPI comm window: keep the core attached but do not count the
+     * transport's own instructions (the wall-clock poll stays invisible). */
+    if (mpi_comm_window[tid].load(std::memory_order_acquire)) return;
 
     if (vcpu_index < MAX_VCPUS) in_zsim[vcpu_index] = true;
     fPtrs[tid].bblPtr(tid, tud->tbAddr, tud->bblInfo);
@@ -580,6 +599,17 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         } else {
             info("Thread %d: MPI_REGISTER (no params addr)", tid);
         }
+        return;
+    }
+
+    if (op == ZSIM_MAGIC_OP_MPI_COMM_BEGIN) {
+        /* Open the comm window: keep the core attached across transport sleeps
+         * and stop counting the transport's own instructions until COMM_END. */
+        mpi_comm_window[tid].store(true, std::memory_order_release);
+        return;
+    }
+    if (op == ZSIM_MAGIC_OP_MPI_COMM_END) {
+        mpi_comm_window[tid].store(false, std::memory_order_release);
         return;
     }
 
@@ -654,10 +684,21 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
     struct MpiParamsBlock {
         uint32_t src_pe, dst_pe;
         uint64_t msg_size, msg_id;
+        uint64_t sim_now;        /* plugin -> guest: current sim-time (SEND) */
+        uint64_t sim_send_time;  /* guest -> plugin: message send-time (RECV) */
     };
+    MpiParamsBlock* gp = (MpiParamsBlock*)zinfo->mpiParamsAddr[tid];
     MpiParamsBlock params;
     /* In QEMU user-mode, guest and host share address space for data */
-    memcpy(&params, (void*)zinfo->mpiParamsAddr[tid], sizeof(params));
+    memcpy(&params, gp, sizeof(params));
+
+    const bool isRecv = (op == ZSIM_MAGIC_OP_MPI_RECV);
+
+    /* SEND: publish the current simulated time so the sender can stamp the
+     * outgoing message with its send-time (read back by libpimid_mpi). */
+    if (!isRecv) {
+        gp->sim_now = zinfo->globPhaseCycles;
+    }
 
     if (params.src_pe == params.dst_pe) return;
 
@@ -713,23 +754,51 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         }
     }
 
-    /* 3. Inject total latency as synthetic BBL */
+    /* 3. Charge timing as CYCLES (not instructions) so instr counts reflect
+     *    pure compute and stay deterministic.  Use addDelay(), which advances
+     *    the core's clock without inflating its instruction count. */
     uint32_t totalLat = nocLat + hierLat;
-    if (totalLat > 0) {
-        BblInfo* bbl = createSimpleBblInfo(totalLat, totalLat * 4);
-        fPtrs[tid].bblPtr(tid, 0, bbl);
+    uint64_t chargedCycles = totalLat;
+    Core* c = cores[tid];
+    if (isRecv) {
+        /* Sim-time rendezvous: advance the receiver's clock to the
+         * deterministic arrival time = send_time + latency. If the receiver is
+         * already past that point in sim-time, the message is already available
+         * and we charge nothing. Falls back to plain latency when the message
+         * carries no stamp (e.g. legacy path). */
+        uint64_t curCyc = c ? c->getCycles() : 0;
+        uint64_t arrival = (params.sim_send_time > 0)
+                               ? (params.sim_send_time + (uint64_t)totalLat)
+                               : (curCyc + (uint64_t)totalLat);
+        uint64_t delta = (arrival > curCyc) ? (arrival - curCyc) : 0;
+        chargedCycles = delta;
+        if (c && delta > 0) c->addDelay((uint32_t)std::min<uint64_t>(delta, 0xFFFFFFFFull));
+        if (getenv("PIMID_DEBUG_RDV")) {
+            info("Thread %d: MPI_RECV src=%u dst=%u size=%lu send_time=%lu cur=%lu "
+                 "lat=%u arrival=%lu delta=%lu", tid, params.src_pe, params.dst_pe,
+                 (unsigned long)params.msg_size, (unsigned long)params.sim_send_time,
+                 (unsigned long)curCyc, totalLat, (unsigned long)arrival,
+                 (unsigned long)delta);
+        }
+    } else {
+        if (c && totalLat > 0) c->addDelay(totalLat);
+        if (getenv("PIMID_DEBUG_RDV")) {
+            info("Thread %d: MPI_SEND src=%u dst=%u size=%lu sim_now=%lu lat=%u",
+                 tid, params.src_pe, params.dst_pe, (unsigned long)params.msg_size,
+                 (unsigned long)zinfo->globPhaseCycles, totalLat);
+        }
     }
 
     /* 4. Stats */
     __sync_fetch_and_add(&zinfo->mpiStats.messages, 1);
-    __sync_fetch_and_add(&zinfo->mpiStats.totalLatency, totalLat);
+    __sync_fetch_and_add(&zinfo->mpiStats.totalLatency, chargedCycles);
 }
 
 /**
  * Check if a magic op code is an MPI op.
  */
 static inline bool isMpiMagicOp(uint64_t op) {
-    return op >= ZSIM_MAGIC_OP_MPI_REGISTER && op <= ZSIM_MAGIC_OP_PRICE_RESUME;
+    return op >= ZSIM_MAGIC_OP_MPI_REGISTER && op <= ZSIM_MAGIC_OP_MPI_COMM_END;
 }
 
 /**
@@ -1324,6 +1393,14 @@ static void syscall_cb(qemu_plugin_id_t id,
                    * the same run passed natively with glibc-2.34 binaries
                    * (those fall back to futex(202)). */
         {
+            /* MPI comm window: the rank is polling its shm mailbox. Keep the
+             * core ATTACHED (no leave) so post-comm compute is counted and
+             * cycles do not couple to the wall-clock poll duration. Gated to
+             * the bracketed MPI transport only -- OMP/co-sim never set this. */
+            if (tid < MAX_THREADS &&
+                mpi_comm_window[tid].load(std::memory_order_acquire)) {
+                break;
+            }
             /* Use syscall number as synthetic PC for the blacklist.
              * Offset by 0x1000 to avoid address 0 (which could confuse
              * the blacklist's unordered_set). */

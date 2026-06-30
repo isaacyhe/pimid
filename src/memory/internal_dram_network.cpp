@@ -491,84 +491,40 @@ void InternalDRAMNetwork::configureDDR5Network() {
 }
 
 void InternalDRAMNetwork::configureHBM2Network() {
-    // NOTE: Width defaults are design-specific placeholders.
-    // L0 = post-column-mux subarray output (narrow), L1 = bank H-tree root (wider).
-    // Current values may be inverted. Correct values should come from Ramulator2
-    // (DRAM), CACTI (SRAM), or NVSim (NVM) characterization, or user YAML overrides
-    // (noc.levels.*). See TODO for proper integration.
-
-    // HBM2: 3D-stacked DRAM with Through-Silicon Vias (TSVs)
+    // HBM2: 3D-stacked DRAM (TSVs), 8 channels. Per-level link widths form a
+    // MONOTONE ladder -- widest at the near-data subarray, narrowing toward the
+    // shared channel/system root -- at freq = 1.2 GHz (the 2.4 GT/s I/O clock / 2).
     //
-    // Physical hierarchy (differs from DDR4):
-    //   L0: subarray   -> within bank (same concept, but wider due to TSV-enabled I/O)
-    //   L1: bank       -> banks within BG (on-die, wide TSV paths)
-    //   L2: bank_group -> BGs within die layer (on-die crossbar)
-    //   L3: die_layer  -> die layers within stack (vertical TSV interconnect)
-    //   L4: logic_die  -> logic die <-> DRAM dies (TSV-based)
-    //   L5: channel    -> pseudo-channels within stack
-    //   L6: system     -> system root (multi-stack, interposer)
-
-    network_configs_[0].link_width_bits = 256;  // Wide column I/O (TSV-enabled)
-    network_configs_[0].frequency_GHz = 1.0;    // HBM2 @ 1 GHz
-    network_configs_[0].bandwidth_GBs =
-        (network_configs_[0].link_width_bits / 8.0) *
-        network_configs_[0].frequency_GHz;
-    network_configs_[0].latency_cycles = 3;     // Short vertical distance
-    network_configs_[0].topology = "crossbar";
-
-    // L1: Banks within BG -- TSV enables 64-bit paths (8x wider than DDR4!)
-    network_configs_[1].link_width_bits = 64;
-    network_configs_[1].frequency_GHz = 1.0;
-    network_configs_[1].bandwidth_GBs =
-        (network_configs_[1].link_width_bits / 8.0) *
-        network_configs_[1].frequency_GHz;
-    network_configs_[1].latency_cycles = 5;         // TSV is fast
-    network_configs_[1].topology = "crossbar";      // 3D crossbar via TSV
-
-    // L2: BGs within die layer -- on-die interconnect
-    network_configs_[2].link_width_bits = 128;
-    network_configs_[2].frequency_GHz = 1.0;
-    network_configs_[2].bandwidth_GBs =
-        (network_configs_[2].link_width_bits / 8.0) *
-        network_configs_[2].frequency_GHz;
-    network_configs_[2].latency_cycles = 8;
-    network_configs_[2].topology = "crossbar";
-
-    // L3: Die layers within stack -- vertical TSV interconnect
-    network_configs_[3].link_width_bits = 128;      // Wide TSV channel
-    network_configs_[3].frequency_GHz = 1.0;
-    network_configs_[3].bandwidth_GBs =
-        (network_configs_[3].link_width_bits / 8.0) *
-        network_configs_[3].frequency_GHz;
-    network_configs_[3].latency_cycles = 10;        // Vertical TSV traversal
-    network_configs_[3].topology = "crossbar";
-
-    // L4: Logic die -- TSV-based connection to DRAM dies
-    network_configs_[4].link_width_bits = 128;
-    network_configs_[4].frequency_GHz = 1.0;
-    network_configs_[4].bandwidth_GBs =
-        (network_configs_[4].link_width_bits / 8.0) *
-        network_configs_[4].frequency_GHz;
-    network_configs_[4].latency_cycles = 8;
-    network_configs_[4].topology = "crossbar";
-
-    // L5: Pseudo-channels within stack
-    network_configs_[5].link_width_bits = 128;
-    network_configs_[5].frequency_GHz = 1.0;
-    network_configs_[5].bandwidth_GBs =
-        (network_configs_[5].link_width_bits / 8.0) *
-        network_configs_[5].frequency_GHz;
-    network_configs_[5].latency_cycles = 5;
-    network_configs_[5].topology = "crossbar";
-
-    // L6: System root (multi-stack, interposer)
-    network_configs_[6].link_width_bits = 128;
-    network_configs_[6].frequency_GHz = 1.0;
-    network_configs_[6].bandwidth_GBs =
-        (network_configs_[6].link_width_bits / 8.0) *
-        network_configs_[6].frequency_GHz;
-    network_configs_[6].latency_cycles = 15;
-    network_configs_[6].topology = "crossbar";
+    // FIXED (was inverted): the old table used freq = 1.0 -> L0 = 256/8*1.0 = 32
+    // GB/s, BELOW HBM2's 38.4 GB/s per-channel rate, AND a non-monotone L1 (64 bits
+    // = 8 GB/s, dipping under both L0 and L2). Both are corrected so this analytical
+    // tier AGREES with the detailed L[] (emitDramCustomTopology): L0 = 38.4 GB/s
+    // (= per-channel egress, BW-neutral) and the leaf ladder mirrors 256/192/160/128.
+    // HBM2's near-data win is the 8-channel parallelism, not a wide subarray link,
+    // so the per-level gradient is intentionally gentle.
+    //
+    // Physical hierarchy:
+    //   L0 subarray   L1 bank       L2 bank_group  L3 die_layer
+    //   L4 logic_die  L5 channel    L6 system root
+    struct Lv { int w; int lat; };
+    const Lv hbm2[7] = {
+        {256,  3},   // L0 subarray   : 38.4 GB/s (wide column I/O, TSV)
+        {192,  5},   // L1 bank       : 28.8
+        {160,  8},   // L2 bank_group : 24.0
+        {128, 10},   // L3 die_layer  : 19.2 (vertical TSV)
+        {128,  8},   // L4 logic_die  : 19.2
+        {128,  5},   // L5 channel    : 19.2 (pseudo-channel)
+        {128, 15},   // L6 system     : 19.2 (interposer root)
+    };
+    for (int i = 0; i < 7; ++i) {
+        network_configs_[i].link_width_bits = hbm2[i].w;
+        network_configs_[i].frequency_GHz   = 1.2;   // 2.4 GT/s I/O clock / 2
+        network_configs_[i].bandwidth_GBs   =
+            (network_configs_[i].link_width_bits / 8.0) *
+            network_configs_[i].frequency_GHz;
+        network_configs_[i].latency_cycles  = hbm2[i].lat;
+        network_configs_[i].topology        = "crossbar";
+    }
 }
 
 void InternalDRAMNetwork::configureHBM3Network() {

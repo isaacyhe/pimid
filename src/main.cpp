@@ -591,6 +591,10 @@ struct UnifiedConfig {
     std::string memory_tech;
     int num_banks;
     int subarrays_per_bank;
+    bool subarrays_per_bank_user_set = false;  // true when user set the count directly
+    int subarray_height = 0;                    // rows per subarray; 0 = per-tech default
+    int bg_per_chip_override = 0;                // bank-groups/chip; 0 = per-tech JEDEC default
+    int banks_per_bg_override = 0;              // banks/bank-group; 0 = per-tech JEDEC default
     int memory_latency_override;  // -1 means auto-derive from tech
     int ports_per_bank = 1;       // Physical RW ports per bank (SRAM multiport, DRAM/NVM = 1)
     // DRAM device width (x4/x8/x16). Empty = use the technology's JEDEC default.
@@ -812,6 +816,7 @@ struct UnifiedConfig {
 
     // Derived: total memory org units at placement level
     int total_mem_orgs = -1;  // -1 = auto from memory organization
+    int pages_per_unit = 32;  // contiguous block (pages) per placement-level unit; sized by subarray capacity
     // Derived: total network endpoints (depends on connection mode)
     int total_network_endpoints = -1;
     // Derived: topology-aware NoC average one-way latency (cycles)
@@ -1257,7 +1262,8 @@ static int topologyClassForTopology(const std::string& topology);
  */
 static bool emitDramCustomTopology(const std::string& tech,
                                    const std::string& outPath,
-                                   int num_pes) {
+                                   int num_pes,
+                                   int pe_level) {
     // Per-tech per-layer (link_width_bits, freq_GHz), layers leaf->root: L0,L1,L2,L3; plus channel count N.
     struct Layer { double width_bits; double freq_ghz; };
     Layer L[4];          // L[0]=L0 (subarray-leaf) ... L[3]=L3 (channel)
@@ -1274,9 +1280,16 @@ static bool emitDramCustomTopology(const std::string& tech,
     } else if (tech == "GDDR6") {
         L[0]={256,2.0}; L[1]={256,2.0}; L[2]={256,2.0}; L[3]={16,2.0};  N=1;
     } else if (tech == "HBM2") {
-        L[0]={256,1.0}; L[1]={64,1.0};  L[2]={128,1.0}; L[3]={128,1.0}; N=8;
+        // freq = 1.2 GHz (= 2.4 GT/s I/O clock / 2), NOT 1.0: at 1.0 the leaf
+        // L0 = 256/8*1.0 = 32 GB/s fell BELOW HBM2's 38.4 GB/s per-channel rate
+        // (an inversion -- subarray link slower than the channel it bypasses) and
+        // the subarray aggregate 32*8 = 256 undershot the 307 GB/s stack. At 1.2,
+        // L0 = 38.4 (= per-channel egress, BW-neutral) and aggregate = 38.4*8 =
+        // 307.2 GB/s = the real HBM2 stack. Gentle width ladder kept: HBM2's
+        // near-data win is the N=8 channel parallelism, not a wide subarray link.
+        L[0]={256,1.2}; L[1]={192,1.2}; L[2]={160,1.2}; L[3]={128,1.2}; N=8;
     } else if (tech == "HBM3") {
-        L[0]={512,1.8}; L[1]={128,1.8}; L[2]={256,1.8}; L[3]={128,1.8}; N=16;
+        L[0]={512,1.8}; L[1]={384,1.8}; L[2]={256,1.8}; L[3]={128,1.8}; N=16;
     } else {
         return false;  // not a modeled DRAM tech
     }
@@ -1317,8 +1330,15 @@ static bool emitDramCustomTopology(const std::string& tech,
     // bank->bank traffic in the same channel has NO common ancestor below the
     // channel-DQ and is FORCED to cross the (narrow) channel-DQ links + router.
     // That shared, narrow channel I/O is the bandwidth wall of real DRAM.
-    const int ENDPOINTS = 128;   // fixed; detailed Garnet hardcodes 128 nodes
-    const int TOTAL_BANKS = 16;  // the config's logical bank count (128 ep / 16 = 8/bank)
+    // Detailed Garnet node budget. Floor 128 keeps every config with <=128 PEs
+    // (i.e. all existing figures) BYTE-IDENTICAL; above that, scale with the
+    // active PE count so many-PE (e.g. subarray) placements get enough distinct
+    // nodes that the ACTIVE PEs do not alias; ceiling 1024 keeps the router/node
+    // count simulatable (matches the createGarnetHTreeForDRAM limit).
+    int ENDPOINTS = num_pes;
+    if (ENDPOINTS < 128)  ENDPOINTS = 128;
+    if (ENDPOINTS > 1024) ENDPOINTS = 1024;
+    const int TOTAL_BANKS = 16;  // the config's logical bank count (>=8 ep/bank)
     int banks_per_channel = (TOTAL_BANKS + N - 1) / N;   // ceil(16/N)
     if (banks_per_channel < 1) banks_per_channel = 1;
 
@@ -1402,12 +1422,22 @@ static bool emitDramCustomTopology(const std::string& tech,
 
     // External links: 128 endpoints round-robin across the 16 logical banks
     // (endpoint e -> bank e % 16). Same-bank endpoints stay local; inter-bank
-    // same-channel crosses the channel-DQ; inter-channel crosses ROOT. The
-    // bank<->endpoint link is the WIDE L0 (subarray) width.
+    // same-channel crosses the channel-DQ; inter-channel crosses ROOT.
+    // PLACEMENT-AWARE injection (ISPASS placement-bandwidth): a PE placed at
+    // hierarchy level L attaches via THAT level's link width -- subarray L0
+    // (wide, near-data) down to the channel L3 (narrow) for coarse placement.
+    // This is the lever that lets fine placement bypass the channel-DQ wall:
+    // a subarray PE's local access rides the wide L0 ext link, a logic-die PE
+    // is pinned to the narrow channel width. ext_idx maps the PE hierarchy
+    // level (0=subarray,1=bank,2=bankgroup,3=chip,4=rank) onto the 4-layer
+    // link array (chip/rank/logic-die -> channel L3).
+    int ext_idx = pe_level;
+    if (ext_idx < 0) ext_idx = 1;   // default BANK
+    if (ext_idx > 3) ext_idx = 3;   // CHIP/RANK/LOGIC_DIE -> channel layer
     for (int e = 0; e < ENDPOINTS; ++e) {
         int b = e % TOTAL_BANKS;
         int bank = bank_router_id(b);
-        f << "ext " << e << " " << bank << " " << layer_lat[0] << " " << layer_w[0] << "\n";
+        f << "ext " << e << " " << bank << " " << layer_lat[ext_idx] << " " << layer_w[ext_idx] << "\n";
     }
 
     f.close();
@@ -1429,6 +1459,8 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
     else if (config.placement_level == "BANK_GROUP") config.pe_hierarchy_level = 2;
     else if (config.placement_level == "CHIP")      config.pe_hierarchy_level = 3;
     else if (config.placement_level == "RANK")      config.pe_hierarchy_level = 4;
+    else if (config.placement_level == "CHANNEL")   config.pe_hierarchy_level = 5;  // aggregation (N=1 techs)
+    else if (config.placement_level == "LOGIC_DIE") config.pe_hierarchy_level = 6;  // aggregation (HBM base die)
     else if (config.placement_level == "HOST_MC")   config.pe_hierarchy_level = -1;  // PEs share host MC
     else                                             config.pe_hierarchy_level = 1;  // default BANK
 
@@ -1466,8 +1498,13 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
     else if (tech == "DDR5")     { banks_per_bg = 4; bg_per_chip = 8; chips_per_rank = 8; }
     else if (tech == "LPDDR5")   { banks_per_bg = 4; bg_per_chip = 4; chips_per_rank = 1; }
     else if (tech == "GDDR6")    { banks_per_bg = 4; bg_per_chip = 4; chips_per_rank = 1; }
-    else if (tech == "HBM2") { banks_per_bg = 4; bg_per_chip = 4; chips_per_rank = 8; }
-    else if (tech == "HBM3")     { banks_per_bg = 4; bg_per_chip = 4; chips_per_rank = 16; }
+    // HBM has 2 pseudo-channels/channel; PIMID has no pseudo-ch level, so fold
+    // them into the BG count to match Ramulator2/JEDEC per-channel org:
+    //   HBM2 {1,2,4,2} = 2 pch x 4 BG x 2 banks = 16 banks (8 BG/ch)
+    //   HBM3 {1,2,4,4} = 2 pch x 4 BG x 4 banks = 32 banks (8 BG/ch)
+    // chips_per_rank = channels per stack (HBM2 8, HBM3 16).
+    else if (tech == "HBM2") { banks_per_bg = 2; bg_per_chip = 8; chips_per_rank = 8; }
+    else if (tech == "HBM3")     { banks_per_bg = 4; bg_per_chip = 8; chips_per_rank = 16; }
     else if (tech == "SRAM" || tech == "STT_MRAM" || tech == "PCM" || tech == "RERAM") {
         banks_per_bg = config.num_banks; bg_per_chip = 1; chips_per_rank = 1;
     }
@@ -1523,9 +1560,50 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
         }
     }
 
+    // Optional YAML override of the per-tech JEDEC defaults (bank-groups/chip and
+    // banks/bank-group are real params): memory.organization.{bank_groups,
+    // banks_per_group}. 0 = keep the JEDEC default set above.
+    if (config.bg_per_chip_override > 0)  bg_per_chip  = config.bg_per_chip_override;
+    if (config.banks_per_bg_override > 0) banks_per_bg = config.banks_per_bg_override;
+
     config.hierarchy_banks_per_bg = banks_per_bg;
     config.hierarchy_bg_per_chip = bg_per_chip;
     config.hierarchy_chips_per_rank = chips_per_rank;
+
+    // --- Subarray geometry (physical sub-bank structure, BELOW the JEDEC row) ---
+    // A subarray is a vertical group of wordlines (rows) inside a bank. It is NOT
+    // part of the JEDEC standard, nor of Ramulator2 (both stop at row/column), so
+    // we size it explicitly: subarrays_per_bank = bank_rows / subarray_height.
+    //
+    // subarray_height (rows) is grounded in published die measurements where they
+    // exist, otherwise the DRAM-family representative. We round the height UP to a
+    // power of two so the per-bank count is a clean power of two for addressing,
+    // and the rounded height stays >= measured (coarser than silicon, never finer):
+    //   DDR4 measured subarray height ~= 576-640 rows  -> 512-row DDR/LPDDR/GDDR default
+    //   HBM2 measured subarray height ~= 768-832 rows  -> 1024-row HBM default
+    // bank_rows is the JEDEC per-device bank row count at the representative
+    // density (DDR3/4 + HBM2 8Gb, DDR5 + GDDR6 16Gb, LPDDR5 + HBM3 8Gb).
+    // The user may override the height (memory.subarray_height) or the count
+    // (memory.subarrays_per_bank) directly in YAML.
+    {
+        bool is_dram = !(tech == "SRAM" || tech == "STT_MRAM" ||
+                         tech == "PCM"  || tech == "RERAM");
+        if (is_dram) {
+            int subarray_height = config.subarray_height;  // 0 = per-tech default
+            int bank_rows;
+            if (tech == "HBM2")        { bank_rows = 65536; if (subarray_height <= 0) subarray_height = 1024; } // measured ~768-832 -> 1024
+            else if (tech == "HBM3")   { bank_rows = 32768; if (subarray_height <= 0) subarray_height = 1024; } // HBM family -> 1024
+            else if (tech == "LPDDR5") { bank_rows = 32768; if (subarray_height <= 0) subarray_height = 512;  }
+            else if (tech == "GDDR6")  { bank_rows = 16384; if (subarray_height <= 0) subarray_height = 512;  }
+            else /* DDR3/DDR4/DDR5 */  { bank_rows = 65536; if (subarray_height <= 0) subarray_height = 512;  } // DDR4 measured ~576-640 -> 512
+            config.subarray_height = subarray_height;       // store the resolved height
+            if (!config.subarrays_per_bank_user_set) {
+                int sa = bank_rows / subarray_height;
+                if (sa < 1) sa = 1;
+                config.subarrays_per_bank = sa;             // per-tech default count
+            }
+        }
+    }
 
     // Validate PE count fits the memory organization at the placement level
     int pe_level = config.pe_hierarchy_level;
@@ -1699,6 +1777,58 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
         }
     }
 
+    // Placement-layer divisibility: the PE<->mem-org distribution at the chosen
+    // tier must be UNIFORM -- either M PEs per mem-org (pes >= orgs, M = pes/orgs)
+    // or 1 PE per N mem-orgs (orgs >= pes, N = orgs/pes). That requires one side
+    // to divide the other; otherwise the coverage is lopsided (some PEs own one
+    // extra unit). We only adjust the AUTO-generated mapping (an explicit or
+    // sentinel pe_mem_map is the user's choice -- left untouched). num_pes is the
+    // design knob, so we snap IT (never the physically-derived org count): for
+    // pes < orgs, down to the largest divisor of orgs <= pes; for pes >= orgs, to
+    // the nearest multiple of orgs.
+    if (config.pe_mem_map.empty() && config.num_pes > 0 && config.total_mem_orgs > 0) {
+        int pes  = config.num_pes;
+        int orgs = config.total_mem_orgs;
+        bool clean = (pes <= orgs) ? (orgs % pes == 0) : (pes % orgs == 0);
+        if (!clean) {
+            int adj;
+            const char* mode;
+            if (pes < orgs) {
+                adj = pes;
+                while (adj > 1 && (orgs % adj) != 0) --adj;   // largest divisor <= pes
+                mode = "1:N (one PE per N mem orgs)";
+            } else {
+                int lo = (pes / orgs) * orgs;                 // multiple of orgs <= pes
+                int hi = lo + orgs;
+                adj = (pes - lo <= hi - pes) ? lo : hi;        // nearest multiple
+                if (adj < orgs) adj = orgs;
+                mode = "M:1 (M PEs per mem org)";
+            }
+            if (adj >= 1 && adj != pes) {
+                std::cerr << "WARNING: num_pes=" << pes << " does not divide evenly "
+                          << "with " << orgs << " mem orgs at placement level "
+                          << config.placement_level << "; adjusting num_pes -> " << adj
+                          << " for a uniform " << mode << " distribution.\n";
+                config.num_pes = adj;
+            }
+        }
+    }
+
+    // Contiguous block size (pages) per placement-level unit (point-1 addressing
+    // fix): each device-local unit owns a contiguous address range sized by the
+    // subarray capacity x subarrays-per-unit, so a PE's contiguous working set
+    // lands in its own coverage (local) instead of being page-interleaved across
+    // every unit (the flat-placement bug).
+    {
+        const int SUBARRAY_PAGES = 32;   // 128 KB subarray / 4 KB page
+        int total_subarrays = config.subarrays_per_bank * banks_per_bg
+                              * bg_per_chip * chips_per_rank;
+        int spu = (config.total_mem_orgs > 0)
+                  ? (total_subarrays / config.total_mem_orgs) : 1;
+        if (spu < 1) spu = 1;
+        config.pages_per_unit = SUBARRAY_PAGES * spu;
+    }
+
     // Validate ports_per_bank
     if (config.ports_per_bank < 1) config.ports_per_bank = 1;
 
@@ -1861,7 +1991,7 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
                 } else {
                     topo_path = topo_name;
                 }
-                if (emitDramCustomTopology(tech, topo_path, config.num_pes)) {
+                if (emitDramCustomTopology(tech, topo_path, config.num_pes, config.pe_hierarchy_level)) {
                     config.noc_topology = "CUSTOM";
                     config.noc_topology_file = topo_path;
                     // The CUSTOM DRAM tree is routed by TreeRouter (up*/down*
@@ -2183,6 +2313,29 @@ static void emitZSimHierarchyBlock(std::ostream& out, const UnifiedConfig& confi
     out << "        localLinkLatency = " << config.local_link_latency << ";\n";
     out << "        mcStandalone = " << (config.mc_standalone ? 1 : 0) << ";\n";
     out << "        totalMemOrgs = " << config.total_mem_orgs << ";\n";
+    out << "        pagesPerUnit = " << config.pages_per_unit << ";\n";
+    out << "        assumeLocal = 1;\n";  // perfect data prep: device computes local (both scopes)
+    out << "        chargePrep = " << ((config.scope == "system") ? 1 : 0) << ";\n";  // co-sim: first-touch reorg+transfer
+    // Host->device link transfer (perfect-prep): charged once per first-touch line
+    // in co-sim when the device is EXTERNALLY attached (pcie/cxl/interposer);
+    // on-package/internal = 0 (no external link to cross). bytes/cycle from the
+    // link BW at the DEVICE clock; 64B line / bytes-per-cycle = per-line cost.
+    {
+        uint32_t hostLinkXferCycles = 0;
+        if (config.scope == "system") {
+            bool external = false;
+            for (const auto& n : config.system_nodes)
+                if (n.role == UnifiedConfig::SystemNode::DEVICE &&
+                    n.attachment == UnifiedConfig::SystemNode::EXTERNAL) { external = true; break; }
+            if (external && config.pcie_bandwidth_GBs > 0.0) {
+                double bwf = (device_bw_freq_mhz > 0.0) ? device_bw_freq_mhz : config.frequency_mhz;
+                double bpc = (config.pcie_bandwidth_GBs * 1e9) / (bwf * 1e6);
+                if (bpc > 0.0) { hostLinkXferCycles = (uint32_t)(64.0 / bpc + 0.5);
+                                 if (hostLinkXferCycles < 1) hostLinkXferCycles = 1; }
+            }
+        }
+        out << "        hostLinkXferCycles = " << hostLinkXferCycles << ";\n";
+    }
     out << "        totalNetworkEndpoints = " << config.total_network_endpoints << ";\n";
     out << "        nocAvgOneWayLatency = " << config.noc_avg_one_way_latency << ";\n";
     out << "        nocBisectionLinks = " << config.noc_bisection_links << ";\n";
@@ -5238,7 +5391,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.2.2" << std::endl;
+    std::cout << "Version 1.3.0" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -5903,7 +6056,23 @@ int main(int argc, char** argv) {
                 }
 
                 config.num_banks = yaml_cfg["memory"]["banks"].as<int>(config.num_banks);
-                config.subarrays_per_bank = yaml_cfg["memory"]["subarrays_per_bank"].as<int>(config.subarrays_per_bank);
+                // subarray geometry: optional height (rows) and/or an explicit
+                // count. If the count is set it wins; otherwise the per-tech
+                // default (or the given height) derives it in the org block.
+                if (yaml_cfg["memory"]["subarray_height"])
+                    config.subarray_height = yaml_cfg["memory"]["subarray_height"].as<int>();
+                if (yaml_cfg["memory"]["subarrays_per_bank"]) {
+                    config.subarrays_per_bank = yaml_cfg["memory"]["subarrays_per_bank"].as<int>();
+                    config.subarrays_per_bank_user_set = true;
+                }
+                // Optional JEDEC-org overrides (0/absent = per-tech JEDEC default).
+                if (yaml_cfg["memory"]["organization"]) {
+                    auto org = yaml_cfg["memory"]["organization"];
+                    if (org["bank_groups"])
+                        config.bg_per_chip_override = org["bank_groups"].as<int>();
+                    if (org["banks_per_group"])
+                        config.banks_per_bg_override = org["banks_per_group"].as<int>();
+                }
                 config.memory_latency_override = yaml_cfg["memory"]["latency"].as<int>(config.memory_latency_override);
                 config.ports_per_bank = yaml_cfg["memory"]["ports_per_bank"].as<int>(config.ports_per_bank);
                 if (yaml_cfg["memory"]["dram"] && yaml_cfg["memory"]["dram"]["device_width"]) {

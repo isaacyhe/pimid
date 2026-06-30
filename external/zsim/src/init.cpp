@@ -499,6 +499,10 @@ static void InitSystem(Config& config) {
         }
         // PE-MC distributed memory controller fields
         zinfo->hierarchy.totalUnits = config.get<uint32_t>("sys.hierarchy.totalUnits", 128);
+        zinfo->hierarchy.pagesPerUnit = config.get<uint32_t>("sys.hierarchy.pagesPerUnit", 32);
+        zinfo->hierarchy.assumeLocal = config.get<uint32_t>("sys.hierarchy.assumeLocal", 0) != 0;
+        zinfo->hierarchy.chargePrep = config.get<uint32_t>("sys.hierarchy.chargePrep", 0) != 0;
+        zinfo->hierarchy.hostLinkXferCycles = config.get<uint32_t>("sys.hierarchy.hostLinkXferCycles", 0);
         zinfo->hierarchy.totalMCs = config.get<uint32_t>("sys.hierarchy.totalMCs", 0);
         zinfo->hierarchy.pesPerMC = config.get<uint32_t>("sys.hierarchy.pesPerMC", 1);
         zinfo->hierarchy.localLatency = config.get<uint32_t>("sys.hierarchy.localLatency", 10);
@@ -666,23 +670,8 @@ static void InitSystem(Config& config) {
         }
 #endif
 
-        // -- NoC <-> endpoint wiring validation --------------------------------
-        // Every network endpoint (PEs, memory orgs, caches) must map to a node
-        // within the Garnet network. If the network has fewer nodes than
-        // endpoints, registration would have to wrap/alias -- a silent mis-wire.
-        // Surface it loudly so the NoC sizing can be fixed.
-        if (zinfo->garnetNetwork) {
-            uint32_t nNodes = zinfo->garnetNetwork->getNumNodes();
-            uint32_t nEnd   = zinfo->hierarchy.totalNetworkEndpoints;
-            if (nEnd > 0 && nNodes > 0 && nEnd > nNodes) {
-                warn("[NoC wiring] %u endpoints but only %u network nodes -- "
-                     "NoC is undersized; endpoint->node mapping will collide",
-                     nEnd, nNodes);
-            } else if (nEnd > 0) {
-                info("[NoC wiring] %u endpoints over %u network nodes (OK)",
-                     nEnd, nNodes);
-            }
-        }
+        // (NoC<->endpoint wiring check moved below, after the PE-mem map is
+        // parsed, so it can test ACTIVE-PE collision rather than total endpoints.)
 
         // Parse flattened PE-mem mapping
         zinfo->hierarchy.peMemMapSize = config.get<uint32_t>("sys.hierarchy.peMemMapSize", 0);
@@ -735,6 +724,32 @@ static void InitSystem(Config& config) {
              zinfo->hierarchy.peMemMapSize,
              (zinfo->hierarchy.connectionMode == 0) ? "shared_io" : "separate_endpoints",
              zinfo->hierarchy.totalNetworkEndpoints);
+
+        // -- NoC <-> endpoint wiring check ------------------------------------
+        // Endpoints (PEs + EVERY mem org + caches) map onto Garnet nodes by
+        // (unit % numNodes). For DRAM the node count is the fixed datapath
+        // abstraction (the channel-DQ chokepoint), so at fine placement the many
+        // PASSIVE mem-org endpoints (e.g. all subarrays) ALIAS onto it BY DESIGN
+        // -- that is the intended model, not a mis-wire. A real collision only
+        // occurs when the ACTIVE injectors (the PEs that actually drive traffic)
+        // outnumber the nodes; warn only then. (Was: warned on total endpoints,
+        // which falsely flagged every fine-placement run.)
+        if (zinfo->garnetNetwork) {
+            uint32_t nNodes  = zinfo->garnetNetwork->getNumNodes();
+            uint32_t nEnd    = zinfo->hierarchy.totalNetworkEndpoints;
+            uint32_t nActive = zinfo->hierarchy.peMemMapSize;   // PEs = traffic injectors
+            if (nNodes > 0 && nActive > nNodes) {
+                warn("[NoC wiring] %u ACTIVE PEs exceed %u network nodes -- active "
+                     "endpoints will alias; raise the NoC node budget", nActive, nNodes);
+            } else if (nNodes > 0 && nEnd > nNodes) {
+                info("[NoC wiring] %u endpoints over %u nodes (OK: %u active PEs; "
+                     "surplus mem-org endpoints alias onto the datapath nodes by "
+                     "design)", nEnd, nNodes, nActive);
+            } else if (nEnd > 0) {
+                info("[NoC wiring] %u endpoints over %u network nodes (OK)",
+                     nEnd, nNodes);
+            }
+        }
     }
 
     // Read node map (multi-host/multi-device system mode)
@@ -908,6 +923,16 @@ static void InitSystem(Config& config) {
             snprintf(latKey, sizeof(latKey), "sys.hierarchy.mcGroup%u.localLatency", i);
             uint64_t bw = config.get<uint64_t>(bwKey, zinfo->hierarchy.defaultBandwidthMBs);
             uint32_t lat = config.get<uint32_t>(latKey, zinfo->hierarchy.localLatency);
+            // Per-level near-data bandwidth gradient (ISPASS placement): a finer
+            // placement sits on a wider internal datapath (subarray row buffer >>
+            // bank >> channel DQ). Scale the local MI bandwidth by placement level
+            // so a subarray-local access is the widest/fastest path, overcoming
+            // its extra hops. subarray=4x, bank/bank-group=2x, coarser=1x.
+            {
+                uint32_t lvl = zinfo->hierarchy.placementLevel;
+                uint32_t bwmul = (lvl == 0) ? 4u : ((lvl == 1 || lvl == 2) ? 2u : 1u);
+                bw *= bwmul;
+            }
 
             if (hasMapping) {
                 // Build coverage set from mapping: MI-i covers all PEs whose HOME bank == i.

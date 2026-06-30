@@ -20,6 +20,9 @@
 #define ZSIM_MAGIC_OP_MPI_SEND      (2049)
 #define ZSIM_MAGIC_OP_MPI_RECV      (2050)
 #define ZSIM_MAGIC_OP_MPI_BARRIER   (2051)
+/* Comm-window bracket: keep the rank core attached across transport polls. */
+#define ZSIM_MAGIC_OP_MPI_COMM_BEGIN (2055)
+#define ZSIM_MAGIC_OP_MPI_COMM_END   (2056)
 
 #ifdef __x86_64__
 #define HOOKS_STR  "HOOKS"
@@ -67,6 +70,8 @@ struct __attribute__((aligned(64))) PimidMpiParams {
     uint32_t dst_pe;
     uint64_t msg_size;
     uint64_t msg_id;
+    uint64_t sim_now;        /* plugin -> guest: current sim-time (SEND) */
+    uint64_t sim_send_time;  /* guest -> plugin: message send-time (RECV) */
 };
 
 /* Register this thread's MPI parameter block address with ZSim.

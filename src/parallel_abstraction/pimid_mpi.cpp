@@ -42,12 +42,25 @@
 #define ZSIM_MAGIC_OP_MPI_SEND      2049
 #define ZSIM_MAGIC_OP_MPI_RECV      2050
 #define ZSIM_MAGIC_OP_MPI_BARRIER   2051
+/* Comm-window bracket: while open, the plugin keeps this rank's core ATTACHED
+ * across the transport's polling sleeps (no syscallLeave) and does NOT count
+ * the transport's own instructions, so post-comm compute is counted and the
+ * reported cycle/instr totals are deterministic (wall-clock poll invisible). */
+#define ZSIM_MAGIC_OP_MPI_COMM_BEGIN 2055
+#define ZSIM_MAGIC_OP_MPI_COMM_END   2056
 
 struct __attribute__((aligned(64))) PimidMpiParams {
     uint32_t src_pe;
     uint32_t dst_pe;
     uint64_t msg_size;
     uint64_t msg_id;
+    /* sim-time rendezvous (1.2.3): plugin writes the rank's current simulated
+     * time into sim_now on MPI_SEND so the sender can stamp the message; the
+     * receiver copies the message's stamp into sim_send_time before MPI_RECV so
+     * the plugin can advance the receiver's clock to the deterministic arrival
+     * time (send_time + latency) instead of the wall-clock poll duration. */
+    uint64_t sim_now;
+    uint64_t sim_send_time;
 };
 
 static thread_local PimidMpiParams tl_mpi_params;
@@ -85,6 +98,7 @@ struct MessageSlot {
     uint32_t  chunk_idx;  /* 0..n_chunks-1 */
     uint32_t  n_chunks;
     uint32_t  msg_id;
+    uint64_t  sim_send_time; /* sender's simulated send-time (cycles) */
     char      payload[PIMID_MPI_MAX_MSG_BYTES];
 };
 
@@ -157,12 +171,31 @@ static size_t dtype_size(MPI_Datatype dt) {
     }
 }
 
-static void inject_timing(int src_pe, int dst_pe, uint64_t msg_size) {
+/* Open/close the comm window. Outside instrumentation these are NOPs. */
+static inline void mpi_comm_begin(void) { zsim_magic_op(ZSIM_MAGIC_OP_MPI_COMM_BEGIN); }
+static inline void mpi_comm_end(void)   { zsim_magic_op(ZSIM_MAGIC_OP_MPI_COMM_END); }
+
+/* SEND-direction timing op. The plugin charges send latency on this rank's
+ * core AND writes the current simulated time back into tl_mpi_params.sim_now,
+ * which the caller reads to stamp the outgoing message. */
+static void inject_timing_send(int src_pe, int dst_pe, uint64_t msg_size) {
     tl_mpi_params.src_pe   = (uint32_t)src_pe;
     tl_mpi_params.dst_pe   = (uint32_t)dst_pe;
     tl_mpi_params.msg_size = msg_size;
     tl_mpi_params.msg_id++;
     zsim_magic_op(ZSIM_MAGIC_OP_MPI_SEND);
+}
+
+/* RECV-direction timing op. The caller supplies the message's send-time stamp;
+ * the plugin advances this rank's core to the deterministic arrival time
+ * (send_time + latency). */
+static void inject_timing_recv(int src_pe, int dst_pe, uint64_t msg_size,
+                               uint64_t send_time) {
+    tl_mpi_params.src_pe        = (uint32_t)src_pe;
+    tl_mpi_params.dst_pe        = (uint32_t)dst_pe;
+    tl_mpi_params.msg_size      = msg_size;
+    tl_mpi_params.sim_send_time = send_time;
+    zsim_magic_op(ZSIM_MAGIC_OP_MPI_RECV);
 }
 
 static void register_mpi_params(void) {
@@ -284,9 +317,13 @@ static void trace_init(int rank) {
 
 /* Push one chunk to the dest mailbox. Blocks if ring is full. */
 static int send_chunk(int dest, int tag, const char* data, uint32_t size,
-                      uint32_t chunk_idx, uint32_t n_chunks, uint32_t msg_id) {
+                      uint32_t chunk_idx, uint32_t n_chunks, uint32_t msg_id,
+                      uint64_t send_time) {
     Mailbox* mb = &g_shared->mailboxes[dest];
     MPITRACE("send_enter dest=%d tag=%d chunk=%u/%u", dest, tag, chunk_idx, n_chunks);
+    /* Bracket the transport (poll + payload copy) so the simulator keeps the
+     * core attached without counting the wall-clock poll as compute. */
+    mpi_comm_begin();
     bool waited = false;
     for (;;) {
         mb_lock(mb);
@@ -296,17 +333,19 @@ static int send_chunk(int dest, int tag, const char* data, uint32_t size,
         usleep(200);   /* ring full: poll until the consumer drains a slot */
     }
     MessageSlot* slot = &mb->slots[mb->tail];
-    slot->src       = g_rank;
-    slot->tag       = tag;
-    slot->size      = size;
-    slot->chunk_idx = chunk_idx;
-    slot->n_chunks  = n_chunks;
-    slot->msg_id    = msg_id;
+    slot->src           = g_rank;
+    slot->tag           = tag;
+    slot->size          = size;
+    slot->chunk_idx     = chunk_idx;
+    slot->n_chunks      = n_chunks;
+    slot->msg_id        = msg_id;
+    slot->sim_send_time = send_time;
     if (data && size > 0) memcpy(slot->payload, data, size);
     mb->tail = (mb->tail + 1) % PIMID_MPI_RING_SLOTS;
     mb->count++;
     uint32_t cnow = mb->count;
     mb_unlock(mb);
+    mpi_comm_end();
     MPITRACE("send_done dest=%d count_now=%u", dest, cnow);
     return 0;
 }
@@ -315,6 +354,10 @@ static int send_chunk(int dest, int tag, const char* data, uint32_t size,
 static void recv_slot(MessageSlot* out) {
     Mailbox* mb = &g_shared->mailboxes[g_rank];
     MPITRACE("recv_enter");
+    /* Bracket the transport (poll + payload copy): the simulator keeps the core
+     * attached across the polling sleeps without counting them, so the post-recv
+     * compute is counted and cycles do not depend on wall-clock poll duration. */
+    mpi_comm_begin();
     bool waited = false;
     for (;;) {
         mb_lock(mb);
@@ -328,6 +371,7 @@ static void recv_slot(MessageSlot* out) {
     mb->count--;
     uint32_t cnow = mb->count;
     mb_unlock(mb);
+    mpi_comm_end();
     MPITRACE("recv_done src=%d tag=%d count_now=%u", out->src, out->tag, cnow);
 }
 
@@ -409,21 +453,27 @@ int MPI_Send(const void *buf, int count, MPI_Datatype datatype,
     size_t nbytes = (size_t)count * dtype_size(datatype);
     const char* p = (const char*)buf;
 
+    /* Emit the SEND timing op FIRST: it charges send latency on this core and
+     * (under instrumentation) writes the current simulated time into
+     * tl_mpi_params.sim_now, which we then stamp onto every chunk so the
+     * receiver can rendezvous in simulated time. msg_id is incremented here. */
+    inject_timing_send(g_rank, dest, nbytes);
+    uint64_t send_time = tl_mpi_params.sim_now;
+    uint32_t msg_id    = (uint32_t)tl_mpi_params.msg_id;
+
     if (nbytes == 0) {
-        send_chunk(dest, tag, nullptr, 0, 0, 1, (uint32_t)tl_mpi_params.msg_id + 1);
+        send_chunk(dest, tag, nullptr, 0, 0, 1, msg_id, send_time);
     } else {
         uint32_t n_chunks = (uint32_t)((nbytes + PIMID_MPI_MAX_MSG_BYTES - 1)
                                        / PIMID_MPI_MAX_MSG_BYTES);
-        uint32_t msg_id = (uint32_t)tl_mpi_params.msg_id + 1;
         size_t left = nbytes;
         for (uint32_t i = 0; i < n_chunks; i++) {
             uint32_t take = (uint32_t)((left < PIMID_MPI_MAX_MSG_BYTES) ? left : PIMID_MPI_MAX_MSG_BYTES);
-            send_chunk(dest, tag, p, take, i, n_chunks, msg_id);
+            send_chunk(dest, tag, p, take, i, n_chunks, msg_id, send_time);
             p += take; left -= take;
         }
     }
 
-    inject_timing(g_rank, dest, nbytes);
     return MPI_SUCCESS;
 }
 
@@ -445,16 +495,18 @@ int MPI_Recv(void *buf, int count, MPI_Datatype datatype,
      * the FIFO-matching policy this implementation has always used, we
      * receive chunks of the next message in order. */
     MessageSlot slot;
+    uint64_t send_time = 0;
     do {
         recv_slot(&slot);
         if (last_src < 0) last_src = slot.src;
+        send_time = slot.sim_send_time;   /* all chunks share the send stamp */
         size_t space = (nbytes > written) ? (nbytes - written) : 0;
         size_t take = (slot.size < space) ? slot.size : space;
         if (p && take > 0) memcpy(p + written, slot.payload, take);
         written += take;
     } while (slot.chunk_idx + 1 < slot.n_chunks);
 
-    inject_timing(last_src, g_rank, written);
+    inject_timing_recv(last_src, g_rank, written, send_time);
     return MPI_SUCCESS;
 }
 
@@ -516,9 +568,13 @@ int MPI_Barrier(MPI_Comm comm) {
         __sync_add_and_fetch(&g_shared->barrier_gen, 1);
         MPITRACE("barrier_release gen=%d", g_shared->barrier_gen);
     } else {
+        /* Keep the core attached across the spin so the wall-clock poll is not
+         * counted (and does not desynchronize per-rank instruction counts). */
+        mpi_comm_begin();
         while (g_shared->barrier_gen == gen) {
             usleep(100);
         }
+        mpi_comm_end();
     }
     MPITRACE("barrier_exit gen=%d", g_shared->barrier_gen);
 
