@@ -16,9 +16,28 @@ memory timing and the device-internal network shape — see
 
 ## PE placement levels
 
-PEs attach at one of six hierarchy levels (`pim.placement.level`):
-`SUBARRAY`, `BANK`, `BANK_GROUP`, `CHIP`, `RANK`, or `HOST_MC`.
-Finer placement = more PEs and a deeper device network.
+PEs attach inside the memory hierarchy via `pim.placement.level`. The levels,
+finest to coarsest, are `SUBARRAY`, `BANK`, `BANK_GROUP`, `RANK`, `CHANNEL`,
+`LOGIC_DIE`, plus `HOST_MC` (PEs share the host memory controller). `CHIP`
+exists as a virtual layer but is degenerate -- not a distinct placement tier.
+
+Which levels are valid is **per technology**: a tier must be real silicon in
+that device's JEDEC organization, so the coarse anchor differs by device class
+-- DDRx is rank-centric, LPDDR5/GDDR6 are channel-centric, and only HBM has an
+in-package logic die.
+
+| Technology | Valid placement ladder (fine -> coarse) |
+|---|---|
+| DDR3 | `SUBARRAY -> BANK -> RANK` (no bank groups) |
+| DDR4, DDR5 | `SUBARRAY -> BANK -> BANK_GROUP -> RANK` |
+| LPDDR5, GDDR6 | `SUBARRAY -> BANK -> BANK_GROUP -> CHANNEL` |
+| HBM2, HBM3 | `SUBARRAY -> BANK -> BANK_GROUP -> CHANNEL -> LOGIC_DIE` |
+
+Finer placement = more PEs, each local to a smaller slice, and a deeper, more
+parallel device network. Coarser placement funnels more PEs through shared
+datapaths, so they contend more. The detailed model charges this contention for
+real -- including cross-rank contention under message-passing (see
+[network.md](network.md)).
 
 ## Characterization cache warehouse
 

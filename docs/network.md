@@ -22,6 +22,17 @@ credit-based flow control, deadlock-free routing.
   consecutive runs of the previously freeze-prone cells across two
   partitions, zero hangs. `PIMID_MPI_TRACE=1` still dumps per-rank
   transport wait events to /tmp for diagnosis.
+- **Message-passing models real cross-rank contention (1.3.1).** MPI ranks run
+  as separate processes with isolated per-rank Garnet timelines, but their
+  traffic is coupled through a simulated-time rendezvous: each message carries
+  its sender's simulated send-time, and the receiver advances deterministically
+  to `send_time + contention_wait + NoC_latency`. Concurrent messages queue on a
+  shared link-occupancy table (in the rank-shared SHM, keyed on simulated time),
+  so cross-rank messages contend on shared links the way shared-memory threads
+  already do under OpenMP. Per-rank instruction counts stay pure compute --
+  deterministic and scaling with the workload. The former within-rank
+  phantom-traffic approximation has been removed; the only intentional
+  approximation inside `detailed` is `noc.model: analytical`.
 
 - **DRAM device networks are trees.** A DRAM device's internal datapath is a
   hierarchical distribution fabric, not a mesh — PIMID emits a per-technology

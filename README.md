@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
-[![Version](https://img.shields.io/badge/version-1.3.1-green.svg)]()
+[![Version](https://img.shields.io/badge/version-1.3.2-green.svg)]()
 
 PIMID is a cycle-accurate simulator for Processing-in-Memory (PIM)
 architectures. Workloads execute under QEMU user-mode emulation; a TCG plugin
@@ -20,7 +20,9 @@ McPAT, and Garnet for timing, power, and area.
 - **2 network models** — `detailed` (cycle-accurate Garnet, per-technology
   DRAM trees, deadlock-free; the default) and `analytical` (closed-form
   hop + M/D/1 + MLP) over 8 topologies → [docs/network.md](docs/network.md)
-- **6 PE placement levels** — subarray to host-MC → [docs/memory.md](docs/memory.md)
+- **Per-technology PE placement** — subarray → bank → bank-group →
+  rank/channel → logic-die ladders (tech-specific; only HBM reaches the logic
+  die) → [docs/memory.md](docs/memory.md)
 - **Host-device co-simulation** — offload over interposer / CXL / PCIe /
   NVLink-class links → [docs/cosim.md](docs/cosim.md)
 - **4 simulation methods** — `exec`, `trace-gen`, `trace`, `synthetic`
