@@ -23,6 +23,8 @@
 /* Comm-window bracket: keep the rank core attached across transport polls. */
 #define ZSIM_MAGIC_OP_MPI_COMM_BEGIN (2055)
 #define ZSIM_MAGIC_OP_MPI_COMM_END   (2056)
+/* Phase-2 cross-rank NoC contention: charge sender queueing wait. */
+#define ZSIM_MAGIC_OP_MPI_CONTEND    (2057)
 
 #ifdef __x86_64__
 #define HOOKS_STR  "HOOKS"
@@ -70,8 +72,14 @@ struct __attribute__((aligned(64))) PimidMpiParams {
     uint32_t dst_pe;
     uint64_t msg_size;
     uint64_t msg_id;
-    uint64_t sim_now;        /* plugin -> guest: current sim-time (SEND) */
-    uint64_t sim_send_time;  /* guest -> plugin: message send-time (RECV) */
+    uint64_t sim_now;          /* plugin -> guest: current sim-time (SEND) */
+    uint64_t sim_send_time;    /* guest -> plugin: message send-time (RECV) */
+    uint64_t sim_contend_wait; /* guest -> plugin: cross-rank contention wait */
+    uint64_t noc_lat;          /* plugin -> guest: real per-message NoC cost
+                                * (Garnet RTT) = occupancy reserve duration */
+    uint32_t noc_detailed;     /* plugin -> guest: 1=detailed (cycle-accurate)
+                                * Garnet -> apply contention; 0=analytical */
+    uint32_t _pad;
 };
 
 /* Register this thread's MPI parameter block address with ZSim.

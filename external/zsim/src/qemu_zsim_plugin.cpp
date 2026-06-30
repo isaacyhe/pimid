@@ -114,6 +114,7 @@ static std::atomic<uint64_t> roi_transition_count{0};
 #define ZSIM_MAGIC_OP_PRICE_RESUME  2054  /* resume address-routed pricing */
 #define ZSIM_MAGIC_OP_MPI_COMM_BEGIN 2055 /* open MPI comm window (keep core attached) */
 #define ZSIM_MAGIC_OP_MPI_COMM_END   2056 /* close MPI comm window */
+#define ZSIM_MAGIC_OP_MPI_CONTEND    2057 /* charge sender cross-rank contention wait (Phase 2) */
 
 /* Per-thread MPI comm-window flag. While set (bracketed by COMM_BEGIN/END from
  * libpimid_mpi), the rank's blocking transport sleeps do NOT trigger a
@@ -385,7 +386,6 @@ void SimEnd() {
     }
 
     if (zinfo->garnetNetwork) {
-        // (async coordinator removed -- detailed always drains synchronously)
         zinfo->garnetNetwork->setTotalCycles(zinfo->globPhaseCycles);
         std::string garnetStatsPath = std::string(zinfo->outputDir) + "/garnet_stats.txt";
         zinfo->garnetNetwork->writeStatsFile(garnetStatsPath.c_str());
@@ -684,20 +684,60 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
     struct MpiParamsBlock {
         uint32_t src_pe, dst_pe;
         uint64_t msg_size, msg_id;
-        uint64_t sim_now;        /* plugin -> guest: current sim-time (SEND) */
-        uint64_t sim_send_time;  /* guest -> plugin: message send-time (RECV) */
+        uint64_t sim_now;          /* plugin -> guest: current sim-time (SEND) */
+        uint64_t sim_send_time;    /* guest -> plugin: message send-time (RECV) */
+        uint64_t sim_contend_wait; /* guest -> plugin: cross-rank contention wait */
+        uint64_t noc_lat;          /* plugin -> guest: real per-message NoC cost
+                                    * (Garnet-computed RTT) = the cross-rank
+                                    * occupancy reservation duration (SEND) */
+        uint32_t noc_detailed;     /* plugin -> guest: 1 if the NoC model is the
+                                    * cycle-accurate (detailed) Garnet, 0 for the
+                                    * analytical/simple model -> contention is
+                                    * applied ONLY when this is 1 (SEND) */
+        uint32_t _pad;
     };
     MpiParamsBlock* gp = (MpiParamsBlock*)zinfo->mpiParamsAddr[tid];
     MpiParamsBlock params;
     /* In QEMU user-mode, guest and host share address space for data */
     memcpy(&params, gp, sizeof(params));
 
+    /* MPI_CONTEND (Phase 2): the sender computed a cross-rank queueing wait
+     * against the shared occupancy table; charge it as idle CYCLES on this
+     * core (the shared outbound link to the destination was busy). Cycles only
+     * via addDelay -- instruction counts stay pure compute. */
+    if (op == ZSIM_MAGIC_OP_MPI_CONTEND) {
+        uint64_t wait = params.sim_contend_wait;
+        Core* cc = cores[tid];
+        if (cc && wait > 0) {
+            cc->addDelay((uint32_t)std::min<uint64_t>(wait, 0xFFFFFFFFull));
+        }
+        if (zinfo && wait > 0) {
+            __sync_fetch_and_add(&zinfo->mpiStats.totalLatency, wait);
+        }
+        if (getenv("PIMID_DEBUG_CONTEND")) {
+            info("Thread %d: MPI_CONTEND src=%u dst=%u size=%lu wait=%lu",
+                 tid, params.src_pe, params.dst_pe,
+                 (unsigned long)params.msg_size, (unsigned long)wait);
+        }
+        return;
+    }
+
     const bool isRecv = (op == ZSIM_MAGIC_OP_MPI_RECV);
 
     /* SEND: publish the current simulated time so the sender can stamp the
-     * outgoing message with its send-time (read back by libpimid_mpi). */
+     * outgoing message with its send-time (read back by libpimid_mpi), plus
+     * tell the guest whether the NoC model is the cycle-accurate (detailed)
+     * Garnet -- cross-rank contention is applied ONLY in detailed mode
+     * (analytical/simple is the single intentional approximation, and a native
+     * run with no plugin never reaches this and leaves the flag at its default
+     * 0). The real per-message NoC cost (noc_lat) is filled in below once
+     * computed and used by the guest as the occupancy reservation duration. */
     if (!isRecv) {
         gp->sim_now = zinfo->globPhaseCycles;
+        gp->noc_detailed =
+            (zinfo->garnetNetwork && zinfo->garnetNetwork->isCycleAccurate())
+                ? 1u : 0u;
+        gp->noc_lat = 0;
     }
 
     if (params.src_pe == params.dst_pe) return;
@@ -754,6 +794,14 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         }
     }
 
+    /* SEND: publish the real per-message NoC cost so the guest can use it as the
+     * cross-rank occupancy reservation duration (no magic-number flit constant).
+     * In detailed mode this is the Garnet-computed RTT; in analytical mode the
+     * guest ignores it (noc_detailed==0 -> contention skipped). */
+    if (!isRecv) {
+        gp->noc_lat = nocLat;
+    }
+
     /* 3. Charge timing as CYCLES (not instructions) so instr counts reflect
      *    pure compute and stay deterministic.  Use addDelay(), which advances
      *    the core's clock without inflating its instruction count. */
@@ -767,16 +815,22 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
          * and we charge nothing. Falls back to plain latency when the message
          * carries no stamp (e.g. legacy path). */
         uint64_t curCyc = c ? c->getCycles() : 0;
+        /* Phase-2: the receiver's rendezvous arrival includes the cross-rank
+         * contention wait stamped by the sender:
+         *   arrival = send_time + contend_wait + hierLat + nocLat            */
         uint64_t arrival = (params.sim_send_time > 0)
-                               ? (params.sim_send_time + (uint64_t)totalLat)
+                               ? (params.sim_send_time + params.sim_contend_wait
+                                  + (uint64_t)totalLat)
                                : (curCyc + (uint64_t)totalLat);
         uint64_t delta = (arrival > curCyc) ? (arrival - curCyc) : 0;
         chargedCycles = delta;
         if (c && delta > 0) c->addDelay((uint32_t)std::min<uint64_t>(delta, 0xFFFFFFFFull));
         if (getenv("PIMID_DEBUG_RDV")) {
-            info("Thread %d: MPI_RECV src=%u dst=%u size=%lu send_time=%lu cur=%lu "
-                 "lat=%u arrival=%lu delta=%lu", tid, params.src_pe, params.dst_pe,
-                 (unsigned long)params.msg_size, (unsigned long)params.sim_send_time,
+            info("Thread %d: MPI_RECV src=%u dst=%u size=%lu send_time=%lu cwait=%lu "
+                 "cur=%lu lat=%u arrival=%lu delta=%lu", tid, params.src_pe,
+                 params.dst_pe, (unsigned long)params.msg_size,
+                 (unsigned long)params.sim_send_time,
+                 (unsigned long)params.sim_contend_wait,
                  (unsigned long)curCyc, totalLat, (unsigned long)arrival,
                  (unsigned long)delta);
         }
@@ -798,7 +852,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
  * Check if a magic op code is an MPI op.
  */
 static inline bool isMpiMagicOp(uint64_t op) {
-    return op >= ZSIM_MAGIC_OP_MPI_REGISTER && op <= ZSIM_MAGIC_OP_MPI_COMM_END;
+    return op >= ZSIM_MAGIC_OP_MPI_REGISTER && op <= ZSIM_MAGIC_OP_MPI_CONTEND;
 }
 
 /**

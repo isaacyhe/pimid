@@ -530,13 +530,13 @@ public:
      * Direct per-access Garnet injection from PE-MIs.
      *
      * Thread-safe: acquires garnetLock_.  Does NOT reset network state
-     * between calls — residual buffer/credit state from prior packets
-     * creates natural contention.
-     *
-     * To model concurrent traffic contention (multiple packets in-flight),
-     * also injects tagged phantom packets representing recent traffic from
-     * other PEs before injecting the real packet.  Uses tag-based matching
-     * to identify and dequeue the correct packet.
+     * between calls — residual buffer/credit state from prior in-flight
+     * packets carries over, so back-to-back injections see real network
+     * state.  One real, tag-matched packet is injected per call; the
+     * tag identifies it for dequeue.  Cross-rank contention (the only
+     * concurrency MPI's sequential per-rank sends actually have) is
+     * modeled by the shared occupancy table in libpimid_mpi, NOT by any
+     * within-rank background traffic.
      *
      * Returns one-way latency in Garnet cycles (caller doubles for RTT).
      */
@@ -560,21 +560,6 @@ public:
             if (!gem5::EventQueue::instance().processOneEvent()) {
                 gem5::curTickRef() = injectTime;
                 break;
-            }
-        }
-
-        // ── Inject phantom traffic for contention ────────────────
-        // Replay recent traffic from other PEs as concurrent background
-        // load.  This makes the real packet compete for network resources.
-        for (size_t i = 0; i < recentTraffic_.size(); i++) {
-            auto& [rSrc, rDst, rTime] = recentTraffic_[i];
-            if (rSrc != src && rSrc < numNodes_ && rDst < numNodes_) {
-                auto phantom = std::make_shared<gem5::ruby::SimpleMessage>(
-                    rSrc, rDst, gem5::ruby::MessageSizeType::Data,
-                    gem5::curTickRef());
-                phantom->setTag(0);  // tag=0 means phantom (not tracked)
-                toNetBufs_[rSrc][0]->enqueue(phantom, gem5::curTickRef(),
-                                             uint64_t(1));
             }
         }
 
@@ -604,15 +589,8 @@ public:
                         gem5::curTickRef() - injectTime);
                     break;
                 }
-                // Phantom or old packet — discard and keep ticking
+                // Older real packet still draining — discard and keep ticking
                 continue;
-            }
-
-            // Also drain ready packets at other destinations (phantoms)
-            for (uint32_t d : phantomDsts_) {
-                while (fromNetBufs_[d][0]->isReady(gem5::curTickRef())) {
-                    fromNetBufs_[d][0]->dequeue(gem5::curTickRef());
-                }
             }
 
             if (!gem5::EventQueue::instance().processOneEvent()) {
@@ -624,9 +602,6 @@ public:
             // Timeout — use simple model fallback
             latCycles = getAnalyticalLatency(src, dst);
         }
-
-        // Record this traffic for future phantom injection
-        recordTraffic_(src, dst, injectTime);
 
         // Save garnet time
         garnetTick_ = gem5::curTickRef();
@@ -648,11 +623,6 @@ public:
     }
 
 private:
-    // Recent traffic window for phantom injection
-    static constexpr size_t kTrafficWindowSize = 16;
-    std::vector<std::tuple<uint32_t, uint32_t, uint64_t>> recentTraffic_;
-    std::unordered_set<uint32_t> phantomDsts_;  // destinations of current phantoms
-
     // ── Phase-level batch: record all PE remote accesses with their
     //    real ZSim cycle timestamps, then replay through Garnet.
     struct BatchAccess { uint32_t src, dst; uint64_t cycle; };
@@ -661,23 +631,6 @@ private:
     std::atomic<uint32_t> batchAvgLatency_{0};
     volatile uint64_t batchLastPhase_ = 0;
     lock_t batchLock_;
-
-    // (The former async background-coordinator was REMOVED 2026-06-11: its
-    // wall-clock-coupled rolling-EWMA accounting biased detailed results by
-    // up to 2x (MPI) / 36% (OMP) vs the synchronous reference. detailed now
-    // ALWAYS drains synchronously; use noc.model=analytical for speed.)
-
-    void recordTraffic_(uint32_t src, uint32_t dst, uint64_t time) {
-        recentTraffic_.push_back({src, dst, time});
-        if (recentTraffic_.size() > kTrafficWindowSize) {
-            recentTraffic_.erase(recentTraffic_.begin());
-        }
-        // Update phantom destination set for drain
-        phantomDsts_.clear();
-        for (auto& [s, d, t] : recentTraffic_) {
-            phantomDsts_.insert(d);
-        }
-    }
 
 public:
 

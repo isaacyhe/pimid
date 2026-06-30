@@ -48,6 +48,12 @@
  * reported cycle/instr totals are deterministic (wall-clock poll invisible). */
 #define ZSIM_MAGIC_OP_MPI_COMM_BEGIN 2055
 #define ZSIM_MAGIC_OP_MPI_COMM_END   2056
+/* Phase-2 cross-rank NoC contention: after the sender computes its contention
+ * wait against the shared occupancy table, it emits this op so the plugin
+ * charges the wait as idle CYCLES on the sender's core (the shared outbound
+ * link to the destination was busy). The same wait is also stamped onto the
+ * message so the receiver's rendezvous arrival accounts for it. */
+#define ZSIM_MAGIC_OP_MPI_CONTEND    2057
 
 struct __attribute__((aligned(64))) PimidMpiParams {
     uint32_t src_pe;
@@ -61,6 +67,20 @@ struct __attribute__((aligned(64))) PimidMpiParams {
      * time (send_time + latency) instead of the wall-clock poll duration. */
     uint64_t sim_now;
     uint64_t sim_send_time;
+    /* Cross-rank shared-link queueing wait (cycles), computed by libpimid_mpi
+     * against the shared occupancy table. On SEND this is charged to the
+     * sender's core (MPI_CONTEND); on RECV it is added to the rendezvous
+     * arrival = sim_send_time + sim_contend_wait + hierLat + nocLat. */
+    uint64_t sim_contend_wait;
+    /* Filled by the plugin on SEND: the real per-message NoC cost (Garnet RTT)
+     * used as the occupancy reservation duration -- NOT a magic flit constant. */
+    uint64_t noc_lat;
+    /* Filled by the plugin on SEND: 1 if the NoC model is the cycle-accurate
+     * (detailed) Garnet, 0 for analytical/simple (or a native run with no
+     * plugin). Cross-rank contention is applied ONLY when this is 1, so the
+     * analytical model -- the single intentional approximation -- skips it. */
+    uint32_t noc_detailed;
+    uint32_t _pad;
 };
 
 static thread_local PimidMpiParams tl_mpi_params;
@@ -98,7 +118,8 @@ struct MessageSlot {
     uint32_t  chunk_idx;  /* 0..n_chunks-1 */
     uint32_t  n_chunks;
     uint32_t  msg_id;
-    uint64_t  sim_send_time; /* sender's simulated send-time (cycles) */
+    uint64_t  sim_send_time;    /* sender's simulated send-time (cycles) */
+    uint64_t  sim_contend_wait; /* cross-rank contention wait (cycles, Phase 2) */
     char      payload[PIMID_MPI_MAX_MSG_BYTES];
 };
 
@@ -125,12 +146,28 @@ struct Mailbox {
     MessageSlot     slots[PIMID_MPI_RING_SLOTS];
 };
 
+/* Phase-2 cross-rank NoC contention occupancy table.
+ *
+ * busy_until[p] holds the simulated cycle until which contention point p is
+ * occupied. A point is, by default, keyed on the destination node
+ * (dst_pe % g_contend_points) so concurrent messages aimed at the same node
+ * contend (captures hotspots). The array is fixed-size at the maximum point
+ * count; the active modulus g_contend_points (<= MAX) selects the granularity.
+ * Protected by occ_lk (CAS spinlock, same wait-free discipline as the
+ * mailboxes). Keyed purely on simulated send-time, so it is independent of
+ * wall-clock except for the tie order of simultaneous reservations. */
+#define PIMID_MPI_CONTEND_MAX_POINTS 256
+
 struct SharedHeader {
     /* Barrier: lock-free generation barrier (atomics only) */
     volatile int     barrier_count;
     volatile int     barrier_gen;
     int              nranks;
     int              _pad;
+    /* Cross-rank contention occupancy (Phase 2). */
+    volatile uint32_t occ_lk;     /* CAS spinlock guarding busy_until[] */
+    uint32_t          _pad2;
+    volatile uint64_t busy_until[PIMID_MPI_CONTEND_MAX_POINTS];
     /* Mailboxes follow: g_shared->mailboxes[0..nranks-1] */
     Mailbox          mailboxes[0];
 };
@@ -147,6 +184,39 @@ static inline void mb_unlock(Mailbox* mb) {
     mb->lk = 0;
 }
 
+/* ---- Cross-rank contention config + occupancy lock ----
+ *
+ * Cross-rank NoC contention is ALWAYS active in detailed mode (no opt-in env
+ * flag): the plugin tells the guest, per SEND, whether the NoC model is the
+ * cycle-accurate Garnet (noc_detailed) and supplies the real per-message NoC
+ * cost (noc_lat) used as the reservation duration. In analytical/simple mode
+ * (the single intentional approximation) noc_detailed is 0 and contention is
+ * skipped. Native runs (no plugin) leave noc_detailed 0 -> no contention.
+ *
+ * The reservation duration is the real Garnet-computed message latency, so the
+ * default models an unsaturated network: the per-message duration is small
+ * relative to the sim-time spacing between sends, so contention is near-inert
+ * for low-occupancy traffic (correct: no queueing when the link is idle) and
+ * grows monotonically as traffic collides on the same point.
+ *   PIMID_MPI_CONTEND_POINTS   number of contention points (default 64; fewer
+ *                              points => more shared => more collisions). Keyed
+ *                              per destination (dst_pe % points).
+ *   PIMID_DEBUG_CONTEND        1=print each reservation (point/wait/busy) */
+static uint32_t g_contend_points = 64;
+static int      g_contend_dbg = 0;
+
+static inline void occ_lock(SharedHeader* h) {
+    for (int spin = 0; ; spin++) {
+        if (__sync_bool_compare_and_swap(&h->occ_lk, 0u, 1u)) return;
+        if (spin < 64) { __asm__ __volatile__("pause"); continue; }
+        usleep(20);
+    }
+}
+static inline void occ_unlock(SharedHeader* h) {
+    __sync_synchronize();
+    h->occ_lk = 0;
+}
+
 /* ---- Process-local state ---- */
 
 static int            g_rank = -1;
@@ -158,6 +228,35 @@ static int            g_shm_fd = -1;
 static bool           g_we_created_shm = false;
 static std::atomic<bool> g_initialized{false};
 static std::atomic<int>  g_next_request{1};
+
+/* Reserve the contention point for a message sent at sim-time send_time that
+ * occupies the shared link for `dur` cycles (the real Garnet-computed per-
+ * message NoC cost), and return the queueing wait (cycles) the message must
+ * absorb because the shared link was still busy with earlier traffic. The
+ * reservation advances busy_until[point] to the message's completion time.
+ * Returns 0 when no shm is mapped (solo run) or the duration is 0. */
+static uint64_t contend_reserve(int dst_pe, uint64_t send_time, uint64_t dur) {
+    if (g_shared == nullptr || dur == 0) return 0;
+    uint32_t pts = g_contend_points;
+    if (pts < 1) pts = 1;
+    if (pts > PIMID_MPI_CONTEND_MAX_POINTS) pts = PIMID_MPI_CONTEND_MAX_POINTS;
+    uint32_t point = (uint32_t)(dst_pe < 0 ? 0 : dst_pe) % pts;
+
+    occ_lock(g_shared);
+    uint64_t busy  = g_shared->busy_until[point];
+    uint64_t wait  = (busy > send_time) ? (busy - send_time) : 0;
+    uint64_t start = (busy > send_time) ? busy : send_time;
+    g_shared->busy_until[point] = start + dur;
+    occ_unlock(g_shared);
+
+    if (g_contend_dbg) {
+        fprintf(stderr, "[contend r%d] dst=%d point=%u send=%lu busy=%lu "
+                "dur=%lu wait=%lu\n", g_rank, dst_pe, point,
+                (unsigned long)send_time, (unsigned long)busy,
+                (unsigned long)dur, (unsigned long)wait);
+    }
+    return wait;
+}
 
 /* ---- Helpers ---- */
 
@@ -186,16 +285,30 @@ static void inject_timing_send(int src_pe, int dst_pe, uint64_t msg_size) {
     zsim_magic_op(ZSIM_MAGIC_OP_MPI_SEND);
 }
 
-/* RECV-direction timing op. The caller supplies the message's send-time stamp;
- * the plugin advances this rank's core to the deterministic arrival time
- * (send_time + latency). */
+/* RECV-direction timing op. The caller supplies the message's send-time stamp
+ * and its cross-rank contention wait; the plugin advances this rank's core to
+ * the deterministic arrival time (send_time + contend_wait + latency). */
 static void inject_timing_recv(int src_pe, int dst_pe, uint64_t msg_size,
-                               uint64_t send_time) {
-    tl_mpi_params.src_pe        = (uint32_t)src_pe;
-    tl_mpi_params.dst_pe        = (uint32_t)dst_pe;
-    tl_mpi_params.msg_size      = msg_size;
-    tl_mpi_params.sim_send_time = send_time;
+                               uint64_t send_time, uint64_t contend_wait) {
+    tl_mpi_params.src_pe           = (uint32_t)src_pe;
+    tl_mpi_params.dst_pe           = (uint32_t)dst_pe;
+    tl_mpi_params.msg_size         = msg_size;
+    tl_mpi_params.sim_send_time    = send_time;
+    tl_mpi_params.sim_contend_wait = contend_wait;
     zsim_magic_op(ZSIM_MAGIC_OP_MPI_RECV);
+}
+
+/* Charge the sender's cross-rank contention wait (shared outbound link busy)
+ * as idle cycles on this rank's core. Cycles only -- instr counts stay pure
+ * compute. Emitted ONCE per send (wait may be 0) so the counted-instruction
+ * stream is independent of how many sends actually queued; bracketed by the
+ * comm window so the op itself is not counted -> instr counts stay pure and
+ * deterministic regardless of wall-clock contention. The CALLER brackets this
+ * (and contend_reserve's lock spin) inside the comm window so neither the op
+ * nor the lock-spin/usleep is counted. */
+static void inject_contend(uint64_t contend_wait) {
+    tl_mpi_params.sim_contend_wait = contend_wait;
+    zsim_magic_op(ZSIM_MAGIC_OP_MPI_CONTEND);
 }
 
 static void register_mpi_params(void) {
@@ -272,6 +385,10 @@ static bool open_or_create_shm(int rank, int nranks, const char* shm_name) {
         g_shared->barrier_count = 0;
         g_shared->barrier_gen   = 0;
         g_shared->nranks        = nranks;
+        g_shared->occ_lk        = 0;
+        for (int i = 0; i < PIMID_MPI_CONTEND_MAX_POINTS; i++) {
+            g_shared->busy_until[i] = 0;
+        }
         for (int i = 0; i < nranks; i++) {
             Mailbox* mb = &g_shared->mailboxes[i];
             mb->lk = 0;
@@ -318,7 +435,7 @@ static void trace_init(int rank) {
 /* Push one chunk to the dest mailbox. Blocks if ring is full. */
 static int send_chunk(int dest, int tag, const char* data, uint32_t size,
                       uint32_t chunk_idx, uint32_t n_chunks, uint32_t msg_id,
-                      uint64_t send_time) {
+                      uint64_t send_time, uint64_t contend_wait) {
     Mailbox* mb = &g_shared->mailboxes[dest];
     MPITRACE("send_enter dest=%d tag=%d chunk=%u/%u", dest, tag, chunk_idx, n_chunks);
     /* Bracket the transport (poll + payload copy) so the simulator keeps the
@@ -338,8 +455,9 @@ static int send_chunk(int dest, int tag, const char* data, uint32_t size,
     slot->size          = size;
     slot->chunk_idx     = chunk_idx;
     slot->n_chunks      = n_chunks;
-    slot->msg_id        = msg_id;
-    slot->sim_send_time = send_time;
+    slot->msg_id           = msg_id;
+    slot->sim_send_time    = send_time;
+    slot->sim_contend_wait = contend_wait;
     if (data && size > 0) memcpy(slot->payload, data, size);
     mb->tail = (mb->tail + 1) % PIMID_MPI_RING_SLOTS;
     mb->count++;
@@ -390,6 +508,20 @@ int MPI_Init(int *argc, char ***argv) {
     g_rank   = env_r ? atoi(env_r) : 0;
     if (g_nranks < 1) g_nranks = 1;
     if (g_rank < 0)   g_rank = 0;
+
+    /* Cross-rank contention config (read once). Contention itself is always
+     * active in detailed mode -- only the granularity is tunable here. */
+    {
+        const char* cp = getenv("PIMID_MPI_CONTEND_POINTS");
+        if (cp && *cp) {
+            long v = atol(cp);
+            if (v < 1) v = 1;
+            if (v > PIMID_MPI_CONTEND_MAX_POINTS) v = PIMID_MPI_CONTEND_MAX_POINTS;
+            g_contend_points = (uint32_t)v;
+        }
+        const char* cd = getenv("PIMID_DEBUG_CONTEND");
+        g_contend_dbg = (cd && cd[0] == '1') ? 1 : 0;
+    }
 
     trace_init(g_rank);
 
@@ -461,15 +593,34 @@ int MPI_Send(const void *buf, int count, MPI_Datatype datatype,
     uint64_t send_time = tl_mpi_params.sim_now;
     uint32_t msg_id    = (uint32_t)tl_mpi_params.msg_id;
 
+    /* Reserve the shared contention point at the message's sim send-time and
+     * charge the resulting queueing wait on this (sender) core. The reservation
+     * duration is the REAL per-message NoC cost (noc_lat) the plugin just
+     * computed from Garnet -- no magic flit constant. The same wait is stamped
+     * onto each chunk so the receiver's rendezvous arrival accounts for it too.
+     * Keyed on sim send-time -> independent of wall clock. The whole block
+     * (occupancy lock spin + CONTEND op) is bracketed by the comm window so none
+     * of it is counted -> instr counts stay pure compute and deterministic.
+     * Applied ONLY in detailed mode (noc_detailed): analytical/simple -- the one
+     * intentional approximation -- and native runs skip it automatically. */
+    uint64_t contend_wait = 0;
+    if (tl_mpi_params.noc_detailed) {
+        uint64_t dur = tl_mpi_params.noc_lat;
+        mpi_comm_begin();
+        contend_wait = contend_reserve(dest, send_time, dur);
+        inject_contend(contend_wait);
+        mpi_comm_end();
+    }
+
     if (nbytes == 0) {
-        send_chunk(dest, tag, nullptr, 0, 0, 1, msg_id, send_time);
+        send_chunk(dest, tag, nullptr, 0, 0, 1, msg_id, send_time, contend_wait);
     } else {
         uint32_t n_chunks = (uint32_t)((nbytes + PIMID_MPI_MAX_MSG_BYTES - 1)
                                        / PIMID_MPI_MAX_MSG_BYTES);
         size_t left = nbytes;
         for (uint32_t i = 0; i < n_chunks; i++) {
             uint32_t take = (uint32_t)((left < PIMID_MPI_MAX_MSG_BYTES) ? left : PIMID_MPI_MAX_MSG_BYTES);
-            send_chunk(dest, tag, p, take, i, n_chunks, msg_id, send_time);
+            send_chunk(dest, tag, p, take, i, n_chunks, msg_id, send_time, contend_wait);
             p += take; left -= take;
         }
     }
@@ -496,17 +647,19 @@ int MPI_Recv(void *buf, int count, MPI_Datatype datatype,
      * receive chunks of the next message in order. */
     MessageSlot slot;
     uint64_t send_time = 0;
+    uint64_t contend_wait = 0;
     do {
         recv_slot(&slot);
         if (last_src < 0) last_src = slot.src;
-        send_time = slot.sim_send_time;   /* all chunks share the send stamp */
+        send_time    = slot.sim_send_time;     /* all chunks share the stamp */
+        contend_wait = slot.sim_contend_wait;  /* and the contention wait */
         size_t space = (nbytes > written) ? (nbytes - written) : 0;
         size_t take = (slot.size < space) ? slot.size : space;
         if (p && take > 0) memcpy(p + written, slot.payload, take);
         written += take;
     } while (slot.chunk_idx + 1 < slot.n_chunks);
 
-    inject_timing_recv(last_src, g_rank, written, send_time);
+    inject_timing_recv(last_src, g_rank, written, send_time, contend_wait);
     return MPI_SUCCESS;
 }
 

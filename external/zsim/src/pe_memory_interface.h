@@ -281,7 +281,9 @@ public:
                     // ── parallel mode: per-thread isolated Garnet ──
                     // Charge this access on THIS thread's own network (per-access
                     // RTT), no shared lock, no cross-thread batch. Fast; contention
-                    // is approximated by the network's phantom-traffic model.
+                    // comes from the real residual VC/credit state carried over
+                    // between back-to-back injections (no synthetic background
+                    // traffic). For full cross-thread contention use detailed mode.
                     GarnetNetwork* tg = gn->threadLocalContext();
                     // Non-grid topologies (H-tree etc.) saturate the per-access
                     // cycle-accurate path -- residual VC state accumulates without
@@ -308,12 +310,11 @@ public:
                     gn->recordBatchAccess(srcNode, dstNode, req.cycle);
 
                     if (zinfo->numPhases > batchLastPhase_) {
-                        // ── Synchronous drain (the ONLY detailed accounting;
-                        // the async EWMA coordinator was removed -- it biased
-                        // results up to 2x): drain the batch on the critical
-                        // path at each phase boundary. Flag the drain so the
-                        // watchdog does not misread the frozen phase clock as
-                        // a fake-leave stall and blacklist hot futex sites.
+                        // ── Synchronous drain (the ONLY detailed accounting):
+                        // drain the batch on the critical path at each phase
+                        // boundary. Flag the drain so the watchdog does not
+                        // misread the frozen phase clock as a fake-leave stall
+                        // and blacklist hot futex sites.
                         __sync_fetch_and_add(&zinfo->hierarchy.nocInlineDrain, 1);
                         gn->processBatch(zinfo->numPhases, zinfo->phaseLength);
                         __sync_fetch_and_sub(&zinfo->hierarchy.nocInlineDrain, 1);
@@ -499,11 +500,9 @@ public:
         return en;
     }
 
-    // (The async EWMA coordinator and its PIMID_NOC_ASYNC toggle were REMOVED
-    // 2026-06-11: measured bias vs the synchronous reference was up to 2x on
-    // MPI (with a 30-76% run-to-run tail) and 0.8-36% on OMP. detailed now
-    // always drains synchronously; use noc.model=analytical when speed
-    // matters more than cycle accounting.)
+    // detailed mode always drains the shared Garnet synchronously per phase
+    // (see processBatch/runBatchDrain_); use noc.model=analytical when speed
+    // matters more than cycle accounting.
 
     // Topology-aware calibrated toggle (Fix B). Default ON: on GRID topologies
     // the calibrated model ADDS the M/D/1 contention + memory terms back onto
