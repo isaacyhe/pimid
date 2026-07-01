@@ -96,7 +96,8 @@ pim:
 | `pim.pe.compute_factor` | double | `1.0` | Cycles-per-instruction multiplier. Higher = slower compute. |
 | `pim.pe.access_factor` | double | `1.0` | Cycles per load/store. `0.0` = free local access (PUM). |
 | `pim.pe.throughput_factor` | double | `1.0` | Parallelism divider on instruction count. |
-| `pim.pe.operand_width` | int | `32` | Operand width in bits. DESCRIPTIVE ONLY -- does not affect simulated cycles or energy; model bit-serial/width cost via `compute_factor`. |
+| `pim.pe.bit_serial` | bool | `false` | Datapath model. `false` = bit-parallel (operand width has no cycle cost). `true` = bit-serial PUM (compute cost proportional to `operand_width`). |
+| `pim.pe.operand_width` | int | `32` | Operand width in bits. With `bit_serial: true`, compute cost scales linearly with width (a W-bit op = W bit-steps). Ignored when `bit_serial: false`. |
 | `pim.pe.energy_factor` | double | `1.0` | Per-op energy scale factor (reporting only, does not affect timing). |
 
 **Cycle model**: BBL cycles = `instructions * compute_factor / throughput_factor`, load/store = `access_factor` cycles each.

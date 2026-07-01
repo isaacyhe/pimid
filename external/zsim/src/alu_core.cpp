@@ -32,18 +32,18 @@
 
 ALUCore::ALUCore(g_string& _name, double _computeFactor, double _accessFactor,
                  double _throughputFactor, int _operandWidth, double _energyFactor,
-                 PEMemoryInterface* mi, uint32_t srcId)
+                 PEMemoryInterface* mi, uint32_t srcId, bool _bitSerial)
     : Core(_name), computeFactor(_computeFactor), accessFactor(_accessFactor),
       throughputFactor(std::max(_throughputFactor, 1e-9)),
-      operandWidth(_operandWidth), energyFactor(_energyFactor),
+      operandWidth(_operandWidth), energyFactor(_energyFactor), bitSerial(_bitSerial),
       mi_(mi), srcId_(srcId) {
     instrs = 0;
     curCycle = 0;
     phaseEndCycle = 0;
 
-    info("ALU Core '%s': compute=%.2f, access=%.2f, throughput=%.2f, width=%d, energy=%.2f, mi=%s",
-         name.c_str(), computeFactor, accessFactor, throughputFactor, operandWidth, energyFactor,
-         mi_ ? "wired" : "none");
+    info("ALU Core '%s': compute=%.2f, access=%.2f, throughput=%.2f, width=%d, serial=%s, energy=%.2f, mi=%s",
+         name.c_str(), computeFactor, accessFactor, throughputFactor, operandWidth,
+         bitSerial ? "yes" : "no", energyFactor, mi_ ? "wired" : "none");
 }
 
 uint64_t ALUCore::getPhaseCycles() const {
@@ -85,8 +85,12 @@ void ALUCore::join() {
 inline void ALUCore::bbl(BblInfo* bblInfo) {
     instrs += bblInfo->instrs;
 
-    // Cycle model: instructions × compute_factor / throughput_factor
-    curCycle += (uint64_t)(bblInfo->instrs * computeFactor / throughputFactor);
+    // Datapath mode: bit-serial charges ~W bit-steps per op (cost proportional to
+    // operand width, W-bit op = W single-bit steps); bit-parallel (default) charges
+    // one step regardless of width, like a full-width ALU. So bit_serial = false
+    // leaves compute cost independent of operand_width (backward-compatible).
+    uint64_t steps = bitSerial ? (uint64_t)std::max(operandWidth, 1) : 1ull;
+    curCycle += (uint64_t)(bblInfo->instrs * computeFactor * steps / throughputFactor);
 }
 
 // Static callback functions for Pin instrumentation

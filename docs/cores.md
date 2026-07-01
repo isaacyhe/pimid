@@ -25,17 +25,24 @@ pim:
     compute_factor: 10.0    # cycles per op (e.g. tRAS-scale for PUM)
     access_factor: 0.0      # memory access cost scale (0 = free local access)
     throughput_factor: 1.0  # issue throughput scale
-    operand_width: 32       # operand bit-width -- DESCRIPTIVE ONLY (see note)
+    bit_serial: false       # datapath: false = bit-parallel (default), true = bit-serial
+    operand_width: 32       # operand bit-width (affects cycles only when bit_serial: true)
     energy_factor: 1.0      # per-op energy scale for reporting only
 ```
 
 `compute_factor`, `access_factor`, and `throughput_factor` scale the simulated
-cycles (compute cost per op, per-access cost, and issue-parallelism divisor
-respectively). `operand_width` and `energy_factor` do **not** affect cycles:
-`energy_factor` scales reported energy only, and `operand_width` is descriptive
-metadata (echoed in the config banner) that influences neither cycles nor
-energy. To model a bit-serial or width-dependent compute cost, fold it into
-`compute_factor` (e.g. a W-bit bit-serial op costs ~W x the 1-bit op cost).
+cycles; `energy_factor` scales reported energy only. `bit_serial` selects the
+datapath model and, together with `operand_width`, sets how operand width affects
+compute cost:
+
+- **`bit_serial: false` (default -- bit-parallel):** a full-width ALU processes
+  any operand in one step, so `operand_width` does **not** affect cycles (it is
+  descriptive). This is backward-compatible -- existing configs are unchanged.
+- **`bit_serial: true` (bit-serial PUM):** a W-bit operation costs ~W bit-steps,
+  so compute cost scales linearly with `operand_width` (`operand_width: 32` is
+  ~32x a single-bit op; `operand_width: 1` is the bit-serial primitive). Use this
+  to model processing-using-memory (PUM) datapaths; `compute_factor` sets the
+  per-bit-step cost.
 
 ## Memory-level parallelism (MLP)
 

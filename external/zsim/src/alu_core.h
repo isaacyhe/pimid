@@ -57,12 +57,13 @@ class ALUCore : public Core {
         uint64_t roiBaseInstrs = 0;
         uint64_t roiBaseCycle  = 0;
 
-        // 5 ALU scaling factors for design space exploration
+        // 6 ALU scaling factors for design space exploration
         double computeFactor;      // cycles-per-instruction multiplier (default 1.0)
         double accessFactor;       // cycles per load/store (default 1.0)
         double throughputFactor;   // parallelism divider on instruction count (default 1.0)
         int    operandWidth;       // operand bit-width (default 32)
         double energyFactor;       // per-op energy scale for reporting (default 1.0)
+        bool   bitSerial;          // true = bit-serial (compute cost ~ operandWidth); false = parallel (default)
 
         // PE memory interface (nullptr = simple model only, no hierarchy)
         PEMemoryInterface* mi_;
@@ -74,7 +75,7 @@ class ALUCore : public Core {
     public:
         ALUCore(g_string& _name, double _computeFactor = 1.0, double _accessFactor = 1.0,
                 double _throughputFactor = 1.0, int _operandWidth = 32, double _energyFactor = 1.0,
-                PEMemoryInterface* mi = nullptr, uint32_t srcId = 0);
+                PEMemoryInterface* mi = nullptr, uint32_t srcId = 0, bool _bitSerial = false);
         void initStats(AggregateStat* parentStat);
 
         uint64_t getInstrs() const {return instrs;}

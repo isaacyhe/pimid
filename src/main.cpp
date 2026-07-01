@@ -649,6 +649,7 @@ struct UnifiedConfig {
     double alu_throughput_factor;  // parallelism divider (default 1.0)
     int    alu_operand_width;      // operand bit-width (default 32)
     double alu_energy_factor;      // per-op energy scale for reporting (default 1.0)
+    bool   alu_bit_serial = false; // bit-serial datapath (false = parallel; default)
 
     // System configuration
     int frequency_mhz;
@@ -4231,6 +4232,7 @@ public:
             cfg << "            throughputFactor = " << config_.alu_throughput_factor << ";\n";
             cfg << std::defaultfloat;
             cfg << "            operandWidth = " << config_.alu_operand_width << ";\n";
+            cfg << "            bitSerial = " << (config_.alu_bit_serial ? "true" : "false") << ";\n";
             cfg << std::fixed << std::setprecision(2);
             cfg << "            energyFactor = " << config_.alu_energy_factor << ";\n";
             cfg << std::defaultfloat;
@@ -5416,7 +5418,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.4.5" << std::endl;
+    std::cout << "Version 1.4.6" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -5678,6 +5680,7 @@ int main(int argc, char** argv) {
                     config.alu_access_factor = yaml_cfg["pim"]["pe"]["access_factor"].as<double>(config.alu_access_factor);
                     config.alu_throughput_factor = yaml_cfg["pim"]["pe"]["throughput_factor"].as<double>(config.alu_throughput_factor);
                     config.alu_operand_width = yaml_cfg["pim"]["pe"]["operand_width"].as<int>(config.alu_operand_width);
+                    config.alu_bit_serial = yaml_cfg["pim"]["pe"]["bit_serial"].as<bool>(config.alu_bit_serial);
                     config.alu_energy_factor = yaml_cfg["pim"]["pe"]["energy_factor"].as<double>(config.alu_energy_factor);
                 }
                 // placement can live either at pim.placement (older flat form)
@@ -7815,6 +7818,7 @@ int main(int argc, char** argv) {
                         cfg << "            throughputFactor = " << config.alu_throughput_factor << ";\n";
                         cfg << std::defaultfloat;
                         cfg << "            operandWidth = " << config.alu_operand_width << ";\n";
+                        cfg << "            bitSerial = " << (config.alu_bit_serial ? "true" : "false") << ";\n";
                         cfg << std::fixed << std::setprecision(2);
                         cfg << "            energyFactor = " << config.alu_energy_factor << ";\n";
                         cfg << std::defaultfloat;

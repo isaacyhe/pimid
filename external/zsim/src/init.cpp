@@ -1372,6 +1372,7 @@ static void InitSystem(Config& config) {
                 double throughputFactor  = config.get<double>(prefix + "throughputFactor", 1.0);
                 uint32_t operandWidth   = config.get<uint32_t>(prefix + "operandWidth", 32);
                 double energyFactor     = config.get<double>(prefix + "energyFactor", 1.0);
+                bool bitSerial          = config.get<bool>(prefix + "bitSerial", false);
                 for (uint32_t j = 0; j < cores; j++) {
                     stringstream ss;
                     ss << group << "-" << j;
@@ -1398,7 +1399,7 @@ static void InitSystem(Config& config) {
                     }
                     Core* core = new (&aluCores[j]) ALUCore(name, computeFactor, accessFactor,
                                                              throughputFactor, operandWidth, energyFactor,
-                                                             mi, coreIdx);
+                                                             mi, coreIdx, bitSerial);
                     coreMap[group].push_back(core);
                     coreIdx++;
                     aluCoreIdx++;
