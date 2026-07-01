@@ -658,6 +658,30 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
     }
 
     if (op == ZSIM_MAGIC_OP_MPI_BARRIER) {
+        /* Per-rank ROI baseline (collective-first benchmarks). Some MPI
+         * kernels (e.g. bfs) reach their communication ONLY through
+         * collectives/barriers -- their frontier exchange is Allgather/
+         * Allgatherv (no MPI_Send/Recv), so the SEND/RECV baseline further
+         * down never fires and ranks 1..N-1 keep the ~40M MPI_Init wall-clock
+         * floor. Synthesize the baseline here too, on the FIRST barrier the
+         * plugin observes. Both bfs and stencil place a sync MPI_Barrier at
+         * kernel entry, immediately before rank 0's zsim_roi_begin(), so this
+         * lands at ~kernel entry (post-init: MPI_Init emits no barrier magic
+         * op, only MPI_REGISTER). rank 0 hits that same barrier first but then
+         * re-baselines at its real roi_begin (markRoiBegin is idempotent -- it
+         * just re-snapshots the current instant), so rank 0 stays exact; a
+         * rank that later also does SEND/RECV skips the block below (flag
+         * already set), preserving the 1.3.3 stencil path. */
+        if (zinfo && !mpi_roi_baselined) {
+            mpi_roi_baselined = true;
+            for (uint32_t c = 0; c < zinfo->numCores; c++)
+                if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
+            snapshotRoiBaseCyc();
+            if (getenv("PIMID_DEBUG_RDV"))
+                info("Thread %d: synthesized per-rank ROI baseline at first "
+                     "MPI BARRIER (cyc=%lu)", tid,
+                     (unsigned long)roiRelCycles(tid));
+        }
         /* Barrier: all ranks synchronize via tree reduction.
          * With Garnet: inject real traffic for log2(N) rounds of exchanges.
          * Without: analytical estimate proportional to rank count. */

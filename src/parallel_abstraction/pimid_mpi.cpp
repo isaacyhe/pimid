@@ -849,6 +849,57 @@ int MPI_Alltoall(const void *sendbuf, int sendcount, MPI_Datatype sendtype,
     return MPI_SUCCESS;
 }
 
+int MPI_Gatherv(const void *sendbuf, int sendcount, MPI_Datatype sendtype,
+                void *recvbuf, const int *recvcounts, const int *displs,
+                MPI_Datatype recvtype, int root, MPI_Comm comm) {
+    size_t rtsz = dtype_size(recvtype);
+    if (g_rank != root) {
+        MPI_Send(sendbuf, sendcount, sendtype, root, 0, comm);
+    } else {
+        char* rbuf = (char*)recvbuf;
+        for (int i = 0; i < g_nranks; i++) {
+            if (i == root) {
+                if (sendbuf && rbuf)
+                    memcpy(rbuf + (size_t)displs[i] * rtsz, sendbuf,
+                           (size_t)sendcount * dtype_size(sendtype));
+            } else {
+                /* FIFO-matched recv (source-agnostic, like the other
+                 * collectives): every rank rebuilds the same recvcounts/displs
+                 * from the preceding Allgather + Bcast, so all ranks agree on
+                 * the layout and the dedup stays consistent. Timing shim, not a
+                 * numerics oracle. */
+                MPI_Recv(rbuf + (size_t)displs[i] * rtsz, recvcounts[i], recvtype,
+                         i, 0, comm, MPI_STATUS_IGNORE);
+            }
+        }
+    }
+    return MPI_SUCCESS;
+}
+
+int MPI_Allgather(const void *sendbuf, int sendcount, MPI_Datatype sendtype,
+                  void *recvbuf, int recvcount, MPI_Datatype recvtype,
+                  MPI_Comm comm) {
+    /* Gather every rank's contribution onto rank 0, then broadcast the full
+     * concatenation back so all ranks hold it. Built on the shim's Send/Recv
+     * so it participates in the sim-time rendezvous / NoC-contention model. */
+    MPI_Gather(sendbuf, sendcount, sendtype, recvbuf, recvcount, recvtype, 0, comm);
+    MPI_Bcast(recvbuf, g_nranks * recvcount, recvtype, 0, comm);
+    return MPI_SUCCESS;
+}
+
+int MPI_Allgatherv(const void *sendbuf, int sendcount, MPI_Datatype sendtype,
+                   void *recvbuf, const int *recvcounts, const int *displs,
+                   MPI_Datatype recvtype, MPI_Comm comm) {
+    MPI_Gatherv(sendbuf, sendcount, sendtype, recvbuf, recvcounts, displs,
+                recvtype, 0, comm);
+    /* Broadcast the assembled buffer. displs are contiguous from 0 in the
+     * common case (e.g. bfs frontier gather), so [0,total) covers all data. */
+    int total = 0;
+    for (int i = 0; i < g_nranks; i++) total += recvcounts[i];
+    MPI_Bcast(recvbuf, total, recvtype, 0, comm);
+    return MPI_SUCCESS;
+}
+
 /* ---- Utility ---- */
 
 int MPI_Type_size(MPI_Datatype datatype, int *size) {

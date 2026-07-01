@@ -2205,13 +2205,38 @@ static void autoGeneratePEMemMap(UnifiedConfig& config) {
     // If already explicitly populated (from YAML explicit mode), leave as-is
     if (!config.pe_mem_map.empty()) return;
 
-    // Default: auto 1:1 with wraparound
+    // Default: auto STRIDED/DISTANT placement. Spread the PEs evenly across
+    // the device's memory-org units instead of clustering them at the front
+    // (the old `pe % num_orgs` packed PEs 0,1,2,... onto orgs 0,1,2,...). Under
+    // the distant-placement policy each PE taps its own evenly-spaced slice:
+    //   pe i -> org round(i * num_orgs / num_pes)
+    // When num_pes < num_orgs every PE lands on a distinct, maximally-separated
+    // unit; when num_pes >= num_orgs they wrap evenly (contiguous PEs share the
+    // nearest units in balanced groups). Only reached when pe_mem_map is empty
+    // (fully auto); explicit/sentinel YAML maps are handled above.
     config.pe_mem_map.clear();
     for (int pe = 0; pe < num_pes; pe++) {
         UnifiedConfig::PEMemMapping m;
         m.pe_id = pe;
-        m.mem_org_ids.push_back(pe % num_orgs);
+        long mo = std::lround((double)pe * (double)num_orgs / (double)num_pes);
+        if (mo < 0) mo = 0;
+        if (mo >= num_orgs) mo = num_orgs - 1;
+        m.mem_org_ids.push_back((int)mo);
         config.pe_mem_map.push_back(m);
+    }
+
+    // Loud one-line note whenever the auto map places >1 PE (i.e. it actually
+    // strides). Lets the placement / PE-count sweeps confirm the spread.
+    if (num_pes > 1) {
+        std::cerr << "NOTE: auto PE->mem-org map is STRIDED/DISTANT (num_pes="
+                  << num_pes << ", num_orgs=" << num_orgs << "): ";
+        int shown = num_pes <= 32 ? num_pes : 32;
+        for (int pe = 0; pe < shown; pe++) {
+            std::cerr << pe << "->" << config.pe_mem_map[pe].mem_org_ids[0]
+                      << (pe + 1 < shown ? " " : "");
+        }
+        if (shown < num_pes) std::cerr << " ...";
+        std::cerr << "\n";
     }
 }
 
@@ -5391,7 +5416,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.3.3" << std::endl;
+    std::cout << "Version 1.3.4" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
