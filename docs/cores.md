@@ -9,7 +9,7 @@ system scope, for hosts (`hosts[].core_type`) and devices (`devices[].pe_type`).
 | `simple_core` | Simple | Coarse functional core: IPC = 1 plus serial memory latency. Fast, approximate. Aliases: `Simple`, `simple`. |
 | `in_order_core` | InOrder | In-order core: IPC = 1 issue plus blocking memory latency plus a two-phase bound/weave pass (`CoreRecorder`) that charges cross-PE memory contention. Aliases: `InOrder`, `in-order`, `in_order`. |
 | `ooo_core` | Out-of-order | Out-of-order superscalar (Westmere-class: 128-entry ROB, 4-issue). Aliases: `OOO`, `OoO`, `ooo`, `out-of-order`. |
-| `null_core` | Null | No execution timing — memory/network-only studies. Aliases: `Null`, `null`. |
+| `null_core` | Null | No timing model: counts instructions (cycles == instrs, IPC = 1) and drops all memory accesses (empty load/store handlers, so no NoC traffic). An IPC = 1 control/upper-bound baseline. Aliases: `Null`, `null`. |
 
 Any other value is rejected with an error listing the valid names.
 
@@ -53,6 +53,13 @@ issue-accurate timing, use `ooo_core`.
 
 ## Notes
 
+- `null_core` issues NO memory or network traffic -- its load/store handlers are
+  empty, so it drops every access. It therefore cannot drive memory- or
+  network-only studies (use `alu_core` with `access_factor`/`compute_factor`).
+  Its role today is an IPC = 1 control/upper-bound baseline. Note: PIMID does not
+  switch core models mid-run, so `null_core` cannot yet fast-forward non-ROI
+  regions into a detailed core; true fast-forward (with trace-gen/replay) is
+  planned for 1.5.x.
 - In-order/out-of-order cores automatically upgrade a `simple` memory controller to
   `weavesimple` for correct weave-phase interaction.
 - Under QEMU user-mode execution the plugin decodes each guest x86 instruction
