@@ -52,6 +52,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 #include "scheduler.h"
 #include "stats.h"
 #include "zsim.h"
+#include "x86_decoder.h"  // minimal x86-64 decoder -> DynUops for the real OOO path
 
 /* ---- Globals (equivalent to zsim.cpp globals) ---- */
 
@@ -72,6 +73,34 @@ static volatile uint32_t perProcessEndFlag;
 /* BblInfo cache: translation block vaddr → BblInfo* */
 static std::unordered_map<uint64_t, BblInfo*> bblCache;
 static std::mutex bblCacheMutex;
+
+/* True if any OOO core exists in this config. Only then do we run the x86
+ * decoder to populate BblInfo->oooBbl with real DynUops (which ONLY the OOO
+ * core reads). When no OOO core is present we keep the byte-identical synthetic
+ * BblInfo path, so alu/simple/in_order/null behavior and sim speed are
+ * unchanged. Set once in qemu_plugin_install after cores are constructed. */
+static bool g_ooo_present = false;
+static bool g_ooo_decode_disabled = false;  /* PIMID_OOO_NODECODE=1 escape hatch */
+
+/* PIMID_OOO_DUMP=1: profile which opcodes fall to the generic/approx uop path,
+ * weighted by DYNAMIC execution count, to prioritize decoder coverage. The
+ * per-TB approx-key list is stored in the TbUserdata (set at decode, read at
+ * execution -> no lock), and dynamic hits accumulate into a lock-free atomic
+ * array indexed by the packed decode signature. Printed at plugin exit. Zero
+ * overhead when unset. */
+static bool g_ooo_dump = false;
+static bool g_ooo_nobranch = false;  /* PIMID_OOO_NOBRANCH=1: skip branch-pred feed */
+#define OOO_DUMP_SLOTS (4 * 256 * 8)   /* [mapIdx:2][op:8][reg:3] */
+static std::atomic<uint64_t> g_dumpDyn[OOO_DUMP_SLOTS];
+static std::atomic<uint64_t> g_dumpTotalInsns{0};
+static std::atomic<uint64_t> g_dumpApproxInsns{0};
+/* Per-TB cache of approx-key arrays for the dump profiler (keyed by tbAddr).
+ * Guarded by bblCacheMutex. Declared here so getOrCreateBblInfo can populate it. */
+static std::unordered_map<uint64_t, std::pair<uint16_t*, uint32_t>> g_tbApproxCache;
+
+/* Branch-predictor diagnostics: total dynamic conditional branches fed to the
+ * OOO predictor (per-core mispredicts live in the OOO stats / zsim.out). */
+static std::atomic<uint64_t> g_brDynCount{0};
 
 /* Per-vcpu → ZSim THREADID mapping */
 #define MAX_VCPUS 256
@@ -394,9 +423,53 @@ uint32_t TakeBarrier(uint32_t tid, uint32_t cid) {
     return newCid;
 }
 
+/* Dump the dynamic opcode profile for instructions that fell to the generic/
+ * approx uop path (PIMID_OOO_DUMP). Prints the top signatures by execution
+ * count so decoder coverage can be prioritized empirically. */
+static void dumpApproxProfile() {
+    if (!g_ooo_dump) return;
+    uint64_t tot = g_dumpTotalInsns.load();
+    uint64_t apx = g_dumpApproxInsns.load();
+    static const char* mapName[4] = {"1B ", "0F ", "0F38", "0F3A"};
+    // Collect nonzero slots
+    std::vector<std::pair<uint64_t,uint16_t>> v;
+    for (uint32_t s = 0; s < OOO_DUMP_SLOTS; s++) {
+        uint64_t c = g_dumpDyn[s].load();
+        if (c) v.push_back(std::make_pair(c, (uint16_t)s));
+    }
+    std::sort(v.begin(), v.end(), [](const std::pair<uint64_t,uint16_t>&a,
+                                     const std::pair<uint64_t,uint16_t>&b){return a.first>b.first;});
+    info("==== OOO DECODE DUMP: %lu dynamic instrs, %lu approx (%.1f%%), %zu distinct approx opcodes ====",
+         (unsigned long)tot, (unsigned long)apx,
+         tot ? (100.0*apx/tot) : 0.0, v.size());
+    uint32_t lim = v.size() < 80 ? (uint32_t)v.size() : 80;
+    for (uint32_t k = 0; k < lim; k++) {
+        int mi, op, reg; x86dec::dbgUnpack(v[k].second, mi, op, reg);
+        info("  APPROX map=%s op=0x%02x /%d  dyn=%lu (%.2f%%)",
+             mapName[mi & 3], op, reg, (unsigned long)v[k].first,
+             tot ? (100.0*v[k].first/tot) : 0.0);
+    }
+    info("==== END OOO DECODE DUMP ====");
+}
+
 /* ---- SimEnd ---- */
 
 void SimEnd() {
+    dumpApproxProfile();
+    if (g_ooo_present) {
+        uint64_t mispred = 0;
+        for (uint32_t c = 0; c < zinfo->numCores; c++)
+            if (zinfo->cores[c] && zinfo->cores[c]->asOOOCore()) {
+                // mispredBranches is a private OOO counter surfaced via stats;
+                // aggregate from the stats tree is complex here, so report the
+                // fed-branch total and let zsim.out carry per-core mispredicts.
+            }
+        (void)mispred;
+        uint64_t br = g_brDynCount.load();
+        info("==== OOO BRANCH PREDICTOR: %lu dynamic conditional branches resolved "
+             "and fed to the predictor (per-core mispredBranches in zsim.out) ====",
+             (unsigned long)br);
+    }
     if (__sync_bool_compare_and_swap(&perProcessEndFlag, 0, 1) == false) {
         while (true) {
             struct timespec tm;
@@ -515,7 +588,8 @@ static void JoinBbl(THREADID tid, ADDRINT addr, BblInfo* bbl) {
 
 /* ---- BblInfo cache ---- */
 
-static BblInfo* getOrCreateBblInfo(uint64_t tbAddr, uint32_t numInsns, uint32_t tbBytes) {
+static BblInfo* getOrCreateBblInfo(uint64_t tbAddr, uint32_t numInsns, uint32_t tbBytes,
+                                   struct qemu_plugin_tb* tb) {
     std::lock_guard<std::mutex> lock(bblCacheMutex);
 
     auto it = bblCache.find(tbAddr);
@@ -523,7 +597,41 @@ static BblInfo* getOrCreateBblInfo(uint64_t tbAddr, uint32_t numInsns, uint32_t 
         return it->second;
     }
 
-    BblInfo* bbl = createSimpleBblInfo(numInsns, tbBytes);
+    BblInfo* bbl = nullptr;
+    /* Decode into DynUops only when an OOO core is present (its oooBbl is the
+     * only reader). Cap TB size to keep the transient decode buffers bounded;
+     * oversized TBs fall back to the synthetic path (they are rare and
+     * typically not hot compute loops). */
+    if (g_ooo_present && !g_ooo_decode_disabled && tb && numInsns > 0 &&
+            numInsns <= 1024) {
+        static const uint32_t MAXI = 1024;
+        // Local per-call buffers (each thread translates independently; this is
+        // on the stack, ~17KB, acceptable). Gather bytes+lengths for the decoder.
+        static thread_local uint8_t bytesBuf[MAXI][16];
+        static thread_local uint8_t lenBuf[MAXI];
+        uint32_t n = numInsns;
+        for (uint32_t k = 0; k < n; k++) {
+            struct qemu_plugin_insn* insn = qemu_plugin_tb_get_insn(tb, k);
+            size_t sz = qemu_plugin_insn_size(insn);
+            if (sz > 16) sz = 16;
+            lenBuf[k] = (uint8_t)sz;
+            qemu_plugin_insn_data(insn, bytesBuf[k], 16);
+        }
+        if (g_ooo_dump) {
+            std::vector<uint16_t> keys;
+            bbl = x86dec::createDecodedBblInfo(tbAddr, bytesBuf, lenBuf, n, tbBytes, &keys);
+            uint16_t* arr = nullptr;
+            if (!keys.empty()) {
+                arr = (uint16_t*)malloc(keys.size() * sizeof(uint16_t));
+                memcpy(arr, keys.data(), keys.size() * sizeof(uint16_t));
+            }
+            g_tbApproxCache[tbAddr] = std::make_pair(arr, (uint32_t)keys.size());
+        } else {
+            bbl = x86dec::createDecodedBblInfo(tbAddr, bytesBuf, lenBuf, n, tbBytes);
+        }
+    } else {
+        bbl = createSimpleBblInfo(numInsns, tbBytes);
+    }
     bblCache[tbAddr] = bbl;
     return bbl;
 }
@@ -553,7 +661,27 @@ static uint32_t getOrAssignTid(unsigned int vcpu_index) {
 struct TbUserdata {
     BblInfo* bblInfo;
     uint64_t tbAddr;
+    /* PIMID_OOO_DUMP only: packed signatures of this TB's approx instructions,
+     * plus its total instruction count, for dynamic opcode profiling. */
+    uint16_t* approxKeys;
+    uint32_t  numApproxKeys;
+    uint32_t  numInsns;
+    /* Branch-predictor wiring (OOO only): if this TB ends in a conditional
+     * jcc, its PC and the two successor addresses, so the real taken/not-taken
+     * direction can be resolved from the actual next TB and fed to the OOO
+     * core's branch predictor. endsInCondBranch=false otherwise. */
+    bool      endsInCondBranch;
+    uint64_t  brPc;
+    uint64_t  brTakenTarget;
+    uint64_t  brFallthrough;
 };
+
+/* Per-thread pending conditional branch awaiting direction resolution (set when
+ * a jcc-terminated TB executes, resolved by the NEXT TB's address). OOO only. */
+static bool     g_brPending[MAX_THREADS];
+static uint64_t g_brPc[MAX_THREADS];
+static uint64_t g_brTaken[MAX_THREADS];
+static uint64_t g_brFall[MAX_THREADS];
 
 /* ---- QEMU Callbacks ---- */
 
@@ -601,7 +729,39 @@ static void insn_exec_cb(unsigned int vcpu_index, void *userdata) {
      * transport's own instructions (the wall-clock poll stays invisible). */
     if (mpi_comm_window[tid].load(std::memory_order_acquire)) return;
 
+    /* Dynamic opcode profiling (PIMID_OOO_DUMP): tally this TB's approx insns
+     * weighted by execution count. Lock-free (per-TB array + atomic slots). */
+    if (unlikely(g_ooo_dump)) {
+        g_dumpTotalInsns.fetch_add(tud->numInsns, std::memory_order_relaxed);
+        g_dumpApproxInsns.fetch_add(tud->numApproxKeys, std::memory_order_relaxed);
+        for (uint32_t k = 0; k < tud->numApproxKeys; k++) {
+            uint16_t key = tud->approxKeys[k];
+            if (key < OOO_DUMP_SLOTS)
+                g_dumpDyn[key].fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
     if (vcpu_index < MAX_VCPUS) in_zsim[vcpu_index] = true;
+    /* OOO branch predictor: resolve the previous TB's conditional branch using
+     * THIS TB's address as the real next-PC, then feed direction+targets to the
+     * core BEFORE bbl() (bbl() consumes branchPc when timing the prev BBL). Only
+     * OOO cores get branch callbacks, so other core types stay byte-identical. */
+    if (g_ooo_present && !g_ooo_nobranch && cores[tid] && cores[tid]->asOOOCore()) {
+        if (g_brPending[tid]) {
+            bool taken = (tud->tbAddr == g_brTaken[tid]);
+            fPtrs[tid].branchPtr(tid, g_brPc[tid], taken ? 1 : 0,
+                                 g_brTaken[tid], g_brFall[tid]);
+            g_brDynCount.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (tud->endsInCondBranch) {
+            g_brPending[tid] = true;
+            g_brPc[tid] = tud->brPc;
+            g_brTaken[tid] = tud->brTakenTarget;
+            g_brFall[tid] = tud->brFallthrough;
+        } else {
+            g_brPending[tid] = false;
+        }
+    }
     fPtrs[tid].bblPtr(tid, tud->tbAddr, tud->bblInfo);
     if (vcpu_index < MAX_VCPUS) in_zsim[vcpu_index] = false;
 }
@@ -1317,8 +1477,8 @@ static void tb_trans_cb(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
         tb_bytes += (uint32_t)qemu_plugin_insn_size(insn);
     }
 
-    /* Get or create BblInfo for this TB */
-    BblInfo* bblInfo = getOrCreateBblInfo(tb_addr, (uint32_t)n_insns, tb_bytes);
+    /* Get or create BblInfo for this TB (decodes DynUops when OOO is present) */
+    BblInfo* bblInfo = getOrCreateBblInfo(tb_addr, (uint32_t)n_insns, tb_bytes, tb);
 
     /* Allocate persistent userdata for this TB's callbacks.
      * QEMU may re-translate TBs, so we use the cached BblInfo.
@@ -1327,6 +1487,48 @@ static void tb_trans_cb(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
     TbUserdata* tud = (TbUserdata*)malloc(sizeof(TbUserdata));
     tud->bblInfo = bblInfo;
     tud->tbAddr = tb_addr;
+    tud->approxKeys = nullptr;
+    tud->numApproxKeys = 0;
+    tud->numInsns = (uint32_t)n_insns;
+    tud->endsInCondBranch = false;
+    tud->brPc = tud->brTakenTarget = tud->brFallthrough = 0;
+
+    /* OOO branch-predictor wiring: if this TB's last instruction is a conditional
+     * jcc, record its PC + both successor addresses so the real direction can be
+     * resolved from the next TB and driven into the OOO branch predictor. */
+    if (g_ooo_present && !g_ooo_decode_disabled && n_insns > 0) {
+        struct qemu_plugin_insn* last = qemu_plugin_tb_get_insn(tb, n_insns - 1);
+        uint64_t lpc = qemu_plugin_insn_vaddr(last);
+        size_t lsz = qemu_plugin_insn_size(last);
+        uint8_t lb[16];
+        qemu_plugin_insn_data(last, lb, sizeof(lb));
+        uint32_t p = 0;
+        while (p < lsz && (lb[p] == 0x2E || lb[p] == 0x3E)) p++;  /* branch hints */
+        int64_t rel = 0; bool isCond = false;
+        if (p < lsz && lb[p] >= 0x70 && lb[p] <= 0x7F && (p + 1) < lsz) {
+            rel = (int8_t)lb[p + 1]; isCond = true;                /* jcc rel8 */
+        } else if ((p + 5) < lsz + 1 && lb[p] == 0x0F &&
+                   lb[p + 1] >= 0x80 && lb[p + 1] <= 0x8F && (p + 5) < lsz) {
+            rel = (int32_t)((uint32_t)lb[p + 2] | ((uint32_t)lb[p + 3] << 8) |
+                            ((uint32_t)lb[p + 4] << 16) | ((uint32_t)lb[p + 5] << 24));
+            isCond = true;                                        /* jcc rel32 */
+        }
+        if (isCond) {
+            tud->endsInCondBranch = true;
+            tud->brPc = lpc;
+            tud->brFallthrough = lpc + lsz;
+            tud->brTakenTarget = lpc + lsz + (uint64_t)rel;
+        }
+    }
+
+    if (g_ooo_dump) {
+        std::lock_guard<std::mutex> lock(bblCacheMutex);
+        auto ai = g_tbApproxCache.find(tb_addr);
+        if (ai != g_tbApproxCache.end()) {
+            tud->approxKeys = ai->second.first;
+            tud->numApproxKeys = ai->second.second;
+        }
+    }
 
     bool bbl_registered = false;
 
@@ -1725,6 +1927,19 @@ int qemu_plugin_install(qemu_plugin_id_t id,
      *
      * ALU and Null cores are always placed in the device mask.
      * All other core types (OoO, Simple, Timing) go to the host mask. */
+    /* Detect any OOO core -> enable x86 decode of TBs into DynUops so the OOO
+     * engine runs its real dataflow pipeline instead of the synthetic path. */
+    g_ooo_decode_disabled = (getenv("PIMID_OOO_NODECODE") != nullptr);
+    g_ooo_dump = (getenv("PIMID_OOO_DUMP") != nullptr);
+    g_ooo_nobranch = (getenv("PIMID_OOO_NOBRANCH") != nullptr);
+    for (uint32_t i = 0; i < zinfo->numCores; i++) {
+        if (zinfo->cores[i] && zinfo->cores[i]->asOOOCore()) { g_ooo_present = true; break; }
+    }
+    if (g_ooo_present) {
+        info("[ZSim] OOO core present: x86 decode -> DynUops enabled (real out-of-order path)%s",
+             g_ooo_decode_disabled ? " [DISABLED via PIMID_OOO_NODECODE]" : "");
+    }
+
     host_mask.resize(zinfo->numCores, false);
     device_mask.resize(zinfo->numCores, false);
     for (uint32_t i = 0; i < zinfo->numCores; i++) {

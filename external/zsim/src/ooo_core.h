@@ -415,6 +415,16 @@ class OOOCore : public Core {
 
         uint64_t instrs, uops, bbls, approxInstrs, mispredBranches;
 
+        // QEMU-decoded OOO path instrumentation (option B). decodedBbls counts
+        // BBLs that ran the real dataflow pipeline (decoded DynUops present);
+        // syntheticBbls counts the 1-CPI fallback. memMismatch* count decoded
+        // vs runtime load/store count divergences handled by the tolerant
+        // drain. These prove the OOO improvement is decode-driven, not constant.
+        uint64_t decodedBbls = 0, syntheticBbls = 0;
+        uint64_t memMismatchLoads = 0, memMismatchStores = 0;
+        bool oooDebug = false;       // PIMID_OOO_DEBUG=1 -> per-BBL uop trace
+        uint32_t oooDebugBbls = 0;
+
         // ROI baselines: snapshot at roi_begin so reported cycles/instrs reflect
         // ONLY the region of interest. roiBaseCycle snapshots the unhalted-cycle
         // metric (cRec.getUnhaltedCycles(curCycle)). 0 until roi_begin fires.

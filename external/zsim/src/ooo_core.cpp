@@ -25,6 +25,7 @@
 
 #include "ooo_core.h"
 #include <algorithm>
+#include <cstdlib>
 #include <queue>
 #include <string>
 #include "bithacks.h"
@@ -72,6 +73,9 @@ OOOCore::OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name) : Core(_
     branchPc = 0;
 
     instrs = uops = bbls = approxInstrs = mispredBranches = 0;
+    decodedBbls = syntheticBbls = memMismatchLoads = memMismatchStores = 0;
+    oooDebug = (getenv("PIMID_OOO_DEBUG") != nullptr);
+    oooDebugBbls = 0;
 
     for (uint32_t i = 0; i < FWD_ENTRIES; i++) fwdArray[i].set((Address)(-1L), 0);
 }
@@ -103,6 +107,14 @@ void OOOCore::initStats(AggregateStat* parentStat) {
     approxInstrsStat->init("approxInstrs", "Instrs with approx uop decoding", &approxInstrs);
     ProxyStat* mispredBranchesStat = new ProxyStat();
     mispredBranchesStat->init("mispredBranches", "Mispredicted branches", &mispredBranches);
+    ProxyStat* decodedBblsStat = new ProxyStat();
+    decodedBblsStat->init("decodedBbls", "BBLs run through the decoded dataflow OOO path", &decodedBbls);
+    ProxyStat* syntheticBblsStat = new ProxyStat();
+    syntheticBblsStat->init("syntheticBbls", "BBLs run through the synthetic 1-CPI fallback", &syntheticBbls);
+    ProxyStat* memMismatchLoadsStat = new ProxyStat();
+    memMismatchLoadsStat->init("memMismatchLoads", "Decoded/runtime load-count divergences drained", &memMismatchLoads);
+    ProxyStat* memMismatchStoresStat = new ProxyStat();
+    memMismatchStoresStat->init("memMismatchStores", "Decoded/runtime store-count divergences drained", &memMismatchStores);
 
     coreStat->append(cyclesStat);
     coreStat->append(cCyclesStat);
@@ -111,6 +123,10 @@ void OOOCore::initStats(AggregateStat* parentStat) {
     coreStat->append(bblsStat);
     coreStat->append(approxInstrsStat);
     coreStat->append(mispredBranchesStat);
+    coreStat->append(decodedBblsStat);
+    coreStat->append(syntheticBblsStat);
+    coreStat->append(memMismatchLoadsStat);
+    coreStat->append(memMismatchStoresStat);
 
 #ifdef OOO_STALL_STATS
     profFetchStalls.init("fetchStalls",  "Fetch stalls");  coreStat->append(&profFetchStalls);
@@ -262,7 +278,18 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                         }
                         dispatchCycle = MAX(lastStoreAddrCommitCycle+1, dispatchCycle);
 
-                        Address addr = loadAddrs[loadIdx++];
+                        // Tolerant consumption: the decoder's static load count
+                        // may not exactly match QEMU's dynamic per-access
+                        // callbacks (e.g. rep-string ops, or instructions the
+                        // minimal decoder approximates). If the decoded stream
+                        // expects more loads than were delivered, treat the
+                        // extra as a predicated/no-op load (0-cycle) rather than
+                        // reading past the buffer. Any UNDER-count (runtime
+                        // loads beyond the decoded uops) is drained after the
+                        // loop so memory traffic/NoC stay accounted.
+                        Address addr;
+                        if (loadIdx < loads) { addr = loadAddrs[loadIdx++]; }
+                        else { addr = (Address)-1L; memMismatchLoads++; }
                         uint64_t reqSatisfiedCycle = dispatchCycle;
                         if (addr != ((Address)-1L)) {
                             reqSatisfiedCycle = l1d->load(addr, dispatchCycle) + L1D_LAT;
@@ -290,11 +317,16 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
                         }
                         dispatchCycle = MAX(lastStoreAddrCommitCycle+1, dispatchCycle);
 
-                        Address addr = storeAddrs[storeIdx++];
-                        uint64_t reqSatisfiedCycle = l1d->store(addr, dispatchCycle) + L1D_LAT;
-                        cRec.record(curCycle, dispatchCycle, reqSatisfiedCycle);
-
-                        fwdArray[(addr>>2) & (FWD_ENTRIES-1)].set(addr, reqSatisfiedCycle);
+                        // Tolerant consumption (see UOP_LOAD note above).
+                        Address addr;
+                        if (storeIdx < stores) { addr = storeAddrs[storeIdx++]; }
+                        else { addr = (Address)-1L; memMismatchStores++; }
+                        uint64_t reqSatisfiedCycle = dispatchCycle;
+                        if (addr != ((Address)-1L)) {
+                            reqSatisfiedCycle = l1d->store(addr, dispatchCycle) + L1D_LAT;
+                            cRec.record(curCycle, dispatchCycle, reqSatisfiedCycle);
+                            fwdArray[(addr>>2) & (FWD_ENTRIES-1)].set(addr, reqSatisfiedCycle);
+                        }
 
                         commitCycle = reqSatisfiedCycle;
                         lastStoreCommitCycle = MAX(lastStoreCommitCycle, reqSatisfiedCycle);
@@ -319,8 +351,30 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
             lastCommitCycle = commitCycle;
         }
 
-        assert_msg(loadIdx == loads, "%s: loadIdx(%d) != loads (%d)", name.c_str(), loadIdx, loads);
-        assert_msg(storeIdx == stores, "%s: storeIdx(%d) != stores (%d)", name.c_str(), storeIdx, stores);
+        // Drain any runtime accesses not consumed by the decoded uop stream
+        // (decoder under-counted: e.g. an instruction it approximated still
+        // performed real memory accesses via QEMU's mem_cb). Push them through
+        // the cache so DRAM/NoC traffic stays accounted; charge at lastCommit.
+        uint64_t drainCycle = MAX(lastCommitCycle, curCycle);
+        while (loadIdx < loads) {
+            Address a = loadAddrs[loadIdx++];
+            memMismatchLoads++;
+            if (a != (Address)-1L) {
+                uint64_t r = l1d->load(a, drainCycle) + L1D_LAT;
+                cRec.record(curCycle, drainCycle, r);
+                lastCommitCycle = MAX(lastCommitCycle, r);
+            }
+        }
+        while (storeIdx < stores) {
+            Address a = storeAddrs[storeIdx++];
+            memMismatchStores++;
+            if (a != (Address)-1L) {
+                uint64_t r = l1d->store(a, drainCycle) + L1D_LAT;
+                cRec.record(curCycle, drainCycle, r);
+                lastCommitCycle = MAX(lastCommitCycle, r);
+            }
+        }
+        decodedBbls++;
 
     } else {
         /* Synthetic BBL (trace/QEMU path): no decoded uops available.
@@ -354,12 +408,23 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
         // frozen at ~0 and the core reported "cycles: 0" with nonzero instrs.
         // Applying it implements the stated 1-CPI + memory-latency model.
         curCycle = lastCommitCycle;
+        syntheticBbls++;
     }
 
     instrs += bblInstrs;
     uops += bbl->uops;
     bbls++;
     approxInstrs += bbl->approxInstrs;
+
+    // Env-gated visibility into the decoded OOO path (proves the improvement is
+    // decode-driven, not a constant): dump the first few decoded BBLs' uop mix
+    // and the cycles they advanced.
+    if (unlikely(oooDebug) && bbl->uops > 0 && oooDebugBbls < 40) {
+        oooDebugBbls++;
+        info("[ooo-dbg %s] bbl@0x%lx instrs=%u uops=%u approx=%u loads=%u stores=%u "
+             "curCycle=%lu", name.c_str(), (unsigned long)bblAddr, bblInstrs,
+             bbl->uops, bbl->approxInstrs, loads, stores, (unsigned long)curCycle);
+    }
 
 #ifdef BBL_PROFILING
     if (approxInstrs) Decoder::profileBbl(bbl->bblIdx);
