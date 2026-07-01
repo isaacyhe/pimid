@@ -125,6 +125,33 @@ static std::atomic<uint64_t> roi_transition_count{0};
  * byte-for-byte unchanged. */
 static std::atomic<bool> mpi_comm_window[MAX_THREADS];
 
+/* Per-rank ROI baseline synthesis (see handleMpiMagicOp): the MPI benchmarks
+ * call zsim_roi_begin() ONLY on rank 0, so ranks 1..N-1 never snapshot an ROI
+ * baseline and would report whole-program (init-dominated, non-scaling) cycles/
+ * instrs. This flag lets the plugin synthesize a per-rank baseline at the first
+ * communication op (~kernel entry) for any rank that never saw roi_begin. Each
+ * MPI rank is its own process, so a process-global flag is per-rank. */
+static bool mpi_roi_baselined = false;
+
+/* Per-core simulated cycle captured at the ROI baseline (markRoiBegin instant).
+ * The sim-time rendezvous stamps/compares send-times RELATIVE to this baseline
+ * so cross-rank timing is a function of real post-baseline work only -- NOT of
+ * the wall-clock-coupled globPhaseCycles floor each rank happens to carry when
+ * it reaches its baseline (that floor differs per rank by scheduling jitter, and
+ * leaking it into the rendezvous made the cross-rank critical path nondet). */
+static uint64_t mpi_roi_base_cyc[MAX_THREADS] = {0};
+
+/* Snapshot every core's ROI baseline cycle (call right after markRoiBegin). */
+static inline void snapshotRoiBaseCyc() {
+    for (uint32_t c = 0; c < zinfo->numCores && c < MAX_THREADS; c++)
+        if (zinfo->cores[c]) mpi_roi_base_cyc[c] = zinfo->cores[c]->getCycles();
+}
+/* This core's simulated cycle measured from its ROI baseline (floor-free). */
+static inline uint64_t roiRelCycles(uint32_t tid) {
+    uint64_t now = cores[tid] ? cores[tid]->getCycles() : 0;
+    return (now > mpi_roi_base_cyc[tid]) ? (now - mpi_roi_base_cyc[tid]) : 0;
+}
+
 /* Co-simulation: per-thread domain tracking and core-type masks */
 enum SimDomain { DOMAIN_HOST = 0, DOMAIN_DEVICE = 1 };
 static std::atomic<int> thread_domain[MAX_THREADS];    // default HOST
@@ -724,6 +751,28 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
 
     const bool isRecv = (op == ZSIM_MAGIC_OP_MPI_RECV);
 
+    /* Per-rank ROI baseline (THE MPI cycle-accounting fix). The benchmarks call
+     * zsim_roi_begin() only on rank 0, so ranks 1..N-1 never snapshot an ROI
+     * baseline: their reported cycles/instrs are whole-program, dominated by the
+     * fixed serial init + the wall-clock-pumped globPhaseCycles floor that forms
+     * during MPI_Init -- so every rank>0 reads a fixed ~40M regardless of --size
+     * or kernel, while only rank 0 scaled. On the FIRST real communication op
+     * (SEND/RECV ~= kernel entry, mirroring rank 0's roi_begin at the compute
+     * loop) synthesize the baseline for any rank that never saw roi_begin, so
+     * ALL ranks report kernel-relative, workload-scaling cycles/instrs. Each MPI
+     * rank is its own process, so mpi_roi_baselined is per-rank; rank 0 sets it
+     * in the roi_begin handler and is therefore left untouched here. */
+    if (!mpi_roi_baselined) {
+        mpi_roi_baselined = true;
+        for (uint32_t c = 0; c < zinfo->numCores; c++)
+            if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
+        snapshotRoiBaseCyc();
+        if (getenv("PIMID_DEBUG_RDV"))
+            info("Thread %d: synthesized per-rank ROI baseline at first MPI %s "
+                 "(cyc=%lu)", tid, isRecv ? "RECV" : "SEND",
+                 (unsigned long)(cores[tid] ? cores[tid]->getCycles() : 0));
+    }
+
     /* SEND: publish the current simulated time so the sender can stamp the
      * outgoing message with its send-time (read back by libpimid_mpi), plus
      * tell the guest whether the NoC model is the cycle-accurate (detailed)
@@ -731,9 +780,16 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
      * (analytical/simple is the single intentional approximation, and a native
      * run with no plugin never reaches this and leaves the flag at its default
      * 0). The real per-message NoC cost (noc_lat) is filled in below once
-     * computed and used by the guest as the occupancy reservation duration. */
+     * computed and used by the guest as the occupancy reservation duration.
+     *
+     * The send-time stamp is the sender core's ROI-baseline-RELATIVE work clock
+     * (roiRelCycles = getCycles() - this rank's baseline), NOT globPhaseCycles
+     * and NOT the raw getCycles(). Raw getCycles() carries the per-rank wall-
+     * clock floor; subtracting the baseline makes the stamp a function of real
+     * post-baseline work only, so the receiver's rendezvous (arrival = send_time
+     * + latency) resolves deterministically and floor-free across ranks. */
     if (!isRecv) {
-        gp->sim_now = zinfo->globPhaseCycles;
+        gp->sim_now = roiRelCycles(tid);
         gp->noc_detailed =
             (zinfo->garnetNetwork && zinfo->garnetNetwork->isCycleAccurate())
                 ? 1u : 0u;
@@ -813,8 +869,10 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
          * deterministic arrival time = send_time + latency. If the receiver is
          * already past that point in sim-time, the message is already available
          * and we charge nothing. Falls back to plain latency when the message
-         * carries no stamp (e.g. legacy path). */
-        uint64_t curCyc = c ? c->getCycles() : 0;
+         * carries no stamp (e.g. legacy path). curCyc is the receiver's ROI-
+         * baseline-RELATIVE work clock so it compares like-for-like against the
+         * sender's baseline-relative send-time stamp (both floor-free). */
+        uint64_t curCyc = roiRelCycles(tid);
         /* Phase-2: the receiver's rendezvous arrival includes the cross-rank
          * contention wait stamped by the sender:
          *   arrival = send_time + contend_wait + hierLat + nocLat            */
@@ -839,7 +897,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         if (getenv("PIMID_DEBUG_RDV")) {
             info("Thread %d: MPI_SEND src=%u dst=%u size=%lu sim_now=%lu lat=%u",
                  tid, params.src_pe, params.dst_pe, (unsigned long)params.msg_size,
-                 (unsigned long)zinfo->globPhaseCycles, totalLat);
+                 (unsigned long)roiRelCycles(tid), totalLat);
         }
     }
 
@@ -963,6 +1021,10 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
         // array-init/setup that otherwise runs on the launcher PE and dominates.
         for (uint32_t c = 0; c < zinfo->numCores; c++)
             if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
+        // This rank got a real roi_begin -> don't also synthesize a baseline at
+        // the first MPI op (see handleMpiMagicOp). rank 0 takes this path.
+        mpi_roi_baselined = true;
+        snapshotRoiBaseCyc();
         // Co-sim: the ROI IS the offload region. The launching thread (and
         // every thread spawned inside the region) executes on the DEVICE;
         // out-of-ROI code executes on the host. Ordinary workloads are
@@ -1121,6 +1183,10 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         // array-init/setup that otherwise runs on the launcher PE and dominates.
         for (uint32_t c = 0; c < zinfo->numCores; c++)
             if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
+        // This rank got a real roi_begin -> don't also synthesize a baseline at
+        // the first MPI op (see handleMpiMagicOp). rank 0 takes this path.
+        mpi_roi_baselined = true;
+        snapshotRoiBaseCyc();
         // Co-sim: ROI = offload region (see the twin handler above).
         if (g_cosim_mode && tid < MAX_THREADS) {
             thread_domain[tid].store(DOMAIN_DEVICE);
