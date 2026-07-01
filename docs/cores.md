@@ -7,7 +7,7 @@ system scope, for hosts (`hosts[].core_type`) and devices (`devices[].pe_type`).
 |---|---|---|
 | `alu_core` | ALU | Stripped-down PIM PE: 1 ALU, no caches. Behavior shaped by scaling factors (below). The default device PE. |
 | `simple_core` | Simple | Coarse functional core: IPC = 1 plus serial memory latency. Fast, approximate. Aliases: `Simple`, `simple`. |
-| `in_order_core` | InOrder | In-order core: IPC = 1 issue plus blocking memory latency plus a two-phase bound/weave pass (`CoreRecorder`) that charges cross-PE memory contention. Aliases: `InOrder`, `in-order`, `in_order`. |
+| `in_order_core` | InOrder | Decode-driven in-order pipeline: real RAW-dependency stalls, functional-unit latencies, and dual-issue in program order (no reordering), plus the cross-PE memory-contention weave (`CoreRecorder`). Aliases: `InOrder`, `in-order`, `in_order`. |
 | `ooo_core` | Out-of-order | Out-of-order superscalar (Westmere-class: 128-entry ROB, 4-issue). Aliases: `OOO`, `OoO`, `ooo`, `out-of-order`. |
 | `null_core` | Null | No timing model: counts instructions (cycles == instrs, IPC = 1) and drops all memory accesses (empty load/store handlers, so no NoC traffic). An IPC = 1 control/upper-bound baseline. Aliases: `Null`, `null`. |
 
@@ -46,19 +46,25 @@ See [network.md](network.md).
 
 ## Fidelity ladder (simple vs in-order vs out-of-order)
 
-`simple_core` and `in_order_core` are both **IPC = 1** models: each retires one
-instruction per cycle and blocks on the full memory-access latency (no
-instruction-level or memory-level parallelism). Only `ooo_core` consumes the
-decoded uops (below) to model ILP/MLP.
+`simple_core` is an **IPC = 1** model: one instruction per cycle plus full
+blocking memory latency, with no instruction- or memory-level parallelism. It is
+the optimistic per-instruction bound and the fast approximation.
 
-The sole difference between `in_order_core` and `simple_core` is the in-order
-core's second bound/weave pass (`CoreRecorder`), which accounts for **cross-PE
-memory contention**. When that contention is negligible -- e.g. PEs placed on
-disjoint memory units with private working sets -- the two produce essentially
-identical cycle counts; `in_order_core` pulls ahead of `simple_core` only when
-PEs actually contend for shared memory datapaths. Neither models per-instruction
-in-order pipeline effects (dependency/issue stalls); for dependency- and
-issue-accurate timing, use `ooo_core`.
+`in_order_core` is a decode-driven **in-order pipeline**: it consumes the decoded
+uops (below) and issues them in strict program order, stalling on real
+per-instruction RAW dependencies, functional-unit latencies, and
+issue-width/port contention -- with no reordering. Dependency chains it cannot
+hide push it *above* simple's IPC = 1 (e.g. FP-latency-bound stencil/gemv),
+while independent work that dual-issue overlaps pulls it slightly *below*; it
+also carries the cross-PE memory-contention weave (`CoreRecorder`). Net vs
+`simple` it runs roughly -4% to +25% across the kernel suite -- genuinely
+distinct, not a rename.
+
+`ooo_core` adds out-of-order issue (128-entry ROB + reordering), hiding latency
+the in-order core must stall on, so `ooo <= in_order` on every kernel; the gap
+tracks each kernel's ILP/MLP. Use `in_order_core` for dependency/issue-accurate
+in-order timing, `ooo_core` for the reordered upper bound, `simple_core` for the
+fast IPC = 1 approximation.
 
 ## Notes
 
@@ -71,6 +77,13 @@ issue-accurate timing, use `ooo_core`.
   planned for 1.5.x.
 - In-order/out-of-order cores automatically upgrade a `simple` memory controller to
   `weavesimple` for correct weave-phase interaction.
+- `in_order_core` reuses the same in-tree x86 decoder as `ooo_core` (below) to
+  drive an in-order scoreboard: per-register ready-cycle tracking, dual-issue in
+  program order, functional-unit port contention, and load-use stalls (no
+  reordering). `PIMID_INORDER_NODECODE=1` restores the legacy IPC = 1 path;
+  `PIMID_INORDER_WIDTH` overrides the issue width (default 2). Diagnostics per
+  in-order core: `uops`, `decodedBbls`, `syntheticBbls`, `depStalls`,
+  `issueStalls`, `memMismatchLoads/Stores`.
 - Under QEMU user-mode execution the plugin decodes each guest x86 instruction
   into ZSim `DynUop`s (register read/write sets, latency class, functional-unit
   port, load/store markers) with a minimal in-tree x86-64 decoder

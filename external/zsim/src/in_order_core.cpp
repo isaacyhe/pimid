@@ -24,6 +24,9 @@
  */
 
 #include "in_order_core.h"
+#include <cstdlib>
+#include "bithacks.h"
+#include "decoder_simple.h"
 #include "filter_cache.h"
 #include "zsim.h"
 
@@ -31,7 +34,30 @@
 //#define DEBUG_MSG(args...) info(args)
 
 InOrderCore::InOrderCore(FilterCache* _l1i, FilterCache* _l1d, uint32_t _domain, g_string& _name)
-    : Core(_name), l1i(_l1i), l1d(_l1d), instrs(0), curCycle(0), cRec(_domain, _name) {}
+    : Core(_name), l1i(_l1i), l1d(_l1d), instrs(0), uops(0), bbls(0),
+      curCycle(0), cRec(_domain, _name) {
+    // PIMID_INORDER_NODECODE=1 -> legacy IPC=1 immediate path (A/B baseline).
+    decodeMode = (getenv("PIMID_INORDER_NODECODE") == nullptr);
+    // In-order superscalar issue width; 2 by default (dual-issue). Overridable
+    // via env for experimentation (not a YAML key). Clamped to [1, NUM_PORTS].
+    issueWidth = 2;
+    const char* w = getenv("PIMID_INORDER_WIDTH");
+    if (w) {
+        int v = atoi(w);
+        if (v >= 1 && v <= (int)NUM_PORTS) issueWidth = (uint32_t)v;
+    }
+
+    prevBbl = nullptr;
+    loads = stores = 0;
+    for (uint32_t i = 0; i < MAX_REGISTERS; i++) regScoreboard[i] = 0;
+    for (uint32_t i = 0; i < NUM_PORTS; i++) portFreeCycle[i] = 0;
+    memRespCycle = 0;
+    slotsUsed = 0;
+
+    decodedBbls = syntheticBbls = depStalls = issueStalls = 0;
+    memMismatchLoads = memMismatchStores = 0;
+    phaseEndCycle = 0;
+}
 
 uint64_t InOrderCore::getPhaseCycles() const {
     return curCycle % zinfo->phaseLength;
@@ -59,12 +85,41 @@ void InOrderCore::initStats(AggregateStat* parentStat) {
     instrsStat->init("instrs", "Simulated instructions");
     coreStat->append(instrsStat);
 
+    // In-order pipeline diagnostics (analogous to the OOO core).
+    ProxyStat* uopsStat = new ProxyStat();
+    uopsStat->init("uops", "Retired micro-ops", &uops);
+    coreStat->append(uopsStat);
+    ProxyStat* bblsStat = new ProxyStat();
+    bblsStat->init("bbls", "Basic blocks", &bbls);
+    coreStat->append(bblsStat);
+    ProxyStat* decodedBblsStat = new ProxyStat();
+    decodedBblsStat->init("decodedBbls", "BBLs run through the decoded in-order scoreboard", &decodedBbls);
+    coreStat->append(decodedBblsStat);
+    ProxyStat* syntheticBblsStat = new ProxyStat();
+    syntheticBblsStat->init("syntheticBbls", "BBLs run through the synthetic 1-CPI fallback", &syntheticBbls);
+    coreStat->append(syntheticBblsStat);
+    ProxyStat* depStallsStat = new ProxyStat();
+    depStallsStat->init("depStalls", "Cycles lost to RAW dependency stalls", &depStalls);
+    coreStat->append(depStallsStat);
+    ProxyStat* issueStallsStat = new ProxyStat();
+    issueStallsStat->init("issueStalls", "Cycles lost to issue-width/port stalls", &issueStalls);
+    coreStat->append(issueStallsStat);
+    ProxyStat* memMismatchLoadsStat = new ProxyStat();
+    memMismatchLoadsStat->init("memMismatchLoads", "Decoded/runtime load-count divergences drained", &memMismatchLoads);
+    coreStat->append(memMismatchLoadsStat);
+    ProxyStat* memMismatchStoresStat = new ProxyStat();
+    memMismatchStoresStat->init("memMismatchStores", "Decoded/runtime store-count divergences drained", &memMismatchStores);
+    coreStat->append(memMismatchStoresStat);
+
     parentStat->append(coreStat);
 }
 
 
 void InOrderCore::contextSwitch(int32_t gid) {
     if (gid == -1) {
+        // Do not simulate the lingering previous BBL across a context switch.
+        prevBbl = nullptr;
+        loads = stores = 0;
         l1i->contextSwitch();
         l1d->contextSwitch();
     }
@@ -81,28 +136,225 @@ void InOrderCore::leave() {
     cRec.notifyLeave(curCycle);
 }
 
+/* ---- Legacy immediate load/store (NODECODE path) ---- */
+
 void InOrderCore::loadAndRecord(Address addr) {
-    uint64_t startCycle = curCycle;
-    curCycle = l1d->load(addr, curCycle);
-    cRec.record(startCycle);
+    if (!decodeMode) {
+        uint64_t startCycle = curCycle;
+        curCycle = l1d->load(addr, curCycle);
+        cRec.record(startCycle);
+    } else {
+        if (loads < 256) loadAddrs[loads] = addr;
+        loads++;
+    }
 }
 
 void InOrderCore::storeAndRecord(Address addr) {
-    uint64_t startCycle = curCycle;
-    curCycle = l1d->store(addr, curCycle);
-    cRec.record(startCycle);
+    if (!decodeMode) {
+        uint64_t startCycle = curCycle;
+        curCycle = l1d->store(addr, curCycle);
+        cRec.record(startCycle);
+    } else {
+        if (stores < 256) storeAddrs[stores] = addr;
+        stores++;
+    }
 }
 
-void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
-    instrs += bblInfo->instrs;
-    curCycle += bblInfo->instrs;
+/* ---- Instruction fetch of the current BBL (serialized through L1I) ---- */
 
+inline void InOrderCore::ifetch(Address bblAddr, BblInfo* bblInfo) {
     Address endBblAddr = bblAddr + bblInfo->bytes;
-    for (Address fetchAddr = bblAddr; fetchAddr < endBblAddr; fetchAddr+=(1 << lineBits)) {
-        uint64_t startCycle = curCycle;
-        curCycle = l1i->load(fetchAddr, curCycle);
+    for (Address fetchAddr = bblAddr; fetchAddr < endBblAddr; fetchAddr += (1 << lineBits)) {
+        uint64_t startCycle = MAX(curCycle, memRespCycle);
+        uint64_t resp = l1i->load(fetchAddr, startCycle);
         cRec.record(startCycle);
+        memRespCycle = resp;
+        if (resp > curCycle) curCycle = resp;  // fetch stalls the in-order front-end
     }
+}
+
+/* ---- Synthetic 1-CPI fallback (no decoded uops for this BBL) ---- */
+
+inline void InOrderCore::simulateSyntheticBbl(BblInfo* bblInfo) {
+    uint64_t commitCycle = curCycle + bblInfo->instrs;  // 1-CPI compute
+    for (uint32_t i = 0; i < loads && i < 256; i++) {
+        Address addr = loadAddrs[i];
+        if (addr == (Address)-1L) continue;
+        uint64_t startCycle = MAX(commitCycle, memRespCycle);
+        uint64_t resp = l1d->load(addr, startCycle);
+        cRec.record(startCycle);
+        memRespCycle = resp;
+        commitCycle = resp;
+    }
+    for (uint32_t i = 0; i < stores && i < 256; i++) {
+        Address addr = storeAddrs[i];
+        if (addr == (Address)-1L) continue;
+        uint64_t startCycle = MAX(commitCycle, memRespCycle);
+        uint64_t resp = l1d->store(addr, startCycle);
+        cRec.record(startCycle);
+        memRespCycle = resp;
+        commitCycle = resp;
+    }
+    if (commitCycle > curCycle) curCycle = commitCycle;
+    syntheticBbls++;
+}
+
+/* ---- Real in-order scoreboard simulation of one BBL ---- */
+
+inline void InOrderCore::simulateDecodedBbl(BblInfo* bblInfo) {
+    DynBbl* db = &(bblInfo->oooBbl[0]);
+    uint32_t nUops = db->uops;
+    uint32_t loadIdx = 0, storeIdx = 0;
+    uint64_t lastDone = curCycle;
+
+    regScoreboard[0] = 0;  // SB_NONE is always ready
+
+    for (uint32_t i = 0; i < nUops; i++) {
+        DynUop* uop = &(db->uop[i]);
+
+        // --- RAW hazard: sources must be ready before issue (in-order stall) ---
+        uint64_t srcReady = MAX(regScoreboard[uop->rs[0]], regScoreboard[uop->rs[1]]);
+        uint64_t iss = curCycle;
+        if (srcReady > iss) { depStalls += (srcReady - iss); iss = srcReady; slotsUsed = 0; }
+
+        // --- Issue width: at most issueWidth independent uops per cycle ---
+        if (iss == curCycle) {
+            if (slotsUsed >= issueWidth) { iss++; issueStalls++; slotsUsed = 0; }
+        } else {
+            slotsUsed = 0;  // moved to a new issue cycle due to the RAW stall
+        }
+
+        // --- Functional-unit port contention (in-order: whole front-end waits) ---
+        uint8_t mask = uop->portMask ? uop->portMask : 0x01;
+        uint64_t bestFree = (uint64_t)-1L; int bestPort = -1;
+        for (uint32_t p = 0; p < NUM_PORTS; p++) {
+            if (mask & (1u << p)) {
+                if (portFreeCycle[p] < bestFree) { bestFree = portFreeCycle[p]; bestPort = p; }
+            }
+        }
+        if (bestPort < 0) { bestPort = 0; bestFree = portFreeCycle[0]; }
+        if (bestFree > iss) { issueStalls += (bestFree - iss); iss = bestFree; slotsUsed = 0; }
+
+        // Commit the issue at cycle `iss`.
+        portFreeCycle[bestPort] = iss + 1;  // 1 uop/cycle throughput on this port
+        slotsUsed++;
+        curCycle = iss;  // in-order issue cursor advances monotonically
+
+        // --- Execute / complete ---
+        uint64_t done;
+        if (uop->type == UOP_LOAD) {
+            Address addr;
+            if (loadIdx < loads) addr = loadAddrs[loadIdx++];
+            else { addr = (Address)-1L; memMismatchLoads++; }
+            if (addr != (Address)-1L) {
+                uint64_t startCycle = MAX(iss, memRespCycle);
+                uint64_t resp = l1d->load(addr, startCycle);
+                cRec.record(startCycle);
+                memRespCycle = resp;
+                done = resp;  // load-use latency gates the destination register
+            } else {
+                done = iss;   // predicated / mismatched -> 0-cycle
+            }
+        } else if (uop->type == UOP_STORE) {
+            Address addr;
+            if (storeIdx < stores) addr = storeAddrs[storeIdx++];
+            else { addr = (Address)-1L; memMismatchStores++; }
+            if (addr != (Address)-1L) {
+                uint64_t startCycle = MAX(iss, memRespCycle);
+                uint64_t resp = l1d->store(addr, startCycle);
+                cRec.record(startCycle);
+                memRespCycle = resp;
+                done = resp;
+            } else {
+                done = iss;
+            }
+        } else {
+            // UOP_GENERAL / UOP_STORE_ADDR / UOP_FENCE: fixed FU latency.
+            done = iss + uop->lat;
+        }
+
+        // --- Scoreboard: destination registers become ready at `done` ---
+        if (uop->rd[0]) regScoreboard[uop->rd[0]] = done;
+        if (uop->rd[1]) regScoreboard[uop->rd[1]] = done;
+        if (done > lastDone) lastDone = done;
+    }
+
+    // Drain any runtime memory accesses the decoded uop stream under-counted
+    // (approximated instructions still performed real accesses via QEMU's
+    // mem_cb): push them through the cache so DRAM/NoC traffic stays accounted.
+    while (loadIdx < loads) {
+        Address a = loadAddrs[loadIdx++];
+        memMismatchLoads++;
+        if (a != (Address)-1L) {
+            uint64_t startCycle = MAX(lastDone, memRespCycle);
+            uint64_t resp = l1d->load(a, startCycle);
+            cRec.record(startCycle);
+            memRespCycle = resp;
+            if (resp > lastDone) lastDone = resp;
+        }
+    }
+    while (storeIdx < stores) {
+        Address a = storeAddrs[storeIdx++];
+        memMismatchStores++;
+        if (a != (Address)-1L) {
+            uint64_t startCycle = MAX(lastDone, memRespCycle);
+            uint64_t resp = l1d->store(a, startCycle);
+            cRec.record(startCycle);
+            memRespCycle = resp;
+            if (resp > lastDone) lastDone = resp;
+        }
+    }
+
+    // In-order commit drains this BBL before the next: advance the core clock to
+    // the last completion. (BBLs are loop bodies here; this models no overlap
+    // across BBL boundaries -- a defensible simplification for a simple in-order
+    // core; intra-BBL dependency/latency/issue effects are fully captured.)
+    if (lastDone > curCycle) curCycle = lastDone;
+    slotsUsed = 0;
+    uops += nUops;
+    decodedBbls++;
+}
+
+/* ---- BBL entry point ---- */
+
+void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
+    if (!decodeMode) {
+        // Legacy IPC=1 immediate path (byte-identical A/B baseline).
+        instrs += bblInfo->instrs;
+        curCycle += bblInfo->instrs;
+        Address endBblAddr = bblAddr + bblInfo->bytes;
+        for (Address fetchAddr = bblAddr; fetchAddr < endBblAddr; fetchAddr += (1 << lineBits)) {
+            uint64_t startCycle = curCycle;
+            curCycle = l1i->load(fetchAddr, curCycle);
+            cRec.record(startCycle);
+        }
+        return;
+    }
+
+    // Deferred decoded path: simulate the PREVIOUS BBL now that its memory
+    // addresses have all been buffered (mem_cb fires between BBL callbacks).
+    if (!prevBbl) {
+        prevBbl = bblInfo;
+        loads = stores = 0;
+        return;
+    }
+
+    BblInfo* sim = prevBbl;
+    prevBbl = bblInfo;
+
+    instrs += sim->instrs;
+    bbls++;
+
+    if (sim->oooBbl[0].uops > 0) {
+        simulateDecodedBbl(sim);
+    } else {
+        simulateSyntheticBbl(sim);
+    }
+
+    loads = stores = 0;
+
+    // Fetch the current BBL's instructions (models L1I traffic + stalls).
+    ifetch(bblAddr, bblInfo);
 }
 
 
@@ -137,4 +389,3 @@ void InOrderCore::PredLoadAndRecordFunc(THREADID tid, ADDRINT addr, BOOL pred) {
 void InOrderCore::PredStoreAndRecordFunc(THREADID tid, ADDRINT addr, BOOL pred) {
     if (pred) static_cast<InOrderCore*>(cores[tid])->storeAndRecord(addr);
 }
-

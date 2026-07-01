@@ -34,17 +34,78 @@
 
 class FilterCache;
 
+/* Genuine in-order pipeline PE core.
+ *
+ * Historically this core modeled IPC=1 (curCycle += bblInstrs) plus blocking
+ * memory latency and a CoreRecorder weave for cross-PE contention -- which made
+ * it numerically identical to SimpleCore whenever there was no contention
+ * ("in-order in name only"). This version consumes the same x86-decoded DynUop
+ * stream the OOO core uses (BblInfo->oooBbl, populated by the plugin's
+ * x86_decoder.h when an in-order OR out-of-order core is present) and runs a
+ * real in-order scoreboard:
+ *
+ *   - uops issue in STRICT PROGRAM ORDER (the defining in-order property);
+ *   - a per-physical-register ready-cycle scoreboard stalls issue on RAW
+ *     hazards (a uop cannot issue until its source registers are ready);
+ *   - up to issueWidth INDEPENDENT uops may issue in one cycle, but the
+ *     front-end STOPS at the first uop that cannot issue (no reordering);
+ *   - functional-unit port contention is modeled from the decoder port masks;
+ *   - loads/stores go through the l1d cache path; a load's destination-register
+ *     readiness is gated on the returned latency (load-use stall), and memory
+ *     accesses are serialized (blocking L1) which also preserves the
+ *     CoreRecorder weave invariant.
+ *
+ * The CoreRecorder cross-PE contention weave is layered on top unchanged.
+ *
+ * Escape hatch: PIMID_INORDER_NODECODE=1 restores the exact legacy IPC=1
+ * immediate-processing path (byte-identical A/B baseline). A BBL with no decoded
+ * uops falls back to a per-BBL synthetic 1-CPI path that still drains buffered
+ * loads/stores through the cache so memory/NoC traffic never desyncs.
+ */
 class InOrderCore : public Core {
     private:
         FilterCache* l1i;
         FilterCache* l1d;
 
         uint64_t instrs;
+        uint64_t uops;
+        uint64_t bbls;
 
-        uint64_t curCycle; //phase 1 clock
+        uint64_t curCycle; //phase 1 clock (in-order issue/commit cursor)
         uint64_t phaseEndCycle; //phase 1 end clock
 
         CoreRecorder cRec;
+
+        // ---- In-order scoreboard state (decoded path) ----
+        // decodeMode: false when PIMID_INORDER_NODECODE is set -> legacy path.
+        bool decodeMode;
+        uint32_t issueWidth; // independent uops issuable per cycle (default 2)
+
+        BblInfo* prevBbl;    // deferred: simulate prev BBL once its mem addrs arrive
+
+        // Buffered memory addresses for the BBL currently executing (decode path)
+        Address loadAddrs[256];
+        Address storeAddrs[256];
+        uint32_t loads;
+        uint32_t stores;
+
+        // Per-physical-register ready cycle (timestamp a reg's value is available)
+        uint64_t regScoreboard[MAX_REGISTERS];
+        // Per functional-unit port: earliest cycle the port is free (1 uop/cyc)
+        static const uint32_t NUM_PORTS = 6;
+        uint64_t portFreeCycle[NUM_PORTS];
+        // Serialization cursor for the blocking L1 / cRec weave invariant: the
+        // response cycle of the last memory access threaded through the cache.
+        uint64_t memRespCycle;
+        uint32_t slotsUsed;  // uops already issued at the current issue cycle
+
+        // Diagnostics (analogous to the OOO core)
+        uint64_t decodedBbls;    // BBLs run through the decoded in-order scoreboard
+        uint64_t syntheticBbls;  // BBLs run through the 1-CPI synthetic fallback
+        uint64_t depStalls;      // cycles lost to RAW dependency stalls
+        uint64_t issueStalls;    // cycles lost to issue-width/port stalls
+        uint64_t memMismatchLoads;   // decoded/runtime load-count divergences drained
+        uint64_t memMismatchStores;  // decoded/runtime store-count divergences drained
 
         // ROI baselines: snapshot at roi_begin so reported cycles/instrs reflect
         // ONLY the region of interest. roiBaseCycle snapshots the unhalted-cycle
@@ -83,6 +144,13 @@ class InOrderCore : public Core {
         inline void storeAndRecord(Address addr);
         inline void bblAndRecord(Address bblAddr, BblInfo* bblInstrs);
         inline void record(uint64_t startCycle);
+
+        // Decoded in-order scoreboard simulation of one (previous) BBL.
+        inline void simulateDecodedBbl(BblInfo* bblInfo);
+        // Synthetic 1-CPI fallback for a BBL without decoded uops.
+        inline void simulateSyntheticBbl(BblInfo* bblInfo);
+        // Instruction fetch of the current BBL (serialized through the L1I).
+        inline void ifetch(Address bblAddr, BblInfo* bblInfo);
 
         static void LoadAndRecordFunc(THREADID tid, ADDRINT addr);
         static void StoreAndRecordFunc(THREADID tid, ADDRINT addr);

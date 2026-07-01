@@ -82,6 +82,18 @@ static std::mutex bblCacheMutex;
 static bool g_ooo_present = false;
 static bool g_ooo_decode_disabled = false;  /* PIMID_OOO_NODECODE=1 escape hatch */
 
+/* True if any genuine in-order core exists. The in-order pipeline (in_order_core)
+ * consumes the SAME x86-decoded DynUop stream as the OOO core (its oooBbl), so we
+ * must also run the decoder when an in-order core is present. PIMID_INORDER_NODECODE
+ * disables that decode (in-order falls back to the legacy IPC=1 path), mirroring
+ * PIMID_OOO_NODECODE. Only OOOCore and InOrderCore read oooBbl, so alu/simple/null
+ * stay byte-identical. */
+static bool g_inorder_present = false;
+static bool g_inorder_decode_disabled = false;  /* PIMID_INORDER_NODECODE=1 */
+/* Combined gate: decode TBs into DynUops when EITHER a (non-disabled) OOO or a
+ * (non-disabled) in-order core is present. Set once in qemu_plugin_install. */
+static bool g_decode_enabled = false;
+
 /* PIMID_OOO_DUMP=1: profile which opcodes fall to the generic/approx uop path,
  * weighted by DYNAMIC execution count, to prioritize decoder coverage. The
  * per-TB approx-key list is stored in the TbUserdata (set at decode, read at
@@ -602,7 +614,7 @@ static BblInfo* getOrCreateBblInfo(uint64_t tbAddr, uint32_t numInsns, uint32_t 
      * only reader). Cap TB size to keep the transient decode buffers bounded;
      * oversized TBs fall back to the synthetic path (they are rare and
      * typically not hot compute loops). */
-    if (g_ooo_present && !g_ooo_decode_disabled && tb && numInsns > 0 &&
+    if (g_decode_enabled && tb && numInsns > 0 &&
             numInsns <= 1024) {
         static const uint32_t MAXI = 1024;
         // Local per-call buffers (each thread translates independently; this is
@@ -1930,14 +1942,24 @@ int qemu_plugin_install(qemu_plugin_id_t id,
     /* Detect any OOO core -> enable x86 decode of TBs into DynUops so the OOO
      * engine runs its real dataflow pipeline instead of the synthetic path. */
     g_ooo_decode_disabled = (getenv("PIMID_OOO_NODECODE") != nullptr);
+    g_inorder_decode_disabled = (getenv("PIMID_INORDER_NODECODE") != nullptr);
     g_ooo_dump = (getenv("PIMID_OOO_DUMP") != nullptr);
     g_ooo_nobranch = (getenv("PIMID_OOO_NOBRANCH") != nullptr);
     for (uint32_t i = 0; i < zinfo->numCores; i++) {
-        if (zinfo->cores[i] && zinfo->cores[i]->asOOOCore()) { g_ooo_present = true; break; }
+        if (!zinfo->cores[i]) continue;
+        if (zinfo->cores[i]->asOOOCore()) g_ooo_present = true;
+        if (zinfo->cores[i]->asInOrderCore()) g_inorder_present = true;
     }
+    /* Decode when either engine wants the DynUop stream (and is not disabled). */
+    g_decode_enabled = (g_ooo_present && !g_ooo_decode_disabled) ||
+                       (g_inorder_present && !g_inorder_decode_disabled);
     if (g_ooo_present) {
         info("[ZSim] OOO core present: x86 decode -> DynUops enabled (real out-of-order path)%s",
              g_ooo_decode_disabled ? " [DISABLED via PIMID_OOO_NODECODE]" : "");
+    }
+    if (g_inorder_present) {
+        info("[ZSim] In-order core present: x86 decode -> DynUops enabled (real in-order scoreboard)%s",
+             g_inorder_decode_disabled ? " [DISABLED via PIMID_INORDER_NODECODE]" : "");
     }
 
     host_mask.resize(zinfo->numCores, false);
