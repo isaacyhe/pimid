@@ -25,8 +25,17 @@ pim:
     compute_factor: 10.0    # cycles per op (e.g. tRAS-scale for PUM)
     access_factor: 0.0      # memory access cost scale (0 = free local access)
     throughput_factor: 1.0  # issue throughput scale
-    operand_width: 1        # bits per operation (1 = bit-serial)
+    operand_width: 32       # operand bit-width -- DESCRIPTIVE ONLY (see note)
+    energy_factor: 1.0      # per-op energy scale for reporting only
 ```
+
+`compute_factor`, `access_factor`, and `throughput_factor` scale the simulated
+cycles (compute cost per op, per-access cost, and issue-parallelism divisor
+respectively). `operand_width` and `energy_factor` do **not** affect cycles:
+`energy_factor` scales reported energy only, and `operand_width` is descriptive
+metadata (echoed in the config banner) that influences neither cycles nor
+energy. To model a bit-serial or width-dependent compute cost, fold it into
+`compute_factor` (e.g. a W-bit bit-serial op costs ~W x the 1-bit op cost).
 
 ## Memory-level parallelism (MLP)
 
