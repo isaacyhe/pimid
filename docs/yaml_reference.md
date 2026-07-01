@@ -231,7 +231,7 @@ memory:
 - DRAM technologies → `ramulator` (cycle-accurate Ramulator2)
 - SRAM → `simple` (fixed latency from CACTI)
 - NVM (STT-MRAM, PCM, ReRAM) → `simple` (fixed latency from NVSim)
-- In-order/OOO cores auto-upgrade a `simple` controller to `weavesimple`
+- In-order/out-of-order cores auto-upgrade a `simple` controller to `weavesimple`
 
 ---
 
@@ -649,7 +649,7 @@ system:
 | `alu_core` | ALU | Minimal PIM ALU (no caches). Aliases: `ALU`, `alu`. |
 | `simple_core` | Simple | Coarse functional: IPC-1 + serial memory latency, with caches. Aliases: `Simple`, `simple`. |
 | `in_order_core` | InOrder | Cycle-detailed in-order (two-phase bound/weave, contention-aware). Aliases: `InOrder`, `in-order`, `in_order`. |
-| `ooo_core` | OOO | Out-of-order superscalar. Aliases: `OOO`, `ooo`. |
+| `ooo_core` | Out-of-order | Out-of-order superscalar. Aliases: `OOO`, `ooo`. |
 | `null_core` | Null | No timing simulation. Aliases: `Null`, `null`. |
 
 Any other value (including the removed `timing_core`) is rejected with an error.
