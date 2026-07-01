@@ -39,6 +39,12 @@ datapaths, so they contend more. The detailed model charges this contention for
 real -- including cross-rank contention under message-passing (see
 [network.md](network.md)).
 
+When multiple PEs are placed at a level and no explicit `pim.pe_mem_map` is
+given, PEs are distributed **distant/strided** across that level's units -- each
+PE local to its own evenly-spaced slice (e.g. 4 PEs over 512 banks land on banks
+0, 128, 256, 384), never clustered at the front. This keeps per-PE working sets
+disjoint and the load balanced; an explicit `pe_mem_map` overrides it.
+
 ## Characterization cache warehouse
 
 Expensive deterministic backend characterizations (NVSim's multi-minute design

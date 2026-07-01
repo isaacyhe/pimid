@@ -65,7 +65,7 @@ as expected.
 ## MPI semantics
 
 `libpimid_mpi.so` provides the MPI ABI (Init, Send/Recv, Sendrecv, Bcast,
-Reduce/Allreduce, Barrier, Scatter/Gather, Alltoall) over a POSIX
+Reduce/Allreduce, Barrier, Scatter/Gather, Allgather/Allgatherv, Alltoall) over a POSIX
 shared-memory mailbox. `MPI_PROC_NULL` send/recv are no-ops per the standard,
 so halo-exchange patterns run without deadlock. Collectives are
 **timing-faithful, not numerics-faithful**: reduce-style ops transmit all
