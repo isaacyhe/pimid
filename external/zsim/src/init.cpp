@@ -1341,7 +1341,10 @@ static void InitSystem(Config& config) {
                         core = new (&simpleCores[j]) SimpleCore(ic, dc, name);
                     } else if (type == "InOrder") {
                         uint32_t domain = j*zinfo->numDomains/cores;
-                        InOrderCore* tcore = new (&inOrderCores[j]) InOrderCore(ic, dc, domain, name);
+                        // In-order superscalar issue width (YAML pim.pe.issue_width;
+                        // PIMID_INORDER_WIDTH env overrides inside the ctor). Default 2.
+                        uint32_t issueWidth = config.get<uint32_t>(prefix + "issueWidth", 2);
+                        InOrderCore* tcore = new (&inOrderCores[j]) InOrderCore(ic, dc, domain, name, issueWidth);
                         zinfo->eventRecorders[coreIdx] = tcore->getEventRecorder();
                         zinfo->eventRecorders[coreIdx]->setSourceId(coreIdx);
                         core = tcore;

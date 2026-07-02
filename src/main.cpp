@@ -657,6 +657,12 @@ struct UnifiedConfig {
     double alu_energy_factor;      // per-op energy scale for reporting (default 1.0)
     bool   alu_bit_serial = false; // bit-serial datapath (false = parallel; default)
 
+    // In-order PE issue width (pim.pe.issue_width; in_order_core only).
+    // Default 2 (dual-issue) = the core's historical hardcoded value, so
+    // configs without the key are numerically unchanged. The env var
+    // PIMID_INORDER_WIDTH, if set, overrides this inside the core.
+    int    inorder_issue_width = 2;
+
     // System configuration
     int frequency_mhz;
     int cache_line_size;
@@ -4252,6 +4258,11 @@ public:
         } else if (core_has_caches) {
             cfg << "            dcache = \"l1d\";\n";
             cfg << "            icache = \"l1i\";\n";
+            if (core_type == "InOrder") {
+                // In-order superscalar issue width (YAML pim.pe.issue_width;
+                // default 2 == the core's historical hardcoded value).
+                cfg << "            issueWidth = " << config_.inorder_issue_width << ";\n";
+            }
         }
         // Null cores: no per-core attributes beyond type + count
         cfg << "        };\n";
@@ -5431,7 +5442,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.4.9" << std::endl;
+    std::cout << "Version 1.4.10" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -5695,6 +5706,8 @@ int main(int argc, char** argv) {
                     config.alu_operand_width = yaml_cfg["pim"]["pe"]["operand_width"].as<int>(config.alu_operand_width);
                     config.alu_bit_serial = yaml_cfg["pim"]["pe"]["bit_serial"].as<bool>(config.alu_bit_serial);
                     config.alu_energy_factor = yaml_cfg["pim"]["pe"]["energy_factor"].as<double>(config.alu_energy_factor);
+                    // In-order PE issue width (in_order_core only; default 2)
+                    config.inorder_issue_width = yaml_cfg["pim"]["pe"]["issue_width"].as<int>(config.inorder_issue_width);
                 }
                 // placement can live either at pim.placement (older flat form)
                 // or pim.pe.placement (newer nested form, used by README and
@@ -7838,6 +7851,10 @@ int main(int argc, char** argv) {
                     } else {
                         cfg << "            dcache = \"l1d\";\n";
                         cfg << "            icache = \"l1i\";\n";
+                        if (core_type == "InOrder") {
+                            // In-order issue width (YAML pim.pe.issue_width; default 2)
+                            cfg << "            issueWidth = " << config.inorder_issue_width << ";\n";
+                        }
                     }
                     cfg << "        };\n";
                     cfg << "    };\n\n";

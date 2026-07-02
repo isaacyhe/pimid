@@ -110,8 +110,9 @@ fast IPC = 1 approximation.
   PAg), fed with the real per-branch direction; a mispredict charges a 7-cycle
   front-end flush bubble (shallow in-order pipe; override with
   `PIMID_INORDER_MISPRED_PENALTY`, disable with `PIMID_INORDER_NOBRANCH=1`).
-  `PIMID_INORDER_NODECODE=1` restores the legacy IPC = 1 path;
-  `PIMID_INORDER_WIDTH` overrides the issue width (default 2). Diagnostics per
+  `PIMID_INORDER_NODECODE=1` restores the legacy IPC = 1 path. The issue width
+  is configurable via `pim.pe.issue_width` (default 2; env `PIMID_INORDER_WIDTH`
+  overrides YAML). Diagnostics per
   in-order core: `uops`, `decodedBbls`, `syntheticBbls`, `depStalls`,
   `issueStalls`, `branches`, `mispredBranches`, `mispredStallCycles`,
   `memMismatchLoads/Stores`.

@@ -135,7 +135,11 @@ class InOrderCore : public Core {
         uint64_t roiBaseCycle  = 0;
 
     public:
-        InOrderCore(FilterCache* _l1i, FilterCache* _l1d, uint32_t domain, g_string& _name);
+        // _issueWidth: in-order superscalar issue width (YAML pim.pe.issue_width,
+        // plumbed via the ZSim config key issueWidth; default 2). Precedence:
+        // PIMID_INORDER_WIDTH env var (if set) > YAML/ctor value > default 2.
+        InOrderCore(FilterCache* _l1i, FilterCache* _l1d, uint32_t domain, g_string& _name,
+                    uint32_t _issueWidth = 2);
         void initStats(AggregateStat* parentStat);
 
         uint64_t getInstrs() const {return instrs;}

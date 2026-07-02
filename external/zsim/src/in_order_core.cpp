@@ -33,14 +33,18 @@
 #define DEBUG_MSG(args...)
 //#define DEBUG_MSG(args...) info(args)
 
-InOrderCore::InOrderCore(FilterCache* _l1i, FilterCache* _l1d, uint32_t _domain, g_string& _name)
+InOrderCore::InOrderCore(FilterCache* _l1i, FilterCache* _l1d, uint32_t _domain, g_string& _name,
+                         uint32_t _issueWidth)
     : Core(_name), l1i(_l1i), l1d(_l1d), instrs(0), uops(0), bbls(0),
       curCycle(0), cRec(_domain, _name) {
     // PIMID_INORDER_NODECODE=1 -> legacy IPC=1 immediate path (A/B baseline).
     decodeMode = (getenv("PIMID_INORDER_NODECODE") == nullptr);
-    // In-order superscalar issue width; 2 by default (dual-issue). Overridable
-    // via env for experimentation (not a YAML key). Clamped to [1, NUM_PORTS].
-    issueWidth = 2;
+    // In-order superscalar issue width. Precedence (highest wins):
+    //   1. PIMID_INORDER_WIDTH env var  (experimentation override)
+    //   2. _issueWidth ctor arg         (YAML pim.pe.issue_width -> ZSim issueWidth)
+    //   3. default 2 (dual-issue)
+    // Clamped to [1, NUM_PORTS]; out-of-range values fall back to the default.
+    issueWidth = (_issueWidth >= 1 && _issueWidth <= NUM_PORTS) ? _issueWidth : 2;
     const char* w = getenv("PIMID_INORDER_WIDTH");
     if (w) {
         int v = atoi(w);

@@ -97,6 +97,7 @@ pim:
 | `pim.pe.access_factor` | double | `1.0` | Cycles per load/store. `0.0` = free local access (PUM). |
 | `pim.pe.throughput_factor` | double | `1.0` | Parallelism divider on instruction count. |
 | `pim.pe.bit_serial` | bool | `false` | Datapath model. `false` = bit-parallel (operand width has no cycle cost). `true` = bit-serial PUM (compute cost proportional to `operand_width`). |
+| `pim.pe.issue_width` | int | `2` | In-order core issue width (uops issued per cycle, program order). Applies to `in_order_core` only; env `PIMID_INORDER_WIDTH` overrides YAML. |
 | `pim.pe.operand_width` | int | `32` | Operand width in bits. With `bit_serial: true`, compute cost scales linearly with width (a W-bit op = W bit-steps). Ignored when `bit_serial: false`. |
 | `pim.pe.energy_factor` | double | `1.0` | Per-op energy scale factor (reporting only, does not affect timing). |
 
