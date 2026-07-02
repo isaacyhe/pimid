@@ -57,6 +57,8 @@ InOrderCore::InOrderCore(FilterCache* _l1i, FilterCache* _l1d, uint32_t _domain,
     for (uint32_t i = 0; i < NUM_PORTS; i++) portFreeCycle[i] = 0;
     memRespCycle = 0;
     slotsUsed = 0;
+    slotCycle = 0;
+    maxOutstanding = 0;
 
     decodedBbls = syntheticBbls = depStalls = issueStalls = 0;
     memMismatchLoads = memMismatchStores = 0;
@@ -173,6 +175,7 @@ void InOrderCore::contextSwitch(int32_t gid) {
         loads = stores = 0;
         branchPc = 0;
         indirMispredPend = false;
+        drainPipeline();  // scheduler boundary: no overlap across a switch
         l1i->contextSwitch();
         l1d->contextSwitch();
     }
@@ -180,12 +183,14 @@ void InOrderCore::contextSwitch(int32_t gid) {
 
 void InOrderCore::join() {
     DEBUG_MSG("[%s] Joining, curCycle %ld phaseEnd %ld", name.c_str(), curCycle, phaseEndCycle);
+    drainPipeline();  // scheduler boundary: outstanding completions charge here
     curCycle = cRec.notifyJoin(curCycle);
     phaseEndCycle = zinfo->globPhaseCycles + zinfo->phaseLength;
     DEBUG_MSG("[%s] Joined, curCycle %ld phaseEnd %ld", name.c_str(), curCycle, phaseEndCycle);
 }
 
 void InOrderCore::leave() {
+    drainPipeline();  // taper must cover all outstanding completions
     cRec.notifyLeave(curCycle);
 }
 
@@ -213,16 +218,25 @@ void InOrderCore::storeAndRecord(Address addr) {
     }
 }
 
-/* ---- Instruction fetch of the current BBL (serialized through L1I) ---- */
+/* ---- Instruction fetch of the current BBL ---- */
 
 inline void InOrderCore::ifetch(Address bblAddr, BblInfo* bblInfo) {
     Address endBblAddr = bblAddr + bblInfo->bytes;
     for (Address fetchAddr = bblAddr; fetchAddr < endBblAddr; fetchAddr += (1 << lineBits)) {
+        // Recorder-safe issue point: the serialized CoreRecorder chain requires
+        // each RECORDED access to start at/after the previous response, so the
+        // cache call is made at MAX(curCycle, memRespCycle). The FRONT-END,
+        // however, pays only the fetch LATENCY from its own clock (the I-port
+        // is separate hardware; an L1I hit must not re-serialize the front-end
+        // behind an outstanding trailing data miss -- same practice as the OOO
+        // core's "always call fetches with curCycle" note).
         uint64_t startCycle = MAX(curCycle, memRespCycle);
         uint64_t resp = l1i->load(fetchAddr, startCycle);
         cRec.record(startCycle);
         memRespCycle = resp;
-        if (resp > curCycle) curCycle = resp;  // fetch stalls the in-order front-end
+        uint64_t fetchLat = resp - startCycle;
+        curCycle += fetchLat;  // fetch latency stalls the in-order front-end
+        if (curCycle > maxOutstanding) maxOutstanding = curCycle;
     }
 }
 
@@ -268,14 +282,12 @@ inline void InOrderCore::simulateDecodedBbl(BblInfo* bblInfo) {
         // --- RAW hazard: sources must be ready before issue (in-order stall) ---
         uint64_t srcReady = MAX(regScoreboard[uop->rs[0]], regScoreboard[uop->rs[1]]);
         uint64_t iss = curCycle;
-        if (srcReady > iss) { depStalls += (srcReady - iss); iss = srcReady; slotsUsed = 0; }
+        if (srcReady > iss) { depStalls += (srcReady - iss); iss = srcReady; }
 
-        // --- Issue width: at most issueWidth independent uops per cycle ---
-        if (iss == curCycle) {
-            if (slotsUsed >= issueWidth) { iss++; issueStalls++; slotsUsed = 0; }
-        } else {
-            slotsUsed = 0;  // moved to a new issue cycle due to the RAW stall
-        }
+        // --- Issue width: at most issueWidth independent uops per cycle.
+        // slotsUsed counts uops issued at cycle slotCycle; slotCycle carries
+        // across BBL boundaries so cross-BBL same-cycle issue is limited too. ---
+        if (iss == slotCycle && slotsUsed >= issueWidth) { iss++; issueStalls++; }
 
         // --- Functional-unit port contention (in-order: whole front-end waits) ---
         uint8_t mask = uop->portMask ? uop->portMask : 0x01;
@@ -286,9 +298,10 @@ inline void InOrderCore::simulateDecodedBbl(BblInfo* bblInfo) {
             }
         }
         if (bestPort < 0) { bestPort = 0; bestFree = portFreeCycle[0]; }
-        if (bestFree > iss) { issueStalls += (bestFree - iss); iss = bestFree; slotsUsed = 0; }
+        if (bestFree > iss) { issueStalls += (bestFree - iss); iss = bestFree; }
 
         // Commit the issue at cycle `iss`.
+        if (iss != slotCycle) { slotCycle = iss; slotsUsed = 0; }
         portFreeCycle[bestPort] = iss + 1;  // 1 uop/cycle throughput on this port
         slotsUsed++;
         curCycle = iss;  // in-order issue cursor advances monotonically
@@ -330,6 +343,7 @@ inline void InOrderCore::simulateDecodedBbl(BblInfo* bblInfo) {
         if (uop->rd[0]) regScoreboard[uop->rd[0]] = done;
         if (uop->rd[1]) regScoreboard[uop->rd[1]] = done;
         if (done > lastDone) lastDone = done;
+        if (done > maxOutstanding) maxOutstanding = done;
     }
 
     // Drain any runtime memory accesses not consumed by the decoded uop stream.
@@ -363,12 +377,13 @@ inline void InOrderCore::simulateDecodedBbl(BblInfo* bblInfo) {
         }
     }
 
-    // In-order commit drains this BBL before the next: advance the core clock to
-    // the last completion. (BBLs are loop bodies here; this models no overlap
-    // across BBL boundaries -- a defensible simplification for a simple in-order
-    // core; intra-BBL dependency/latency/issue effects are fully captured.)
-    if (lastDone > curCycle) curCycle = lastDone;
-    slotsUsed = 0;
+    // NO end-of-BBL drain: the scoreboard (register ready cycles, port free
+    // cycles, issue slot cursor) carries across BBL boundaries, so a trailing
+    // load overlaps with independent work in the next block -- still strictly
+    // in program order (only true dependencies and issue/port limits stall).
+    // Drained accesses (rep/mismatch) fold into maxOutstanding so flush and
+    // scheduler-boundary drains still cover them.
+    if (lastDone > maxOutstanding) maxOutstanding = lastDone;
     uops += nUops;
     decodedBbls++;
 }
@@ -421,17 +436,23 @@ void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
         if (!branchPred.predict(branchPc, branchTaken)) {
             mispredBranches++;
             mispredStallCycles += mispredPenalty;
+            // A mispredict FLUSHES the front-end: the redirect cannot begin
+            // until the outstanding work (incl. whatever resolved the branch)
+            // completes, so this boundary DRAINS. Correctly-predicted and
+            // fall-through boundaries do not (cross-BBL overlap flows on).
+            drainPipeline();
             curCycle += mispredPenalty;
         }
         branchPc = 0;
     }
 
     // Indirect jmp/call/ret target misprediction (BTB/RAS miss, armed by
-    // ctrlFlow for the terminator of `sim`): same flush/refill bubble as a
-    // conditional mispredict.
+    // ctrlFlow for the terminator of `sim`): same flush semantics + bubble as
+    // a conditional mispredict.
     if (indirMispredPend) {
         indirMispredPend = false;
         mispredStallCycles += mispredPenalty;
+        drainPipeline();
         curCycle += mispredPenalty;
     }
 

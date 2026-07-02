@@ -54,9 +54,29 @@ class FilterCache;
  *   - loads/stores go through the l1d cache path; a load's destination-register
  *     readiness is gated on the returned latency (load-use stall), and memory
  *     accesses are serialized (blocking L1) which also preserves the
- *     CoreRecorder weave invariant.
+ *     CoreRecorder weave invariant;
+ *   - scoreboard state (register ready cycles, port free cycles, issue slot
+ *     cursor) CARRIES ACROSS BBL boundaries: a trailing load's completion only
+ *     stalls uops that actually depend on it, so independent work in the next
+ *     basic block overlaps with it (an in-order front-end flows across basic
+ *     blocks; only true dependencies and issue/port limits stall). The pipeline
+ *     IS drained (curCycle advanced to the newest outstanding completion) at
+ *     points where the overlap is not architecturally meaningful: a branch
+ *     MISPREDICT (the flush empties the front-end; correctly-predicted and
+ *     fall-through boundaries do NOT drain), and scheduler boundaries --
+ *     join/leave, the bound->weave transitions (cSimStart/cSimEnd, so the
+ *     CoreRecorder taper covers all outstanding latency), and contextSwitch.
  *
  * The CoreRecorder cross-PE contention weave is layered on top unchanged.
+ *
+ * NOTE on hit-under-miss (non-blocking L1): intentionally NOT modeled. The
+ * CoreRecorder event chain requires each recorded access to start at or after
+ * the previous response (CoreRecorder::recordAccess asserts
+ * startCycle >= prevRespCycle and links events serially), and FilterCache has
+ * no side-effect-free probe to know whether an access hits before issuing it,
+ * so a second access cannot be safely started under an outstanding miss.
+ * Supporting it would need an OOOCoreRecorder-style multi-outstanding weave
+ * recorder. Memory therefore stays serialized via memRespCycle.
  *
  * Escape hatch: PIMID_INORDER_NODECODE=1 restores the exact legacy IPC=1
  * immediate-processing path (byte-identical A/B baseline). A BBL with no decoded
@@ -108,7 +128,12 @@ class InOrderCore : public Core {
         // Serialization cursor for the blocking L1 / cRec weave invariant: the
         // response cycle of the last memory access threaded through the cache.
         uint64_t memRespCycle;
-        uint32_t slotsUsed;  // uops already issued at the current issue cycle
+        uint32_t slotsUsed;  // uops already issued at cycle slotCycle
+        uint64_t slotCycle;  // the issue cycle slotsUsed refers to (carries across BBLs)
+        // Newest completion time of any issued uop (or drained access). Cross-BBL
+        // overlap means curCycle (the ISSUE cursor) may trail this; drainPipeline
+        // advances curCycle to it at flush/scheduler boundaries.
+        uint64_t maxOutstanding;
 
         // Diagnostics (analogous to the OOO core)
         uint64_t decodedBbls;    // BBLs run through the decoded in-order scoreboard
@@ -173,13 +198,21 @@ class InOrderCore : public Core {
         // Virtual type check for use without RTTI (Pin 4.x requires -fno-rtti)
         InOrderCore* asInOrderCore() override { return this; }
 
-        // Contention simulation interface
+        // Contention simulation interface. The bound->weave transitions drain
+        // the pipeline first so the CoreRecorder taper covers all outstanding
+        // (cross-BBL overlapped) completions -- see drainPipeline().
         bool hasContentionSim() const override { return true; }
         EventRecorder* getEventRecorder() override {return cRec.getEventRecorder();}
-        void cSimStart() override {curCycle = cRec.cSimStart(curCycle);}
-        void cSimEnd() override {curCycle = cRec.cSimEnd(curCycle);}
+        void cSimStart() override {drainPipeline(); curCycle = cRec.cSimStart(curCycle);}
+        void cSimEnd() override {drainPipeline(); curCycle = cRec.cSimEnd(curCycle);}
 
     private:
+        // Drain the in-order pipeline: advance the issue cursor to the newest
+        // outstanding completion. Called at branch-mispredict flushes and at
+        // scheduler boundaries (join/leave/cSim*/contextSwitch), where cross-BBL
+        // overlap is not architecturally meaningful.
+        inline void drainPipeline() { if (maxOutstanding > curCycle) curCycle = maxOutstanding; }
+
         inline void loadAndRecord(Address addr);
         inline void storeAndRecord(Address addr);
         inline void bblAndRecord(Address bblAddr, BblInfo* bblInstrs);
