@@ -42,7 +42,6 @@ pimid/
 ├── examples/             runnable example configs (techs, cores, topologies,
 │                         placements, cosim) + integration/ extension demo
 ├── docs/                 full documentation (see below)
-├── docker/  Dockerfile   container image
 └── CMakeLists.txt  LICENSE  README.md
 ```
 
