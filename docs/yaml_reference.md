@@ -655,10 +655,10 @@ system:
 | Value | ZSim Core | Description |
 |-------|-----------|-------------|
 | `alu_core` | ALU | Minimal PIM ALU (no caches). Aliases: `ALU`, `alu`. |
-| `simple_core` | Simple | Coarse functional: IPC-1 + serial memory latency, with caches. Aliases: `Simple`, `simple`. |
+| `simple_core` | Simple | Coarse functional: IPC = 1 + serial memory latency, with caches. Aliases: `Simple`, `simple`. |
 | `in_order_core` | InOrder | Decode-driven in-order pipeline: real RAW/port stalls, dual-issue (default 2), mispredict bubbles, contention-aware two-phase bound/weave. Aliases: `InOrder`, `in-order`, `in_order`. |
-| `ooo_core` | Out-of-order | Out-of-order superscalar. Aliases: `OOO`, `ooo`. |
-| `null_core` | Null | No timing simulation. Aliases: `Null`, `null`. |
+| `ooo_core` | Out-of-order | Decode-driven out-of-order superscalar (128-entry ROB, 4-wide, BTB+RAS branch prediction). Aliases: `OOO`, `OoO`, `ooo`, `out-of-order`. |
+| `null_core` | Null | No timing model: IPC = 1 instruction counting; drops all memory accesses. Aliases: `Null`, `null`. |
 
 Any other value (including the removed `timing_core`) is rejected with an error.
 

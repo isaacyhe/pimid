@@ -60,10 +60,8 @@ the optimistic per-instruction bound and the fast approximation.
 `in_order_core` is a decode-driven **in-order pipeline**: it consumes the decoded
 uops (below) and issues them in strict program order, stalling on real
 per-instruction RAW dependencies, functional-unit latencies, and
-issue-width/port contention -- with no reordering. The scoreboard carries across
-basic-block boundaries, so independent work overlaps a trailing load's latency;
-it drains only where a real front-end does (branch/indirect mispredicts,
-scheduler boundaries). Dependency chains it cannot hide push it *above* simple's
+issue-width/port contention -- with no reordering (mechanism details in the
+Notes below). Dependency chains it cannot hide push it *above* simple's
 IPC = 1 (FP-latency-bound stencil), while dual-issue plus cross-block overlap
 pulls it *below* on kernels with exploitable independence (gemv, histogram); it
 also carries the cross-PE memory-contention weave (`CoreRecorder`) and pays
