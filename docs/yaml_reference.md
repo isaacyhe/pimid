@@ -656,7 +656,7 @@ system:
 |-------|-----------|-------------|
 | `alu_core` | ALU | Minimal PIM ALU (no caches). Aliases: `ALU`, `alu`. |
 | `simple_core` | Simple | Coarse functional: IPC-1 + serial memory latency, with caches. Aliases: `Simple`, `simple`. |
-| `in_order_core` | InOrder | Cycle-detailed in-order (two-phase bound/weave, contention-aware). Aliases: `InOrder`, `in-order`, `in_order`. |
+| `in_order_core` | InOrder | Decode-driven in-order pipeline: real RAW/port stalls, dual-issue (default 2), mispredict bubbles, contention-aware two-phase bound/weave. Aliases: `InOrder`, `in-order`, `in_order`. |
 | `ooo_core` | Out-of-order | Out-of-order superscalar. Aliases: `OOO`, `ooo`. |
 | `null_core` | Null | No timing simulation. Aliases: `Null`, `null`. |
 
