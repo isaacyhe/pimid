@@ -126,10 +126,16 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
     // characterize bitline/wordline length). When the caller supplies the array
     // capacity (banks × per-bank size), use it so the timing matches the energy
     // model; otherwise fall back to the model defaults. 0 = use default.
-    const uint64_t SRAM_DEFAULT_CAP = 64 * 1024;        // 64 KB if unspecified
-    const uint64_t NVM_DEFAULT_CAP  = 8 * 1024 * 1024;  // legacy 8 MB default
-    uint64_t sram_cap = (array_capacity_bytes > 0) ? array_capacity_bytes : SRAM_DEFAULT_CAP;
-    uint64_t nvm_cap  = (array_capacity_bytes > 0) ? array_capacity_bytes : NVM_DEFAULT_CAP;
+    // Per-bank access latency: each PE reads/writes its OWN local 64KB bank, so
+    // the access is characterized on a single bank -- not the whole
+    // (num_banks x 64KB) device array. This is the physically correct local-access
+    // latency for PIM and keeps NVSim off the multi-minute large-array run.
+    // (array_capacity_bytes is retained in the signature for callers but the
+    // per-bank unit governs SRAM/NVM access timing.)
+    (void)array_capacity_bytes;
+    const uint64_t PER_BANK_BYTES = 64 * 1024;
+    uint64_t sram_cap = PER_BANK_BYTES;
+    uint64_t nvm_cap  = PER_BANK_BYTES;
 
     if (use_yaml_override && yaml_latency_ns > 0.0) {
         // User provided COMPLETE memory params in YAML - use their values
@@ -3715,11 +3721,15 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     } else if (config.memory_tech == "SRAM") {
         // SRAM: CACTI model
         try {
+            // Per-bank characterization: model ONE 64KB bank (CACTI supports only
+            // 1-32 banks; a 256-bank device would overflow its range), then scale
+            // the extensive quantities (leakage, area) by the bank count. Per-access
+            // energy is already per-bank -- one access hits one bank.
             pimid::CACTIWrapper::SRAMConfig sram_cfg;
-            sram_cfg.capacity_bytes = config.num_banks * 64 * 1024;  // default 64KB/bank
+            sram_cfg.capacity_bytes = 64 * 1024;  // one bank
             sram_cfg.line_size = config.cache_line_size;
             sram_cfg.associativity = 1;
-            sram_cfg.banks = config.num_banks;
+            sram_cfg.banks = 1;
             sram_cfg.tech_node_nm = std::max(22, config.tech_node_nm);
             sram_cfg.is_cache = false;  // RAM mode
             sram_cfg.read_write_ports = config.ports_per_bank;
@@ -3727,10 +3737,10 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             pimid::CACTIWrapper cacti(sram_cfg);
             cacti.initialize();
 
-            double rd_energy = cacti.getDynamicReadEnergy();
+            double rd_energy = cacti.getDynamicReadEnergy();  // per-access (one bank)
             double wr_energy = cacti.getDynamicWriteEnergy();
-            double leakage = cacti.getLeakagePower();
-            double area = cacti.getArea();
+            double leakage = cacti.getLeakagePower() * config.num_banks;  // device = num_banks banks
+            double area = cacti.getArea() * config.num_banks;
 
             double total_rd_nj = rd_energy * zsim_stats.mem_rd;
             double total_wr_nj = wr_energy * zsim_stats.mem_wr;
@@ -3750,8 +3760,11 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     } else {
         // NVM: NVSim model (STT_MRAM, PCM, RERAM)
         try {
+            // Per-bank characterization: model ONE 64KB bank, then scale leakage/area
+            // by the bank count (per-access energy is already per-bank). Also keeps
+            // NVSim off the multi-minute 16MB-array characterization.
             pimid::NVSimWrapper::NVMConfig nvm_cfg;
-            nvm_cfg.capacity_bytes = config.num_banks * 64 * 1024;  // default 64KB/bank
+            nvm_cfg.capacity_bytes = 64 * 1024;  // one bank
             nvm_cfg.word_width_bits = 64;
             nvm_cfg.process_node_nm = std::max(22, config.tech_node_nm);
             if (config.memory_tech == "STT_MRAM")
@@ -3764,10 +3777,10 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             pimid::NVSimWrapper nvsim(nvm_cfg);
             nvsim.initialize();
 
-            double rd_energy = nvsim.getReadDynamicEnergy();
+            double rd_energy = nvsim.getReadDynamicEnergy();  // per-access (one bank)
             double wr_energy = nvsim.getWriteDynamicEnergy();
-            double leakage = nvsim.getLeakagePower();
-            double area = nvsim.getArea();
+            double leakage = nvsim.getLeakagePower() * config.num_banks;  // device = num_banks banks
+            double area = nvsim.getArea() * config.num_banks;
 
             double total_rd_nj = rd_energy * zsim_stats.mem_rd;
             double total_wr_nj = wr_energy * zsim_stats.mem_wr;
@@ -5418,7 +5431,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.4.6" << std::endl;
+    std::cout << "Version 1.4.7" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR

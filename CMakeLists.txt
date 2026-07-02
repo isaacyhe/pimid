@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(PIMID VERSION 1.4.6 LANGUAGES CXX)
+project(PIMID VERSION 1.4.7 LANGUAGES CXX)
 
 # C++17 standard required
 set(CMAKE_CXX_STANDARD 17)
