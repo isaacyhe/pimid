@@ -60,24 +60,31 @@ the optimistic per-instruction bound and the fast approximation.
 `in_order_core` is a decode-driven **in-order pipeline**: it consumes the decoded
 uops (below) and issues them in strict program order, stalling on real
 per-instruction RAW dependencies, functional-unit latencies, and
-issue-width/port contention -- with no reordering. Dependency chains it cannot
-hide push it *above* simple's IPC = 1 (e.g. FP-latency-bound stencil/gemv),
-while independent work that dual-issue overlaps pulls it slightly *below*; it
-also carries the cross-PE memory-contention weave (`CoreRecorder`). Net vs
-`simple` it runs roughly -4% to +25% across the kernel suite -- genuinely
-distinct, not a rename.
+issue-width/port contention -- with no reordering. The scoreboard carries across
+basic-block boundaries, so independent work overlaps a trailing load's latency;
+it drains only where a real front-end does (branch/indirect mispredicts,
+scheduler boundaries). Dependency chains it cannot hide push it *above* simple's
+IPC = 1 (FP-latency-bound stencil), while dual-issue plus cross-block overlap
+pulls it *below* on kernels with exploitable independence (gemv, histogram); it
+also carries the cross-PE memory-contention weave (`CoreRecorder`) and pays
+branch-mispredict flush bubbles. Genuinely distinct from `simple` -- not a
+rename.
 
 `ooo_core` adds out-of-order issue (128-entry ROB + reordering), hiding latency
-the in-order core must stall on, so `ooo <= in_order` on every kernel; the gap
-tracks each kernel's ILP/MLP. Use `in_order_core` for dependency/issue-accurate
-in-order timing, `ooo_core` for the reordered upper bound, `simple_core` for the
-fast IPC = 1 approximation.
+the in-order core must stall on, so `ooo <= in_order` holds across the kernel
+suite (typical gaps 2-3.5x, tracking each kernel's ILP/MLP). Use
+`in_order_core` for dependency/issue-accurate in-order timing, `ooo_core` for
+the reordered upper bound, `simple_core` for the fast IPC = 1 approximation.
 
 ## Model boundaries (documented, deliberate)
 
 - **In-order memory is blocking**: one outstanding miss at a time, no
-  hit-under-miss MLP. This matches a simple in-order PIM PE and is required by
-  the `CoreRecorder` weave's serialization invariant.
+  hit-under-miss MLP. Cross-BBL overlap hides functional-unit and dependency
+  latency under L1-hit memory, but DRAM-miss chains stay serialized: the
+  `CoreRecorder` weave records accesses into a strictly serial event chain
+  (`recordAccess` asserts `startCycle >= prevRespCycle`) and the cache has no
+  side-effect-free probe to admit hits-only under a miss, so hit-under-miss
+  would need an OOOCoreRecorder-style multi-outstanding weave recorder.
 - **No wrong-path effects**: a mispredict charges the flush/refill bubble but
   wrong-path fetches do not pollute caches. Standard for simulators of this
   class.
@@ -106,16 +113,20 @@ fast IPC = 1 approximation.
 - `in_order_core` reuses the same in-tree x86 decoder as `ooo_core` (below) to
   drive an in-order scoreboard: per-register ready-cycle tracking, dual-issue in
   program order, functional-unit port contention, and load-use stalls (no
-  reordering). It also carries the same branch predictor as `ooo_core` (2-level
-  PAg), fed with the real per-branch direction; a mispredict charges a 7-cycle
-  front-end flush bubble (shallow in-order pipe; override with
-  `PIMID_INORDER_MISPRED_PENALTY`, disable with `PIMID_INORDER_NOBRANCH=1`).
-  `PIMID_INORDER_NODECODE=1` restores the legacy IPC = 1 path. The issue width
-  is configurable via `pim.pe.issue_width` (default 2; env `PIMID_INORDER_WIDTH`
-  overrides YAML). Diagnostics per
+  reordering). The scoreboard carries across basic-block boundaries and drains
+  only at mispredict flushes and scheduler boundaries
+  (join/phase/context-switch). Branch modeling matches `ooo_core`: a 2-level PAg
+  predictor for conditional direction plus a 512-entry BTB (indirect jmp/call
+  targets) and 16-entry return-address stack, all fed with real outcomes; any
+  mispredict charges a 7-cycle front-end flush bubble (shallow in-order pipe;
+  override with `PIMID_INORDER_MISPRED_PENALTY`, disable all branch modeling
+  with `PIMID_INORDER_NOBRANCH=1`). `PIMID_INORDER_NODECODE=1` restores the
+  legacy IPC = 1 path. The issue width is configurable via `pim.pe.issue_width`
+  (default 2; env `PIMID_INORDER_WIDTH` overrides YAML). Diagnostics per
   in-order core: `uops`, `decodedBbls`, `syntheticBbls`, `depStalls`,
   `issueStalls`, `branches`, `mispredBranches`, `mispredStallCycles`,
-  `memMismatchLoads/Stores`.
+  `indirBranches`, `indirMispreds`, `rasReturns`, `rasMispreds`,
+  `repDrainedLoads/Stores`, `memMismatchLoads/Stores`.
 - Under QEMU user-mode execution the plugin decodes each guest x86 instruction
   into ZSim `DynUop`s (register read/write sets, latency class, functional-unit
   port, load/store markers) with a minimal in-tree x86-64 decoder
@@ -123,23 +134,32 @@ fast IPC = 1 approximation.
   dependency-driven pipeline (128-entry ROB, 4-wide issue, port contention,
   load/store queues, register scoreboard) instead of the old synthetic 1-CPI
   path, so `ooo_core` now models ILP and memory-level parallelism: on
-  compute-bound kernels it retires faster than `in_order_core` (2.0-2.4x on
-  streaming/gemv, 1.3-1.4x on irregular bfs/stencil under HBM3/16-PE/detailed-NoC;
-  the gap tracks the kernel's ILP/MLP). The decoder covers the common
+  compute-bound kernels it retires faster than `in_order_core` (typical gaps
+  2-3.5x under HBM3/16-PE/detailed-NoC; the gap tracks the kernel's ILP/MLP).
+  The decoder covers the common
   integer/SSE/SSE2/AVX forms precisely (full integer ALU incl. group-1 immediate
-  arithmetic and shifts, imul/idiv, load-op/rmw, lea, push/pop/call/ret, mov-imm,
+  arithmetic and shifts, load-op/rmw, lea, push/pop/call/ret, mov-imm,
   movzx/movsx/movsxd, jcc/cmov/setcc, SSE/SSE2 scalar+packed FP add/mul/div/sqrt/
   cvt/compare, packed-integer logic/add/sub/mul/shift/shuffle/pack, pmovmskb,
-  bsf/bsr, and lock-prefixed atomics/cmpxchg/xadd/xchg as fenced rmw), leaving
-  only ~0.1-0.5% of dynamic instructions on a generic-uop fallback (integer div's
-  rdx:rax pair, rep-string, syscall/cpuid). Unrecognized instructions' memory
-  accesses are absorbed by a tolerant load/store drain, so counts never desync
-  (measured memMismatch is <0.05% of memory ops). The out-of-order branch predictor is
-  driven by the per-branch direction (resolved from the actual next TB) so
-  mispredicts incur the correct front-end penalty. Diagnostics per out-of-order core:
+  bsf/bsr, BMI2 bzhi/pdep/pext, vpbroadcast, lock-prefixed atomics/cmpxchg/xadd/
+  xchg as fenced rmw, div/idiv with the true rdx:rax pair via a merge uop +
+  divide uop, and widening mul rd={rax,rdx}). rep movs/stos use a documented
+  block-copy model: register-side dependency uops plus the QEMU-delivered
+  accesses through a serial drain, counted as `repDrainedLoads/Stores`. The
+  generic-uop fallback is ~0.0% of dynamic instructions (only serializing ops:
+  syscall/cpuid/rdtsc/xsave). Unrecognized instructions' memory accesses are
+  absorbed by a tolerant load/store drain, so counts never desync (measured
+  memMismatch is <0.05% of memory ops). Branch modeling: the direction predictor
+  is driven by the real per-branch direction (resolved from the actual next TB),
+  and indirect jmp/call targets and returns are predicted by a 512-entry
+  direct-mapped BTB (last-seen-target) plus a 16-entry return-address stack --
+  wrong targets pay the same front-end redirect as a conditional mispredict.
+  Diagnostics per out-of-order core:
   `uops`, `decodedBbls`, `syntheticBbls`, `approxInstrs`, `mispredBranches`,
+  `indirBranches`, `indirMispreds`, `rasReturns`, `rasMispreds`,
+  `repDrainedLoads/Stores`,
   `memMismatchLoads/Stores`. Env toggles: `PIMID_OOO_NODECODE=1` forces the legacy
-  synthetic path; `PIMID_OOO_NOBRANCH=1` disables branch-predictor feed;
+  synthetic path; `PIMID_OOO_NOBRANCH=1` disables ALL branch modeling (direction, BTB, RAS);
   `PIMID_OOO_DUMP=1` profiles which opcodes hit the generic fallback (weighted by
   dynamic count); `PIMID_OOO_DEBUG=1` traces the first decoded BBLs. Other core
   types ignore the decoded uops and never receive branch callbacks, so their
