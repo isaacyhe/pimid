@@ -90,6 +90,7 @@ static bool g_ooo_decode_disabled = false;  /* PIMID_OOO_NODECODE=1 escape hatch
  * stay byte-identical. */
 static bool g_inorder_present = false;
 static bool g_inorder_decode_disabled = false;  /* PIMID_INORDER_NODECODE=1 */
+static bool g_inorder_nobranch = false;  /* PIMID_INORDER_NOBRANCH=1: skip branch feed */
 /* Combined gate: decode TBs into DynUops when EITHER a (non-disabled) OOO or a
  * (non-disabled) in-order core is present. Set once in qemu_plugin_install. */
 static bool g_decode_enabled = false;
@@ -754,11 +755,23 @@ static void insn_exec_cb(unsigned int vcpu_index, void *userdata) {
     }
 
     if (vcpu_index < MAX_VCPUS) in_zsim[vcpu_index] = true;
-    /* OOO branch predictor: resolve the previous TB's conditional branch using
+    /* Branch predictor feed: resolve the previous TB's conditional branch using
      * THIS TB's address as the real next-PC, then feed direction+targets to the
      * core BEFORE bbl() (bbl() consumes branchPc when timing the prev BBL). Only
-     * OOO cores get branch callbacks, so other core types stay byte-identical. */
-    if (g_ooo_present && !g_ooo_nobranch && cores[tid] && cores[tid]->asOOOCore()) {
+     * OOO and (decode-enabled) in-order cores get branch callbacks, so
+     * alu/simple/null stay byte-identical.
+     * NOTE: the OOO leg now also checks !g_ooo_decode_disabled -- a no-op today,
+     * since endsInCondBranch is only ever set when decode ran for the TB, but it
+     * keeps OOO's feed provably unchanged in mixed-core configs where the
+     * in-order presence alone enables decode. */
+    bool feedBranch = false;
+    if (cores[tid]) {
+        if (g_ooo_present && !g_ooo_nobranch && !g_ooo_decode_disabled &&
+                cores[tid]->asOOOCore()) feedBranch = true;
+        else if (g_inorder_present && !g_inorder_nobranch && !g_inorder_decode_disabled &&
+                cores[tid]->asInOrderCore()) feedBranch = true;
+    }
+    if (feedBranch) {
         if (g_brPending[tid]) {
             bool taken = (tud->tbAddr == g_brTaken[tid]);
             fPtrs[tid].branchPtr(tid, g_brPc[tid], taken ? 1 : 0,
@@ -1505,10 +1518,13 @@ static void tb_trans_cb(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
     tud->endsInCondBranch = false;
     tud->brPc = tud->brTakenTarget = tud->brFallthrough = 0;
 
-    /* OOO branch-predictor wiring: if this TB's last instruction is a conditional
-     * jcc, record its PC + both successor addresses so the real direction can be
-     * resolved from the next TB and driven into the OOO branch predictor. */
-    if (g_ooo_present && !g_ooo_decode_disabled && n_insns > 0) {
+    /* Branch-predictor wiring (OOO and decode-enabled in-order): if this TB's
+     * last instruction is a conditional jcc, record its PC + both successor
+     * addresses so the real direction can be resolved from the next TB and
+     * driven into the core's branch predictor. g_decode_enabled is exactly
+     * (ooo && !ooo_nodecode) || (inorder && !inorder_nodecode), so for pure-OOO
+     * configs this gate is unchanged. */
+    if (g_decode_enabled && n_insns > 0) {
         struct qemu_plugin_insn* last = qemu_plugin_tb_get_insn(tb, n_insns - 1);
         uint64_t lpc = qemu_plugin_insn_vaddr(last);
         size_t lsz = qemu_plugin_insn_size(last);
@@ -1945,6 +1961,7 @@ int qemu_plugin_install(qemu_plugin_id_t id,
     g_inorder_decode_disabled = (getenv("PIMID_INORDER_NODECODE") != nullptr);
     g_ooo_dump = (getenv("PIMID_OOO_DUMP") != nullptr);
     g_ooo_nobranch = (getenv("PIMID_OOO_NOBRANCH") != nullptr);
+    g_inorder_nobranch = (getenv("PIMID_INORDER_NOBRANCH") != nullptr);
     for (uint32_t i = 0; i < zinfo->numCores; i++) {
         if (!zinfo->cores[i]) continue;
         if (zinfo->cores[i]->asOOOCore()) g_ooo_present = true;

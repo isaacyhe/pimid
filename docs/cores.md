@@ -87,10 +87,15 @@ fast IPC = 1 approximation.
 - `in_order_core` reuses the same in-tree x86 decoder as `ooo_core` (below) to
   drive an in-order scoreboard: per-register ready-cycle tracking, dual-issue in
   program order, functional-unit port contention, and load-use stalls (no
-  reordering). `PIMID_INORDER_NODECODE=1` restores the legacy IPC = 1 path;
+  reordering). It also carries the same branch predictor as `ooo_core` (2-level
+  PAg), fed with the real per-branch direction; a mispredict charges a 7-cycle
+  front-end flush bubble (shallow in-order pipe; override with
+  `PIMID_INORDER_MISPRED_PENALTY`, disable with `PIMID_INORDER_NOBRANCH=1`).
+  `PIMID_INORDER_NODECODE=1` restores the legacy IPC = 1 path;
   `PIMID_INORDER_WIDTH` overrides the issue width (default 2). Diagnostics per
   in-order core: `uops`, `decodedBbls`, `syntheticBbls`, `depStalls`,
-  `issueStalls`, `memMismatchLoads/Stores`.
+  `issueStalls`, `branches`, `mispredBranches`, `mispredStallCycles`,
+  `memMismatchLoads/Stores`.
 - Under QEMU user-mode execution the plugin decodes each guest x86 instruction
   into ZSim `DynUop`s (register read/write sets, latency class, functional-unit
   port, load/store markers) with a minimal in-tree x86-64 decoder

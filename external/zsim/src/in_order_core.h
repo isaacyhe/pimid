@@ -30,6 +30,7 @@
 #include "core_recorder.h"
 #include "event_recorder.h"
 #include "memory_hierarchy.h"
+#include "ooo_core.h"  /* BranchPredictorPAg -- same predictor structure as OOOCore */
 #include "pad.h"
 
 class FilterCache;
@@ -61,6 +62,16 @@ class FilterCache;
  * immediate-processing path (byte-identical A/B baseline). A BBL with no decoded
  * uops falls back to a per-BBL synthetic 1-CPI path that still drains buffered
  * loads/stores through the cache so memory/NoC traffic never desyncs.
+ *
+ * Branch mispredictions: the plugin resolves each TB-terminating conditional
+ * branch's real direction (from the next TB's address) and feeds it via
+ * BranchFunc, exactly as for the OOO core. The in-order core runs the SAME
+ * BranchPredictorPAg<11,18,14> predictor as OOOCore; on a mispredict it charges
+ * a fixed front-end flush/refill bubble (default 7 cycles ~= the OOO model's
+ * fetch-to-issue depth, ISSUE_STAGE; typical of short in-order pipelines such
+ * as Cortex-A53's ~8-cycle mispredict penalty). Overridable via
+ * PIMID_INORDER_MISPRED_PENALTY; disable the whole feed with
+ * PIMID_INORDER_NOBRANCH=1 (mirrors PIMID_OOO_NOBRANCH).
  */
 class InOrderCore : public Core {
     private:
@@ -107,6 +118,16 @@ class InOrderCore : public Core {
         uint64_t memMismatchLoads;   // decoded/runtime load-count divergences drained
         uint64_t memMismatchStores;  // decoded/runtime store-count divergences drained
 
+        // ---- Branch prediction (decode path only) ----
+        // Same predictor structure as OOOCore (2-level PAg).
+        BranchPredictorPAg<11, 18, 14> branchPred;
+        Address branchPc;        // 0 if the BBL being simulated did not end in a jcc
+        bool branchTaken;
+        uint32_t mispredPenalty; // front-end flush/refill bubble (cycles)
+        uint64_t branches;           // resolved conditional branches fed to the predictor
+        uint64_t mispredBranches;    // mispredicted branches
+        uint64_t mispredStallCycles; // total cycles charged for mispredict bubbles
+
         // ROI baselines: snapshot at roi_begin so reported cycles/instrs reflect
         // ONLY the region of interest. roiBaseCycle snapshots the unhalted-cycle
         // metric (cRec.getUnhaltedCycles(curCycle)). 0 until roi_begin fires.
@@ -152,13 +173,17 @@ class InOrderCore : public Core {
         // Instruction fetch of the current BBL (serialized through the L1I).
         inline void ifetch(Address bblAddr, BblInfo* bblInfo);
 
+        // Records the resolved direction of the branch terminating the BBL that
+        // is about to be simulated (the plugin calls this right before bblPtr).
+        inline void branch(Address pc, bool taken);
+
         static void LoadAndRecordFunc(THREADID tid, ADDRINT addr);
         static void StoreAndRecordFunc(THREADID tid, ADDRINT addr);
         static void BblAndRecordFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo);
         static void PredLoadAndRecordFunc(THREADID tid, ADDRINT addr, BOOL pred);
         static void PredStoreAndRecordFunc(THREADID tid, ADDRINT addr, BOOL pred);
 
-        static void BranchFunc(THREADID, ADDRINT, BOOL, ADDRINT, ADDRINT) {}
+        static void BranchFunc(THREADID tid, ADDRINT pc, BOOL taken, ADDRINT takenNpc, ADDRINT notTakenNpc);
 } ATTR_LINE_ALIGNED;
 
 #endif  // IN_ORDER_CORE_H_

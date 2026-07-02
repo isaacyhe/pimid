@@ -57,6 +57,21 @@ InOrderCore::InOrderCore(FilterCache* _l1i, FilterCache* _l1d, uint32_t _domain,
     decodedBbls = syntheticBbls = depStalls = issueStalls = 0;
     memMismatchLoads = memMismatchStores = 0;
     phaseEndCycle = 0;
+
+    // Branch misprediction: front-end flush/refill bubble. Default 7 cycles ~=
+    // the OOO model's fetch-to-issue depth (ISSUE_STAGE), i.e. the redirect
+    // cost of a short in-order pipeline (Cortex-A53 class is ~8 cycles).
+    // Overridable via PIMID_INORDER_MISPRED_PENALTY for sensitivity studies.
+    // The whole feed is disabled by PIMID_INORDER_NOBRANCH=1 (plugin-side gate).
+    branchPc = 0;
+    branchTaken = false;
+    mispredPenalty = 7;
+    const char* mp = getenv("PIMID_INORDER_MISPRED_PENALTY");
+    if (mp) {
+        int v = atoi(mp);
+        if (v >= 0 && v <= 1000) mispredPenalty = (uint32_t)v;
+    }
+    branches = mispredBranches = mispredStallCycles = 0;
 }
 
 uint64_t InOrderCore::getPhaseCycles() const {
@@ -110,6 +125,15 @@ void InOrderCore::initStats(AggregateStat* parentStat) {
     ProxyStat* memMismatchStoresStat = new ProxyStat();
     memMismatchStoresStat->init("memMismatchStores", "Decoded/runtime store-count divergences drained", &memMismatchStores);
     coreStat->append(memMismatchStoresStat);
+    ProxyStat* branchesStat = new ProxyStat();
+    branchesStat->init("branches", "Resolved conditional branches fed to the predictor", &branches);
+    coreStat->append(branchesStat);
+    ProxyStat* mispredBranchesStat = new ProxyStat();
+    mispredBranchesStat->init("mispredBranches", "Mispredicted branches", &mispredBranches);
+    coreStat->append(mispredBranchesStat);
+    ProxyStat* mispredStallCyclesStat = new ProxyStat();
+    mispredStallCyclesStat->init("mispredStallCycles", "Cycles charged for mispredict flush/refill bubbles", &mispredStallCycles);
+    coreStat->append(mispredStallCyclesStat);
 
     parentStat->append(coreStat);
 }
@@ -120,6 +144,7 @@ void InOrderCore::contextSwitch(int32_t gid) {
         // Do not simulate the lingering previous BBL across a context switch.
         prevBbl = nullptr;
         loads = stores = 0;
+        branchPc = 0;
         l1i->contextSwitch();
         l1d->contextSwitch();
     }
@@ -336,6 +361,7 @@ void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
     if (!prevBbl) {
         prevBbl = bblInfo;
         loads = stores = 0;
+        branchPc = 0;  // any pending branch belongs to a BBL we never simulated
         return;
     }
 
@@ -349,6 +375,21 @@ void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
         simulateDecodedBbl(sim);
     } else {
         simulateSyntheticBbl(sim);
+    }
+
+    // Branch misprediction: the plugin delivered (right before this bblPtr) the
+    // resolved direction of the conditional branch TERMINATING `sim`. Query and
+    // update the predictor; on a mispredict, charge the front-end flush/refill
+    // bubble. In-order cores resolve the branch at execute, so the redirect
+    // lands after the BBL drains (curCycle is at last completion here).
+    if (branchPc) {
+        branches++;
+        if (!branchPred.predict(branchPc, branchTaken)) {
+            mispredBranches++;
+            mispredStallCycles += mispredPenalty;
+            curCycle += mispredPenalty;
+        }
+        branchPc = 0;
     }
 
     loads = stores = 0;
@@ -388,4 +429,16 @@ void InOrderCore::PredLoadAndRecordFunc(THREADID tid, ADDRINT addr, BOOL pred) {
 
 void InOrderCore::PredStoreAndRecordFunc(THREADID tid, ADDRINT addr, BOOL pred) {
     if (pred) static_cast<InOrderCore*>(cores[tid])->storeAndRecord(addr);
+}
+
+/* ---- Branch feed (plugin calls this right before bblPtr; see plugin gate) ---- */
+
+void InOrderCore::branch(Address pc, bool taken) {
+    branchPc = pc;
+    branchTaken = taken;
+}
+
+void InOrderCore::BranchFunc(THREADID tid, ADDRINT pc, BOOL taken, ADDRINT takenNpc, ADDRINT notTakenNpc) {
+    (void)takenNpc; (void)notTakenNpc;  // no wrong-path fetch modeling (see header)
+    static_cast<InOrderCore*>(cores[tid])->branch(pc, taken != 0);
 }
