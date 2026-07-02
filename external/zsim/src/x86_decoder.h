@@ -109,6 +109,18 @@ struct Decoded {
     bool     readsFlags, writesFlags;
     bool     approx;
     bool     fence;        /* lock-prefixed / atomic / explicit fence -> serialize */
+    /* grp3 (0xF6/0xF7 /4../7) widening-mul / divide rdx:rax pair semantics:
+     * 0 = not grp3 mul/div; 1 = widening mul (reads rax, writes rdx:rax);
+     * 2 = div/idiv (reads rdx:rax AND rm, writes rdx:rax -> needs 2 uops);
+     * 3 = 8-bit form (al/ah/ax all alias the rax scoreboard id -> the
+     *     single-register model is already exact). */
+    uint8_t  gp3;
+    /* String ops: 0 = none, 1 = movs, 2 = stos, 3 = lods. repPrefixed set for
+     * F3/F2 forms (dynamic iteration count -> memory uops intentionally not
+     * emitted; the cores drain the actual QEMU-delivered accesses at serial
+     * L1 throughput and classify them as expected rep traffic). */
+    uint8_t  strKind;
+    bool     repPrefixed;
     /* resolved register ids (SB_NONE if absent) */
     uint16_t regId;        /* ModRM.reg operand */
     uint16_t rmRegId;      /* ModRM.rm operand when it is a register (mod==3) */
@@ -411,13 +423,26 @@ static inline bool decodeOne(const uint8_t* b, uint32_t len, Decoded& d) {
                     d.cls = C_ALU; d.rmIsSrc = true; d.rmIsDst = true;
                     if (ext == 3) d.writesFlags = true;
                     if (memOperand) d.mem = MEM_RMW;
-                } else {                       /* mul/imul/div/idiv: implicit rax/rdx */
+                } else {                       /* mul/imul/div/idiv: rdx:rax pair */
                     d.cls = (ext == 6 || ext == 7) ? C_IDIV : C_IMUL;
-                    d.rmIsSrc = true; d.writesFlags = true;
-                    d.regId = gprId(0);        /* rax as extra src/dst (approx) */
+                    d.rmIsSrc = true;
+                    /* Exact pair semantics (emitUops consumes d.gp3):
+                     *  - 16/32/64-bit widening mul (F7 /4,/5): reads rax + rm,
+                     *    writes BOTH rax (low) and rdx (high) -> gp3=1.
+                     *  - 16/32/64-bit div/idiv (F7 /6,/7): reads rdx:rax + rm,
+                     *    writes BOTH rax (quotient) and rdx (remainder). Three
+                     *    sources exceed the 2-slot uop -> merge uop + div uop
+                     *    (gp3=2).
+                     *  - 8-bit forms (F6): operate on al/ah/ax, which ALL alias
+                     *    the single rax scoreboard id -> one uop reading
+                     *    {rm, rax} and writing rax is exact (gp3=3).
+                     * FLAGS after mul/div are undefined (mul's OF/CF are defined
+                     * but in practice never consumed); dropping the FLAGS write
+                     * frees the 2nd dest slot for rdx. */
+                    d.gp3 = (op == 0xF6) ? 3 : ((ext == 6 || ext == 7) ? 2 : 1);
+                    d.regId = gprId(0);        /* rax */
                     d.regIsSrc = true; d.regIsDst = true;
                     if (memOperand) d.mem = MEM_LOAD;
-                    d.approx = true;
                 }
                 return hasModrm;
             }
@@ -472,6 +497,20 @@ static inline bool decodeOne(const uint8_t* b, uint32_t len, Decoded& d) {
                 return false;
             case 0x98: case 0x99:              /* cltq/cltd */
                 d.cls = C_ALU; d.regId = gprId(0); d.regIsSrc = d.regIsDst = true;
+                return false;
+            /* --- string ops (no ModRM). cmps (A6/A7) / scas (AE/AF) remain
+             * generic: zero dynamic occurrences in the 5-kernel dump. --- */
+            case 0xA4: case 0xA5:              /* movs[bwdq]: [rsi] -> [rdi] */
+                d.cls = C_MOV; d.hasModrm = false;
+                d.strKind = 1; d.repPrefixed = (pF3 || pF2);
+                return false;
+            case 0xAA: case 0xAB:              /* stos: rax -> [rdi] */
+                d.cls = C_MOV; d.hasModrm = false;
+                d.strKind = 2; d.repPrefixed = (pF3 || pF2);
+                return false;
+            case 0xAC: case 0xAD:              /* lods: [rsi] -> rax */
+                d.cls = C_MOV; d.hasModrm = false;
+                d.strKind = 3; d.repPrefixed = (pF3 || pF2);
                 return false;
             default:
                 if (op >= 0x70 && op <= 0x7F) { /* jcc rel8 */
@@ -749,6 +788,23 @@ static inline bool decodeOne(const uint8_t* b, uint32_t len, Decoded& d) {
     }
 
     if (map == 0x0F38) {
+        if (op == 0xF5) {                 /* BMI2: bzhi (no pp) / pext (F3) /
+                                           * pdep (F2): GPR dst = f(rm, vvvv) */
+            setRegIds(RF_GPR, RF_GPR);
+            d.cls = (pF3 || pF2) ? C_IMUL : C_ALU;  /* pdep/pext ~3cy, bzhi 1cy */
+            d.regIsDst = true; d.rmIsSrc = true;
+            if (d.vvvvId) d.vvvvId = gprId(d.vvvvId - SB_XMM_BASE); /* vvvv is a GPR here */
+            d.writesFlags = (!pF3 && !pF2);          /* bzhi writes flags */
+            if (memOperand) d.mem = MEM_LOAD;
+            return hasModrm;
+        }
+        if (op == 0x78 || op == 0x79) {   /* vpbroadcastb/w: pure vec move */
+            setRegIds(RF_VEC, RF_VEC);
+            d.cls = C_VECMOV; d.isPureMove = true;
+            d.regIsDst = true; d.rmIsSrc = true;
+            if (memOperand) d.mem = MEM_LOAD;
+            return hasModrm;
+        }
         setRegIds(RF_VEC, RF_VEC);
         if (op >= 0x96 && op <= 0xBF) {   /* vfmadd/vfmsub family (VEX) */
             d.cls = C_FMA;
@@ -786,6 +842,72 @@ static inline void emitUops(const Decoded& d, std::vector<DynUop>& v,
     const uint16_t LT = REG_LOAD_TEMP;    /* per-instruction load temp */
     bool doLoad  = (d.mem == MEM_LOAD || d.mem == MEM_RMW);
     bool doStore = (d.mem == MEM_STORE || d.mem == MEM_RMW);
+
+    /* ---- string ops (movs/stos/lods) ---- */
+    if (d.strKind) {
+        const uint16_t RAX = gprId(0), RCX = gprId(1), RSI = gprId(6), RDI = gprId(7);
+        if (d.repPrefixed) {
+            /* REP form: the iteration count is dynamic (rcx), so the memory
+             * uops are intentionally NOT emitted statically -- the cores drain
+             * the ACTUAL QEMU-delivered accesses through the cache at serial
+             * L1 throughput (block-copy cost model) and classify them as rep
+             * traffic (DynBbl.repInstrs > 0). Here we only model the register
+             * side: pointer/count updates depending on rcx. */
+            if (d.strKind == 1) {           /* rep movs: rsi, rdi, rcx */
+                pushUop(v, UOP_GENERAL, RCX, RSI, RSI, SB_NONE, 1, PORTS_ALU, 0, decCycle);
+                pushUop(v, UOP_GENERAL, RCX, RDI, RDI, RCX, 1, PORTS_ALU, 0, decCycle);
+            } else if (d.strKind == 2) {    /* rep stos: rax value, rdi, rcx */
+                pushUop(v, UOP_GENERAL, RCX, RDI, RDI, RCX, 1, PORTS_ALU, 0, decCycle);
+            } else {                        /* rep lods (rare): rsi, rcx, rax */
+                pushUop(v, UOP_GENERAL, RCX, RSI, RSI, RAX, 1, PORTS_ALU, 0, decCycle);
+            }
+            return;
+        }
+        /* Non-REP single-shot forms: exactly one load and/or store -- emit
+         * matching memory uops so runtime callback counts line up exactly. */
+        if (d.strKind == 1) {               /* movs: [rsi] -> [rdi], ptr updates */
+            pushUop(v, UOP_LOAD, RSI, SB_NONE, LT, RSI, 0, PORTS_LOAD, 0, decCycle);
+            pushUop(v, UOP_STORE, LT, RDI, RDI, SB_NONE, 0, PORTS_STORE, 0, decCycle);
+            loads++; stores++;
+        } else if (d.strKind == 2) {        /* stos: rax -> [rdi] */
+            pushUop(v, UOP_STORE, RAX, RDI, RDI, SB_NONE, 0, PORTS_STORE, 0, decCycle);
+            stores++;
+        } else {                            /* lods: [rsi] -> rax */
+            pushUop(v, UOP_LOAD, RSI, SB_NONE, RAX, RSI, 0, PORTS_LOAD, 0, decCycle);
+            loads++;
+        }
+        return;
+    }
+
+    /* ---- grp3 widening mul / div with correct rdx:rax pair semantics ---- */
+    if (d.gp3) {
+        const uint16_t RAX = gprId(0), RDX = gprId(2);
+        uint16_t src = d.rmRegId;           /* rm register source... */
+        if (doLoad) {                       /* ...or loaded memory operand */
+            pushUop(v, UOP_LOAD, d.baseId, d.indexId, LT, SB_NONE,
+                    0, PORTS_LOAD, 0, decCycle);
+            loads++;
+            src = LT;
+        }
+        if (d.gp3 == 2) {
+            /* div/idiv: reads rdx:rax + src (3 sources > 2 slots) -> merge the
+             * rdx:rax pair into an exec temp, then divide. Both rax (quotient)
+             * and rdx (remainder) become ready at divide completion. */
+            pushUop(v, UOP_GENERAL, RAX, RDX, REG_EXEC_TEMP, SB_NONE,
+                    1, PORTS_ALU, 0, decCycle);
+            pushUop(v, UOP_GENERAL, REG_EXEC_TEMP, src, RAX, RDX,
+                    ci.lat, ci.port, ci.extraSlots, decCycle);
+        } else if (d.gp3 == 1) {
+            /* widening mul: rdx:rax = rax * src (2 sources, 2 dests: exact) */
+            pushUop(v, UOP_GENERAL, RAX, src, RAX, RDX,
+                    ci.lat, ci.port, ci.extraSlots, decCycle);
+        } else {
+            /* 8-bit form: al/ah/ax all alias the rax scoreboard id */
+            pushUop(v, UOP_GENERAL, RAX, src, RAX, SB_NONE,
+                    ci.lat, ci.port, ci.extraSlots, decCycle);
+        }
+        return;
+    }
 
     /* Collect up to 2 source and 2 dest registers for the compute uop. */
     uint16_t src[2] = {SB_NONE, SB_NONE}; int ns = 0;
@@ -840,6 +962,10 @@ static inline void emitUops(const Decoded& d, std::vector<DynUop>& v,
     if (d.mem == MEM_LOAD || d.mem == MEM_RMW) addS(LT);  /* loaded value */
     if (d.rmIsSrc && d.mem == MEM_NONE) addS(d.rmRegId);
     if (d.regIsSrc) addS(d.regId);
+    /* VEX third operand (vvvv), lowest priority: consumed only when a source
+     * slot remains (e.g. BMI2 bzhi/pdep/pext reg forms; FMA's slots are already
+     * full with the loaded value + accumulator, so FMA timing is unchanged). */
+    if (d.vvvvId) addS(d.vvvvId);
     if (d.readsFlags) addS(SB_FLAGS);
 
     /* compute dests */
@@ -882,6 +1008,7 @@ static inline BblInfo* createDecodedBblInfo(uint64_t bblAddr,
     std::vector<DynUop> uops;
     uops.reserve(nInsns * 2 + 1);
     uint32_t approx = 0;
+    uint32_t repInstrs = 0;
     uint32_t decWidth = 4;  /* front-end decode/issue width for decCycle spread */
     uint32_t emitted = 0;
 
@@ -892,6 +1019,7 @@ static inline BblInfo* createDecodedBblInfo(uint64_t bblAddr,
         uint32_t decCycle = emitted / decWidth;
         emitUops(d, uops, decCycle, loads, stores);
         emitted = (uint32_t)uops.size();
+        if (d.strKind && d.repPrefixed) repInstrs++;
         if (d.approx || d.cls == C_GENERIC) {
             approx++;
             if (outApproxKeys) outApproxKeys->push_back(dbgKey(d));
@@ -909,6 +1037,7 @@ static inline BblInfo* createDecodedBblInfo(uint64_t bblAddr,
     db.addr = bblAddr;
     db.uops = nUops;
     db.approxInstrs = approx;
+    db.repInstrs = repInstrs;
     for (uint32_t u = 0; u < nUops; u++) db.uop[u] = uops[u];
     return bbl;
 }

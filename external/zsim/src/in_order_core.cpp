@@ -60,6 +60,7 @@ InOrderCore::InOrderCore(FilterCache* _l1i, FilterCache* _l1d, uint32_t _domain,
 
     decodedBbls = syntheticBbls = depStalls = issueStalls = 0;
     memMismatchLoads = memMismatchStores = 0;
+    repDrainedLoads = repDrainedStores = 0;
     phaseEndCycle = 0;
 
     // Branch misprediction: front-end flush/refill bubble. Default 7 cycles ~=
@@ -129,6 +130,12 @@ void InOrderCore::initStats(AggregateStat* parentStat) {
     ProxyStat* memMismatchStoresStat = new ProxyStat();
     memMismatchStoresStat->init("memMismatchStores", "Decoded/runtime store-count divergences drained", &memMismatchStores);
     coreStat->append(memMismatchStoresStat);
+    ProxyStat* repDrainedLoadsStat = new ProxyStat();
+    repDrainedLoadsStat->init("repDrainedLoads", "Expected rep-string loads drained (block-copy model)", &repDrainedLoads);
+    coreStat->append(repDrainedLoadsStat);
+    ProxyStat* repDrainedStoresStat = new ProxyStat();
+    repDrainedStoresStat->init("repDrainedStores", "Expected rep-string stores drained (block-copy model)", &repDrainedStores);
+    coreStat->append(repDrainedStoresStat);
     ProxyStat* branchesStat = new ProxyStat();
     branchesStat->init("branches", "Resolved conditional branches fed to the predictor", &branches);
     coreStat->append(branchesStat);
@@ -308,12 +315,17 @@ inline void InOrderCore::simulateDecodedBbl(BblInfo* bblInfo) {
         if (done > lastDone) lastDone = done;
     }
 
-    // Drain any runtime memory accesses the decoded uop stream under-counted
-    // (approximated instructions still performed real accesses via QEMU's
-    // mem_cb): push them through the cache so DRAM/NoC traffic stays accounted.
+    // Drain any runtime memory accesses not consumed by the decoded uop stream.
+    // Two populations, counted separately (same convention as the OOO core):
+    //  - EXPECTED rep-string traffic (db->repInstrs > 0): rep movs/stos have
+    //    dynamic iteration counts, so their per-iteration accesses are left to
+    //    this serial drain (block-copy cost model) -> repDrained{Loads,Stores};
+    //  - true decode/runtime divergences -> memMismatch{Loads,Stores}.
+    // Either way they go through the cache so DRAM/NoC traffic stays accounted.
+    bool repBbl = (db->repInstrs > 0);
     while (loadIdx < loads) {
         Address a = loadAddrs[loadIdx++];
-        memMismatchLoads++;
+        if (repBbl) repDrainedLoads++; else memMismatchLoads++;
         if (a != (Address)-1L) {
             uint64_t startCycle = MAX(lastDone, memRespCycle);
             uint64_t resp = l1d->load(a, startCycle);
@@ -324,7 +336,7 @@ inline void InOrderCore::simulateDecodedBbl(BblInfo* bblInfo) {
     }
     while (storeIdx < stores) {
         Address a = storeAddrs[storeIdx++];
-        memMismatchStores++;
+        if (repBbl) repDrainedStores++; else memMismatchStores++;
         if (a != (Address)-1L) {
             uint64_t startCycle = MAX(lastDone, memRespCycle);
             uint64_t resp = l1d->store(a, startCycle);

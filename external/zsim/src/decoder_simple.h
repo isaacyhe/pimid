@@ -47,6 +47,13 @@ struct DynBbl {
     uint64_t addr;
     uint32_t uops;
     uint32_t approxInstrs;
+    // Number of REP-prefixed string instructions (rep movs/stos/lods) in this
+    // BBL. Their per-iteration memory accesses are intentionally NOT decoded
+    // into static uops (the dynamic iteration count varies per execution of
+    // the same cached TB); the cores drain those accesses through the cache at
+    // serial L1 throughput and, when repInstrs > 0, classify the drained
+    // accesses as expected rep-string traffic instead of decode mismatches.
+    uint32_t repInstrs;
     DynUop uop[1];
 
     static uint32_t bytes(uint32_t uops) {
@@ -56,6 +63,7 @@ struct DynBbl {
     void init(uint64_t _addr, uint32_t _uops, uint32_t _approxInstrs) {
         uops = _uops;
         approxInstrs = _approxInstrs;
+        repInstrs = 0;
     }
 };
 

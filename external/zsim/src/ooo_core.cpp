@@ -74,6 +74,7 @@ OOOCore::OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name) : Core(_
 
     instrs = uops = bbls = approxInstrs = mispredBranches = 0;
     decodedBbls = syntheticBbls = memMismatchLoads = memMismatchStores = 0;
+    repDrainedLoads = repDrainedStores = 0;
     oooDebug = (getenv("PIMID_OOO_DEBUG") != nullptr);
     oooDebugBbls = 0;
 
@@ -115,6 +116,10 @@ void OOOCore::initStats(AggregateStat* parentStat) {
     memMismatchLoadsStat->init("memMismatchLoads", "Decoded/runtime load-count divergences drained", &memMismatchLoads);
     ProxyStat* memMismatchStoresStat = new ProxyStat();
     memMismatchStoresStat->init("memMismatchStores", "Decoded/runtime store-count divergences drained", &memMismatchStores);
+    ProxyStat* repDrainedLoadsStat = new ProxyStat();
+    repDrainedLoadsStat->init("repDrainedLoads", "Expected rep-string loads drained (block-copy model)", &repDrainedLoads);
+    ProxyStat* repDrainedStoresStat = new ProxyStat();
+    repDrainedStoresStat->init("repDrainedStores", "Expected rep-string stores drained (block-copy model)", &repDrainedStores);
 
     coreStat->append(cyclesStat);
     coreStat->append(cCyclesStat);
@@ -127,6 +132,8 @@ void OOOCore::initStats(AggregateStat* parentStat) {
     coreStat->append(syntheticBblsStat);
     coreStat->append(memMismatchLoadsStat);
     coreStat->append(memMismatchStoresStat);
+    coreStat->append(repDrainedLoadsStat);
+    coreStat->append(repDrainedStoresStat);
 
 #ifdef OOO_STALL_STATS
     profFetchStalls.init("fetchStalls",  "Fetch stalls");  coreStat->append(&profFetchStalls);
@@ -351,14 +358,21 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
             lastCommitCycle = commitCycle;
         }
 
-        // Drain any runtime accesses not consumed by the decoded uop stream
-        // (decoder under-counted: e.g. an instruction it approximated still
-        // performed real memory accesses via QEMU's mem_cb). Push them through
-        // the cache so DRAM/NoC traffic stays accounted; charge at lastCommit.
+        // Drain any runtime accesses not consumed by the decoded uop stream.
+        // Two distinct populations, counted separately:
+        //  - EXPECTED rep-string traffic (bbl->repInstrs > 0): rep movs/stos
+        //    iteration counts are dynamic, so the decoder intentionally leaves
+        //    their per-iteration accesses to this drain (block-copy cost model:
+        //    serial L1-latency chain) -> repDrained{Loads,Stores}.
+        //  - true decode/runtime divergences (approximated instructions that
+        //    still touched memory) -> memMismatch{Loads,Stores}.
+        // Either way the accesses go through the cache so DRAM/NoC traffic
+        // stays accounted; charge at lastCommit.
+        bool repBbl = (bbl->repInstrs > 0);
         uint64_t drainCycle = MAX(lastCommitCycle, curCycle);
         while (loadIdx < loads) {
             Address a = loadAddrs[loadIdx++];
-            memMismatchLoads++;
+            if (repBbl) repDrainedLoads++; else memMismatchLoads++;
             if (a != (Address)-1L) {
                 uint64_t r = l1d->load(a, drainCycle) + L1D_LAT;
                 cRec.record(curCycle, drainCycle, r);
@@ -367,7 +381,7 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
         }
         while (storeIdx < stores) {
             Address a = storeAddrs[storeIdx++];
-            memMismatchStores++;
+            if (repBbl) repDrainedStores++; else memMismatchStores++;
             if (a != (Address)-1L) {
                 uint64_t r = l1d->store(a, drainCycle) + L1D_LAT;
                 cRec.record(curCycle, drainCycle, r);

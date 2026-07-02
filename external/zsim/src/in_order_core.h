@@ -117,6 +117,10 @@ class InOrderCore : public Core {
         uint64_t issueStalls;    // cycles lost to issue-width/port stalls
         uint64_t memMismatchLoads;   // decoded/runtime load-count divergences drained
         uint64_t memMismatchStores;  // decoded/runtime store-count divergences drained
+        // Expected rep-string (movs/stos) accesses drained through the
+        // block-copy cost model (DynBbl.repInstrs > 0) -- NOT divergences.
+        uint64_t repDrainedLoads;
+        uint64_t repDrainedStores;
 
         // ---- Branch prediction (decode path only) ----
         // Same predictor structure as OOOCore (2-level PAg).

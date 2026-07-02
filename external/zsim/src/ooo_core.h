@@ -422,6 +422,9 @@ class OOOCore : public Core {
         // drain. These prove the OOO improvement is decode-driven, not constant.
         uint64_t decodedBbls = 0, syntheticBbls = 0;
         uint64_t memMismatchLoads = 0, memMismatchStores = 0;
+        // Expected rep-string (movs/stos) accesses drained through the
+        // block-copy cost model (DynBbl.repInstrs > 0) -- NOT divergences.
+        uint64_t repDrainedLoads = 0, repDrainedStores = 0;
         bool oooDebug = false;       // PIMID_OOO_DEBUG=1 -> per-BBL uop trace
         uint32_t oooDebugBbls = 0;
 
