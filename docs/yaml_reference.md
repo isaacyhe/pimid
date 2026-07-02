@@ -411,14 +411,14 @@ Bridge router params: same as per-level (`router_latency`, `router_pipeline`, `r
 ```yaml
 simulation:
   phase_length: 10000
-  max_instructions: 1000000000
+  max_instructions: 1000000000000
   stats_interval: 100000
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `simulation.phase_length` | int | `10000` | ZSim phase length (instructions per phase). |
-| `simulation.max_instructions` | long | `1000000000` | Maximum instructions before termination. |
+| `simulation.max_instructions` | long | `1000000000000` | Runaway guard: total-instruction budget across all cores; the run terminates (rc=0, stats dumped) when reached. The default (1e12) is effectively unlimited -- if you lower it, make sure it exceeds the workload's full instruction count, or the run is silently truncated mid-kernel (watch for "Max total instructions reached" in the log / a missing BENCH_DONE). |
 | `simulation.stats_interval` | int | `100000` | Statistics collection interval. |
 
 ---

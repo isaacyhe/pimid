@@ -1041,7 +1041,7 @@ struct UnifiedConfig {
         noc_data_msg_bits(0),
         noc_ring_unidirectional(false),
         phase_length(10000),
-        max_instructions(1000000000LL),
+        max_instructions(1000000000000LL),  // runaway guard only; must NOT truncate real workloads (1e9 silently cut 256MB-WSS kernels mid-run)
         stats_interval(100000),
         stats_file("results/stats.txt"),
         enable_detailed_stats(true),
@@ -5442,7 +5442,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.4.14" << std::endl;
+    std::cout << "Version 1.4.15" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
