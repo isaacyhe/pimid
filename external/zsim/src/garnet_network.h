@@ -234,10 +234,6 @@ private:
     // Lock for thread-safe direct Garnet access from multiple PE-MIs
     lock_t garnetLock_;
 
-    // parallel-mode: claimed by the first thread calling threadLocalContext(),
-    // which then reuses `this`; later threads get private clones.
-    std::atomic<bool> primaryClaimed_{false};
-
 public:
     /**
      * Full constructor with all topology parameters
@@ -345,42 +341,6 @@ public:
     uint32_t getNumNodes()    const { return numNodes_; }
     bool isRingUnidirectional() const { return ringUnidirectional_; }
     bool isCycleAccurate()    const { return cycleAccurate_; }
-
-    /**
-     * Parallel-mode per-thread network context.
-     *
-     * In noc.model=parallel, each OS thread charges its PE's traffic on its
-     * OWN isolated full-topology Garnet (own thread_local clock + EventQueue),
-     * so OMP threads never serialize on garnetLock_ -- the same isolated model
-     * each MPI rank already runs as a separate process.
-     *
-     * The FIRST thread to ask reuses this shared instance; additional threads
-     * get private clones (same topology/config, reconstructed from members).
-     * That keeps single-threaded contexts -- every MPI rank, and simple/detailed
-     * runs -- byte-identical to before (they only ever touch `this`), while
-     * multi-threaded OMP runs fan out one network per thread.
-     */
-    GarnetNetwork* threadLocalContext() {
-        thread_local GarnetNetwork* tl = nullptr;
-        if (!tl) {
-            bool alreadyClaimed = primaryClaimed_.exchange(true);
-            if (!alreadyClaimed) {
-                tl = this;
-            } else {
-                tl = new GarnetNetwork(topology_, numRows_, numCols_, routerLatency_,
-                                       linkLatency_, cycleAccurate_, routing_,
-                                       vcsPerVnet_, buffersPerVc_, clockMhz_,
-                                       flitSizeBits_, customTopoFile_, routingTableFile_,
-                                       controlMsgBits_, dataMsgBits_, ringUnidirectional_);
-                // Inherit the configured deadlock threshold. init.cpp raises the
-                // shared network's to 100M to suppress false "network deadlock"
-                // panics when the H-tree saturates; clones must match or they trip
-                // the 500k default (seen as fig3/DRAM parallel-OMP crashes).
-                tl->setDeadlockThreshold(deadlockThreshold_);
-            }
-        }
-        return tl;
-    }
 
 #ifdef HAVE_GARNET
     /**

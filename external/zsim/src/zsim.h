@@ -330,9 +330,6 @@ struct GlobSimInfo {
         //   grid (where detailed > analytical and the memory term helps).
         uint32_t nocCurveIsGrid = 1;
 
-        // -- "parallel" NoC model (noc.model: parallel) --
-        uint32_t nocParallel = 0;   // 1 = parallel mode (isolated per-context Garnet)
-
         // Flattened mapping (shared-memory safe, no pointers)
         // peMemMapOffsets[pe] = start index in peMemMapData for PE pe
         // peMemMapOffsets[pe+1] - peMemMapOffsets[pe] = count of mem orgs for PE pe

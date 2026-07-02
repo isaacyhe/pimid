@@ -910,10 +910,8 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
             GarnetNetwork* gn = zinfo->garnetNetwork;
 
             if (gn && gn->isCycleAccurate()) {
-                /* parallel mode charges on this thread's own isolated network;
-                 * single-threaded MPI ranks get `this` back, so unchanged. */
-                GarnetNetwork* anet = zinfo->hierarchy.nocParallel
-                                          ? gn->threadLocalContext() : gn;
+                /* One shared cycle-accurate Garnet network for all PEs/ranks. */
+                GarnetNetwork* anet = gn;
                 /* Tree-reduction barrier: log2(N) rounds.
                  * In each round, half the nodes send to the other half.
                  * Model this PE's perspective: one send per round. */
@@ -1066,10 +1064,8 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         uint32_t dstNode = params.dst_pe % gn->getNumNodes();
 
         if (gn->isCycleAccurate()) {
-            /* parallel mode charges on this thread's own isolated network;
-             * single-threaded MPI ranks get `this` back, so unchanged. */
-            GarnetNetwork* anet = zinfo->hierarchy.nocParallel
-                                      ? gn->threadLocalContext() : gn;
+            /* One shared cycle-accurate Garnet network for all PEs/ranks. */
+            GarnetNetwork* anet = gn;
             /* Direct Garnet injection — real traffic with real contention.
              * Each packet represents a cache-line (64B) transfer.
              * Large messages inject multiple packets sequentially. */

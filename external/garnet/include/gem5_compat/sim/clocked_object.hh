@@ -25,17 +25,11 @@ namespace gem5 {
 class ClockedObject;
 class EventQueue;
 
-// When true (noc.model=parallel), each thread gets its OWN gem5 context
-// (clock + event queue) for isolated per-thread Garnet networks. When false
-// (detailed/simple/calibrated, and MPI), a SINGLE shared context is used --
-// the original behavior, required so the shared detailed-OMP network is driven
-// consistently by all threads.
-inline bool g_parallelNocContexts = false;
-
-// Current tick. Routed at runtime: per-thread (parallel mode) or shared.
+// A SINGLE shared gem5 context (clock + event queue) drives the NoC. The
+// detailed NoC is one shared Garnet network stepped consistently by all
+// threads/ranks; there is no per-thread isolated context.
 inline Tick g_sharedTick = 0;
-inline thread_local Tick g_tlTick = 0;
-inline Tick& curTickRef() { return g_parallelNocContexts ? g_tlTick : g_sharedTick; }
+inline Tick& curTickRef() { return g_sharedTick; }
 inline Tick curTick() { return curTickRef(); }
 inline void setCurTick(Tick t) { curTickRef() = t; }
 
@@ -134,9 +128,8 @@ class EventQueue {
 
 public:
     static EventQueue& instance() {
-        static EventQueue sharedQ;            // detailed/simple/MPI: one shared queue
-        thread_local static EventQueue tlQ;   // parallel: per-thread queue
-        return g_parallelNocContexts ? tlQ : sharedQ;
+        static EventQueue sharedQ;            // one shared event queue for the NoC
+        return sharedQ;
     }
 
     void schedule(Event* e, Tick when) {

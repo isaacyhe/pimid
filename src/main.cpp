@@ -852,7 +852,6 @@ struct UnifiedConfig {
                                        // DEFAULT noc model is detailed (see noc_cycle_accurate)
     int noc_mlp_degree = -1;           // noc.mlp -> M = PE-model MLP intensity; -1 = AUTO from pe_type
                                        // (resolved by defaultMlpForPeType at config emission)
-    int noc_parallel = 0;              // noc.model=parallel -> isolated per-thread/proc Garnet
 
     // Workload (required for both methods)
     std::string workload_binary;
@@ -1681,10 +1680,6 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
         const auto& m = config.network_level_model[i];
         if (m == "detailed") {
             hierarchy->setLevelModel(i, pimid::NetworkModelType::DETAILED);
-        } else if (m == "parallel") {
-            // parallel: per-context isolated Garnet is driven by the nocParallel flag,
-            // not by the per-level network model -- so the per-level model stays SIMPLE.
-            hierarchy->setLevelModel(i, pimid::NetworkModelType::SIMPLE);
         } else {
             // "simple", "md1", "analytical" (backward compat) → SIMPLE
             hierarchy->setLevelModel(i, pimid::NetworkModelType::SIMPLE);
@@ -1972,18 +1967,18 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
             }
 
             // ── DETAILED DRAM: per-tech CUSTOM topology (per-link latency+bw +
-            //    channel concurrency). For the cycle-accurate (detailed,
-            //    non-parallel) Garnet on a real DRAM tech we emit a TREE topology
+            //    channel concurrency). For the cycle-accurate (detailed) Garnet
+            //    on a real DRAM tech we emit a TREE topology
             //    file that encodes the tech's DRAM hierarchy with per-layer link
             //    latency, per-link width (bandwidth via occupancy), and N parallel
             //    channel subtrees, then point Garnet at it via CUSTOM. This
             //    SUPERSEDES the scalar noc_garnet_link_latency above for detailed
             //    DRAM (that value is kept as the linkLatency fallback / inherited
             //    default for any link that omits per-link fields, and still drives
-            //    non-DRAM and parallel paths). simple/calibrated/approximate/curve
-            //    and parallel are left unchanged.
+            //    non-DRAM paths). simple/calibrated/approximate/curve are left
+            //    unchanged.
             bool detailed_dram =
-                config.noc_cycle_accurate && (config.noc_parallel == 0) &&
+                config.noc_cycle_accurate &&
                 (tech == "DDR3" || tech == "DDR4" || tech == "DDR5" ||
                  tech == "LPDDR5" || tech == "GDDR6" ||
                  tech == "HBM2" || tech == "HBM3");
@@ -2403,7 +2398,6 @@ static void emitZSimHierarchyBlock(std::ostream& out, const UnifiedConfig& confi
         if (mlpM < 1) mlpM = 10;   // AUTO: single validated default for now
         out << "        nocMlpDegree = " << mlpM << ";\n";
     }
-    out << "        nocParallel = " << config.noc_parallel << ";\n";
 
     // Flattened mapping: offsets as space-separated, data as space-separated
     if (!config.pe_mem_map.empty()) {
@@ -3057,11 +3051,11 @@ static void emitZSimNetworkBlock(std::ostream& out, const UnifiedConfig& config)
     // curve/approximate stay on noc_link_latency, unchanged.
     {
         // Apply the channel-aware override ONLY for the cycle-accurate Garnet
-        // (detailed / parallel). The non-cycle-accurate models build a PROBE
-        // network from this same block (calibrated/curve), so we must NOT alter
-        // their linkLatency or their probed L0 would shift -> keep them on
+        // (detailed). The non-cycle-accurate models build a PROBE network from
+        // this same block (calibrated/curve), so we must NOT alter their
+        // linkLatency or their probed L0 would shift -> keep them on
         // noc_link_latency for cycleAccurate=false.
-        bool detailed_only = config.noc_cycle_accurate && (config.noc_parallel == 0);
+        bool detailed_only = config.noc_cycle_accurate;
         int garnet_link = (detailed_only && config.noc_garnet_link_latency > 0)
                           ? config.noc_garnet_link_latency : config.noc_link_latency;
         out << "        linkLatency = " << garnet_link << ";\n";
@@ -5442,7 +5436,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.5.0" << std::endl;
+    std::cout << "Version 1.5.1" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -5921,14 +5915,12 @@ int main(int argc, char** argv) {
                         config.noc_injector_calib = 0;
                         config.noc_curve_model = 0;
                         config.noc_calqueue = 0;
-                        config.noc_parallel = 0;
                         config.noc_mlp_model = 0;
                     } else if (noc_model == "analytical") {
                         config.noc_cycle_accurate = false;
                         config.noc_injector_calib = 0;
                         config.noc_curve_model = 0;
                         config.noc_calqueue = 0;
-                        config.noc_parallel = 0;
                         config.noc_mlp_model = 1;
                     } else {
                         std::cerr << "Error: unknown noc.model '" << noc_model
@@ -7115,7 +7107,7 @@ int main(int argc, char** argv) {
                     else                                          disp_routing = "XY";
                 }
                 std::cout << ", routing=" << disp_routing
-                          << ", mode=" << (config.noc_parallel ? "parallel" : (config.noc_cycle_accurate ? "detailed" : "simple")) << std::endl;
+                          << ", mode=" << (config.noc_cycle_accurate ? "detailed" : "simple") << std::endl;
             }
 
             // Display hierarchy info
@@ -7677,7 +7669,7 @@ int main(int argc, char** argv) {
                     else                                          disp_routing = "XY";
                 }
                 std::cout << ", routing=" << disp_routing
-                          << ", mode=" << (config.noc_parallel ? "parallel" : (config.noc_cycle_accurate ? "detailed" : "simple")) << std::endl;
+                          << ", mode=" << (config.noc_cycle_accurate ? "detailed" : "simple") << std::endl;
                 std::cout << "             VCs=" << config.noc_vcs_per_vnet << "/vnet"
                           << ", buffers=" << config.noc_buffers_per_vc << "/VC"
                           << ", router=" << config.noc_router_latency

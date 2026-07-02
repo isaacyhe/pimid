@@ -239,13 +239,12 @@ public:
 
             // DRAM channel bandwidth bottleneck (accuracy fix): even a "local"
             // bank access consumes the shared DRAM channel's DQ bandwidth. In
-            // detailed (cycle-accurate, non-parallel) mode, charge the shared
-            // M/D/c channel-BW queueing wait so the aggregate effective DRAM BW
-            // is capped at the datasheet value across ALL bank-MIs.
+            // detailed (cycle-accurate) mode, charge the shared M/D/c channel-BW
+            // queueing wait so the aggregate effective DRAM BW is capped at the
+            // datasheet value across ALL bank-MIs.
             {
                 GarnetNetwork* gnLocal = zinfo->garnetNetwork;
                 if (gnLocal && gnLocal->isCycleAccurate() &&
-                    !zinfo->hierarchy.nocParallel &&
                     zinfo->hierarchy.nocAggBandwidthMBs > 0) {
                     lat += channelBandwidthWait();
                 }
@@ -277,56 +276,26 @@ public:
                 uint32_t srcNode = myUnit % gn->getNumNodes();
                 uint32_t dstNode = targetUnit % gn->getNumNodes();
                 uint32_t networkLat;
-                if (zinfo->hierarchy.nocParallel) {
-                    // ── parallel mode: per-thread isolated Garnet ──
-                    // Charge this access on THIS thread's own network (per-access
-                    // RTT), no shared lock, no cross-thread batch. Fast; contention
-                    // comes from the real residual VC/credit state carried over
-                    // between back-to-back injections (no synthetic background
-                    // traffic). For full cross-thread contention use detailed mode.
-                    GarnetNetwork* tg = gn->threadLocalContext();
-                    // Non-grid topologies (H-tree etc.) saturate the per-access
-                    // cycle-accurate path -- residual VC state accumulates without
-                    // bound -> false "network deadlock" panic. detailed mode avoids
-                    // this by resetting per phase (processBatch). Mirror it here for
-                    // non-grid; grid (MESH/TORUS) keeps its validated
-                    // residual-contention behavior (fig2/fig4 are clean).
-                    NoCTopology topo = tg->getTopology();
-                    if (topo != NoCTopology::MESH_2D && topo != NoCTopology::TORUS_2D) {
-                        thread_local uint64_t tlResetPhase = (uint64_t)-1;
-                        if (zinfo->numPhases != tlResetPhase) {
-                            tg->resetGarnetState();
-                            tlResetPhase = zinfo->numPhases;
-                        }
-                    }
-                    uint32_t oneWay = tg->accessNetwork(srcNode, dstNode, req.cycle);
-                    networkLat = 2 * oneWay;
-                } else {
-                    // ── detailed mode: shared Garnet batch, real contention ──
-                    // Record this access (brief batchLock_). The SHARED Garnet is
-                    // the real cross-thread-contended network (this is what
-                    // distinguishes detailed-OMP from parallel-OMP's per-thread
-                    // isolated networks).
-                    gn->recordBatchAccess(srcNode, dstNode, req.cycle);
+                // Synchronous shared-Garnet accounting (the ONLY detailed NoC):
+                // record this access (brief batchLock_) on the SHARED Garnet -- the
+                // real cross-thread-contended network -- and drain the batch on the
+                // critical path at each phase boundary. The drain flag keeps the
+                // watchdog from misreading the frozen phase clock as a fake-leave
+                // stall.
+                gn->recordBatchAccess(srcNode, dstNode, req.cycle);
 
-                    if (zinfo->numPhases > batchLastPhase_) {
-                        // ── Synchronous drain (the ONLY detailed accounting):
-                        // drain the batch on the critical path at each phase
-                        // boundary. Flag the drain so the watchdog does not
-                        // misread the frozen phase clock as a fake-leave stall
-                        // and blacklist hot futex sites.
-                        __sync_fetch_and_add(&zinfo->hierarchy.nocInlineDrain, 1);
-                        gn->processBatch(zinfo->numPhases, zinfo->phaseLength);
-                        __sync_fetch_and_sub(&zinfo->hierarchy.nocInlineDrain, 1);
-                        batchLastPhase_ = zinfo->numPhases;
-                    }
-
-                    // Use Garnet-measured latency (RTT); bootstrap with analytical
-                    uint32_t garnetLat = gn->getBatchAvgLatency();
-                    networkLat = (garnetLat > 0)
-                        ? 2 * garnetLat
-                        : 2 * zinfo->hierarchy.nocAvgOneWayLatency;
+                if (zinfo->numPhases > batchLastPhase_) {
+                    __sync_fetch_and_add(&zinfo->hierarchy.nocInlineDrain, 1);
+                    gn->processBatch(zinfo->numPhases, zinfo->phaseLength);
+                    __sync_fetch_and_sub(&zinfo->hierarchy.nocInlineDrain, 1);
+                    batchLastPhase_ = zinfo->numPhases;
                 }
+
+                // Use Garnet-measured latency (RTT); bootstrap with analytical.
+                uint32_t garnetLat = gn->getBatchAvgLatency();
+                networkLat = (garnetLat > 0)
+                    ? 2 * garnetLat
+                    : 2 * zinfo->hierarchy.nocAvgOneWayLatency;
 
                 uint32_t totalLat = networkLat + remoteLat + 2 * localLinkLat_;
                 // DRAM channel bandwidth bottleneck (accuracy fix): the H-tree
@@ -335,8 +304,7 @@ public:
                 // channel saturating — detailed otherwise permits ~num_banks ×
                 // per-MI BW. Add a shared M/D/c channel-BW queueing wait so
                 // effective aggregate DRAM BW is capped at the datasheet value.
-                if (!zinfo->hierarchy.nocParallel &&
-                    zinfo->hierarchy.nocAggBandwidthMBs > 0) {
+                if (zinfo->hierarchy.nocAggBandwidthMBs > 0) {
                     totalLat += channelBandwidthWait();
                 }
                 // Standalone MC: extra core → MC node hop on top of routing.

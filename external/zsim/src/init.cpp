@@ -538,8 +538,6 @@ static void InitSystem(Config& config) {
         zinfo->hierarchy.nocCalQueue = config.get<uint32_t>("sys.hierarchy.nocCalQueue", 0);
         zinfo->hierarchy.nocMlpModel = config.get<uint32_t>("sys.hierarchy.nocMlpModel", 0);
         zinfo->hierarchy.nocMlpDegree = config.get<uint32_t>("sys.hierarchy.nocMlpDegree", 1);
-        zinfo->hierarchy.nocParallel = config.get<uint32_t>("sys.hierarchy.nocParallel", 0);
-        gem5::g_parallelNocContexts = (zinfo->hierarchy.nocParallel != 0);
 #ifdef HAVE_GARNET
         if (zinfo->hierarchy.nocInjectorCalib &&
             !config.get<bool>("sys.network.cycleAccurate", false)) {
