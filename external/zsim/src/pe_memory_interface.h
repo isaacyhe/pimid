@@ -17,7 +17,6 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_set>
-#include <list>
 #include "g_std/g_string.h"
 #include "garnet_network.h"
 #include "memory_hierarchy.h"
@@ -25,25 +24,6 @@
 #include "pad.h"
 #include "stats.h"
 #include "zsim.h"
-
-// Per-PE LRU residency for WSS/capacity-gated near-data (SOFT limit): the PE's
-// local store at the placement level holds `cap` lines; a resident line hits
-// (served local), a miss evicts the LRU line and spills to the remote path.
-// Driven by the real access stream, so subarray (small cap) is fastest only
-// while the working set fits; large WSS -> capacity misses -> coarser wins.
-struct PELocalCache {
-    size_t cap;
-    std::list<uint64_t> order;  // front = MRU, back = LRU
-    std::unordered_map<uint64_t, std::list<uint64_t>::iterator> pos;
-    explicit PELocalCache(size_t c) : cap(c ? c : 1) {}
-    bool access(uint64_t key) {
-        auto it = pos.find(key);
-        if (it != pos.end()) { order.splice(order.begin(), order, it->second); return true; }
-        order.push_front(key); pos[key] = order.begin();
-        if (pos.size() > cap) { pos.erase(order.back()); order.pop_back(); }
-        return false;  // miss
-    }
-};
 
 /**
  * PE Memory Interface: coverage routing + hierarchy traversal + M/D/1 queuing.
@@ -164,40 +144,27 @@ public:
         // (applied here in the PE-MI cost branch, NOT in isLocal()/isLocalAddress()
         // which the ALU core uses for routing). In co-sim (chargePrep), the host's
         // de-interleave is paid on FIRST TOUCH of each line: the first access
-        // routes through the REMOTE path (cross-unit reorg + host-device link via
-        // the network levels), every reuse is local. So reuse / arithmetic
-        // intensity decides whether fine placement's prep is worth its faster
-        // compute. Device-only (chargePrep=false) assumes prep done -> always local.
-        // WSS/capacity-gated near-data (SOFT limit). With perfect data prep
-        // (assumeLocal) the PE's local store at the placement level holds C lines
-        // (C = the level-unit capacity = pagesPerUnit pages). A RESIDENT line is
-        // served LOCAL (placement-sensitive fast path); a capacity MISS spills to
-        // the REMOTE path (fetched from other units; in co-sim it also re-pays the
-        // host->device transfer). Residency is tracked per-PE from the REAL access
-        // stream (LRU) -- so subarray (small C) is fastest only while the WSS fits,
-        // and coarser placement (larger C) wins for large WSS. First touch = first
-        // miss. Without assumeLocal: the static coverage test (no capacity model).
+        // re-pays the host->device transfer, every reuse is local. So reuse /
+        // arithmetic intensity decides whether fine placement's prep is worth its
+        // faster compute. Device-only (chargePrep=false) assumes prep done.
+        //
+        // SCRATCHPAD, NOT A CACHE. An alu_core PE has NO cache (docs/cores.md); the
+        // placement unit's memory is a software-managed SCRATCHPAD that the prep
+        // step fills. So every prepped access is served LOCAL -- there is no
+        // capacity eviction spilling to a "remote" unit, which would be a cache
+        // model the PE does not physically have. Placement still shapes cost
+        // through the LOCAL access-latency proximity gradient below (a subarray
+        // column datapath is faster than a channel-level one).
         bool wantLocal;
         if (zinfo->hierarchy.assumeLocal) {
-            static thread_local PELocalCache* lcache = nullptr;
             static thread_local std::unordered_set<uint64_t>* preppedEver = nullptr;
-            if (!lcache) {
-                uint64_t cap = (uint64_t)zinfo->hierarchy.pagesPerUnit * 4096ull
-                               / (zinfo->lineSize ? zinfo->lineSize : 64);
-                lcache = new PELocalCache((size_t)cap);
-                preppedEver = new std::unordered_set<uint64_t>();
-            }
+            if (!preppedEver) preppedEver = new std::unordered_set<uint64_t>();
             // Co-sim: the first-EVER touch of a line is the ONE-TIME host->device
-            // prep (reorganize + transfer into the device's contiguous space),
-            // charged once. The device has a flat address space across units joined
-            // by the in-device net, so later CAPACITY overflow is device-internal --
-            // the data is already on the device, just in another unit -> reached via
-            // the net (remote path), NOT re-transferred from the host.
+            // prep (reorganize + transfer into the device scratchpad), charged once;
+            // every reuse is local. Device-only (chargePrep=false) skips it.
             if (zinfo->hierarchy.chargePrep && preppedEver->insert((uint64_t)req.lineAddr).second)
                 req.cycle += zinfo->hierarchy.hostLinkXferCycles;
-            // Local-unit residency: hit = local near-data fast path; miss = capacity
-            // overflow -> remote via the in-device net (the existing remote path).
-            wantLocal = lcache->access((uint64_t)req.lineAddr);
+            wantLocal = true;
         } else {
             wantLocal = isLocal(targetUnit);
         }
