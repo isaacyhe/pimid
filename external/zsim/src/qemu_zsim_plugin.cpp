@@ -52,6 +52,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 #include "scheduler.h"
 #include "stats.h"
 #include "zsim.h"
+#include "ooo_core.h"     // CtrlFlowKind codes for the branch/indirect feed
 #include "x86_decoder.h"  // minimal x86-64 decoder -> DynUops for the real OOO path
 
 /* ---- Globals (equivalent to zsim.cpp globals) ---- */
@@ -687,6 +688,16 @@ struct TbUserdata {
     uint64_t  brPc;
     uint64_t  brTakenTarget;
     uint64_t  brFallthrough;
+    /* Indirect control-flow wiring: if this TB's last instruction is a direct
+     * call (E8), indirect call (FF /2,/3), indirect jmp (FF /4,/5), or ret
+     * (C3/C2), termKind holds the CtrlFlowKind code (2..5, see ooo_core.h) and
+     * termPc/termRetAddr its PC and (for calls) fall-through return address.
+     * The actual target is resolved from the NEXT TB's start address, exactly
+     * like the conditional-direction wiring above. termKind=0 otherwise.
+     * Mutually exclusive with endsInCondBranch (one terminator per TB). */
+    uint8_t   termKind;
+    uint64_t  termPc;
+    uint64_t  termRetAddr;
 };
 
 /* Per-thread pending conditional branch awaiting direction resolution (set when
@@ -695,6 +706,13 @@ static bool     g_brPending[MAX_THREADS];
 static uint64_t g_brPc[MAX_THREADS];
 static uint64_t g_brTaken[MAX_THREADS];
 static uint64_t g_brFall[MAX_THREADS];
+
+/* Per-thread pending indirect/call/ret terminator awaiting target resolution
+ * (same next-TB mechanism; fed to the core as a CtrlFlowKind code >= 2 through
+ * the branchPtr callback). 0 = none pending. */
+static uint8_t  g_ctrlPending[MAX_THREADS];
+static uint64_t g_ctrlPc[MAX_THREADS];
+static uint64_t g_ctrlRet[MAX_THREADS];
 
 /* ---- QEMU Callbacks ---- */
 
@@ -778,6 +796,17 @@ static void insn_exec_cb(unsigned int vcpu_index, void *userdata) {
                                  g_brTaken[tid], g_brFall[tid]);
             g_brDynCount.fetch_add(1, std::memory_order_relaxed);
         }
+        /* Indirect/call/ret terminator of the previous TB: THIS TB's start is
+         * its actual target. Feed as a CtrlFlowKind code (>= 2) through the
+         * same branchPtr callback (BOOL carries the kind; takenNpc = resolved
+         * target; notTakenNpc = call fall-through/return address). Routed via
+         * fPtrs so unscheduled (nop/join) phases drop it exactly like the
+         * conditional feed. */
+        if (g_ctrlPending[tid]) {
+            fPtrs[tid].branchPtr(tid, g_ctrlPc[tid], g_ctrlPending[tid],
+                                 tud->tbAddr, g_ctrlRet[tid]);
+            g_ctrlPending[tid] = 0;
+        }
         if (tud->endsInCondBranch) {
             g_brPending[tid] = true;
             g_brPc[tid] = tud->brPc;
@@ -785,6 +814,11 @@ static void insn_exec_cb(unsigned int vcpu_index, void *userdata) {
             g_brFall[tid] = tud->brFallthrough;
         } else {
             g_brPending[tid] = false;
+        }
+        if (tud->termKind) {
+            g_ctrlPending[tid] = tud->termKind;
+            g_ctrlPc[tid] = tud->termPc;
+            g_ctrlRet[tid] = tud->termRetAddr;
         }
     }
     fPtrs[tid].bblPtr(tid, tud->tbAddr, tud->bblInfo);
@@ -1517,13 +1551,20 @@ static void tb_trans_cb(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
     tud->numInsns = (uint32_t)n_insns;
     tud->endsInCondBranch = false;
     tud->brPc = tud->brTakenTarget = tud->brFallthrough = 0;
+    tud->termKind = 0;
+    tud->termPc = tud->termRetAddr = 0;
 
-    /* Branch-predictor wiring (OOO and decode-enabled in-order): if this TB's
-     * last instruction is a conditional jcc, record its PC + both successor
-     * addresses so the real direction can be resolved from the next TB and
-     * driven into the core's branch predictor. g_decode_enabled is exactly
-     * (ooo && !ooo_nodecode) || (inorder && !inorder_nodecode), so for pure-OOO
-     * configs this gate is unchanged. */
+    /* Branch-predictor wiring (OOO and decode-enabled in-order): classify this
+     * TB's TERMINATOR so its outcome can be resolved from the next TB's start
+     * address and fed to the core's predictors:
+     *  - conditional jcc            -> direction feed (2-level predictor)
+     *  - direct call (E8)           -> RAS push (target always predicted)
+     *  - indirect call (FF /2,/3)   -> BTB target check + RAS push
+     *  - indirect jmp (FF /4,/5)    -> BTB target check
+     *  - ret (C3/C2)                -> RAS pop + target check
+     * Direct jmp (E9/EB) has a fixed correctly-predicted target: no feed.
+     * g_decode_enabled is exactly (ooo && !ooo_nodecode) || (inorder &&
+     * !inorder_nodecode), so for pure-OOO configs the cond gate is unchanged. */
     if (g_decode_enabled && n_insns > 0) {
         struct qemu_plugin_insn* last = qemu_plugin_tb_get_insn(tb, n_insns - 1);
         uint64_t lpc = qemu_plugin_insn_vaddr(last);
@@ -1531,7 +1572,13 @@ static void tb_trans_cb(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
         uint8_t lb[16];
         qemu_plugin_insn_data(last, lb, sizeof(lb));
         uint32_t p = 0;
-        while (p < lsz && (lb[p] == 0x2E || lb[p] == 0x3E)) p++;  /* branch hints */
+        /* Skip legacy prefixes (segment/hint 2E/3E/26/36/64/65, opsize 66,
+         * addrsize 67, rep F2/F3 -- e.g. the "rep ret" idiom F3 C3) and REX. */
+        while (p < lsz && (lb[p] == 0x2E || lb[p] == 0x3E || lb[p] == 0x26 ||
+                           lb[p] == 0x36 || lb[p] == 0x64 || lb[p] == 0x65 ||
+                           lb[p] == 0x66 || lb[p] == 0x67 ||
+                           lb[p] == 0xF2 || lb[p] == 0xF3)) p++;
+        if (p < lsz && lb[p] >= 0x40 && lb[p] <= 0x4F) p++;        /* REX */
         int64_t rel = 0; bool isCond = false;
         if (p < lsz && lb[p] >= 0x70 && lb[p] <= 0x7F && (p + 1) < lsz) {
             rel = (int8_t)lb[p + 1]; isCond = true;                /* jcc rel8 */
@@ -1546,6 +1593,26 @@ static void tb_trans_cb(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
             tud->brPc = lpc;
             tud->brFallthrough = lpc + lsz;
             tud->brTakenTarget = lpc + lsz + (uint64_t)rel;
+        } else if (p < lsz) {
+            uint8_t opb = lb[p];
+            if (opb == 0xE8) {                                    /* direct call */
+                tud->termKind = CF_DIR_CALL;
+                tud->termPc = lpc;
+                tud->termRetAddr = lpc + lsz;
+            } else if (opb == 0xC3 || opb == 0xC2) {              /* ret */
+                tud->termKind = CF_RET;
+                tud->termPc = lpc;
+            } else if (opb == 0xFF && (p + 1) < lsz) {            /* grp5 */
+                uint8_t ext = (lb[p + 1] >> 3) & 7;
+                if (ext == 2 || ext == 3) {                       /* call r/m */
+                    tud->termKind = CF_IND_CALL;
+                    tud->termPc = lpc;
+                    tud->termRetAddr = lpc + lsz;
+                } else if (ext == 4 || ext == 5) {                /* jmp r/m */
+                    tud->termKind = CF_IND_JMP;
+                    tud->termPc = lpc;
+                }
+            }
         }
     }
 

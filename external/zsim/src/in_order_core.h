@@ -132,6 +132,17 @@ class InOrderCore : public Core {
         uint64_t mispredBranches;    // mispredicted branches
         uint64_t mispredStallCycles; // total cycles charged for mispredict bubbles
 
+        // Indirect control-flow prediction: same minimal structures as OOOCore
+        // (direct-mapped PC-tagged 512-entry BTB + 16-entry RAS). A wrong
+        // target charges the same mispredPenalty bubble as a conditional
+        // mispredict. Gated by PIMID_INORDER_NOBRANCH like all branch modeling.
+        IndirectPredictor<9, 16> indirPred;
+        bool indirMispredPend;
+        uint64_t indirBranches;
+        uint64_t indirMispreds;
+        uint64_t rasReturns;
+        uint64_t rasMispreds;
+
         // ROI baselines: snapshot at roi_begin so reported cycles/instrs reflect
         // ONLY the region of interest. roiBaseCycle snapshots the unhalted-cycle
         // metric (cRec.getUnhaltedCycles(curCycle)). 0 until roi_begin fires.
@@ -184,6 +195,10 @@ class InOrderCore : public Core {
         // Records the resolved direction of the branch terminating the BBL that
         // is about to be simulated (the plugin calls this right before bblPtr).
         inline void branch(Address pc, bool taken);
+
+        // Indirect control-flow resolution (kind >= CF_IND_JMP, CtrlFlowKind in
+        // ooo_core.h): BTB/RAS query+update; arms the mispredict bubble.
+        inline void ctrlFlow(uint32_t kind, Address pc, Address target, Address retAddr);
 
         static void LoadAndRecordFunc(THREADID tid, ADDRINT addr);
         static void StoreAndRecordFunc(THREADID tid, ADDRINT addr);

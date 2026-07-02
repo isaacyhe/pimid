@@ -120,6 +120,14 @@ void OOOCore::initStats(AggregateStat* parentStat) {
     repDrainedLoadsStat->init("repDrainedLoads", "Expected rep-string loads drained (block-copy model)", &repDrainedLoads);
     ProxyStat* repDrainedStoresStat = new ProxyStat();
     repDrainedStoresStat->init("repDrainedStores", "Expected rep-string stores drained (block-copy model)", &repDrainedStores);
+    ProxyStat* indirBranchesStat = new ProxyStat();
+    indirBranchesStat->init("indirBranches", "Indirect jmp/call resolutions fed to the BTB", &indirBranches);
+    ProxyStat* indirMispredsStat = new ProxyStat();
+    indirMispredsStat->init("indirMispreds", "Indirect jmp/call target mispredictions", &indirMispreds);
+    ProxyStat* rasReturnsStat = new ProxyStat();
+    rasReturnsStat->init("rasReturns", "Returns resolved against the RAS", &rasReturns);
+    ProxyStat* rasMispredsStat = new ProxyStat();
+    rasMispredsStat->init("rasMispreds", "Return-target mispredictions (RAS miss)", &rasMispreds);
 
     coreStat->append(cyclesStat);
     coreStat->append(cCyclesStat);
@@ -134,6 +142,10 @@ void OOOCore::initStats(AggregateStat* parentStat) {
     coreStat->append(memMismatchStoresStat);
     coreStat->append(repDrainedLoadsStat);
     coreStat->append(repDrainedStoresStat);
+    coreStat->append(indirBranchesStat);
+    coreStat->append(indirMispredsStat);
+    coreStat->append(rasReturnsStat);
+    coreStat->append(rasMispredsStat);
 
 #ifdef OOO_STALL_STATS
     profFetchStalls.init("fetchStalls",  "Fetch stalls");  coreStat->append(&profFetchStalls);
@@ -151,6 +163,7 @@ void OOOCore::contextSwitch(int32_t gid) {
     if (gid == -1) {
         // Do not execute previous BBL, as we were context-switched
         prevBbl = nullptr;
+        indirMispredPending = false;  // pending redirect belongs to a dropped BBL
 
         // Invalidate virtually-addressed filter caches
         l1i->contextSwitch();
@@ -505,6 +518,16 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
     }
     branchPc = 0;  // clear for next BBL
 
+    // Indirect jmp/call/ret target misprediction (BTB/RAS miss, flagged by
+    // ctrlFlow): charge the same front-end redirect a conditional mispredict
+    // pays -- the next fetch cannot start until the branch resolves. Wrong-path
+    // ifetches are NOT simulated for indirects (no plausible wrong-path stream
+    // worth modeling for a first-target BTB).
+    if (indirMispredPending) {
+        indirMispredPending = false;
+        fetchCycle = MAX(fetchCycle, lastCommitCycle);
+    }
+
     // Simulate current bbl ifetch
     Address endAddr = bblAddr + bblInfo->bytes;
     for (Address fetchAddr = bblAddr; fetchAddr < endAddr; fetchAddr += lineSize) {
@@ -606,7 +629,38 @@ void OOOCore::BblFunc(THREADID tid, ADDRINT bblAddr, BblInfo* bblInfo) {
     }
 }
 
+/* Indirect control-flow resolution (kind >= CF_IND_JMP, see CtrlFlowKind).
+ * target = the resolved actual target (next TB start); retAddr = the call's
+ * fall-through address (calls only). A wrong prediction arms the same
+ * front-end redirect a conditional mispredict pays, consumed in bbl(). */
+void OOOCore::ctrlFlow(uint32_t kind, Address pc, Address target, Address retAddr) {
+    switch (kind) {
+        case CF_DIR_CALL:
+            indirPred.push(retAddr);  /* direct call: target always predicted */
+            break;
+        case CF_IND_CALL:
+            indirBranches++;
+            if (!indirPred.indirect(pc, target)) { indirMispreds++; indirMispredPending = true; }
+            indirPred.push(retAddr);
+            break;
+        case CF_IND_JMP:
+            indirBranches++;
+            if (!indirPred.indirect(pc, target)) { indirMispreds++; indirMispredPending = true; }
+            break;
+        case CF_RET:
+            rasReturns++;
+            if (!indirPred.ret(target)) { rasMispreds++; indirMispredPending = true; }
+            break;
+        default: break;
+    }
+}
+
 void OOOCore::BranchFunc(THREADID tid, ADDRINT pc, BOOL taken, ADDRINT takenNpc, ADDRINT notTakenNpc) {
-    static_cast<OOOCore*>(cores[tid])->branch(pc, taken, takenNpc, notTakenNpc);
+    OOOCore* core = static_cast<OOOCore*>(cores[tid]);
+    // taken <= 1: classic conditional direction feed. taken >= 2: CtrlFlowKind
+    // for indirect jmp/call/ret and direct-call RAS pushes (takenNpc carries
+    // the resolved target, notTakenNpc the call fall-through address).
+    if (taken <= CF_COND_T) core->branch(pc, taken, takenNpc, notTakenNpc);
+    else core->ctrlFlow((uint32_t)taken, pc, takenNpc, notTakenNpc);
 }
 

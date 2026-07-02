@@ -77,6 +77,10 @@ InOrderCore::InOrderCore(FilterCache* _l1i, FilterCache* _l1d, uint32_t _domain,
         if (v >= 0 && v <= 1000) mispredPenalty = (uint32_t)v;
     }
     branches = mispredBranches = mispredStallCycles = 0;
+
+    // Indirect control flow (BTB + RAS; IndirectPredictor default-constructs).
+    indirMispredPend = false;
+    indirBranches = indirMispreds = rasReturns = rasMispreds = 0;
 }
 
 uint64_t InOrderCore::getPhaseCycles() const {
@@ -145,6 +149,18 @@ void InOrderCore::initStats(AggregateStat* parentStat) {
     ProxyStat* mispredStallCyclesStat = new ProxyStat();
     mispredStallCyclesStat->init("mispredStallCycles", "Cycles charged for mispredict flush/refill bubbles", &mispredStallCycles);
     coreStat->append(mispredStallCyclesStat);
+    ProxyStat* indirBranchesStat = new ProxyStat();
+    indirBranchesStat->init("indirBranches", "Indirect jmp/call resolutions fed to the BTB", &indirBranches);
+    coreStat->append(indirBranchesStat);
+    ProxyStat* indirMispredsStat = new ProxyStat();
+    indirMispredsStat->init("indirMispreds", "Indirect jmp/call target mispredictions", &indirMispreds);
+    coreStat->append(indirMispredsStat);
+    ProxyStat* rasReturnsStat = new ProxyStat();
+    rasReturnsStat->init("rasReturns", "Returns resolved against the RAS", &rasReturns);
+    coreStat->append(rasReturnsStat);
+    ProxyStat* rasMispredsStat = new ProxyStat();
+    rasMispredsStat->init("rasMispreds", "Return-target mispredictions (RAS miss)", &rasMispreds);
+    coreStat->append(rasMispredsStat);
 
     parentStat->append(coreStat);
 }
@@ -156,6 +172,7 @@ void InOrderCore::contextSwitch(int32_t gid) {
         prevBbl = nullptr;
         loads = stores = 0;
         branchPc = 0;
+        indirMispredPend = false;
         l1i->contextSwitch();
         l1d->contextSwitch();
     }
@@ -378,6 +395,7 @@ void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
         prevBbl = bblInfo;
         loads = stores = 0;
         branchPc = 0;  // any pending branch belongs to a BBL we never simulated
+        indirMispredPend = false;
         return;
     }
 
@@ -406,6 +424,15 @@ void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
             curCycle += mispredPenalty;
         }
         branchPc = 0;
+    }
+
+    // Indirect jmp/call/ret target misprediction (BTB/RAS miss, armed by
+    // ctrlFlow for the terminator of `sim`): same flush/refill bubble as a
+    // conditional mispredict.
+    if (indirMispredPend) {
+        indirMispredPend = false;
+        mispredStallCycles += mispredPenalty;
+        curCycle += mispredPenalty;
     }
 
     loads = stores = 0;
@@ -454,7 +481,37 @@ void InOrderCore::branch(Address pc, bool taken) {
     branchTaken = taken;
 }
 
+/* Indirect control-flow resolution (kind >= CF_IND_JMP, see CtrlFlowKind in
+ * ooo_core.h). target = resolved actual target (next TB start); retAddr = the
+ * call's fall-through (calls only). Wrong prediction arms the mispredPenalty
+ * bubble consumed after the terminator's BBL is simulated. */
+void InOrderCore::ctrlFlow(uint32_t kind, Address pc, Address target, Address retAddr) {
+    switch (kind) {
+        case CF_DIR_CALL:
+            indirPred.push(retAddr);  /* direct call: target always predicted */
+            break;
+        case CF_IND_CALL:
+            indirBranches++;
+            if (!indirPred.indirect(pc, target)) { indirMispreds++; indirMispredPend = true; }
+            indirPred.push(retAddr);
+            break;
+        case CF_IND_JMP:
+            indirBranches++;
+            if (!indirPred.indirect(pc, target)) { indirMispreds++; indirMispredPend = true; }
+            break;
+        case CF_RET:
+            rasReturns++;
+            if (!indirPred.ret(target)) { rasMispreds++; indirMispredPend = true; }
+            break;
+        default: break;
+    }
+}
+
 void InOrderCore::BranchFunc(THREADID tid, ADDRINT pc, BOOL taken, ADDRINT takenNpc, ADDRINT notTakenNpc) {
-    (void)takenNpc; (void)notTakenNpc;  // no wrong-path fetch modeling (see header)
-    static_cast<InOrderCore*>(cores[tid])->branch(pc, taken != 0);
+    InOrderCore* core = static_cast<InOrderCore*>(cores[tid]);
+    // taken <= 1: conditional direction feed (wrong-path fetches not modeled).
+    // taken >= 2: CtrlFlowKind for indirect jmp/call/ret and direct-call RAS
+    // pushes (takenNpc = resolved target, notTakenNpc = call fall-through).
+    if (taken <= CF_COND_T) core->branch(pc, taken != 0);
+    else core->ctrlFlow((uint32_t)taken, pc, takenNpc, notTakenNpc);
 }

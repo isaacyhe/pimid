@@ -99,6 +99,65 @@ class BranchPredictorPAg {
         }
 };
 
+/* Control-flow kinds fed through the branchPtr callback. Values 0/1 are the
+ * classic conditional-branch direction (not-taken/taken); >= 2 are indirect
+ * control-flow resolutions handled by IndirectPredictor (BTB + RAS). */
+enum CtrlFlowKind : uint32_t {
+    CF_COND_NT = 0, CF_COND_T = 1,
+    CF_IND_JMP = 2,   /* jmp r/m   (FF /4,/5)             */
+    CF_IND_CALL = 3,  /* call r/m  (FF /2,/3): BTB + push */
+    CF_RET = 4,       /* ret       (C3/C2): RAS pop       */
+    CF_DIR_CALL = 5   /* call rel  (E8): RAS push only    */
+};
+
+/* Minimal indirect-branch predictor: a direct-mapped, PC-tagged BTB predicting
+ * "same target as last time" for indirect jmp/call, plus a circular
+ * return-address stack for call/ret pairs. Standard minimal structures:
+ *  - BTB: 2^BTB_BITS entries (default 512), full-PC tag, single target.
+ *  - RAS: RAS_SZ entries (default 16); push on call, pop+compare on ret;
+ *    pop on empty and capacity wrap-around behave like real hardware
+ *    (mispredict / silent overwrite of oldest).
+ */
+template<uint32_t BTB_BITS, uint32_t RAS_SZ>
+class IndirectPredictor {
+    private:
+        struct BtbEntry { Address pc; Address target; };
+        BtbEntry btb[1 << BTB_BITS];
+        Address ras[RAS_SZ];
+        uint32_t rasTop;
+        uint32_t rasCount;
+
+    public:
+        IndirectPredictor() {
+            for (uint32_t i = 0; i < (1u << BTB_BITS); i++) btb[i] = {0, 0};
+            for (uint32_t i = 0; i < RAS_SZ; i++) ras[i] = 0;
+            rasTop = 0; rasCount = 0;
+        }
+
+        /* Predict+update for an indirect jmp/call; returns true if the BTB had
+         * this PC's actual target (correct prediction). */
+        inline bool indirect(Address pc, Address target) {
+            uint32_t idx = ((uint32_t)(pc >> 1)) & ((1u << BTB_BITS) - 1);
+            bool hit = (btb[idx].pc == pc && btb[idx].target == target);
+            btb[idx].pc = pc; btb[idx].target = target;
+            return hit;
+        }
+
+        inline void push(Address retAddr) {
+            ras[rasTop] = retAddr;
+            rasTop = (rasTop + 1) % RAS_SZ;
+            if (rasCount < RAS_SZ) rasCount++;
+        }
+
+        /* Pop+compare for ret; returns true if predicted correctly. */
+        inline bool ret(Address target) {
+            if (rasCount == 0) return false;  /* empty RAS -> mispredict */
+            rasTop = (rasTop + RAS_SZ - 1) % RAS_SZ;
+            rasCount--;
+            return ras[rasTop] == target;
+        }
+};
+
 
 template<uint32_t H, uint32_t WSZ>
 class WindowStructure {
@@ -425,6 +484,17 @@ class OOOCore : public Core {
         // Expected rep-string (movs/stos) accesses drained through the
         // block-copy cost model (DynBbl.repInstrs > 0) -- NOT divergences.
         uint64_t repDrainedLoads = 0, repDrainedStores = 0;
+
+        // Indirect control-flow prediction (BTB 512 entries + RAS 16 entries).
+        // Fed by the plugin with resolved targets (kind codes >= 2 through the
+        // branchPtr callback); a wrong target sets indirMispredPending, consumed
+        // in bbl() as the same front-end redirect a conditional mispredict pays
+        // (fetchCycle = lastCommitCycle; wrong-path ifetches NOT simulated for
+        // indirects). Gated by PIMID_OOO_NOBRANCH like all branch modeling.
+        IndirectPredictor<9, 16> indirPred;
+        bool indirMispredPending = false;
+        uint64_t indirBranches = 0, indirMispreds = 0;
+        uint64_t rasReturns = 0, rasMispreds = 0;
         bool oooDebug = false;       // PIMID_OOO_DEBUG=1 -> per-BBL uop trace
         uint32_t oooDebugBbls = 0;
 
@@ -500,6 +570,10 @@ class OOOCore : public Core {
         inline void predFalseStore();
 
         inline void branch(Address pc, bool taken, Address takenNpc, Address notTakenNpc);
+
+        // Indirect control-flow resolution (kind >= CF_IND_JMP): BTB/RAS
+        // query+update; sets indirMispredPending on a wrong target.
+        inline void ctrlFlow(uint32_t kind, Address pc, Address target, Address retAddr);
 
         inline void bbl(Address bblAddr, BblInfo* bblInfo);
 
