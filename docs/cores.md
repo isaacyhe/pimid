@@ -73,6 +73,25 @@ tracks each kernel's ILP/MLP. Use `in_order_core` for dependency/issue-accurate
 in-order timing, `ooo_core` for the reordered upper bound, `simple_core` for the
 fast IPC = 1 approximation.
 
+## Model boundaries (documented, deliberate)
+
+- **In-order memory is blocking**: one outstanding miss at a time, no
+  hit-under-miss MLP. This matches a simple in-order PIM PE and is required by
+  the `CoreRecorder` weave's serialization invariant.
+- **No wrong-path effects**: a mispredict charges the flush/refill bubble but
+  wrong-path fetches do not pollute caches. Standard for simulators of this
+  class.
+- **Timing microarchitecture is fixed per core model** (`ooo_core`:
+  128-entry-ROB/4-wide Westmere-class, compile-time; `in_order_core`: dual-issue
+  default). The `power.mcpat_overrides` keys (`pipeline_depth`, `issue_width`,
+  ...) shape the McPAT power/area model only, never cycle timing -- see
+  [yaml_reference.md](yaml_reference.md).
+- At large working sets, `ooo_core` can legitimately exceed `in_order_core` on
+  branch-heavy irregular kernels: its mispredict redirect is resolution-bound,
+  so a load-fed mispredict pays a DRAM-latency-long refill that a shallow
+  in-order pipe does not pay on top of its load-use stall. This is physics, not
+  a calibration error.
+
 ## Notes
 
 - `null_core` issues NO memory or network traffic -- its load/store handlers are

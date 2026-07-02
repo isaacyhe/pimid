@@ -451,6 +451,12 @@ power:
     interconnect_projection_type: 0
 ```
 
+These overrides feed the **McPAT power/area model only** -- they do NOT change
+ZSim cycle timing. The timing microarchitecture is fixed per core model
+(`ooo_core` is Westmere-class with a 128-entry ROB and 4-wide issue at compile
+time; `in_order_core` issue width defaults to 2, env-tunable via
+`PIMID_INORDER_WIDTH`).
+
 | Override Key | Type | Description |
 |-------------|------|-------------|
 | `pipeline_depth` | int | Pipeline stages (auto: alu=5, in_order=14, ooo=19). |
