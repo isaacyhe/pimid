@@ -58,6 +58,7 @@
 #include "memory/cacti_wrapper.h"
 #include "memory/ramulator_wrapper.h"
 #include "memory/internal_dram_network.h"
+#include "sparse_htree.h"
 
 #ifdef HAVE_HDF5
 #include <hdf5.h>
@@ -1272,10 +1273,11 @@ static int topologyClassForTopology(const std::string& topology);
  * Each int edge is emitted in BOTH directions with identical lat/width.
  * Returns true on success.
  */
-static bool emitDramCustomTopology(const std::string& tech,
-                                   const std::string& outPath,
-                                   int num_pes,
-                                   int pe_level) {
+static bool dramHTreeBuilder(const std::string& tech,
+                             const std::string& outPath,
+                             const UnifiedConfig& config) {
+    int num_pes = config.num_pes;
+    int pe_level = config.pe_hierarchy_level;
     // Per-tech per-layer (link_width_bits, freq_GHz), layers leaf->root: L0,L1,L2,L3; plus channel count N.
     struct Layer { double width_bits; double freq_ghz; };
     Layer L[4];          // L[0]=L0 (subarray-leaf) ... L[3]=L3 (channel)
@@ -1336,122 +1338,49 @@ static bool emitDramCustomTopology(const std::string& tech,
         layer_lat[i] = (int)lat;
     }
 
-    // ---- Channel-DQ chokepoint sizing (star-of-banks) -----------------------
-    // 16 banks are partitioned across N channel-DQ routers. Each bank connects
-    // ONLY to its channel-DQ router (a star -- NO bankgroup intermediates), so
-    // bank->bank traffic in the same channel has NO common ancestor below the
-    // channel-DQ and is FORCED to cross the (narrow) channel-DQ links + router.
-    // That shared, narrow channel I/O is the bandwidth wall of real DRAM.
-    // Detailed Garnet node budget. Floor 128 keeps every config with <=128 PEs
-    // (i.e. all existing figures) BYTE-IDENTICAL; above that, scale with the
-    // active PE count so many-PE (e.g. subarray) placements get enough distinct
-    // nodes that the ACTIVE PEs do not alias; ceiling 1024 keeps the router/node
-    // count simulatable (matches the createGarnetHTreeForDRAM limit).
-    int ENDPOINTS = num_pes;
-    if (ENDPOINTS < 128)  ENDPOINTS = 128;
-    if (ENDPOINTS > 1024) ENDPOINTS = 1024;
-    const int TOTAL_BANKS = 16;  // the config's logical bank count (>=8 ep/bank)
-    int banks_per_channel = (TOTAL_BANKS + N - 1) / N;   // ceil(16/N)
-    if (banks_per_channel < 1) banks_per_channel = 1;
-
-    // Router id layout (contiguous): ROOT=0, then per channel
-    //   1 channel-DQ router + banks_per_channel bank routers.
-    // Endpoints fan out BELOW the bank routers (ext links), so no single router
-    // ever carries 128 ports:
-    //   * channel-DQ router: banks_per_channel + 1 (ROOT uplink) ports.
-    //   * bank router:       ~8 endpoints + 1 (channel-DQ uplink) ports.
-    //   * ROOT:              N ports.
-    const int per_channel_routers = 1 + banks_per_channel;   // 1 channelDQ + banks
-    const int total_routers = 1 + N * per_channel_routers;
-
-    // Bank router id for logical bank b (0..15): banks map round-robin onto the
-    // N channels, banks_per_channel per channel, in contiguous id order.
-    //   channel of bank b = b / banks_per_channel
-    //   within-channel bank index = b % banks_per_channel
-    // Channel c occupies ids [base_c .. base_c + per_channel_routers); the first
-    // is its channel-DQ, the rest are its bank routers.
-    auto bank_router_id = [&](int b) -> int {
-        int c = b / banks_per_channel;
-        int within = b % banks_per_channel;
-        int base = 1 + c * per_channel_routers;   // channel c's first router id
-        return base + 1 + within;                 // skip the channel-DQ (base)
-    };
+    // ── SPARSE, PLACEMENT-DRIVEN H-TREE (regenerated per sim) ────────────────
+    // Built by the SHARED builder (external/zsim/src/sparse_htree.h) that the
+    // PE-MI routing ALSO calls, so the emitted Garnet endpoint ids and the runtime
+    // routing can never drift (invariant #2). Only PE-hosting branches are
+    // materialized down to the placement level; each router with empty children
+    // gets ONE abstract endpoint at the maximal-empty-subtree root (invariant #4).
+    // A non-PE unit routes to its region's abstract endpoint (real tiered distance)
+    // + Ramulator device time; own unit = 0 hops. Sparse sweeps stay tiny
+    // (nodes ~ PEs x depth); a fully-placed device grows the complete tree.
+    std::vector<uint64_t> peHomes;
+    for (int pe = 0; pe < num_pes; ++pe) {
+        uint64_t home = (uint64_t)pe;
+        if (pe < (int)config.pe_mem_map.size() && !config.pe_mem_map[pe].mem_org_ids.empty())
+            home = (uint64_t)config.pe_mem_map[pe].mem_org_ids[0];
+        peHomes.push_back(home);
+    }
+    pimid_htree::SparseHTree tree = pimid_htree::buildSparseHTree(
+        peHomes, pe_level, N,
+        config.subarrays_per_bank, config.hierarchy_banks_per_bg,
+        config.hierarchy_bg_per_chip, config.hierarchy_chips_per_rank,
+        config.hierarchy_ranks_per_channel, layer_w, layer_lat);
 
     std::ofstream f(outPath);
     if (!f.is_open()) return false;
-
-    f << "# Auto-generated DRAM CUSTOM topology for detailed Garnet NoC\n";
-    f << "# NOTE: routers are NOT real packet routers — each is a SIMPLIFIED\n";
-    f << "#       ABSTRACTION OF A DATAPATH TRANSITION/MUX POINT in the DRAM\n";
-    f << "#       hierarchy (bank IO, channel/DQ bus, system/IMC). Each link\n";
-    f << "#       models that transition's datapath bandwidth (width) and\n";
-    f << "#       latency.\n";
-    f << "# CHANNEL-DQ CHOKEPOINT (star-of-banks): per channel, ALL banks hang\n";
-    f << "#       directly off ONE channel-DQ router via NARROW (L3) links --\n";
-    f << "#       no bankgroup intermediates. bank->bank traffic in a channel\n";
-    f << "#       has NO lower common ancestor, so it MUST cross the shared\n";
-    f << "#       narrow channel-DQ links + router (the bandwidth wall). The N\n";
-    f << "#       parallel channel-DQ subtrees model independent DRAM channels.\n";
-    f << "#         ROOT --(L3 narrow)-- channelDQ_c --(L3 narrow)-- bank_b\n";
-    f << "#                                                 --(L0 wide ext)-- endpoints\n";
-    f << "# tech=" << tech << "  channels=" << N
-      << "  num_pes=" << num_pes
-      << "  channels_utilized(=min(pes,N))=" << concurrency << "\n";
-    f << "# per-layer (width_bits, latency_cyc):"
-      << " L0=(" << layer_w[0] << "," << layer_lat[0] << ")"
-      << " L1=(" << layer_w[1] << "," << layer_lat[1] << ")"
-      << " L2=(" << layer_w[2] << "," << layer_lat[2] << ")"
-      << " L3=(" << layer_w[3] << "," << layer_lat[3] << ")\n";
-    f << "# star: total_banks=" << TOTAL_BANKS
-      << " banks/channel=" << banks_per_channel
-      << " endpoints/bank~=" << (ENDPOINTS / TOTAL_BANKS)
-      << "  channelDQ<->bank link = L3 (narrow, the chokepoint)"
-      << "  bank<->endpoint = L0 (wide)\n";
-    f << "routers " << total_routers << "\n";
-    f << "endpoints " << ENDPOINTS << "\n";
-
-    auto emit_int = [&](int a, int b, int w, int lat) {
-        // bidirectional: emit both directions, identical params, weight=1
-        f << "int " << a << " " << b << " 1 " << lat << " " << w << "\n";
-        f << "int " << b << " " << a << " 1 " << lat << " " << w << "\n";
-    };
-
-    // Build per channel: a channel-DQ router under ROOT, then banks_per_channel
-    // bank routers hanging off it. The ROOT<->channelDQ and channelDQ<->bank
-    // links are BOTH the narrow L3 (channel/DQ) width -- this is the shared
-    // channel I/O that all of a channel's banks contend for, so inter-bank
-    // (same-channel) traffic serializes on it.
-    int next_id = 1;   // 0 is ROOT
-    for (int c = 0; c < N; ++c) {
-        int dq = next_id++;                                  // channel-DQ (L3)
-        emit_int(0, dq, layer_w[3], layer_lat[3]);           // ROOT -- channelDQ (narrow)
-
-        for (int bk = 0; bk < banks_per_channel; ++bk) {
-            int bank = next_id++;                            // bank router
-            emit_int(dq, bank, layer_w[3], layer_lat[3]);    // channelDQ -- bank (narrow L3)
-        }
+    f << "# Auto-generated SPARSE placement-driven DRAM H-tree (regenerated per sim).\n";
+    f << "# Only PE-hosting branches materialized to the placement level; each empty\n";
+    f << "# region -> ONE abstract endpoint. endpoint e<num_pes == PE e; e>=num_pes\n";
+    f << "# == an abstract region (non-PE units route there + Ramulator device time).\n";
+    f << "# tech=" << tech << " channels=" << N << " num_pes=" << num_pes
+      << " pe_level=" << pe_level << " routers=" << tree.numRouters
+      << " endpoints=" << tree.totalEndpoints()
+      << " (PE=" << tree.numPEs << " abstract=" << tree.numAbstract << ")\n";
+    f << "# per-layer (width_bits, latency_cyc): L0=(" << layer_w[0] << "," << layer_lat[0]
+      << ") L1=(" << layer_w[1] << "," << layer_lat[1] << ") L2=(" << layer_w[2] << ","
+      << layer_lat[2] << ") L3=(" << layer_w[3] << "," << layer_lat[3] << ")\n";
+    f << "routers " << tree.numRouters << "\n";
+    f << "endpoints " << tree.totalEndpoints() << "\n";
+    for (auto& e : tree.intLinks) {
+        f << "int " << e.a << " " << e.b << " 1 " << e.lat << " " << e.w << "\n";
+        f << "int " << e.b << " " << e.a << " 1 " << e.lat << " " << e.w << "\n";
     }
-
-    // External links: 128 endpoints round-robin across the 16 logical banks
-    // (endpoint e -> bank e % 16). Same-bank endpoints stay local; inter-bank
-    // same-channel crosses the channel-DQ; inter-channel crosses ROOT.
-    // PLACEMENT-AWARE injection (ISPASS placement-bandwidth): a PE placed at
-    // hierarchy level L attaches via THAT level's link width -- subarray L0
-    // (wide, near-data) down to the channel L3 (narrow) for coarse placement.
-    // This is the lever that lets fine placement bypass the channel-DQ wall:
-    // a subarray PE's local access rides the wide L0 ext link, a logic-die PE
-    // is pinned to the narrow channel width. ext_idx maps the PE hierarchy
-    // level (0=subarray,1=bank,2=bankgroup,3=chip,4=rank) onto the 4-layer
-    // link array (chip/rank/logic-die -> channel L3).
-    int ext_idx = pe_level;
-    if (ext_idx < 0) ext_idx = 1;   // default BANK
-    if (ext_idx > 3) ext_idx = 3;   // CHIP/RANK/LOGIC_DIE -> channel layer
-    for (int e = 0; e < ENDPOINTS; ++e) {
-        int b = e % TOTAL_BANKS;
-        int bank = bank_router_id(b);
-        f << "ext " << e << " " << bank << " " << layer_lat[ext_idx] << " " << layer_w[ext_idx] << "\n";
-    }
-
+    for (auto& e : tree.extLinks)
+        f << "ext " << e.a << " " << e.b << " " << e.lat << " " << e.w << "\n";
     f.close();
     return true;
 }
@@ -1999,7 +1928,7 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
                 } else {
                     topo_path = topo_name;
                 }
-                if (emitDramCustomTopology(tech, topo_path, config.num_pes, config.pe_hierarchy_level)) {
+                if (dramHTreeBuilder(tech, topo_path, config)) {
                     config.noc_topology = "CUSTOM";
                     config.noc_topology_file = topo_path;
                     // The CUSTOM DRAM tree is routed by TreeRouter (up*/down*
@@ -2226,6 +2155,9 @@ static void autoGeneratePEMemMap(UnifiedConfig& config) {
     for (int pe = 0; pe < num_pes; pe++) {
         UnifiedConfig::PEMemMapping m;
         m.pe_id = pe;
+        // Store only the distant HOME org (slice start). The slice is contiguous
+        // [home, home + orgs_per_pe) and is expanded to full coverage in init.cpp
+        // (storing all orgs would overflow peMemMapData[4096] for fine placement).
         long mo = std::lround((double)pe * (double)num_orgs / (double)num_pes);
         if (mo < 0) mo = 0;
         if (mo >= num_orgs) mo = num_orgs - 1;
@@ -2461,10 +2393,15 @@ static void emitZSimHierarchyBlock(std::ostream& out, const UnifiedConfig& confi
         int mc_count = config.num_pes / config.pes_per_mc;
         if (mc_count < 1) mc_count = 1;
 
-        // Compute total units at the placement level
-        int total_units = config.num_banks;
-        if (config.placement_level == "SUBARRAY")
-            total_units = config.num_banks * config.subarrays_per_bank;
+        // Compute total units at the placement level. This MUST equal the org
+        // count the PE coverage/mapping uses (config.total_mem_orgs); otherwise
+        // addrToUnit (% totalUnits) returns unit ids in a different range than the
+        // coverage org ids -> PEs beyond #0 are structurally all-remote (a bug that
+        // was masked while assumeLocal force-set every access local).
+        int total_units = (config.total_mem_orgs > 0)
+            ? config.total_mem_orgs
+            : (config.placement_level == "SUBARRAY"
+               ? config.num_banks * config.subarrays_per_bank : config.num_banks);
 
         // Auto-derive local latency from technology if not overridden
         int local_latency = config.pe_mc_local_latency;
@@ -5436,7 +5373,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.5.2" << std::endl;
+    std::cout << "Version 1.5.3" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -6905,6 +6842,30 @@ int main(int argc, char** argv) {
     };
     resolveWorkload(config.workload_binary);
     for (auto& n : config.system_nodes) resolveWorkload(n.workload_binary);
+
+    // Device-organization awareness for benchmarks: pass the placement geometry
+    // the simulator uses (placement level, PE count, unit count, pages-per-unit)
+    // to the workload on its command line, so a device-org-aware kernel can
+    // EXPLICITLY relocate each PE's working set into its own unit (near-data).
+    // total_units mirrors the emit-side formula (SUBARRAY => banks*subarrays,
+    // else banks). Unknown to legacy kernels -> harmlessly ignored.
+    if (!config.workload_binary.empty()) {
+        // Pass the SAME org count the coverage/addrToUnit use (total_mem_orgs), so
+        // the benchmark's per-PE slots land on the PEs' (distant/strided) home units.
+        int devorg_total_units = (config.total_mem_orgs > 0)
+            ? config.total_mem_orgs
+            : (config.pe_hierarchy_level == 0
+               ? config.num_banks * config.subarrays_per_bank : config.num_banks);
+        auto add_devorg = [&](std::vector<std::string>& args) {
+            args.push_back("--placement");     args.push_back(config.placement_level);
+            args.push_back("--pes");           args.push_back(std::to_string(config.num_pes));
+            args.push_back("--total-units");   args.push_back(std::to_string(devorg_total_units));
+            args.push_back("--pages-per-unit");args.push_back(std::to_string(config.pages_per_unit));
+        };
+        add_devorg(config.workload_args);
+        for (auto& n : config.system_nodes)
+            if (!n.workload_binary.empty()) add_devorg(n.workload_args);
+    }
     if (!config.workload_binary.empty() && config.method != "trace") {
         if (access(config.workload_binary.c_str(), X_OK) != 0) {
             std::cerr << "Warning: workload binary '" << config.workload_binary

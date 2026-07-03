@@ -17,10 +17,13 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_set>
+#include <unordered_map>
+#include <mutex>
 #include "g_std/g_string.h"
 #include "garnet_network.h"
 #include "memory_hierarchy.h"
 #include "hierarchy_util.h"
+#include "sparse_htree.h"
 #include "pad.h"
 #include "stats.h"
 #include "zsim.h"
@@ -129,6 +132,41 @@ public:
         return isLocal(unit);
     }
 
+    // The SHARED sparse placement-driven H-tree -- the SINGLE SOURCE OF TRUTH it
+    // co-owns with the topology emitter in src/main.cpp (invariant #2). Built once
+    // from the SAME inputs the emitter used (PE home units, placement level, dims,
+    // channel count), via the SAME buildSparseHTree(), so the endpoint ids used to
+    // route at runtime can never drift from the emitted Garnet topology. The link
+    // layer widths/latencies are irrelevant here (routing needs only the STRUCTURE:
+    // routerOf / abstractOf / peOfLeaf), so dummy layer arrays are passed.
+    static const pimid_htree::SparseHTree& tree() {
+        static pimid_htree::SparseHTree t;
+        static std::once_flag onceFlag;
+        std::call_once(onceFlag, []() {
+            std::vector<uint64_t> peHomes;
+            uint32_t numPEs = zinfo->hierarchy.peMemMapSize;
+            for (uint32_t p = 0; p < numPEs; p++) {
+                uint32_t off = zinfo->hierarchy.peMemMapOffsets[p];
+                peHomes.push_back(off < 4096
+                    ? (uint64_t)zinfo->hierarchy.peMemMapData[off] : (uint64_t)p);
+            }
+            const int W[4] = {1, 1, 1, 1}, Lt[4] = {1, 1, 1, 1};  // structure only
+            t = pimid_htree::buildSparseHTree(
+                peHomes, (int)zinfo->hierarchy.placementLevel,
+                (int)zinfo->hierarchy.dramChannels,
+                (int)zinfo->hierarchy.subarraysPerBank, (int)zinfo->hierarchy.banksPerBG,
+                (int)zinfo->hierarchy.bgPerChip, (int)zinfo->hierarchy.chipsPerRank,
+                (int)zinfo->hierarchy.ranksPerChannel, W, Lt);
+        });
+        return t;
+    }
+
+    // Garnet endpoint a target unit routes to: a PE endpoint if the unit hosts a
+    // PE, else the abstract endpoint of its deepest LIVE region (invariant #4). -1
+    // only if the tree has no PEs at all. Delegates to the shared tree so both
+    // sides agree.
+    static int unitToEndpoint(uint32_t unit) { return tree().endpointForUnit(unit); }
+
     uint64_t access(MemReq& req) override {
         // Update coherence state
         switch (req.type) {
@@ -139,70 +177,26 @@ public:
 
         uint32_t targetUnit = addrToUnit(req.lineAddr);
 
-        // Perfect data prep. assumeLocal => the data ends up in the PE's local
-        // unit, so an access takes the LOCAL placement-sensitive fast path
-        // (applied here in the PE-MI cost branch, NOT in isLocal()/isLocalAddress()
-        // which the ALU core uses for routing). In co-sim (chargePrep), the host's
-        // de-interleave is paid on FIRST TOUCH of each line: the first access
-        // re-pays the host->device transfer, every reuse is local. So reuse /
-        // arithmetic intensity decides whether fine placement's prep is worth its
-        // faster compute. Device-only (chargePrep=false) assumes prep done.
-        //
-        // SCRATCHPAD, NOT A CACHE. An alu_core PE has NO cache (docs/cores.md); the
-        // placement unit's memory is a software-managed SCRATCHPAD that the prep
-        // step fills. So every prepped access is served LOCAL -- there is no
-        // capacity eviction spilling to a "remote" unit, which would be a cache
-        // model the PE does not physically have. Placement still shapes cost
-        // through the LOCAL access-latency proximity gradient below (a subarray
-        // column datapath is faster than a channel-level one).
-        bool wantLocal;
-        if (zinfo->hierarchy.assumeLocal) {
-            static thread_local std::unordered_set<uint64_t>* preppedEver = nullptr;
-            if (!preppedEver) preppedEver = new std::unordered_set<uint64_t>();
-            // Co-sim: the first-EVER touch of a line is the ONE-TIME host->device
-            // prep (reorganize + transfer into the device scratchpad), charged once;
-            // every reuse is local. Device-only (chargePrep=false) skips it.
-            if (zinfo->hierarchy.chargePrep && preppedEver->insert((uint64_t)req.lineAddr).second)
-                req.cycle += zinfo->hierarchy.hostLinkXferCycles;
-            wantLocal = true;
-        } else {
-            wantLocal = isLocal(targetUnit);
-        }
+        // Memory behind a network. The simulator prices an access ONLY by WHERE
+        // the data is: the PE's own placement region (isLocal, via the device-local
+        // contiguous addrToUnit map) is CLOSE -> local fast path below; anywhere
+        // else is FAR -> crosses the network (remote path below), real hop cost.
+        // Nothing is moved or cached automatically -- keeping data close, reuse,
+        // and any host/device staging are the USER's job (their code, or a
+        // cache-based PE which ZSim already models). The ALU has no cache, so it
+        // simply pays the distance.
+        // DETAILED Garnet: there is NO computed / uniform-local shortcut. EVERY
+        // access is a packet that travels the H-tree from the PE's home node to the
+        // target node; Garnet returns the latency it actually took. Own subarray =
+        // same node = 0 network hops; a nearer unit = fewer hops; a farther one =
+        // more -- the tiering is whatever the real tree yields, at the placement
+        // level's resolution. So do not special-case "local"; route all traffic
+        // through the network path below. (isLocal is kept only for the analytical
+        // NoC, which has no packets and must fall back to a distance model.)
+        bool wantLocal = zinfo->garnetNetwork && zinfo->garnetNetwork->isCycleAccurate()
+                         ? false : isLocal(targetUnit);
         if (wantLocal) {
             uint32_t lat = localAccessLatency(req) + localLinkLat_;
-
-            // Near-data PROXIMITY-LATENCY gradient (perfect-prep, option A).
-            // PHYSICS (grounded): a near-data PE reads operands through the COLUMN
-            // datapath, whose per-unit rate is the channel rate at EVERY level --
-            // prefetch is a tCCD-gated serializer, so the internal datapath is
-            // BANDWIDTH-NEUTRAL (a wider row buffer does NOT give one unit more read
-            // BW; egress == channel rate regardless of placement). Finer placement
-            // is faster NOT because of a wider per-unit datapath, but because the
-            // access is served CLOSER to the data and crosses LESS of the shared,
-            // contended egress path before reaching a private datapath (fewer
-            // arbitration/queueing cycles). The aggregate-BANDWIDTH win of fine
-            // placement (bypassing the shared channel-DQ) is modeled SEPARATELY in
-            // channelBandwidthWait(); THIS term is the always-charged proximity
-            // LATENCY (not saturation-gated), so it shapes MLP-bound (unsaturated)
-            // throughput -> a monotone placement gradient (subarray fastest).
-            // serBase ~ one internal-hop latency; the per-level factor is the
-            // monotone proximity weight (levels of shared egress between the
-            // placement point and the data). Tunable via PIMID_LOCAL_SER_BASE
-            // (default 8 cyc); the span is calibrated (8 -> ~2.1x subarray:rank).
-            {
-                static const uint32_t serBase = []() {
-                    const char* e = getenv("PIMID_LOCAL_SER_BASE");
-                    return (uint32_t)(e && e[0] ? atoi(e) : 8);
-                }();
-                uint32_t lvl = zinfo->hierarchy.placementLevel;
-                // strictly monotone proximity weight (finer = closer to data, less
-                // shared-egress contention = fewer cycles): subarray 1x (its own
-                // open row) < bank 2x < bank-group 3x < rank 4x < channel 6x <
-                // logic-die 8x (host interface, most shared / most distant).
-                uint32_t f = (lvl == 0) ? 1u : (lvl == 1) ? 2u : (lvl == 2) ? 3u
-                           : (lvl == 4) ? 4u : (lvl == 5) ? 6u : (lvl >= 6) ? 8u : 4u;
-                lat += serBase * f;
-            }
 
             // DRAM channel bandwidth bottleneck (accuracy fix): even a "local"
             // bank access consumes the shared DRAM channel's DQ bandwidth. In
@@ -240,8 +234,28 @@ public:
 
             GarnetNetwork* gn = zinfo->garnetNetwork;
             if (gn && gn->isCycleAccurate()) {
-                uint32_t srcNode = myUnit % gn->getNumNodes();
-                uint32_t dstNode = targetUnit % gn->getNumNodes();
+                // EVERY access TRAVELS the sparse H-tree. endpointForUnit maps the
+                // target unit to its Garnet endpoint: the PE index if the unit hosts
+                // a PE, else the abstract endpoint of its DEEPEST LIVE region -- a
+                // non-PE unit routes to that region's terminus (invariant #4), so its
+                // network distance is the real tier (same bank as a PE < other
+                // bank-group < other channel) and the DRAM device time is still
+                // charged via remoteLat below. src = THIS PE (endpoint == mcId_);
+                // dst==src (own unit) = 0 network hops = near-data; nearer = fewer
+                // hops; farther = more.
+                int dstEp = unitToEndpoint(targetUnit);
+                if (dstEp < 0) {
+                    // Degenerate: the tree has no PEs (no placement) -> nothing to
+                    // route to. Price as plain Ramulator DRAM (no Garnet traversal).
+                    uint32_t lat = remoteLat + 2 * localLinkLat_;
+                    if (zinfo->hierarchy.nocAggBandwidthMBs > 0) lat += channelBandwidthWait();
+                    if (zinfo->hierarchy.mcStandalone) lat += mcHopLatency(targetUnit, req.cycle);
+                    profRemoteAccesses_.inc();
+                    profRemoteLatency_.inc(lat);
+                    return req.cycle + lat;
+                }
+                uint32_t srcNode = (uint32_t)mcId_ % gn->getNumNodes();
+                uint32_t dstNode = (uint32_t)dstEp % gn->getNumNodes();
                 uint32_t networkLat;
                 // Synchronous shared-Garnet accounting (the ONLY detailed NoC):
                 // record this access (brief batchLock_) on the SHARED Garnet -- the

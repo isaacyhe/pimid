@@ -933,34 +933,32 @@ static void InitSystem(Config& config) {
             }
 
             if (hasMapping) {
-                // Build coverage set from mapping: MI-i covers all PEs whose HOME bank == i.
-                // A PE's home bank is its first mapped mem org (peMemMapData[offset]).
-                // This ensures PEs co-located on the same bank share an MI,
-                // and cross-bank accesses correctly route through the hierarchy.
-                std::vector<uint32_t> coverage;
+                // MI-i owns the CONTIGUOUS org slice of the PEs assigned to it.
+                // PEs group into MIs by INDEX (MI-i serves PEs [i*pesPerMc,
+                // (i+1)*pesPerMc)); the map stores only each PE's distant HOME org
+                // (slice start), which we expand to the full [home, home+orgsPerPe)
+                // slice -- storing every org would overflow peMemMapData[4096] at
+                // fine placement, and this range form avoids it. (The old code
+                // compared a PE's home-org VALUE to the MI index i, so with distant
+                // placement every MI but #0 got EMPTY coverage -> all-remote; and it
+                // only added the single home org, so coverage was 1 unit -> any
+                // working set > one unit spilled remote.)
                 uint32_t numPEs = zinfo->hierarchy.peMemMapSize;
-                for (uint32_t pe = 0; pe < numPEs; pe++) {
-                    if (pe >= MAX_THREADS) break;
-                    uint32_t off0 = zinfo->hierarchy.peMemMapOffsets[pe];
-                    uint32_t off1 = (pe + 1 <= numPEs)
-                                    ? zinfo->hierarchy.peMemMapOffsets[pe + 1] : off0;
-                    if (off0 > 4096) off0 = 4096;
-                    if (off1 > 4096) off1 = 4096;
-                    // PE's home bank is its first mapped mem org
-                    uint32_t homeBank = (off0 < off1) ? zinfo->hierarchy.peMemMapData[off0] : 0;
-                    if (homeBank == i) {
-                        // This PE belongs to MI-i; add all its mapped orgs as coverage
-                        for (uint32_t k = off0; k < off1; k++) {
-                            coverage.push_back(zinfo->hierarchy.peMemMapData[k]);
-                        }
-                    }
+                uint32_t pesPerMc = (mcCount > 0) ? (numPEs / mcCount) : 1;
+                if (pesPerMc < 1) pesPerMc = 1;
+                uint32_t orgsPerPe = (numPEs > 0) ? (totalUnits / numPEs) : totalUnits;
+                if (orgsPerPe < 1) orgsPerPe = 1;
+                uint32_t firstPe = i * pesPerMc;
+                uint32_t covStart = 0, covEnd = totalUnits;
+                if (firstPe < numPEs) {
+                    uint32_t off0 = zinfo->hierarchy.peMemMapOffsets[firstPe];
+                    if (off0 > 4095) off0 = 4095;
+                    covStart = zinfo->hierarchy.peMemMapData[off0];   // firstPe's home org
+                    covEnd = covStart + pesPerMc * orgsPerPe;
+                    if (covEnd > totalUnits) covEnd = totalUnits;
                 }
-                // Deduplicate
-                std::sort(coverage.begin(), coverage.end());
-                coverage.erase(std::unique(coverage.begin(), coverage.end()), coverage.end());
-
                 mems[i] = new PEMemoryInterface(
-                    i, coverage, totalUnits, lat,
+                    i, covStart, covEnd, totalUnits, lat,
                     linkLat, bw, zinfo->lineSize, peMiFreqMHz, mcName,
                     zinfo->hierarchy.dramChannels);
             } else {
