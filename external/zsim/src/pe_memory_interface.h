@@ -24,6 +24,8 @@
 #include "memory_hierarchy.h"
 #include "hierarchy_util.h"
 #include "sparse_htree.h"
+#include "pimid_noc_shm.h"
+#include <cstdlib>
 #include "pad.h"
 #include "stats.h"
 #include "zsim.h"
@@ -167,6 +169,115 @@ public:
     // sides agree.
     static int unitToEndpoint(uint32_t unit) { return tree().endpointForUnit(unit); }
 
+    // ── Shared detailed-MPI NoC: ONE logical Garnet driven by ALL ranks ──────
+    // When the launcher exports PIMID_NOC_SHM (MPI + detailed), every rank
+    // publishes its network-traversing accesses {src,dst,cycle} to its ring in
+    // the shared log and, at its own phase drain, replays the IDENTICAL merged
+    // multi-rank stream (up to the min-watermark consistent cut) through its
+    // local Garnet replica. processBatch resets Garnet per drain, so a drain is
+    // a pure function of the record window: N deterministic replicas of one
+    // logical network, all seeing all ranks' packets. No barriers, no async
+    // coordinator; quiescent (guest blocked in MPI) and exited ranks are exempt
+    // from the cut, so no rank ever waits on another.
+    struct SharedNoc {
+        PimidNocHdr* h = nullptr;
+        uint32_t rank = 0;
+        uint32_t nranks = 1;
+        std::vector<uint64_t> cursor;   // per-ring read position (this process)
+        std::vector<uint64_t> lost;     // per-ring overwritten-before-read count
+        uint64_t pressureDrains = 0;    // past-the-cut consumptions (valve hits)
+        lock_t lock;
+    };
+    static SharedNoc* sharedNoc() {
+        static SharedNoc ctx;
+        static std::once_flag onceFlag;
+        std::call_once(onceFlag, []() {
+            const char* nm = getenv("PIMID_NOC_SHM");
+            const char* rk = getenv("PIMID_MPI_RANK");
+            if (!rk) return;               // not an MPI rank: single-process Garnet
+            if (!nm) {
+                // MPI rank in detailed mode without the shared log = someone
+                // bypassed the launcher. There is NO isolated multi-Garnet
+                // mode to fall back to -- refuse rather than silently run N
+                // blind networks.
+                panic("[SharedNoC] detailed-MPI rank without PIMID_NOC_SHM: "
+                      "the shared Garnet stream is the only MPI NoC model; "
+                      "launch through pimid --mpi-ranks");
+            }
+            PimidNocHdr* h = pimid_noc_shm_attach(nm);
+            if (!h) {
+                panic("[SharedNoC] PIMID_NOC_SHM=%s attach failed: cannot run "
+                      "detailed-MPI without the shared Garnet stream (no "
+                      "isolated-Garnet fallback exists)", nm);
+            }
+            ctx.h = h;
+            ctx.rank = (uint32_t)atoi(rk);
+            ctx.nranks = h->nranks;
+            ctx.cursor.assign(h->nranks, 0);
+            ctx.lost.assign(h->nranks, 0);
+            futex_init(&ctx.lock);
+            pimid_noc_set_state(h, ctx.rank, PIMID_NOC_ACTIVE);
+            info("[SharedNoC] rank %u/%u attached %s (ringSlots=%u nodes=%u "
+                 "nodesPerRank=%u): ONE logical Garnet across all ranks",
+                 ctx.rank, ctx.nranks, nm, h->ringSlots, h->numNodes,
+                 h->nodesPerRank);
+        });
+        return ctx.h ? &ctx : nullptr;
+    }
+
+    // Collect the merged multi-rank stream up to the consistent cut and replay
+    // it through the local Garnet replica. Never blocks on peers: the cut is
+    // min-watermark over ACTIVE ranks; quiescent/exited/not-yet-publishing
+    // ranks are exempt. PRESSURE VALVE: a ring whose unread backlog exceeds
+    // half its capacity is consumed past the cut (no data is ever lost to
+    // overrun; the cost is bounded window skew for that ring, counted loudly).
+    static void sharedNocDrain(GarnetNetwork* gn, SharedNoc* sn, uint64_t phaseNum) {
+        std::vector<GarnetNetwork::BatchAccess> merged;
+        futex_lock(&sn->lock);
+        uint64_t cut = pimid_noc_cut(sn->h);
+        for (uint32_t r = 0; r < sn->nranks; r++) {
+            PimidNocRank* rk = pimid_noc_rank(sn->h, r);
+            PimidNocRec* ring = pimid_noc_ring(sn->h, r);
+            uint64_t seq = __atomic_load_n(&rk->seq, __ATOMIC_ACQUIRE);
+            uint64_t& cur = sn->cursor[r];
+            if (seq > (uint64_t)sn->h->ringSlots &&
+                cur < seq - sn->h->ringSlots) {
+                // Producer lapped us: entries [cur, seq-ringSlots) are gone.
+                uint64_t dropped = (seq - sn->h->ringSlots) - cur;
+                sn->lost[r] += dropped;
+                cur = seq - sn->h->ringSlots;
+                warn("[SharedNoC] rank %u ring overran reader by %lu recs "
+                     "(total lost from rank %u: %lu)",
+                     r, dropped, r, sn->lost[r]);
+            }
+            // Pressure valve: consume past the cut rather than lose records.
+            bool pressure = (seq - cur) > (uint64_t)(sn->h->ringSlots / 2);
+            if (pressure) {
+                sn->pressureDrains++;
+                if ((sn->pressureDrains & (sn->pressureDrains - 1)) == 0)  // 1,2,4,8...
+                    warn("[SharedNoC] ring %u under pressure (backlog %lu > %u): "
+                         "consuming past the cut (bounded window skew, "
+                         "pressure-drains so far: %lu)",
+                         r, seq - cur, sn->h->ringSlots / 2, sn->pressureDrains);
+            }
+            while (cur < seq) {
+                PimidNocRec rec = ring[cur & (sn->h->ringSlots - 1)];
+                // Tear check: if the producer lapped us mid-copy, discard+resync.
+                uint64_t seq2 = __atomic_load_n(&rk->seq, __ATOMIC_ACQUIRE);
+                if (seq2 > (uint64_t)sn->h->ringSlots &&
+                    cur < seq2 - sn->h->ringSlots) {
+                    break;  // next drain's overrun branch resyncs + counts
+                }
+                if (!pressure && rec.cycle > cut) break;  // beyond the cut
+                merged.push_back({rec.src, rec.dst, rec.cycle});
+                cur++;
+            }
+        }
+        futex_unlock(&sn->lock);
+        if (!merged.empty())
+            gn->processBatchRecords(std::move(merged), phaseNum);
+    }
+
     uint64_t access(MemReq& req) override {
         // Update coherence state
         switch (req.type) {
@@ -258,16 +369,38 @@ public:
                 uint32_t dstNode = (uint32_t)dstEp % gn->getNumNodes();
                 uint32_t networkLat;
                 // Synchronous shared-Garnet accounting (the ONLY detailed NoC):
-                // record this access (brief batchLock_) on the SHARED Garnet -- the
-                // real cross-thread-contended network -- and drain the batch on the
-                // critical path at each phase boundary. The drain flag keeps the
-                // watchdog from misreading the frozen phase clock as a fake-leave
-                // stall.
-                gn->recordBatchAccess(srcNode, dstNode, req.cycle);
+                // record this access and drain the batch on the critical path at
+                // each phase boundary. The drain flag keeps the watchdog from
+                // misreading the frozen phase clock as a fake-leave stall.
+                //   Single process (OMP/device): record on the in-process Garnet.
+                //   MPI shared mode (PIMID_NOC_SHM): publish to the cross-rank
+                //   shared log instead, and drain the MERGED multi-rank stream --
+                //   one logical Garnet driven by all ranks' traffic.
+                SharedNoc* sn = sharedNoc();
+                if (sn) {
+                    // ROI-RELATIVE clock: per-rank absolute cycles carry huge
+                    // startup skew (QEMU boot staggering) and are NOT comparable
+                    // across ranks -- publishing on them pins the merged-replay
+                    // cut at the slowest-starting rank and overruns the rings.
+                    // roiRel (cycle - this rank's ROI baseline) is the
+                    // established floor-free cross-rank axis (1.3.x rendezvous).
+                    // Pre-baseline (startup/warmup) traffic is not published.
+                    if (zinfo->hierarchy.mpiNocBaselined) {
+                        uint64_t base = zinfo->hierarchy.mpiNocRoiBase;
+                        uint64_t rel = (req.cycle > base) ? req.cycle - base : 0;
+                        if (srcNode != dstNode)   // src==dst never traverses
+                            pimid_noc_publish(sn->h, sn->rank, srcNode, dstNode, rel);
+                        else
+                            pimid_noc_touch(sn->h, sn->rank, rel);
+                    }
+                } else {
+                    gn->recordBatchAccess(srcNode, dstNode, req.cycle);
+                }
 
                 if (zinfo->numPhases > batchLastPhase_) {
                     __sync_fetch_and_add(&zinfo->hierarchy.nocInlineDrain, 1);
-                    gn->processBatch(zinfo->numPhases, zinfo->phaseLength);
+                    if (sn) sharedNocDrain(gn, sn, zinfo->numPhases);
+                    else    gn->processBatch(zinfo->numPhases, zinfo->phaseLength);
                     __sync_fetch_and_sub(&zinfo->hierarchy.nocInlineDrain, 1);
                     batchLastPhase_ = zinfo->numPhases;
                 }
@@ -569,7 +702,36 @@ protected:
         uint32_t page = (uint32_t)(lineAddr >> 6);
         uint32_t ppu = (zinfo->hierarchy.pagesPerUnit > 0)
                        ? zinfo->hierarchy.pagesPerUnit : 1;
-        return (page / ppu) % totalUnits_;
+        uint32_t unit = (page / ppu) % totalUnits_;
+        // MPI: each rank is a SEPARATE guest process with its own (identical-
+        // looking) VA space. Without an offset, every rank's pages would map to
+        // the SAME units -- N processes falsely stacked on one region. Offset
+        // rank r's mapping into r's own slice (first-touch by the local PE): the
+        // honest emulation of per-rank physical placement, and what makes the
+        // shared multi-rank Garnet stream meaningful (rank r sources from AND
+        // homes in its own region).
+        uint32_t rr = mpiRank_(), rn = mpiRanks_();
+        if (rn > 1) {
+            uint64_t upr = totalUnits_ / rn;      // units per rank (>=0)
+            if (upr == 0) upr = 1;
+            unit = (uint32_t)((unit + (uint64_t)rr * upr) % totalUnits_);
+        }
+        return unit;
+    }
+
+    static uint32_t mpiRank_() {
+        static const uint32_t r = []() {
+            const char* e = getenv("PIMID_MPI_RANK");
+            return e ? (uint32_t)atoi(e) : 0u;
+        }();
+        return r;
+    }
+    static uint32_t mpiRanks_() {
+        static const uint32_t n = []() {
+            const char* e = getenv("PIMID_MPI_RANKS");
+            return e ? (uint32_t)atoi(e) : 1u;
+        }();
+        return n;
     }
 
     bool isLocal(uint32_t unit_id) const {

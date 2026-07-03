@@ -1384,15 +1384,28 @@ static void InitSystem(Config& config) {
                     // model's map covers only its own PEs.
                     PEMemoryInterface* mi = nullptr;
                     if (!rawMIs.empty()) {
-                        uint32_t miIdx = 0;
-                        if (zinfo->hierarchy.peMemMapSize > 0 && aluCoreIdx < zinfo->hierarchy.peMemMapSize) {
-                            uint32_t off0 = zinfo->hierarchy.peMemMapOffsets[aluCoreIdx];
-                            uint32_t off1 = (aluCoreIdx + 1 <= zinfo->hierarchy.peMemMapSize)
-                                            ? zinfo->hierarchy.peMemMapOffsets[aluCoreIdx + 1] : off0;
-                            if (off0 < off1 && off0 < 4096)
-                                miIdx = zinfo->hierarchy.peMemMapData[off0]; // home bank
-                        } else {
-                            miIdx = aluCoreIdx / std::max(zinfo->hierarchy.pesPerMC, 1u);
+                        // MI index == PE ORDINAL group, by construction of the
+                        // coverage build above (MI-i covers PE-i-group's slice).
+                        // The old home-ORG-id lookup was a stale pre-slice
+                        // convention: at SUBARRAY placement home orgs (0, 2048,
+                        // 4096, ...) overflow the MI array, silently leaving
+                        // every PE but PE 0 with mi_ == nullptr (flat path, no
+                        // PE-MI, no NoC).
+                        uint32_t miIdx = aluCoreIdx / std::max(zinfo->hierarchy.pesPerMC, 1u);
+                        // MPI: every rank builds the same P cores but runs its
+                        // single guest thread on core 0. Rank r IS the r-th PE
+                        // group of the shared device: offset so rank r's core 0
+                        // drives MI r*(P/N) -- its own slice, its own Garnet
+                        // source node (matches the addrToUnit rank offset and
+                        // the shared NoC log's nodesPerRank mapping).
+                        const char* mpiRk = getenv("PIMID_MPI_RANK");
+                        const char* mpiRn = getenv("PIMID_MPI_RANKS");
+                        if (mpiRk && mpiRn && !rawMIs.empty()) {
+                            uint32_t r = (uint32_t)atoi(mpiRk);
+                            uint32_t n = (uint32_t)atoi(mpiRn);
+                            uint32_t misPerRank = (n > 0 && rawMIs.size() >= n)
+                                                  ? rawMIs.size() / n : 1;
+                            miIdx = (miIdx + r * misPerRank) % rawMIs.size();
                         }
                         if (miIdx < rawMIs.size()) mi = rawMIs[miIdx];
                     }

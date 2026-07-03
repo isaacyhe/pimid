@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(PIMID VERSION 1.5.3 LANGUAGES CXX)
+project(PIMID VERSION 1.5.4 LANGUAGES CXX)
 
 # C++17 standard required
 set(CMAKE_CXX_STANDARD 17)
@@ -155,7 +155,6 @@ set(PIMID_SOURCES
     src/memory/pim_bandwidth_tracker.cpp
     src/memory/internal_dram_network.cpp
     src/memory/internal_memory_network.cpp
-    src/memory/multi_instance_garnet_network.cpp
     src/memory/pim_controller_plugin.cpp
 
     # DRAM architecture specifications

@@ -203,6 +203,14 @@ struct GlobSimInfo {
         // technologies stay unsaturated under load. A proper N-parallel-Garnet-
         // trees model is future work; this scalar is a stop-gap. 1 = no effect.
         uint32_t dramChannels = 1;
+        // Shared detailed-MPI Garnet: this rank's ROI baseline, exported by the
+        // plugin (snapshotRoiBaseCyc) so the PE-MI publishes shared-NoC records
+        // on the ROI-RELATIVE clock -- the established floor-free cross-rank
+        // axis (1.3.x rendezvous fix). Absolute per-rank cycles are NOT
+        // comparable across ranks (startup skew pins the merged-replay cut and
+        // overruns the rings). 0/unset = not yet baselined: publish nothing.
+        volatile uint32_t mpiNocBaselined = 0;
+        volatile uint64_t mpiNocRoiBase = 0;
         // Real datasheet AGGREGATE sustainable DRAM bandwidth (MB/s) =
         // per-channel × channels (from Ramulator getBandwidth()). The detailed
         // NoC model uses this to cap effective DRAM bandwidth at the channel

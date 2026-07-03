@@ -47,6 +47,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 #include "init.h"
 #include "log.h"
 #include "pad.h"
+#include "pimid_noc_shm.h"
 #include "process_tree.h"
 #include "profile_stats.h"
 #include "scheduler.h"
@@ -82,6 +83,27 @@ static std::mutex bblCacheMutex;
  * unchanged. Set once in qemu_plugin_install after cores are constructed. */
 static bool g_ooo_present = false;
 static bool g_ooo_decode_disabled = false;  /* PIMID_OOO_NODECODE=1 escape hatch */
+
+/* ---- Shared detailed-MPI Garnet: rank state in the shared NoC log ----
+ * A guest blocked in MPI (comm window open) injects nothing, so it is marked
+ * QUIESCENT and exempted from the merged-replay consistent cut; EXITED at
+ * plugin teardown. Peers therefore never wait on this rank (deadlock-free).
+ * No-op unless the launcher exported PIMID_NOC_SHM (MPI + detailed). */
+static void pimid_noc_mark_state(uint32_t st) {
+    static PimidNocHdr* h = nullptr;
+    static int rank = -1;
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        const char* nm = getenv("PIMID_NOC_SHM");
+        const char* rk = getenv("PIMID_MPI_RANK");
+        if (nm && rk) {
+            h = pimid_noc_shm_attach(nm);
+            rank = atoi(rk);
+        }
+    }
+    if (h && rank >= 0) pimid_noc_set_state(h, (uint32_t)rank, st);
+}
 
 /* True if any genuine in-order core exists. The in-order pipeline (in_order_core)
  * consumes the SAME x86-decoded DynUop stream as the OOO core (its oooBbl), so we
@@ -186,8 +208,18 @@ static uint64_t mpi_roi_base_cyc[MAX_THREADS] = {0};
 
 /* Snapshot every core's ROI baseline cycle (call right after markRoiBegin). */
 static inline void snapshotRoiBaseCyc() {
+    uint64_t maxBase = 0;
     for (uint32_t c = 0; c < zinfo->numCores && c < MAX_THREADS; c++)
-        if (zinfo->cores[c]) mpi_roi_base_cyc[c] = zinfo->cores[c]->getCycles();
+        if (zinfo->cores[c]) {
+            mpi_roi_base_cyc[c] = zinfo->cores[c]->getCycles();
+            if (mpi_roi_base_cyc[c] > maxBase) maxBase = mpi_roi_base_cyc[c];
+        }
+    /* Export for the PE-MI's shared-NoC publishing: records go on the ROI-
+     * relative clock (the floor-free cross-rank axis). The max across cores is
+     * the running core's baseline (idle cores sit near 0 in a 1-thread rank). */
+    zinfo->hierarchy.mpiNocRoiBase = maxBase;
+    __sync_synchronize();
+    zinfo->hierarchy.mpiNocBaselined = 1;
 }
 /* This core's simulated cycle measured from its ROI baseline (floor-free). */
 static inline uint64_t roiRelCycles(uint32_t tid) {
@@ -850,12 +882,16 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
 
     if (op == ZSIM_MAGIC_OP_MPI_COMM_BEGIN) {
         /* Open the comm window: keep the core attached across transport sleeps
-         * and stop counting the transport's own instructions until COMM_END. */
+         * and stop counting the transport's own instructions until COMM_END.
+         * Shared detailed-MPI Garnet: a blocked guest injects nothing -> mark
+         * QUIESCENT so the merged-replay cut never waits on this rank. */
         mpi_comm_window[tid].store(true, std::memory_order_release);
+        pimid_noc_mark_state(PIMID_NOC_QUIESCENT);
         return;
     }
     if (op == ZSIM_MAGIC_OP_MPI_COMM_END) {
         mpi_comm_window[tid].store(false, std::memory_order_release);
+        pimid_noc_mark_state(PIMID_NOC_ACTIVE);
         return;
     }
 
@@ -1095,6 +1131,38 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
      * guest ignores it (noc_detailed==0 -> contention skipped). */
     if (!isRecv) {
         gp->noc_lat = nocLat;
+
+        /* Shared detailed-MPI Garnet: the message's cache-line packets also go
+         * into the cross-rank shared log (sender-side only -- one publication
+         * per message), so rank-to-rank MPI traffic physically contends with
+         * ALL ranks' memory traffic in every rank's merged Garnet replay. */
+        static PimidNocHdr* nocShm = nullptr;
+        static int nocRank = -1;
+        static bool nocTried = false;
+        if (!nocTried) {
+            nocTried = true;
+            const char* nm = getenv("PIMID_NOC_SHM");
+            const char* rk = getenv("PIMID_MPI_RANK");
+            if (nm && rk) { nocShm = pimid_noc_shm_attach(nm); nocRank = atoi(rk); }
+        }
+        if (nocShm && nocRank >= 0 && zinfo->garnetNetwork &&
+            zinfo->garnetNetwork->isCycleAccurate()) {
+            uint32_t nn = zinfo->garnetNetwork->getNumNodes();
+            /* src/dst_pe are RANK ids; rank r's memory traffic sources from
+             * node r*nodesPerRank (its own PE-group's MI). Scale so message
+             * packets share the same source/dest leaves as the rank's memory
+             * stream (exact when ranks == PEs, the sweep norm). */
+            uint32_t npr = nocShm->nodesPerRank > 0 ? nocShm->nodesPerRank : 1;
+            uint32_t srcN = (params.src_pe * npr) % nn;
+            uint32_t dstN = (params.dst_pe * npr) % nn;
+            uint32_t nPkts = std::max(1u, (uint32_t)((params.msg_size + 63) / 64));
+            if (nPkts > PIMID_NOC_MAX_MSG_RECS) nPkts = PIMID_NOC_MAX_MSG_RECS;
+            /* ROI-relative clock: the only cross-rank-comparable axis (same
+             * axis the PE-MI publishes memory records on). */
+            uint64_t cyc = roiRelCycles(tid);
+            for (uint32_t p = 0; p < nPkts; p++)
+                pimid_noc_publish(nocShm, (uint32_t)nocRank, srcN, dstN, cyc + p);
+        }
     }
 
     /* 3. Charge timing as CYCLES (not instructions) so instr counts reflect
@@ -1861,6 +1929,9 @@ static void syscall_cb(qemu_plugin_id_t id,
  */
 static void plugin_exit(qemu_plugin_id_t id, void *userdata) {
     (void)userdata;
+    /* Shared detailed-MPI Garnet: mark this rank EXITED first, so peers'
+     * merged-replay cuts stop including it immediately (no wait on the dead). */
+    pimid_noc_mark_state(PIMID_NOC_EXITED);
     /* Finalize any threads still registered */
     for (uint32_t v = 0; v < MAX_VCPUS; v++) {
         uint32_t tid = vcpuToTid[v];

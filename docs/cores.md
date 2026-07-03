@@ -104,8 +104,8 @@ the reordered upper bound, `simple_core` for the fast IPC = 1 approximation.
   network-only studies (use `alu_core` with `access_factor`/`compute_factor`).
   Its role today is an IPC = 1 control/upper-bound baseline. Note: PIMID does not
   switch core models mid-run, so `null_core` cannot yet fast-forward non-ROI
-  regions into a detailed core; true fast-forward (with trace-gen/replay) is
-  planned for 1.5.x.
+  regions into a detailed core; true fast-forward (a mid-run core switch, a
+  separate mechanism from trace/replay) is planned for 1.7.x.
 - In-order/out-of-order cores automatically upgrade a `simple` memory controller to
   `weavesimple` for correct weave-phase interaction.
 - `in_order_core` reuses the same in-tree x86 decoder as `ooo_core` (below) to

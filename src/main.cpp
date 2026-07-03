@@ -59,6 +59,7 @@
 #include "memory/ramulator_wrapper.h"
 #include "memory/internal_dram_network.h"
 #include "sparse_htree.h"
+#include "pimid_noc_shm.h"
 
 #ifdef HAVE_HDF5
 #include <hdf5.h>
@@ -5373,7 +5374,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.5.3" << std::endl;
+    std::cout << "Version 1.5.4" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -7885,6 +7886,28 @@ int main(int argc, char** argv) {
                 // Unique shm name per launch so concurrent pimid invocations don't collide
                 std::string shm_name = "/pimid_mpi_" + std::to_string(getpid());
 
+                // Shared detailed-MPI Garnet: the launcher owns the NoC record-log
+                // lifecycle (create + size BEFORE forking; unlink after every child
+                // exited), so the segment exists from t=0 no matter which rank
+                // starts first. Every rank publishes its NoC accesses here and
+                // replays the identical merged multi-rank stream through its local
+                // Garnet replica -- ONE logical network driven by all ranks.
+                // This is the ONLY detailed-MPI NoC model: there is no isolated
+                // per-rank multi-Garnet mode and no fallback to one. Creation
+                // failure is FATAL -- silently degrading to N blind networks
+                // would fake the contention model.
+                std::string noc_shm_name = "/pimid_noc_" + std::to_string(getpid());
+                if (pimid_noc_shm_create(noc_shm_name.c_str(), (uint32_t)ranks,
+                                         (uint32_t)config.num_pes) != 0) {
+                    std::cerr << "Error: shared NoC log creation failed ("
+                              << noc_shm_name << ") -- cannot run detailed-MPI "
+                              << "without the shared Garnet stream" << std::endl;
+                    return 1;
+                }
+                std::cout << "Shared NoC log: " << noc_shm_name
+                          << " (one Garnet stream across " << ranks
+                          << " ranks)" << std::endl;
+
                 std::cout << "MPI transport: libpimid_mpi.so (shm=" << shm_name << ")" << std::endl;
                 std::cout << "Launching " << ranks << " ranks (PIMID-managed multi-process)" << std::endl;
                 std::cout << "────────────────────────────────────────" << std::endl;
@@ -7912,6 +7935,7 @@ int main(int argc, char** argv) {
                         setenv("PIMID_MPI_RANKS", std::to_string(ranks).c_str(), 1);
                         setenv("PIMID_MPI_RANK", std::to_string(rank).c_str(), 1);
                         setenv("PIMID_MPI_SHM", shm_name.c_str(), 1);
+                        setenv("PIMID_NOC_SHM", noc_shm_name.c_str(), 1);
                         for (const auto& [key, val] : config.workload_env) {
                             setenv(key.c_str(), val.c_str(), 1);
                         }
@@ -7946,6 +7970,7 @@ int main(int argc, char** argv) {
                 }
 
                 shm_unlink(shm_name.c_str());
+                shm_unlink(noc_shm_name.c_str());
 
                 std::cout << "────────────────────────────────────────" << std::endl;
 

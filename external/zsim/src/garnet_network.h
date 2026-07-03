@@ -582,10 +582,11 @@ public:
         return latCycles;
     }
 
-private:
+public:
     // ── Phase-level batch: record all PE remote accesses with their
     //    real ZSim cycle timestamps, then replay through Garnet.
     struct BatchAccess { uint32_t src, dst; uint64_t cycle; };
+private:
     std::vector<BatchAccess> phaseBatch_;
     // Published rolling one-way avg latency (lock-free read by all PE threads).
     std::atomic<uint32_t> batchAvgLatency_{0};
@@ -658,6 +659,21 @@ public:
         runBatchDrain_(std::move(batch), phaseNum);
     }
 
+    /**
+     * Drain an EXPLICIT record set through Garnet (shared detailed-MPI mode:
+     * the caller collected the merged multi-rank stream from the shared NoC
+     * log up to a consistent cut). Bypasses phaseBatch_ entirely -- in shared
+     * mode records live in the shm rings, never in phaseBatch_. Same replay
+     * engine as processBatch (reset per drain => a drain is a pure function
+     * of the record window, so every rank replaying the identical merged
+     * stream IS one logical network). Idempotence is the caller's job (ring
+     * cursors advance exactly once per consumed record).
+     */
+    void processBatchRecords(std::vector<BatchAccess>&& records, uint64_t phaseNum) {
+        if (records.empty()) return;
+        runBatchDrain_(std::move(records), phaseNum);
+    }
+
 private:
     /**
      * Core Garnet drain over an already-claimed batch. Holds garnetLock_ for the
@@ -675,11 +691,16 @@ private:
         // Reset Garnet for each phase — clean slate
         resetGarnetState();
 
-        // ── Sort by ZSim cycle timestamp so packets enter Garnet
-        //    in the order they'd naturally occur in real hardware. ──
+        // ── Sort by ZSim cycle timestamp so packets enter Garnet in the order
+        //    they'd naturally occur in real hardware. TOTAL order (cycle, src,
+        //    dst): equal-cycle ties resolve identically everywhere, so the N
+        //    per-rank replicas replaying the same merged multi-rank stream
+        //    stay deterministic (equal records are interchangeable). ──
         std::sort(batch.begin(), batch.end(),
                   [](const BatchAccess& a, const BatchAccess& b) {
-                      return a.cycle < b.cycle;
+                      if (a.cycle != b.cycle) return a.cycle < b.cycle;
+                      if (a.src != b.src) return a.src < b.src;
+                      return a.dst < b.dst;
                   });
 
         // Normalize timestamps: offset so the first packet is at tick 0
