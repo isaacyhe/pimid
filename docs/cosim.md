@@ -71,3 +71,9 @@ so halo-exchange patterns run without deadlock. Collectives are
 **timing-faithful, not numerics-faithful**: reduce-style ops transmit all
 chunks but do not apply the reduction operator — workloads needing actual
 reduced values should compute them on the root from received chunks.
+
+Under `noc.model: detailed`, all ranks drive ONE logical Garnet network via a
+shared record log (see [network.md](network.md)): message payloads and every
+rank's memory traffic contend on the same tree. Each rank also occupies its
+own placement slice of the device (rank r's address space maps into PE r's
+region), so rank-local data is near-data by construction.

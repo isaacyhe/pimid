@@ -100,6 +100,25 @@ forked ranks.
 
 See [cosim.md](cosim.md) for the host-device link model used by cosim.
 
+## Device-organization-aware data prep (near-data placement)
+
+The simulator prices each PE access purely by data LOCATION (own unit = fast,
+elsewhere = network distance) and never moves data itself -- placing data
+near its PE is the benchmark's job, exactly as it is the programmer's job on
+real PIM hardware. The harness passes the device organization on the command
+line (`--placement --pes --total-units --pages-per-unit`), and
+`benchmarks/include/pimid_devorg.h` gives kernels the address math to
+relocate each PE's working set into that PE's own placement unit BEFORE the
+ROI (plain untimed setup; the measured kernel arithmetic is byte-identical).
+All 5 sweep kernels (`stream_triad`, `gemv`, `bfs`, `stencil_2d`,
+`histogram`) do this: partitioned data goes to the owner's slot, read-shared
+data is replicated, and genuinely cross-PE traffic (stencil halos, bfs edge
+scatter) stays remote -- so it pays real network distance, which is the
+point. Coarse/host-shared placements (`CHANNEL`, `LOGIC_DIE`) need no prep
+and run the original path; a working set too large for a PE slot falls back
+to host layout with a loud note. MPI variants need no prep for rank
+locality: each rank's address space maps into its own placement slice.
+
 ## NPB (NAS Parallel Benchmarks)
 
 Self-contained single-file C implementations of 5 NPB kernels with zsim

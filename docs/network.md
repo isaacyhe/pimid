@@ -22,26 +22,46 @@ credit-based flow control, deadlock-free routing.
   consecutive runs of the previously freeze-prone cells across two
   partitions, zero hangs. `PIMID_MPI_TRACE=1` still dumps per-rank
   transport wait events to /tmp for diagnosis.
-- **Message-passing models real cross-rank contention (1.3.1).** MPI ranks run
-  as separate processes with isolated per-rank Garnet timelines, but their
-  traffic is coupled through a simulated-time rendezvous: each message carries
-  its sender's simulated send-time, and the receiver advances deterministically
-  to `send_time + contention_wait + NoC_latency`. Concurrent messages queue on a
-  shared link-occupancy table (in the rank-shared SHM, keyed on simulated time),
-  so cross-rank messages contend on shared links the way shared-memory threads
-  already do under OpenMP. Per-rank instruction counts stay pure compute --
-  deterministic and scaling with the workload. The former within-rank
-  phantom-traffic approximation has been removed; the only intentional
-  approximation inside `detailed` is `noc.model: analytical`.
+- **ONE logical Garnet across MPI ranks (1.5.4).** MPI ranks run as separate
+  processes, but they drive a single logical network: every rank publishes its
+  network-traversing accesses `{src, dst, cycle}` to a launcher-owned shared
+  record log, and at its own phase drain replays the identical merged
+  multi-rank stream through its local Garnet replica. Because a drain resets
+  Garnet and replays a record window, N replicas of the same merged stream ARE
+  one network -- cross-rank packets (memory traffic and MPI message payloads
+  alike) physically contend on shared links. No barriers and no coordinator:
+  ranks blocked in MPI, exited ranks, and pre-ROI ranks are exempt from the
+  merge cut, so no rank ever waits on another (deadlock-free by construction).
+  There is NO isolated per-rank network mode; if the shared log cannot be
+  created or attached, the run refuses to start. Records are stamped on the
+  ROI-relative clock (the floor-free cross-rank axis); the message rendezvous
+  (`send_time + contention_wait + NoC_latency`, 1.3.1) is unchanged.
+- **One timeline inside a process too (1.5.6).** Per-core cycle counters are
+  private work clocks (an init-heavy thread runs far ahead of fresh workers),
+  so single-process (OpenMP/device) batch records are stamped on the global
+  phase clock with a deterministic intra-phase offset -- same-phase packets
+  genuinely coexist in the replay. (`PIMID_NOC_DIAG_SPAN=1` prints per-drain
+  batch spans for diagnosis.)
 
-- **DRAM device networks are trees.** A DRAM device's internal datapath is a
-  hierarchical distribution fabric, not a mesh — PIMID emits a per-technology
-  CUSTOM tree topology (banks -> channel-DQ -> system root) with per-link
-  latency/width derived from the technology's JEDEC organization (per-channel
-  bandwidth x channel count from Ramulator2). Per-technology bandwidth is
-  modeled by NI-side flit count; tree routing uses up/down virtual-channel
-  classes and is deadlock-free (validated drain-complete across packet counts,
-  technologies, and traffic patterns).
+- **DRAM device networks are sparse placement-driven trees (1.5.3).** A DRAM
+  device's internal datapath is a hierarchical distribution fabric, not a
+  mesh. PIMID regenerates a CUSTOM tree per simulation from the PE placement:
+  only PE-hosting branches are materialized down to the placement level, and
+  every empty region hangs ONE abstract endpoint at its maximal-empty-subtree
+  root -- so an access to a non-PE region still travels the real tiered
+  distance (same bank as a PE < other bank-group < other channel) while the
+  region's device time comes from the aggregate DRAM model. The emitter and
+  the runtime routing share one builder (`sparse_htree.h`), so endpoint ids
+  cannot drift. Node count scales with PEs x tree depth, not device size:
+  sparse placements simulate fast, and a fully-placed device grows the
+  complete tree naturally. Accesses are priced purely by data LOCATION: an
+  access to the PE's own unit traverses zero network hops and pays no network
+  latency (1.5.5); everything else pays the Garnet-measured distance.
+  Per-link latency/width derive from the technology's JEDEC organization
+  (per-channel bandwidth x channel count from Ramulator2); per-technology
+  bandwidth is modeled by NI-side flit count; tree routing uses up/down
+  virtual-channel classes and is deadlock-free (validated drain-complete
+  across packet counts, technologies, and traffic patterns).
 - Flat topologies remain available for the host network and non-DRAM device
   memories: `MESH_2D`, `TORUS_2D`, `RING`, `CROSSBAR`, `FAT_TREE`, `BUS`,
   `H_TREE`, `CUSTOM` (file-defined).

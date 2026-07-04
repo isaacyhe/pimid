@@ -39,6 +39,14 @@ datapaths, so they contend more. The detailed model charges this contention for
 real -- including cross-rank contention under message-passing (see
 [network.md](network.md)).
 
+Access pricing is purely by data LOCATION: a PE's access to its own placement
+unit traverses zero network hops; anything else pays the real tiered tree
+distance to where the data lives (or to its region's abstract endpoint, for
+regions hosting no PE). The PE local memory is a scratchpad, not a cache --
+nothing is cached, migrated, or auto-prepped by the simulator; data placement
+is the workload's job (see the device-org prep section in
+[benchmarks.md](benchmarks.md)).
+
 When multiple PEs are placed at a level and no explicit `pim.pe_mem_map` is
 given, PEs are distributed **distant/strided** across that level's units -- each
 PE local to its own evenly-spaced slice (e.g. 4 PEs over 512 banks land on banks

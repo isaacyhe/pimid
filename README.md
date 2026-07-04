@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
-[![Version](https://img.shields.io/badge/version-1.5.6-green.svg)]()
+[![Version](https://img.shields.io/badge/version-1.5.7-green.svg)]()
 
 <img src="assets/qr-code.png" alt="PIMID repository QR code" width="120" align="right" />
 
@@ -19,9 +19,10 @@ McPAT, and Garnet for timing, power, and area.
   SRAM, 3 NVM (STT-MRAM, PCM, ReRAM) → [docs/memory.md](docs/memory.md)
 - **5 PE core models** — `alu_core`, `simple_core`, `in_order_core`,
   `ooo_core`, `null_core` → [docs/cores.md](docs/cores.md)
-- **2 network models** — `detailed` (cycle-accurate Garnet, per-technology
-  DRAM trees, deadlock-free; the default) and `analytical` (closed-form
-  hop + M/D/1 + MLP) over 8 topologies → [docs/network.md](docs/network.md)
+- **2 network models** — `detailed` (cycle-accurate Garnet over sparse
+  placement-driven DRAM trees; ONE logical network across OpenMP threads AND
+  MPI ranks; the default) and `analytical` (closed-form hop + M/D/1 + MLP)
+  over 8 topologies → [docs/network.md](docs/network.md)
 - **Per-technology PE placement** — subarray → bank → bank-group →
   rank/channel → logic-die ladders (tech-specific; only HBM reaches the logic
   die) → [docs/memory.md](docs/memory.md)
