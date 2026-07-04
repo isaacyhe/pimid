@@ -1,10 +1,10 @@
 # PIMID: Processing-In-Memory Infrastructure for Design-space Exploration
 
+<img src="assets/qr-code.png" alt="PIMID repository QR code" width="130" align="right" />
+
 [![License](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
-[![Version](https://img.shields.io/badge/version-1.5.7-green.svg)]()
-
-<img src="assets/qr-code.png" alt="PIMID repository QR code" width="120" align="right" />
+[![Version](https://img.shields.io/badge/version-1.5.8-green.svg)]()
 
 PIMID is a cycle-accurate simulator for Processing-in-Memory (PIM)
 architectures. Workloads execute under QEMU user-mode emulation; a TCG plugin
