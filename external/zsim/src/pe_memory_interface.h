@@ -391,6 +391,18 @@ public:
                 //   shared log instead, and drain the MERGED multi-rank stream --
                 //   one logical Garnet driven by all ranks' traffic.
                 SharedNoc* sn = sharedNoc();
+                // POST-ROI GUARD: at ROI end the plugin requests termination and
+                // the scheduler -- the only writer of globPhaseCycles -- stops
+                // advancing it, while instrumentation keeps running until the
+                // watchdog ends the sim. Records stamped in that regime carry a
+                // FROZEN phase clock and mix eras inside one batch: the replay
+                // then ticks through a fake multi-billion-cycle span (hours of
+                // wall for a post-ROI checksum loop nobody measures). Nothing
+                // reported lives outside the ROI, so the post-ROI tail keeps
+                // paying the last measured latencies but feeds the replay
+                // NOTHING.
+                bool postRoi = zinfo->terminationConditionMet;
+                if (!postRoi) {
                 if (sn) {
                     // ROI-RELATIVE clock: per-rank absolute cycles carry huge
                     // startup skew (QEMU boot staggering) and are NOT comparable
@@ -420,6 +432,7 @@ public:
                     __sync_fetch_and_sub(&zinfo->hierarchy.nocInlineDrain, 1);
                     batchLastPhase_ = zinfo->numPhases;
                 }
+                }  // !postRoi
 
                 // Own unit (src == dst): the packet does not traverse the tree
                 // -- 0 network hops, the near-data case the placement model
@@ -703,13 +716,17 @@ protected:
             uint32_t srcNode = representativeUnit() % gn->getNumNodes();
             // MC node for memory org `targetUnit` is modeled as node `targetUnit`.
             uint32_t mcNode = targetUnit % gn->getNumNodes();
-            // Global-phase-clock stamp (see phaseStamp): core-private clocks skew.
-            gn->recordBatchAccess(srcNode, mcNode, phaseStamp(cycle));
-            if (zinfo->numPhases > batchLastPhase_) {
-                __sync_fetch_and_add(&zinfo->hierarchy.nocInlineDrain, 1);
-                gn->processBatch(zinfo->numPhases, zinfo->phaseLength);
-                __sync_fetch_and_sub(&zinfo->hierarchy.nocInlineDrain, 1);
-                batchLastPhase_ = zinfo->numPhases;
+            // Post-ROI: frozen phase clock -- charge, but never record (see the
+            // POST-ROI GUARD in access()).
+            if (!zinfo->terminationConditionMet) {
+                // Global-phase-clock stamp (see phaseStamp): core-private clocks skew.
+                gn->recordBatchAccess(srcNode, mcNode, phaseStamp(cycle));
+                if (zinfo->numPhases > batchLastPhase_) {
+                    __sync_fetch_and_add(&zinfo->hierarchy.nocInlineDrain, 1);
+                    gn->processBatch(zinfo->numPhases, zinfo->phaseLength);
+                    __sync_fetch_and_sub(&zinfo->hierarchy.nocInlineDrain, 1);
+                    batchLastPhase_ = zinfo->numPhases;
+                }
             }
             uint32_t garnetLat = gn->getBatchAvgLatency();
             return (garnetLat > 0)
