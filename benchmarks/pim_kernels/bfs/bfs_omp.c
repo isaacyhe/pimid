@@ -1,10 +1,20 @@
 /* bfs_omp.c — Breadth-First Search on random graph (adjacency list via CSR)
- * OpenMP parallel version. Parallel frontier expansion with atomic dist update. */
+ * OpenMP parallel version. Parallel frontier expansion with atomic dist update.
+ *
+ * Device-organization aware (PIMID): the simulator prices each PE access by
+ * LOCATION. Prep (before the ROI, untimed) partitions the CSR by vertex range:
+ * PE p's slot holds [row_ptr slice][col_idx slice][dist slice] for its owned
+ * vertices. The ROI reads a vertex's edges from the OWNER's slot and CASes
+ * dist in the OWNER's slot -- BFS's genuinely irregular cross-PE traffic is
+ * then real network distance, while owned-range scans stay local. The shared
+ * frontier work queue remains host-side (it IS the shared structure). The
+ * arithmetic and atomics are identical to the host-layout path. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <omp.h>
 #include "zsim_hooks.h"
+#include "../../include/pimid_devorg.h"
 
 #define DEFAULT_VERTICES 512
 #define DEFAULT_DEGREE   8
@@ -25,10 +35,12 @@ int main(int argc, char* argv[]) {
     int deg = parse_int_arg(argc, argv, "--degree", DEFAULT_DEGREE);
     int source = parse_int_arg(argc, argv, "--source", 0);
     uint32_t seed = 42;
+    pimid_devorg_t dev = pimid_devorg_from_args(argc, argv);
+    int P = dev.num_pes;
 
     int total_edges = V * deg;
     int* row_ptr = (int*)malloc((V + 1) * sizeof(int));
-    int* col_idx = (int*)malloc(total_edges * sizeof(int));
+    int* col_idx = (int*)malloc((size_t)total_edges * sizeof(int));
     int* dist = (int*)malloc(V * sizeof(int));
     int* frontier = (int*)malloc(V * sizeof(int));
     int* next_frontier = (int*)malloc(V * sizeof(int));
@@ -49,42 +61,126 @@ int main(int argc, char* argv[]) {
     frontier[0] = source;
     int fsize = 1;
 
-    zsim_roi_begin();
-    int level = 0;
-    while (fsize > 0) {
-        level++;
-        int nsize = 0;
-        #pragma omp parallel for
-        for (int f = 0; f < fsize; f++) {
-            int u = frontier[f];
-            for (int e = row_ptr[u]; e < row_ptr[u + 1]; e++) {
-                int v = col_idx[e];
-                /* Atomically check-and-set distance for thread safety */
-                int expected = -1;
-                if (__sync_bool_compare_and_swap(&dist[v], expected, level)) {
-                    int pos;
-                    #pragma omp atomic capture
-                    pos = nsize++;
-                    next_frontier[pos] = v;
+    int prep = pimid_devorg_needs_prep(&dev);
+    int vpp = (V + P - 1) / P;                 /* vertices per PE */
+    size_t need = ((size_t)(vpp + 1) + (size_t)vpp * deg + (size_t)vpp)
+                  * sizeof(int);               /* [row][col][dist] per slot */
+
+    size_t slot_bytes = 0;
+    char* base = NULL;
+    if (prep) {
+        base = (char*)pimid_devorg_alloc(&dev, &slot_bytes);
+        if (!base || need > slot_bytes) {
+            fprintf(stderr, "devorg: per-PE need %zu > slot %zu (or alloc fail); "
+                            "running host-layout (no prep)\n", need, slot_bytes);
+            prep = 0;
+        }
+    }
+
+    if (prep) {
+        /* ---- DATA PREP (before ROI, not timed): partition CSR by owner. ---- */
+        omp_set_num_threads(P);
+        int** s_row = (int**)malloc((size_t)P * sizeof(int*));
+        int** s_col = (int**)malloc((size_t)P * sizeof(int*));
+        int** s_dist = (int**)malloc((size_t)P * sizeof(int*));
+        if (!s_row || !s_col || !s_dist) { fprintf(stderr, "malloc failed\n"); return 1; }
+        for (int p = 0; p < P; p++) {
+            int v0 = p * vpp, v1 = v0 + vpp; if (v1 > V) v1 = V;
+            int* slot = (int*)pimid_devorg_pe_slot(base, p, slot_bytes);
+            s_row[p] = slot;
+            s_col[p] = slot + (vpp + 1);
+            s_dist[p] = slot + (vpp + 1) + (size_t)vpp * deg;
+            if (v0 >= V) continue;
+            memcpy(s_row[p], row_ptr + v0, (size_t)(v1 - v0 + 1) * sizeof(int));
+            memcpy(s_col[p], col_idx + (size_t)v0 * deg,
+                   (size_t)(v1 - v0) * deg * sizeof(int));
+            memcpy(s_dist[p], dist + v0, (size_t)(v1 - v0) * sizeof(int));
+        }
+
+        zsim_roi_begin();
+        int level = 0;
+        while (fsize > 0) {
+            level++;
+            int nsize = 0;
+            #pragma omp parallel for
+            for (int f = 0; f < fsize; f++) {
+                int u = frontier[f];
+                int pu = u / vpp;
+                int uo = u - pu * vpp;
+                int e0 = s_row[pu][uo], e1 = s_row[pu][uo + 1];
+                for (int e = e0; e < e1; e++) {
+                    int v = s_col[pu][e - pu * vpp * deg];
+                    int pv = v / vpp;
+                    int expected = -1;
+                    if (__sync_bool_compare_and_swap(&s_dist[pv][v - pv * vpp],
+                                                     expected, level)) {
+                        int pos;
+                        #pragma omp atomic capture
+                        pos = nsize++;
+                        next_frontier[pos] = v;
+                    }
                 }
             }
+            /* Swap frontiers */
+            int* t = frontier;
+            frontier = next_frontier;
+            next_frontier = t;
+            fsize = nsize;
         }
-        /* Swap frontiers */
-        int* tmp = frontier;
-        frontier = next_frontier;
-        next_frontier = tmp;
-        fsize = nsize;
+        zsim_roi_end();
+
+        /* Gather dist back for the (untimed) result check */
+        for (int p = 0; p < P; p++) {
+            int v0 = p * vpp, v1 = v0 + vpp; if (v1 > V) v1 = V;
+            if (v0 >= V) continue;
+            memcpy(dist + v0, s_dist[p], (size_t)(v1 - v0) * sizeof(int));
+        }
+        free(s_row); free(s_col); free(s_dist);
+
+        long visited = 0;
+        for (int i = 0; i < V; i++)
+            if (dist[i] >= 0) visited++;
+        printf("BENCH_LEVELS: %d\n", level);
+        printf("BENCH_VISITED: %ld\n", visited);
+        printf("BENCH_CHECKSUM: %ld\n", visited);
+        printf("BENCH_DONE\n");
+    } else {
+        zsim_roi_begin();
+        int level = 0;
+        while (fsize > 0) {
+            level++;
+            int nsize = 0;
+            #pragma omp parallel for
+            for (int f = 0; f < fsize; f++) {
+                int u = frontier[f];
+                for (int e = row_ptr[u]; e < row_ptr[u + 1]; e++) {
+                    int v = col_idx[e];
+                    /* Atomically check-and-set distance for thread safety */
+                    int expected = -1;
+                    if (__sync_bool_compare_and_swap(&dist[v], expected, level)) {
+                        int pos;
+                        #pragma omp atomic capture
+                        pos = nsize++;
+                        next_frontier[pos] = v;
+                    }
+                }
+            }
+            /* Swap frontiers */
+            int* t = frontier;
+            frontier = next_frontier;
+            next_frontier = t;
+            fsize = nsize;
+        }
+        zsim_roi_end();
+
+        long visited = 0;
+        for (int i = 0; i < V; i++)
+            if (dist[i] >= 0) visited++;
+        printf("BENCH_LEVELS: %d\n", level);
+        printf("BENCH_VISITED: %ld\n", visited);
+        printf("BENCH_CHECKSUM: %ld\n", visited);
+        printf("BENCH_DONE\n");
     }
-    zsim_roi_end();
-
-    long visited = 0;
-    for (int i = 0; i < V; i++)
-        if (dist[i] >= 0) visited++;
-
-    printf("BENCH_LEVELS: %d\n", level);
-    printf("BENCH_VISITED: %ld\n", visited);
-    printf("BENCH_CHECKSUM: %ld\n", visited);
-    printf("BENCH_DONE\n");
 
     free(row_ptr); free(col_idx); free(dist);
     free(frontier); free(next_frontier);

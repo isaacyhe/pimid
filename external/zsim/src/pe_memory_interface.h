@@ -169,6 +169,20 @@ public:
     // sides agree.
     static int unitToEndpoint(uint32_t unit) { return tree().endpointForUnit(unit); }
 
+    // Replay timestamp for the SINGLE-PROCESS (OMP/device) batch: per-core
+    // curCycle values are PRIVATE work clocks with no cross-thread sync (an
+    // init-heavy thread sits hundreds of millions of cycles ahead of a fresh
+    // worker), so they are NOT one timeline. Stamping records with them makes
+    // a batch span the whole skew window: the replay ticks through billions of
+    // empty cycles (4h wall for one cell) AND same-phase packets almost never
+    // coexist -- OMP contention systematically understated. The honest shared
+    // axis inside a process is the GLOBAL phase clock; the core's intra-phase
+    // offset spreads injections deterministically within the phase.
+    static uint64_t phaseStamp(uint64_t coreCycle) {
+        uint32_t pl = zinfo->phaseLength > 0 ? zinfo->phaseLength : 10000;
+        return zinfo->globPhaseCycles + (coreCycle % pl);
+    }
+
     // ── Shared detailed-MPI NoC: ONE logical Garnet driven by ALL ranks ──────
     // When the launcher exports PIMID_NOC_SHM (MPI + detailed), every rank
     // publishes its network-traversing accesses {src,dst,cycle} to its ring in
@@ -394,7 +408,9 @@ public:
                             pimid_noc_touch(sn->h, sn->rank, rel);
                     }
                 } else {
-                    gn->recordBatchAccess(srcNode, dstNode, req.cycle);
+                    // Global-phase-clock stamp (see phaseStamp): per-core private
+                    // clocks are skewed by ~init length and are not one timeline.
+                    gn->recordBatchAccess(srcNode, dstNode, phaseStamp(req.cycle));
                 }
 
                 if (zinfo->numPhases > batchLastPhase_) {
@@ -405,11 +421,22 @@ public:
                     batchLastPhase_ = zinfo->numPhases;
                 }
 
-                // Use Garnet-measured latency (RTT); bootstrap with analytical.
-                uint32_t garnetLat = gn->getBatchAvgLatency();
-                networkLat = (garnetLat > 0)
-                    ? 2 * garnetLat
-                    : 2 * zinfo->hierarchy.nocAvgOneWayLatency;
+                // Own unit (src == dst): the packet does not traverse the tree
+                // -- 0 network hops, the near-data case the placement model
+                // exists to express. The replay itself already treats src==dst
+                // as non-traversing (it never enters Garnet); the CHARGE must
+                // match, or near-data pays the batch average of everyone
+                // else's deep-tree traffic and the placement tiers collapse.
+                // Cross-tree accesses use the Garnet-measured RTT (bootstrap
+                // with analytical until the first drain publishes).
+                if (srcNode == dstNode) {
+                    networkLat = 0;
+                } else {
+                    uint32_t garnetLat = gn->getBatchAvgLatency();
+                    networkLat = (garnetLat > 0)
+                        ? 2 * garnetLat
+                        : 2 * zinfo->hierarchy.nocAvgOneWayLatency;
+                }
 
                 uint32_t totalLat = networkLat + remoteLat + 2 * localLinkLat_;
                 // DRAM channel bandwidth bottleneck (accuracy fix): the H-tree
@@ -676,7 +703,8 @@ protected:
             uint32_t srcNode = representativeUnit() % gn->getNumNodes();
             // MC node for memory org `targetUnit` is modeled as node `targetUnit`.
             uint32_t mcNode = targetUnit % gn->getNumNodes();
-            gn->recordBatchAccess(srcNode, mcNode, cycle);
+            // Global-phase-clock stamp (see phaseStamp): core-private clocks skew.
+            gn->recordBatchAccess(srcNode, mcNode, phaseStamp(cycle));
             if (zinfo->numPhases > batchLastPhase_) {
                 __sync_fetch_and_add(&zinfo->hierarchy.nocInlineDrain, 1);
                 gn->processBatch(zinfo->numPhases, zinfo->phaseLength);

@@ -707,6 +707,29 @@ private:
         uint64_t baseTime = batch.empty() ? 0 : batch[0].cycle;
         gem5::curTickRef() = 0;
 
+        // DIAG (PIMID_NOC_DIAG_SPAN=1): a drain's wall cost is dominated by the
+        // batch's CYCLE SPAN (the replay ticks through the whole injection
+        // window). A span of ~1 phase is healthy; a span of ~the whole run
+        // means some records carry stale clocks. Print span + the stale
+        // records' sources so the bad clock domain can be identified.
+        static const bool diagSpan = (getenv("PIMID_NOC_DIAG_SPAN") != nullptr);
+        if (diagSpan && !batch.empty()) {
+            uint64_t minC = batch.front().cycle, maxC = batch.back().cycle;
+            info("[SpanDiag] phase=%lu n=%zu minCyc=%lu maxCyc=%lu span=%lu",
+                 phaseNum, batch.size(), minC, maxC, maxC - minC);
+            if (maxC - minC > 1000000) {   // >100 phases: list the stragglers
+                uint32_t shown = 0;
+                for (auto& a : batch) {
+                    if (maxC - a.cycle > 1000000 && shown < 8) {
+                        info("[SpanDiag]   stale rec: src=%u dst=%u cyc=%lu "
+                             "(%lu behind max)", a.src, a.dst, a.cycle,
+                             maxC - a.cycle);
+                        shown++;
+                    }
+                }
+            }
+        }
+
         // ── Natural inject-and-drain: inject each packet at its
         //    actual ZSim timestamp, let Garnet route them all
         //    concurrently. The network physically models contention. ──
