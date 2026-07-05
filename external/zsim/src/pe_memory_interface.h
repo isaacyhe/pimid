@@ -180,7 +180,14 @@ public:
     // offset spreads injections deterministically within the phase.
     static uint64_t phaseStamp(uint64_t coreCycle) {
         uint32_t pl = zinfo->phaseLength > 0 ? zinfo->phaseLength : 10000;
-        return zinfo->globPhaseCycles + (coreCycle % pl);
+        // Stamp on numPhases -- THE SAME counter that gates batch claims -- not
+        // on globPhaseCycles. glob freezes whenever the scheduler stops ticking
+        // (thread leave/park at OMP region boundaries, termination tail) while
+        // numPhases keeps advancing; stamping on the frozen clock while claiming
+        // on the live one mixes eras inside a batch and the replay crawls
+        // through the divergence window. Tying stamp and claim to ONE counter
+        // makes a batch's span <= ~1 phase BY CONSTRUCTION.
+        return (uint64_t)zinfo->numPhases * pl + (coreCycle % pl);
     }
 
     // ── Shared detailed-MPI NoC: ONE logical Garnet driven by ALL ranks ──────

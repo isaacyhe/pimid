@@ -500,6 +500,29 @@ static void dumpApproxProfile() {
 
 /* ---- SimEnd ---- */
 
+/* Dump the termination stats exactly once. Split out of SimEnd so an MPI
+ * rank can freeze its ROI-scoped stats at ROI END deterministically while the
+ * process lives on to finish its MPI protocol (closing barrier, serving
+ * reduces as root). The later real SimEnd (natural guest exit) skips the
+ * re-dump. */
+static volatile uint32_t g_termStatsDumped = 0;
+static void dumpTerminationStats() {
+    if (!__sync_bool_compare_and_swap(&g_termStatsDumped, 0, 1)) return;
+
+    info("Dumping termination stats");
+    zinfo->trigger = 20000;
+    for (StatsBackend* backend : *(zinfo->statsBackends)) {
+        backend->dump(false);
+    }
+
+    if (zinfo->garnetNetwork) {
+        zinfo->garnetNetwork->setTotalCycles(zinfo->globPhaseCycles);
+        std::string garnetStatsPath = std::string(zinfo->outputDir) + "/garnet_stats.txt";
+        zinfo->garnetNetwork->writeStatsFile(garnetStatsPath.c_str());
+        zinfo->garnetNetwork->printStats();
+    }
+}
+
 void SimEnd() {
     dumpApproxProfile();
     if (g_ooo_present) {
@@ -525,18 +548,7 @@ void SimEnd() {
         }
     }
 
-    info("Dumping termination stats");
-    zinfo->trigger = 20000;
-    for (StatsBackend* backend : *(zinfo->statsBackends)) {
-        backend->dump(false);
-    }
-
-    if (zinfo->garnetNetwork) {
-        zinfo->garnetNetwork->setTotalCycles(zinfo->globPhaseCycles);
-        std::string garnetStatsPath = std::string(zinfo->outputDir) + "/garnet_stats.txt";
-        zinfo->garnetNetwork->writeStatsFile(garnetStatsPath.c_str());
-        zinfo->garnetNetwork->printStats();
-    }
+    dumpTerminationStats();
 
     if (zinfo->mpiStats.messages > 0) {
         info("MPI Stats: %lu messages, %lu total latency cycles, %lu barriers",
@@ -1372,7 +1384,21 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
             info("Thread %d: ROI offload end (co-sim)", tid);
         }
         in_roi.store(false);
-        zinfo->terminationConditionMet = true;  // Let watchdog trigger SimEnd()
+        if (getenv("PIMID_MPI_RANK")) {
+            /* MPI rank: freeze the ROI-scoped stats NOW (deterministic ROI
+             * end) but DO NOT request termination -- this rank still owes MPI
+             * protocol work (the closing barrier; serving the reduce as
+             * root). The watchdog SimEnd here killed rank 0 mid-protocol at
+             * high rank counts: peers then blocked forever on the dead
+             * root's full mailbox ring (16 sends succeed, the rest
+             * send_WAIT_full -- observed exactly in the 32-rank trace). The
+             * process ends naturally at guest exit; SimEnd then skips the
+             * already-done dump. At 4/8 ranks the old race was won by
+             * timing luck; this makes the semantics deterministic. */
+            dumpTerminationStats();
+        } else {
+            zinfo->terminationConditionMet = true;  // Let watchdog trigger SimEnd()
+        }
     } else if (opcode == ZSIM_MAGIC_OP_WORK_BEGIN) {
         if (tid < MAX_THREADS) {
             thread_domain[tid].store(DOMAIN_DEVICE);
@@ -1528,7 +1554,21 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
             info("Thread %d: ROI offload end (co-sim)", tid);
         }
         in_roi.store(false);
-        zinfo->terminationConditionMet = true;  // Let watchdog trigger SimEnd()
+        if (getenv("PIMID_MPI_RANK")) {
+            /* MPI rank: freeze the ROI-scoped stats NOW (deterministic ROI
+             * end) but DO NOT request termination -- this rank still owes MPI
+             * protocol work (the closing barrier; serving the reduce as
+             * root). The watchdog SimEnd here killed rank 0 mid-protocol at
+             * high rank counts: peers then blocked forever on the dead
+             * root's full mailbox ring (16 sends succeed, the rest
+             * send_WAIT_full -- observed exactly in the 32-rank trace). The
+             * process ends naturally at guest exit; SimEnd then skips the
+             * already-done dump. At 4/8 ranks the old race was won by
+             * timing luck; this makes the semantics deterministic. */
+            dumpTerminationStats();
+        } else {
+            zinfo->terminationConditionMet = true;  // Let watchdog trigger SimEnd()
+        }
     } else if (opcode == ZSIM_MAGIC_OP_WORK_BEGIN) {
         thread_domain[tid].store(DOMAIN_DEVICE);
         g_in_device_region.store(true);
