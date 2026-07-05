@@ -298,13 +298,29 @@ static std::string findQemuBinary() {
  * Returns empty string if not found.
  */
 static std::string findQemuPlugin(const std::string& plugin_name) {
+    // SELF-EXE-RELATIVE FIRST (the only trustworthy anchor): the plugin MUST
+    // come from the same build tree as this binary. Resolving via PIMID_ROOT
+    // or the CWD let sweep jobs silently pair a fresh binary with a days-old
+    // plugin from another build tree (a Frankenbuild that "un-deployed" every
+    // fix and burned a full day of fleet debugging). CWD fallbacks are kept
+    // only for exotic setups, and the caller prints the chosen path.
+    std::vector<std::string> plugin_paths;
+    char exe[4096];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (n > 0) {
+        exe[n] = '\0';
+        std::string exeDir(exe);
+        size_t slash = exeDir.rfind('/');
+        if (slash != std::string::npos) {
+            exeDir = exeDir.substr(0, slash);
+            // binary at <build>/pimid -> plugin at <build>/external/zsim/
+            plugin_paths.push_back(exeDir + "/external/zsim/" + plugin_name);
+        }
+    }
     std::string pimid_root = getPimidRoot();
-    std::vector<std::string> plugin_paths = {
-        pimid_root + "/build/external/zsim/" + plugin_name,
-        pimid_root + "/build/external/zsim/" + plugin_name,
-        pimid_root + "/external/zsim/build/" + plugin_name,
-        "./" + plugin_name,
-    };
+    plugin_paths.push_back(pimid_root + "/build/external/zsim/" + plugin_name);
+    plugin_paths.push_back(pimid_root + "/external/zsim/build/" + plugin_name);
+    plugin_paths.push_back("./" + plugin_name);
     for (const auto& p : plugin_paths) {
         if (access(p.c_str(), F_OK) == 0) {
             return p;
@@ -5374,7 +5390,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.5.12" << std::endl;
+    std::cout << "Version 1.5.13" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
