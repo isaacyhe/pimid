@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <unordered_set>
 #include <unordered_map>
 #include <mutex>
@@ -207,6 +208,15 @@ public:
         std::vector<uint64_t> cursor;   // per-ring read position (this process)
         std::vector<uint64_t> lost;     // per-ring overwritten-before-read count
         uint64_t pressureDrains = 0;    // past-the-cut consumptions (valve hits)
+        // Records consumed from the rings but not yet replayed. Replay happens
+        // strictly in per-phase buckets up to the consistent cut; stamps beyond
+        // the cut wait here. This makes the replayed windows a pure function of
+        // SIMULATED time: host-scheduling skew between rank processes changes
+        // only when buckets get replayed, never their contents. (Before this,
+        // a drain replayed whatever had accumulated -- on a loaded host that
+        // was thousands of phases lumped into one window, and simulated cycle
+        // counts varied up to 9x with the execution venue.)
+        std::vector<GarnetNetwork::BatchAccess> pending;
         lock_t lock;
     };
     static SharedNoc* sharedNoc() {
@@ -246,16 +256,29 @@ public:
         return ctx.h ? &ctx : nullptr;
     }
 
-    // Collect the merged multi-rank stream up to the consistent cut and replay
-    // it through the local Garnet replica. Never blocks on peers: the cut is
-    // min-watermark over ACTIVE ranks; quiescent/exited/not-yet-publishing
-    // ranks are exempt. PRESSURE VALVE: a ring whose unread backlog exceeds
-    // half its capacity is consumed past the cut (no data is ever lost to
-    // overrun; the cost is bounded window skew for that ring, counted loudly).
+    // Collect the merged multi-rank stream and replay it through the local
+    // Garnet replica in PER-PHASE BUCKETS up to the consistent cut. Never
+    // blocks on peers: the cut is min-watermark over ACTIVE ranks;
+    // quiescent/exited/not-yet-publishing ranks are exempt.
+    //
+    // VENUE INDEPENDENCE (defect #9): rings are always consumed fully into a
+    // persistent pending buffer, but replay happens ONLY in complete
+    // phase-sized buckets whose stamps are <= the cut. A drain that finds ten
+    // thousand accumulated phases (host-loaded venue: rank processes skewed by
+    // the OS scheduler) replays them as ten thousand single-phase windows --
+    // byte-for-byte the same sequence a fast host produces by draining every
+    // phase. Replayed contention is a pure function of the simulated-time
+    // record stream; the host changes only when the arithmetic runs.
+    // The old design replayed each drain's accumulation as ONE window, so
+    // same-phase packets from skewed ranks landed in different windows
+    // (contention undercounted up to 9x) and multi-phase lumps hit the replay
+    // as synthetic bursts. The pressure valve no longer forces early replay
+    // either -- backlogged records just wait in pending (memory, not skew).
     static void sharedNocDrain(GarnetNetwork* gn, SharedNoc* sn, uint64_t phaseNum) {
-        std::vector<GarnetNetwork::BatchAccess> merged;
         futex_lock(&sn->lock);
         uint64_t cut = pimid_noc_cut(sn->h);
+        // 1) Consume the rings fully into pending (never leave records exposed
+        //    to overrun; the ring is the only lossy structure here).
         for (uint32_t r = 0; r < sn->nranks; r++) {
             PimidNocRank* rk = pimid_noc_rank(sn->h, r);
             PimidNocRec* ring = pimid_noc_ring(sn->h, r);
@@ -271,16 +294,6 @@ public:
                      "(total lost from rank %u: %lu)",
                      r, dropped, r, sn->lost[r]);
             }
-            // Pressure valve: consume past the cut rather than lose records.
-            bool pressure = (seq - cur) > (uint64_t)(sn->h->ringSlots / 2);
-            if (pressure) {
-                sn->pressureDrains++;
-                if ((sn->pressureDrains & (sn->pressureDrains - 1)) == 0)  // 1,2,4,8...
-                    warn("[SharedNoC] ring %u under pressure (backlog %lu > %u): "
-                         "consuming past the cut (bounded window skew, "
-                         "pressure-drains so far: %lu)",
-                         r, seq - cur, sn->h->ringSlots / 2, sn->pressureDrains);
-            }
             while (cur < seq) {
                 PimidNocRec rec = ring[cur & (sn->h->ringSlots - 1)];
                 // Tear check: if the producer lapped us mid-copy, discard+resync.
@@ -289,14 +302,36 @@ public:
                     cur < seq2 - sn->h->ringSlots) {
                     break;  // next drain's overrun branch resyncs + counts
                 }
-                if (!pressure && rec.cycle > cut) break;  // beyond the cut
-                merged.push_back({rec.src, rec.dst, rec.cycle});
+                sn->pending.push_back({rec.src, rec.dst, rec.cycle});
                 cur++;
             }
         }
+        // 2) Partition pending: stamps <= cut are FINAL (no rank can publish
+        //    below its watermark) and get bucketed by phase; the rest wait.
+        uint32_t pl = zinfo->phaseLength > 0 ? zinfo->phaseLength : 10000;
+        std::map<uint64_t, std::vector<GarnetNetwork::BatchAccess>> buckets;
+        std::vector<GarnetNetwork::BatchAccess> keep;
+        keep.reserve(sn->pending.size());
+        for (auto& a : sn->pending) {
+            if (a.cycle <= cut) buckets[a.cycle / pl].push_back(a);
+            else                keep.push_back(a);
+        }
+        sn->pending.swap(keep);
+        if (sn->pending.size() > (size_t)sn->h->ringSlots * 4) {
+            sn->pressureDrains++;
+            if ((sn->pressureDrains & (sn->pressureDrains - 1)) == 0)  // 1,2,4,8...
+                warn("[SharedNoC] pending backlog %zu recs beyond the cut "
+                     "(a rank is far behind in host time; replay waits -- "
+                     "correctness unaffected, memory grows; warnings: %lu)",
+                     sn->pending.size(), sn->pressureDrains);
+        }
         futex_unlock(&sn->lock);
-        if (!merged.empty())
-            gn->processBatchRecords(std::move(merged), phaseNum);
+        // 3) Replay each complete phase bucket in order, one reset per bucket:
+        //    identical windows on every host, loaded or idle. (phaseNum tag is
+        //    display-only in the replay; use each bucket's own phase.)
+        for (auto& kv : buckets)
+            gn->processBatchRecords(std::move(kv.second), kv.first);
+        (void)phaseNum;
     }
 
     uint64_t access(MemReq& req) override {

@@ -1113,6 +1113,25 @@ static int parseBandwidthToMBs(const std::string& input) {
 }
 
 /**
+ * @brief Canonicalize a memory-technology spelling at parse time.
+ *
+ * Every downstream comparison in this file tests the UPPERCASE canonical name
+ * (tech == "RERAM", == "STT_MRAM", ...). Accepting mixed-case spellings at the
+ * YAML layer without normalizing means a valid input like "ReRAM" misses every
+ * one of those tests and silently falls through to the generic-DRAM defaults
+ * (128-bank DDR4-like org, 10-cycle DDR local latency) while the NVSim/power
+ * path -- which uppercases locally -- still prices it as ReRAM. Normalize once
+ * here so a technology has exactly one spelling past the parser.
+ */
+static std::string canonicalMemTech(std::string t) {
+    std::transform(t.begin(), t.end(), t.begin(), ::toupper);
+    if (t == "STTMRAM" || t == "STT-MRAM" || t == "MRAM") return "STT_MRAM";
+    if (t == "RESISTIVE" || t == "MEMRISTOR") return "RERAM";
+    if (t == "PCRAM" || t == "3DXPOINT") return "PCM";
+    return t;
+}
+
+/**
  * @brief Auto-derive memory controller type and parameters from technology.
  *
  * Maps memory technologies to ZSim controller models:
@@ -4955,7 +4974,7 @@ private:
         cfg_.benchmark_name = parser_.getString("benchmark.name", "PIM_Simulation");
 
         // Memory configuration
-        cfg_.memory_tech = parser_.getString("memory.technology", "STT_MRAM");
+        cfg_.memory_tech = canonicalMemTech(parser_.getString("memory.technology", "STT_MRAM"));
         cfg_.num_banks = parser_.getInt("memory.organization.num_banks", 16);
         cfg_.subarrays_per_bank = parser_.getInt("memory.organization.num_subarrays_per_bank", 8);
         cfg_.num_bank_groups = parser_.getInt("memory.organization.num_bank_groups", 4);
@@ -5390,7 +5409,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.5.13" << std::endl;
+    std::cout << "Version 1.5.16" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -6034,16 +6053,18 @@ int main(int argc, char** argv) {
 
             // Load memory configuration
             if (yaml_cfg["memory"]) {
-                config.memory_tech = yaml_cfg["memory"]["technology"].as<std::string>(config.memory_tech);
+                config.memory_tech = canonicalMemTech(
+                    yaml_cfg["memory"]["technology"].as<std::string>(config.memory_tech));
 
                 // Reject unknown memory technologies up front rather than
                 // silently falling back to DDR4 (which would hide user typos
                 // and produce misleading results). HBM gen-1 was removed —
-                // use HBM2/HBM3.
+                // use HBM2/HBM3. The whitelist is canonical-only: input is
+                // normalized by canonicalMemTech() before this check.
                 {
                     static const std::set<std::string> kValidTechs = {
                         "DDR3", "DDR4", "DDR5", "LPDDR5", "GDDR6", "HBM2", "HBM3",
-                        "SRAM", "STT_MRAM", "STTMRAM", "PCM", "RERAM", "ReRAM"
+                        "SRAM", "STT_MRAM", "PCM", "RERAM"
                     };
                     if (kValidTechs.find(config.memory_tech) == kValidTechs.end()) {
                         std::cerr << "ERROR: unknown memory technology '"
@@ -6245,7 +6266,8 @@ int main(int argc, char** argv) {
                     config.host_l3_kb = h["cache"]["l3_kb"].as<int>(config.host_l3_kb);
                 }
                 if (h["memory"]) {
-                    config.host_memory_tech = h["memory"]["technology"].as<std::string>(config.host_memory_tech);
+                    config.host_memory_tech = canonicalMemTech(
+                        h["memory"]["technology"].as<std::string>(config.host_memory_tech));
                 }
             }
 
@@ -6297,7 +6319,8 @@ int main(int argc, char** argv) {
                             node.enable_l3 = (node.l3_kb > 0);
                         }
                         if (h["memory"]) {
-                            node.memory_tech = h["memory"]["technology"].as<std::string>(node.memory_tech);
+                            node.memory_tech = canonicalMemTech(
+                                h["memory"]["technology"].as<std::string>(node.memory_tech));
                         }
                         if (h["workload"]) {
                             node.workload_binary = h["workload"]["binary"].as<std::string>("");
@@ -6331,7 +6354,8 @@ int main(int argc, char** argv) {
                         node.tech_node_nm = d["tech_node_nm"].as<int>(22);
 
                         if (d["memory"]) {
-                            node.memory_tech = d["memory"]["technology"].as<std::string>(node.memory_tech);
+                            node.memory_tech = canonicalMemTech(
+                                d["memory"]["technology"].as<std::string>(node.memory_tech));
                             node.ports_per_bank = d["memory"]["ports_per_bank"].as<int>(node.ports_per_bank);
                             node.banks = d["memory"]["banks"].as<int>(node.banks);
                         }

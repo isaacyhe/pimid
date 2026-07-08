@@ -187,8 +187,15 @@ void ContentionSim::enqueue(TimingEvent* ev, uint64_t cycle) {
     assert(inCSim);
     assert(ev);
     assert_msg(cycle >= lastLimit, "Enqueued event before last limit! cycle %ld min %ld", cycle, lastLimit);
-    //Hacky, but helpful to chase events scheduled too far ahead due to bugs (e.g., cycle -1). We should probably formalize this a bit more
-    assert_msg(cycle < lastLimit+10*zinfo->phaseLength+1000000, "Queued event too far into the future, cycle %ld lastLimit %ld", cycle, lastLimit);
+    //Debug tripwire against garbage cycles (e.g., cycle -1 wraps to ~1e19).
+    //The original +10 phases +1e6 bound was calibrated for host-scale memory
+    //latencies; a PIM in-order core legitimately drifts several MILLION cycles
+    //ahead of the weave limit (every dependent load stalls at full remote
+    //latency, so the recorded timeline outruns the instruction-driven phase
+    //clock). The PrioQueue's feMap is built to park far-future events, so this
+    //is legal simulation state -- keep the tripwire, but wide enough for real
+    //slow-core drift while still catching wraparound garbage instantly.
+    assert_msg(cycle < lastLimit + 1000000000UL, "Queued event too far into the future, cycle %ld lastLimit %ld", cycle, lastLimit);
 
     assert_msg(cycle >= domains[ev->domain].curCycle, "Queued event goes back in time, cycle %ld curCycle %ld", cycle, domains[ev->domain].curCycle);
     ev->privCycle = cycle;
