@@ -89,7 +89,11 @@ void OOOCore::initStats(AggregateStat* parentStat) {
     // 0 until roi_begin, so non-ROI workloads are unaffected. cCycles/uops/bbls/
     // approxInstrs/mispredBranches are left absolute as diagnostic counters, not
     // ROI duration metrics.
-    auto x = [this]() { return cRec.getUnhaltedCycles(curCycle) - roiBaseCycle; };
+    auto x = [this]() {
+        uint64_t c = cRec.getUnhaltedCycles(curCycle);
+        c = (c > pimidPhantomWait) ? (c - pimidPhantomWait) : 0;   // 1.6.1 wall-free
+        return (c > roiBaseCycle) ? (c - roiBaseCycle) : 0;
+    };
     LambdaStat<decltype(x)>* cyclesStat = new LambdaStat<decltype(x)>(x);
     cyclesStat->init("cycles", "Simulated unhalted cycles");
 
@@ -556,7 +560,10 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
 void OOOCore::join() {
     DEBUG_MSG("[%s] Joining, curCycle %ld phaseEnd %ld", name.c_str(), curCycle, phaseEndCycle);
     uint64_t targetCycle = cRec.notifyJoin(curCycle);
-    if (targetCycle > curCycle) advance(targetCycle);
+    if (targetCycle > curCycle) {
+        if (pimidCommParked) curCycle = targetCycle;  // empty pipeline: jump
+        else advance(targetCycle);
+    }
     phaseEndCycle = zinfo->globPhaseCycles + zinfo->phaseLength;
     // assert(targetCycle <= phaseEndCycle);
     DEBUG_MSG("[%s] Joined, curCycle %ld phaseEnd %ld", name.c_str(), curCycle, phaseEndCycle);

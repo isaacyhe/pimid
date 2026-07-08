@@ -4285,8 +4285,14 @@ public:
         cfg << "    phaseLength = " << config_.phase_length << ";\n";
         cfg << "    maxTotalInstrs = " << config_.max_instructions << "L;\n";
         cfg << "    statsPhaseInterval = " << config_.stats_interval << ";\n";
-        // For OMP/MPI workloads, allow all PEs to run concurrently
-        int parallelism = (config_.workload_type == "openmp" || config_.workload_type == "mpi")
+        // OMP: all PEs run concurrently (work-locked phases keep it exact).
+        // 1.6 thread-MPI: parallelism=1 -- zsim's deterministic round-robin
+        // core rotation. Ranks park/wake on transport waits, and with a
+        // single simulator thread every interleaving (numPhases, batch
+        // content, EWMA order) is a pure function of simulated state:
+        // bit-exact by construction, on any host. The parallel-deterministic
+        // scheduler (idle-tick phases) is the 1.6.x speed roadmap.
+        int parallelism = (config_.workload_type == "openmp")
                           ? config_.num_pes : 1;
         cfg << "    parallelism = " << parallelism << ";\n";
         cfg << "    printHierarchy = true;\n";
@@ -5409,7 +5415,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.5.16" << std::endl;
+    std::cout << "Version 1.6.4" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -7745,13 +7751,30 @@ int main(int argc, char** argv) {
                 }
             }
 
-            if (config.workload_type == "mpi" && config.mpi_ranks > 0) {
-                // ── MPI path: per-rank QEMU+ZSim simulation via mpirun ──
+            // ── 1.6: thread-based MPI emu is THE MPI execution model ──
+            // All N ranks run as guest threads inside ONE QEMU/zsim process
+            // (the OMP execution substrate): one Garnet sees every rank's
+            // traffic directly in simulated time, ordered by the phase
+            // barriers -- venue-independent by construction. The legacy
+            // process-per-rank path (shm mailboxes + shared NoC record log +
+            // consistent-cut replay) survives only behind PIMID_MPI_PROCESS=1
+            // for A/B reference during bring-up and is slated for deletion.
+            bool mpi_process_mode = (config.workload_type == "mpi" &&
+                                     config.mpi_ranks > 0 &&
+                                     getenv("PIMID_MPI_PROCESS") != nullptr);
+            if (config.workload_type == "mpi" && config.mpi_ranks > 0 &&
+                !mpi_process_mode) {
+                std::cout << "MPI Mode: " << config.mpi_ranks
+                          << " ranks as threads in ONE process (1.6 emu)"
+                          << std::endl;
+            }
+            if (mpi_process_mode) {
+                // ── LEGACY MPI path: per-rank QEMU+ZSim processes ──
                 int ranks = config.mpi_ranks;
                 std::string output_base = "/tmp/pimid_qemu_" + std::to_string(getpid());
                 mkdir(output_base.c_str(), 0755);
 
-                std::cout << "MPI Mode: " << ranks << " ranks" << std::endl;
+                std::cout << "MPI Mode: " << ranks << " ranks (LEGACY multi-process)" << std::endl;
                 std::cout << "Output directory: " << output_base << std::endl;
 
                 // Generate per-rank ZSim configs (1 core per rank, QEMU-mode)
@@ -8061,7 +8084,20 @@ int main(int argc, char** argv) {
                     success = (exit_code == 0);
                 }
             } else {
-                // ── Single-rank path ──
+                // ── Single-process path (single-rank, OMP, and 1.6 thread-MPI) ──
+                // Thread-MPI needs libpimid_mpi.so resolvable BEFORE the fork
+                // so a missing library is a clean launcher error, not a child
+                // exec mystery.
+                std::string mpi_thread_lib;
+                if (config.workload_type == "mpi" && config.mpi_ranks > 0) {
+                    mpi_thread_lib = findPimidMpiLib();
+                    if (mpi_thread_lib.empty()) {
+                        std::cerr << "Error: libpimid_mpi.so not found (searched "
+                                  << "build dirs); required for thread-MPI"
+                                  << std::endl;
+                        return 1;
+                    }
+                }
                 // Generate ZSim configuration file (reuse ZSimSimulator's logic)
                 ZSimSimulator zsim_helper(config);
                 std::string zsim_cfg_path = zsim_helper.generateConfig();
@@ -8112,11 +8148,33 @@ int main(int argc, char** argv) {
                         setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
                         setenv("GOMP_SPINCOUNT", "0", 0);
                     }
+                    // 1.6 thread-MPI: the preloaded libpimid_mpi.so interposes
+                    // __libc_start_main and runs the app's UNTOUCHED main() once
+                    // per rank on its own guest thread. No PIMID_MPI_RANK, no
+                    // PIMID_MPI_SHM, no PIMID_NOC_SHM: rank identity is TLS and
+                    // the transport is plain process memory; zsim sees an
+                    // OMP-shaped world (N threads -> N cores, one Garnet).
+                    if (config.workload_type == "mpi" && config.mpi_ranks > 0) {
+                        // LD_PRELOAD must be GUEST-scoped (qemu -E below): a
+                        // host-env preload loads the interposer into QEMU
+                        // itself, which then hijacks QEMU's own main and
+                        // spawns N QEMUs in one process (instant SIGSEGV).
+                        setenv("PIMID_MPI_RANKS",
+                               std::to_string(config.mpi_ranks).c_str(), 1);
+                        setenv("PIMID_MPI_THREADED", "1", 1);
+                        setenv("OMP_NUM_THREADS", "1", 0);
+                    }
                     for (const auto& [key, val] : config.workload_env) {
                         setenv(key.c_str(), val.c_str(), 1);
                     }
                     std::vector<const char*> args;
+                    std::string guest_preload;
                     args.push_back(qemu_binary.c_str());
+                    if (config.workload_type == "mpi" && config.mpi_ranks > 0) {
+                        guest_preload = "LD_PRELOAD=" + mpi_thread_lib;
+                        args.push_back("-E");
+                        args.push_back(guest_preload.c_str());
+                    }
                     args.push_back("-plugin");
                     args.push_back(plugin_arg.c_str());
                     args.push_back("--");
@@ -8152,6 +8210,40 @@ int main(int argc, char** argv) {
                         while (std::getline(stats_file, line)) {
                             std::cout << "  " << line << std::endl;
                         }
+                    }
+
+                    // 1.6 thread-MPI: print the SAME per-rank/Total summary the
+                    // process-mode launcher printed, so every downstream parser
+                    // (sweep runners grep "Total: ... (max: N)") works unchanged.
+                    // Per-core cycles in the single zsim.out ARE the per-rank
+                    // cycles (rank r == core r in thread mode).
+                    if (config.workload_type == "mpi" && config.mpi_ranks > 0) {
+                        std::ifstream sf(stats_path);
+                        std::string ln;
+                        std::vector<uint64_t> rankCycles;
+                        while (std::getline(sf, ln)) {
+                            size_t cpos = ln.find("cycles: ");
+                            if (cpos != std::string::npos &&
+                                ln.find("# Simulated") != std::string::npos) {
+                                uint64_t v = strtoull(ln.c_str() + cpos + 8, nullptr, 10);
+                                rankCycles.push_back(v);
+                            }
+                        }
+                        uint64_t tot = 0, mx = 0;
+                        int printed = 0;
+                        for (size_t i = 0; i < rankCycles.size() &&
+                             printed < config.mpi_ranks; i++) {
+                            if (rankCycles[i] == 0) continue;
+                            std::cout << "Rank " << printed << ": " << rankCycles[i]
+                                      << " cycles, " << 0 << " instrs" << std::endl;
+                            tot += rankCycles[i];
+                            if (rankCycles[i] > mx) mx = rankCycles[i];
+                            printed++;
+                        }
+                        std::cout << "Total:  " << tot << " cycles (max: " << mx
+                                  << ")" << std::endl;
+                        std::cout << "        " << exec_zsim_stats.instrs
+                                  << " instructions" << std::endl;
                     }
 
                     // Power analysis (runs if stats exist, even for non-zero guest exit)

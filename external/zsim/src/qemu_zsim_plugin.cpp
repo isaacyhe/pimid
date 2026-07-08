@@ -163,6 +163,9 @@ static bool in_zsim[MAX_VCPUS];
 
 /* ROI state — set by mov $op, %rcx + xchg %rcx, %rcx (zsim_hooks.h magic ops) */
 static std::atomic<bool> in_roi{true};              /* true = record; default on for non-ROI workloads */
+// 1.6 thread-MPI: N rank-threads each bracket their own ROI in ONE process.
+// Baselines snapshot at the FIRST begin; termination fires at the LAST end.
+static std::atomic<int> g_roiRefCount{0};
 static std::atomic<uint64_t> roi_transition_count{0};
 
 /* ZSim magic op codes (must match zsim_hooks.h) */
@@ -179,7 +182,14 @@ static std::atomic<uint64_t> roi_transition_count{0};
 #define ZSIM_MAGIC_OP_PRICE_RESUME  2054  /* resume address-routed pricing */
 #define ZSIM_MAGIC_OP_MPI_COMM_BEGIN 2055 /* open MPI comm window (keep core attached) */
 #define ZSIM_MAGIC_OP_MPI_COMM_END   2056 /* close MPI comm window */
-#define ZSIM_MAGIC_OP_MPI_CONTEND    2057 /* charge sender cross-rank contention wait (Phase 2) */
+#define ZSIM_MAGIC_OP_MPI_CONTEND    2057
+/* 1.6 thread-MPI determinism ops: TIME publishes the calling core's ROI-
+ * relative sim clock into params.sim_now; ADVANCE snaps the calling core
+ * forward to params.sim_send_time (never backward). Together they let the
+ * guest barrier compute a max-arrival rendezvous so every rank exits a
+ * barrier at the SAME deterministic cycle regardless of futex wake order. */
+#define ZSIM_MAGIC_OP_MPI_TIME       2058
+#define ZSIM_MAGIC_OP_MPI_ADVANCE    2059 /* charge sender cross-rank contention wait (Phase 2) */
 
 /* Per-thread MPI comm-window flag. While set (bracketed by COMM_BEGIN/END from
  * libpimid_mpi), the rank's blocking transport sleeps do NOT trigger a
@@ -189,6 +199,8 @@ static std::atomic<uint64_t> roi_transition_count{0};
  * transport; OMP and co-sim paths never touch it, so their behavior is
  * byte-for-byte unchanged. */
 static std::atomic<bool> mpi_comm_window[MAX_THREADS];
+/* 1.6 frozen-clock waits: raw core cycles at COMM_BEGIN (~0 = idle). */
+static uint64_t mpi_comm_saved[MAX_THREADS] = {};
 
 /* Per-rank ROI baseline synthesis (see handleMpiMagicOp): the MPI benchmarks
  * call zsim_roi_begin() ONLY on rank 0, so ranks 1..N-1 never snapshot an ROI
@@ -893,8 +905,21 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
     }
 
     if (op == ZSIM_MAGIC_OP_MPI_COMM_BEGIN) {
-        /* Open the comm window: keep the core attached across transport sleeps
-         * and stop counting the transport's own instructions until COMM_END.
+        /* 1.6 thread mode: FROZEN-CLOCK WAIT. Do NOT attach the window (a
+         * frozen-attached core deadlocks the multi-core phase barrier); the
+         * thread parks detached, phases advance, and COMM_END rewinds the
+         * core by the wait's raw cycle growth -- the wall-dependent rejoin
+         * fast-forward is erased and the rendezvous ADVANCE re-places the
+         * clock from deterministic arithmetic alone. */
+        if (getenv("PIMID_MPI_THREADED")) {
+            if (tid < MAX_THREADS && cores[tid]) {
+                mpi_comm_saved[tid] = cores[tid]->getCycles();
+                cores[tid]->pimidCommParked = true;
+            }
+            return;
+        }
+        /* Process mode: keep the core attached across transport sleeps and
+         * stop counting the transport's own instructions until COMM_END.
          * Shared detailed-MPI Garnet: a blocked guest injects nothing -> mark
          * QUIESCENT so the merged-replay cut never waits on this rank. */
         mpi_comm_window[tid].store(true, std::memory_order_release);
@@ -902,6 +927,16 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         return;
     }
     if (op == ZSIM_MAGIC_OP_MPI_COMM_END) {
+        if (getenv("PIMID_MPI_THREADED")) {
+            if (tid < MAX_THREADS && cores[tid] && mpi_comm_saved[tid] != ~0ull) {
+                cores[tid]->pimidCommParked = false;
+                uint64_t raw = cores[tid]->getCycles();
+                if (raw > mpi_comm_saved[tid])
+                    cores[tid]->pimidRewindCycles(raw - mpi_comm_saved[tid]);
+                mpi_comm_saved[tid] = ~0ull;
+            }
+            return;
+        }
         mpi_comm_window[tid].store(false, std::memory_order_release);
         pimid_noc_mark_state(PIMID_NOC_ACTIVE);
         return;
@@ -1038,6 +1073,21 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         return;
     }
 
+    if (op == ZSIM_MAGIC_OP_MPI_TIME) {
+        gp->sim_now = roiRelCycles(tid);
+        return;
+    }
+    if (op == ZSIM_MAGIC_OP_MPI_ADVANCE) {
+        uint64_t target = params.sim_send_time;
+        uint64_t cur = roiRelCycles(tid);
+        Core* cc = cores[tid];
+        if (cc && target > cur) {
+            uint64_t delta = target - cur;
+            cc->addDelay((uint32_t)std::min<uint64_t>(delta, 0xFFFFFFFFull));
+        }
+        return;
+    }
+
     const bool isRecv = (op == ZSIM_MAGIC_OP_MPI_RECV);
 
     /* Per-rank ROI baseline (THE MPI cycle-accounting fix). The benchmarks call
@@ -1111,7 +1161,28 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         uint32_t srcNode = params.src_pe % gn->getNumNodes();
         uint32_t dstNode = params.dst_pe % gn->getNumNodes();
 
-        if (gn->isCycleAccurate()) {
+        if (gn->isCycleAccurate() && getenv("PIMID_MPI_THREADED")) {
+            /* 1.6 thread mode: DETERMINISTIC message path. Live accessNetwork
+             * injection is order-sensitive (persistent garnetTick_/in-flight
+             * state means each RTT depends on the wall interleaving of the 16
+             * rank threads). Instead the message's cache-line packets go into
+             * the SAME phase-sorted batch replay every memory access uses (so
+             * they physically contend, deterministically), and the charged
+             * latency comes from the batch-smoothed RTT -- a pure function of
+             * the deterministic batch history. Same modeling contract as OMP. */
+            uint32_t pl = zinfo->phaseLength > 0 ? zinfo->phaseLength : 10000;
+            uint64_t coreCyc = cores[tid] ? cores[tid]->getCycles() : 0;
+            uint64_t stamp = (uint64_t)zinfo->numPhases * pl + (coreCyc % pl);
+            uint32_t numPackets = std::max(1u, (uint32_t)((params.msg_size + 63) / 64));
+            for (uint32_t p = 0; p < numPackets; p++)
+                gn->recordBatchAccess(srcNode, dstNode, stamp + p);
+            /* Deterministic pricing: static analytic RTT only (the EWMA
+             * read is wall-order-dependent; see pe_memory_interface). */
+            uint32_t rtt = gn->getRTT(
+                std::to_string(params.src_pe).c_str(),
+                std::to_string(params.dst_pe).c_str());
+            nocLat = rtt + (uint32_t)((params.msg_size / 64) * 2);
+        } else if (gn->isCycleAccurate()) {
             /* One shared cycle-accurate Garnet network for all PEs/ranks. */
             GarnetNetwork* anet = gn;
             /* Direct Garnet injection — real traffic with real contention.
@@ -1334,6 +1405,24 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
     uint32_t payload_size = static_cast<uint32_t>(op >> 32);
 
     if (opcode == ZSIM_MAGIC_OP_ROI_BEGIN) {
+        // 1.6 thread-MPI: every rank-thread baselines ITS OWN core at ITS
+        // OWN roi_begin (the process-mode contract, per-rank deterministic).
+        // A first-rank-baselines-all sweep would capture the other 15 cores
+        // at wall-arbitrary points -- stamps relative to those baselines
+        // carried run-to-run jitter into every rendezvous downstream.
+        if (getenv("PIMID_MPI_THREADED")) {
+            int prev = g_roiRefCount.fetch_add(1);
+            uint32_t cid = (tid < MAX_THREADS) ? cids[tid] : INVALID_CID;
+            if (cid != INVALID_CID && cid != UNINITIALIZED_CID &&
+                cid < zinfo->numCores && zinfo->cores[cid])
+                zinfo->cores[cid]->markRoiBegin();
+            if (prev == 0) {
+                in_roi.store(true);
+                mpi_roi_baselined = true;
+                snapshotRoiBaseCyc();
+            }
+            return;
+        }
         in_roi.store(true);
         // Snapshot each core's ROI baseline so the reported cycles/instrs cover
         // ONLY the kernel (roi_begin..roi_end), excluding the serial pre-ROI
@@ -1382,6 +1471,16 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
             }
             ensureThreadInit(tid);  // host mask
             info("Thread %d: ROI offload end (co-sim)", tid);
+        }
+        // 1.6 thread-MPI: only the LAST rank out freezes stats + terminates;
+        // earlier enders still owe MPI protocol work (closing barrier,
+        // serving collectives) on live cores.
+        if (getenv("PIMID_MPI_THREADED")) {
+            if (g_roiRefCount.fetch_sub(1) - 1 > 0) return;
+            in_roi.store(false);
+            dumpTerminationStats();
+            zinfo->terminationConditionMet = true;
+            return;
         }
         in_roi.store(false);
         if (getenv("PIMID_MPI_RANK")) {
@@ -1510,6 +1609,24 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
     uint32_t payload_size = static_cast<uint32_t>(op >> 32);
 
     if (opcode == ZSIM_MAGIC_OP_ROI_BEGIN) {
+        // 1.6 thread-MPI: every rank-thread baselines ITS OWN core at ITS
+        // OWN roi_begin (the process-mode contract, per-rank deterministic).
+        // A first-rank-baselines-all sweep would capture the other 15 cores
+        // at wall-arbitrary points -- stamps relative to those baselines
+        // carried run-to-run jitter into every rendezvous downstream.
+        if (getenv("PIMID_MPI_THREADED")) {
+            int prev = g_roiRefCount.fetch_add(1);
+            uint32_t cid = (tid < MAX_THREADS) ? cids[tid] : INVALID_CID;
+            if (cid != INVALID_CID && cid != UNINITIALIZED_CID &&
+                cid < zinfo->numCores && zinfo->cores[cid])
+                zinfo->cores[cid]->markRoiBegin();
+            if (prev == 0) {
+                in_roi.store(true);
+                mpi_roi_baselined = true;
+                snapshotRoiBaseCyc();
+            }
+            return;
+        }
         in_roi.store(true);
         // Snapshot each core's ROI baseline so the reported cycles/instrs cover
         // ONLY the kernel (roi_begin..roi_end), excluding the serial pre-ROI
@@ -1552,6 +1669,16 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
             }
             ensureThreadInit(tid);  // host mask
             info("Thread %d: ROI offload end (co-sim)", tid);
+        }
+        // 1.6 thread-MPI: only the LAST rank out freezes stats + terminates;
+        // earlier enders still owe MPI protocol work (closing barrier,
+        // serving collectives) on live cores.
+        if (getenv("PIMID_MPI_THREADED")) {
+            if (g_roiRefCount.fetch_sub(1) - 1 > 0) return;
+            in_roi.store(false);
+            dumpTerminationStats();
+            zinfo->terminationConditionMet = true;
+            return;
         }
         in_roi.store(false);
         if (getenv("PIMID_MPI_RANK")) {

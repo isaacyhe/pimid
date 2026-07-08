@@ -96,7 +96,11 @@ void InOrderCore::initStats(AggregateStat* parentStat) {
     // Report cycles/instrs RELATIVE to the ROI baseline (roi_begin); roiBase* are
     // 0 until roi_begin, so non-ROI workloads are unaffected. cCycles (contention)
     // is left absolute as it is a diagnostic counter, not an ROI duration metric.
-    auto x = [this]() { return cRec.getUnhaltedCycles(curCycle) - roiBaseCycle; };
+    auto x = [this]() {
+        uint64_t c = cRec.getUnhaltedCycles(curCycle);
+        c = (c > pimidPhantomWait) ? (c - pimidPhantomWait) : 0;   // 1.6.1 wall-free
+        return (c > roiBaseCycle) ? (c - roiBaseCycle) : 0;
+    };
     LambdaStat<decltype(x)>* cyclesStat = new LambdaStat<decltype(x)>(x);
     cyclesStat->init("cycles", "Simulated unhalted cycles");
     coreStat->append(cyclesStat);

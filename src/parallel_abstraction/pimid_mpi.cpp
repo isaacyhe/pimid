@@ -28,6 +28,8 @@
 #include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <dlfcn.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <atomic>
@@ -54,6 +56,8 @@
  * link to the destination was busy). The same wait is also stamped onto the
  * message so the receiver's rendezvous arrival accounts for it. */
 #define ZSIM_MAGIC_OP_MPI_CONTEND    2057
+#define ZSIM_MAGIC_OP_MPI_TIME       2058  /* plugin -> params.sim_now */
+#define ZSIM_MAGIC_OP_MPI_ADVANCE    2059  /* core clock -> params.sim_send_time */
 
 struct __attribute__((aligned(64))) PimidMpiParams {
     uint32_t src_pe;
@@ -143,6 +147,22 @@ struct Mailbox {
     uint32_t        head;          /* next slot to read */
     uint32_t        tail;          /* next slot to write */
     uint32_t        count;         /* slots currently filled */
+    /* 1.6 thread mode ONLY: private (same-process) mutex/cond waits, the OMP
+     * discipline -- a waiting rank parks in a futex, the plugin deschedules
+     * its core, and the wait costs ZERO simulated cycles. The kernel-wait-free
+     * usleep polling below is the PROCESS-mode discipline (pshared futex wakes
+     * were lost under the simulator, the 1.0.8 freeze); private futexes are
+     * exercised daily by libgomp under this same plugin. In thread mode a
+     * polling wait would burn shared phase-clock cycles while attached, which
+     * both crawls and re-imports wall-clock into results. */
+    pthread_mutex_t mtx;
+    pthread_cond_t  can_recv;      /* signaled on enqueue */
+    pthread_cond_t  can_send;      /* signaled on dequeue */
+    /* Thread mode: source-matched receive. A slot consumed out of FIFO order
+     * (receiver asked for a specific src) is tombstoned here; head advances
+     * over tombstones. Per-src order is preserved (scan from head returns the
+     * earliest enqueued match). Process mode never touches this. */
+    uint8_t         consumed[PIMID_MPI_RING_SLOTS];
     MessageSlot     slots[PIMID_MPI_RING_SLOTS];
 };
 
@@ -162,6 +182,15 @@ struct SharedHeader {
     /* Barrier: lock-free generation barrier (atomics only) */
     volatile int     barrier_count;
     volatile int     barrier_gen;
+    /* 1.6 thread mode ONLY: cond-parked barrier (see Mailbox comment). */
+    pthread_mutex_t  bar_mtx;
+    pthread_cond_t   bar_cv;
+    /* Max-arrival rendezvous: max over this generation's arrivals (sim time),
+     * captured into bar_release by the last arriver. Every rank ADVANCEs its
+     * core to bar_release after the wake, so barrier exit time is a pure
+     * function of simulated arrivals -- wake order is timing-invisible. */
+    uint64_t         bar_max_arr;
+    uint64_t         bar_release;
     int              nranks;
     int              _pad;
     /* Cross-rank contention occupancy (Phase 2). */
@@ -217,10 +246,15 @@ static inline void occ_unlock(SharedHeader* h) {
     h->occ_lk = 0;
 }
 
-/* ---- Process-local state ---- */
+/* ---- Rank-local + process-local state ----
+ *
+ * 1.6 THREAD MODE: ranks are guest threads of ONE process, so rank identity
+ * lives in TLS. In legacy process mode the process has exactly one MPI-calling
+ * thread, for which a thread_local behaves identically to the old global. */
 
-static int            g_rank = -1;
+static thread_local int g_rank = -1;
 static int            g_nranks = 0;
+static bool           g_thread_mode = false;  /* set by the 1.6 main harness */
 static SharedHeader*  g_shared = nullptr;
 static size_t         g_shared_bytes = 0;
 static char           g_shm_name[256] = {0};
@@ -236,6 +270,11 @@ static std::atomic<int>  g_next_request{1};
  * reservation advances busy_until[point] to the message's completion time.
  * Returns 0 when no shm is mapped (solo run) or the duration is 0. */
 static uint64_t contend_reserve(int dst_pe, uint64_t send_time, uint64_t dur) {
+    /* 1.6 thread mode: the ONE in-process Garnet models message contention
+     * physically (packets recorded into the deterministic batch replay), so
+     * the occupancy table would double-count -- and its tie order is wall-
+     * clock, the last source of run-to-run jitter. Process-mode only. */
+    if (g_thread_mode) return 0;
     if (g_shared == nullptr || dur == 0) return 0;
     uint32_t pts = g_contend_points;
     if (pts < 1) pts = 1;
@@ -328,6 +367,41 @@ static void register_mpi_params(void) {
 
 static size_t shared_bytes_for(int nranks) {
     return sizeof(SharedHeader) + (size_t)nranks * sizeof(Mailbox);
+}
+
+/* 1.6 thread mode: the "shared" region is plain process memory -- all ranks
+ * live in this address space, so the mailbox/barrier/occupancy layout is used
+ * verbatim with no shm object, no attach race, no cross-process lifetime. */
+static bool create_heap_region(int nranks) {
+    g_shared_bytes = shared_bytes_for(nranks);
+    void* p = calloc(1, g_shared_bytes);
+    if (!p) {
+        fprintf(stderr, "[pimid_mpi] thread-mode region alloc failed (%zu bytes)\n",
+                g_shared_bytes);
+        return false;
+    }
+    g_shared = (SharedHeader*)p;
+    g_shared->barrier_count = 0;
+    g_shared->nranks        = nranks;
+    g_shared->occ_lk        = 0;
+    for (int i = 0; i < PIMID_MPI_CONTEND_MAX_POINTS; i++)
+        g_shared->busy_until[i] = 0;
+    pthread_mutex_init(&g_shared->bar_mtx, nullptr);
+    pthread_cond_init(&g_shared->bar_cv, nullptr);
+    g_shared->bar_max_arr = 0;
+    g_shared->bar_release = 0;
+    for (int i = 0; i < nranks; i++) {
+        Mailbox* mb = &g_shared->mailboxes[i];
+        mb->lk = 0;
+        mb->head = mb->tail = mb->count = 0;
+        memset((void*)mb->consumed, 0, sizeof(mb->consumed));
+        pthread_mutex_init(&mb->mtx, nullptr);
+        pthread_cond_init(&mb->can_recv, nullptr);
+        pthread_cond_init(&mb->can_send, nullptr);
+    }
+    __sync_synchronize();
+    g_shared->barrier_gen = 1;   /* >0 == initialized (same sentinel as shm) */
+    return true;
 }
 
 /* Rank 0 creates and initializes the shm segment; other ranks attach.
@@ -440,6 +514,38 @@ static int send_chunk(int dest, int tag, const char* data, uint32_t size,
     MPITRACE("send_enter dest=%d tag=%d chunk=%u/%u", dest, tag, chunk_idx, n_chunks);
     /* Bracket the transport (poll + payload copy) so the simulator keeps the
      * core attached without counting the wall-clock poll as compute. */
+    if (g_thread_mode) {
+        /* Thread mode: cond-parked wait (OMP discipline). The parked thread
+         * leaves its simulated core; the wait costs zero simulated cycles. */
+        /* v5 wait discipline: ACTIVE PHASE-LOCKSTEP SPIN. No syscalls, no
+         * scheduler leave, no comm window: the spinning core advances through
+         * simulated phases in lockstep with all cores, so the wait ends at
+         * the peer's DETERMINISTIC publish phase -- wall time cannot vote.
+         * (cond parking rejoined at wall-dependent phases; window-frozen
+         * cores deadlocked the phase barrier. Spin instrs are counted,
+         * deterministically; purity refinement tracked for 1.6.1.) */
+        mpi_comm_begin();   /* frozen-clock bracket: plugin rewinds at END */
+        pthread_mutex_lock(&mb->mtx);
+        while (mb->count >= PIMID_MPI_RING_SLOTS)
+            pthread_cond_wait(&mb->can_send, &mb->mtx);
+        MessageSlot* slot = &mb->slots[mb->tail];
+        slot->src           = g_rank;
+        slot->tag           = tag;
+        slot->size          = size;
+        slot->chunk_idx     = chunk_idx;
+        slot->n_chunks      = n_chunks;
+        slot->msg_id           = msg_id;
+        slot->sim_send_time    = send_time;
+        slot->sim_contend_wait = contend_wait;
+        if (data && size > 0) memcpy(slot->payload, data, size);
+        mb->tail = (mb->tail + 1) % PIMID_MPI_RING_SLOTS;
+        mb->count++;
+        pthread_cond_signal(&mb->can_recv);
+        pthread_mutex_unlock(&mb->mtx);
+        mpi_comm_end();
+        MPITRACE("send_done dest=%d", dest);
+        return 0;
+    }
     mpi_comm_begin();
     bool waited = false;
     for (;;) {
@@ -468,13 +574,53 @@ static int send_chunk(int dest, int tag, const char* data, uint32_t size,
     return 0;
 }
 
-/* Pop one message from the local mailbox. Blocks if empty. */
-static void recv_slot(MessageSlot* out) {
+/* Pop one message from the local mailbox. Blocks if empty. Thread mode
+ * matches want_src (MPI_ANY_SOURCE = any); process mode keeps its historical
+ * FIFO-pop and ignores want_src. */
+static void recv_slot(MessageSlot* out, int want_src = -1) {
     Mailbox* mb = &g_shared->mailboxes[g_rank];
     MPITRACE("recv_enter");
     /* Bracket the transport (poll + payload copy): the simulator keeps the core
      * attached across the polling sleeps without counting them, so the post-recv
      * compute is counted and cycles do not depend on wall-clock poll duration. */
+    if (g_thread_mode) {
+        /* SOURCE-MATCHED receive: scan from head for the earliest unconsumed
+         * slot from want_src (or any). Popping in wall-arrival order made the
+         * rendezvous consume varying send_time stamps run-to-run -- the 6%
+         * determinism jitter. Matching by source makes the consumed stamp a
+         * pure function of the program's communication pattern. */
+        mpi_comm_begin();   /* frozen-clock bracket: plugin rewinds at END */
+        pthread_mutex_lock(&mb->mtx);
+        for (;;) {
+            int found = -1;
+            for (uint32_t k = 0; k < mb->count; k++) {
+                uint32_t idx = (mb->head + k) % PIMID_MPI_RING_SLOTS;
+                if (mb->consumed[idx]) continue;
+                if (want_src < 0 || mb->slots[idx].src == want_src) {
+                    found = (int)idx;
+                    break;
+                }
+            }
+            if (found >= 0) {
+                *out = mb->slots[found];
+                mb->consumed[found] = 1;
+                /* Advance head over the consumed prefix. */
+                while (mb->count > 0 && mb->consumed[mb->head]) {
+                    mb->consumed[mb->head] = 0;
+                    mb->head = (mb->head + 1) % PIMID_MPI_RING_SLOTS;
+                    mb->count--;
+                    pthread_cond_signal(&mb->can_send);
+                }
+                break;
+            }
+            MPITRACE("recv_WAIT_src=%d", want_src);
+            pthread_cond_wait(&mb->can_recv, &mb->mtx);
+        }
+        pthread_mutex_unlock(&mb->mtx);
+        mpi_comm_end();
+        MPITRACE("recv_done src=%d tag=%d", out->src, out->tag);
+        return;
+    }
     mpi_comm_begin();
     bool waited = false;
     for (;;) {
@@ -499,6 +645,15 @@ extern "C" {
 
 int MPI_Init(int *argc, char ***argv) {
     (void)argc; (void)argv;
+
+    /* 1.6 thread mode: the main harness already assigned this thread's rank
+     * (TLS) and built the in-process region BEFORE any rank started. Every
+     * rank-thread calls MPI_Init; each just registers its own params block. */
+    if (g_thread_mode) {
+        trace_init(g_rank);
+        register_mpi_params();
+        return MPI_SUCCESS;
+    }
 
     if (g_initialized.exchange(true)) return MPI_SUCCESS;
 
@@ -548,6 +703,10 @@ int MPI_Init(int *argc, char ***argv) {
 }
 
 int MPI_Finalize(void) {
+    /* 1.6 thread mode: the region belongs to the harness (freed after all
+     * rank-threads join); a rank finalizing must not unmap under its peers. */
+    if (g_thread_mode) return MPI_SUCCESS;
+
     if (g_shared) {
         munmap(g_shared, g_shared_bytes);
         g_shared = nullptr;
@@ -648,9 +807,10 @@ int MPI_Recv(void *buf, int count, MPI_Datatype datatype,
     MessageSlot slot;
     uint64_t send_time = 0;
     uint64_t contend_wait = 0;
+    int want = g_thread_mode ? source : -1;   /* thread mode: honor source */
     do {
-        recv_slot(&slot);
-        if (last_src < 0) last_src = slot.src;
+        recv_slot(&slot, want);
+        if (last_src < 0) { last_src = slot.src; want = g_thread_mode ? slot.src : want; }
         send_time    = slot.sim_send_time;     /* all chunks share the stamp */
         contend_wait = slot.sim_contend_wait;  /* and the contention wait */
         size_t space = (nbytes > written) ? (nbytes - written) : 0;
@@ -712,6 +872,36 @@ int MPI_Barrier(MPI_Comm comm) {
     /* Lock-free generation barrier: snapshot gen BEFORE arriving; the last
      * arriver resets the count and bumps the generation; everyone else
      * polls the generation. No mutex, no condvar, no kernel waits. */
+    if (g_thread_mode) {
+        /* Cond-parked generation barrier + MAX-ARRIVAL RENDEZVOUS: every rank
+         * publishes its arrival sim-time; the last arriver freezes the max as
+         * the release time; every rank then ADVANCEs its core clock to that
+         * release before the (deterministically priced) BARRIER op. Exit time
+         * = f(arrivals) only -- futex wake order cannot touch it. */
+        zsim_magic_op(ZSIM_MAGIC_OP_MPI_TIME);
+        uint64_t my_arr = tl_mpi_params.sim_now;
+        pthread_mutex_lock(&g_shared->bar_mtx);
+        int gen = g_shared->barrier_gen;
+        if (my_arr > g_shared->bar_max_arr) g_shared->bar_max_arr = my_arr;
+        if (++g_shared->barrier_count >= g_nranks) {
+            g_shared->barrier_count = 0;
+            g_shared->bar_release = g_shared->bar_max_arr;
+            g_shared->bar_max_arr = 0;
+            g_shared->barrier_gen = gen + 1;
+            pthread_cond_broadcast(&g_shared->bar_cv);
+        } else {
+            mpi_comm_begin();   /* frozen-clock bracket */
+            while (g_shared->barrier_gen == gen)
+                pthread_cond_wait(&g_shared->bar_cv, &g_shared->bar_mtx);
+            mpi_comm_end();
+        }
+        uint64_t release = g_shared->bar_release;
+        pthread_mutex_unlock(&g_shared->bar_mtx);
+        tl_mpi_params.sim_send_time = release;
+        zsim_magic_op(ZSIM_MAGIC_OP_MPI_ADVANCE);
+        zsim_magic_op(ZSIM_MAGIC_OP_MPI_BARRIER);
+        return MPI_SUCCESS;
+    }
     int gen = g_shared->barrier_gen;
     int pos = __sync_add_and_fetch(&g_shared->barrier_count, 1);
     MPITRACE("barrier_in gen=%d count=%d/%d", gen, pos, g_nranks);
@@ -914,3 +1104,102 @@ double MPI_Wtime(void) {
 }
 
 }  /* extern "C" */
+
+/* ==== 1.6 thread mode: rank = guest thread, ONE process ====================
+ *
+ * The app binary is UNTOUCHED standard MPI. This library interposes
+ * __libc_start_main (it is preloaded ahead of libc by the PIMID launcher):
+ * when PIMID_MPI_THREADED=1, the app's real main() is captured and a harness
+ * main runs instead. The harness builds the in-process transport region and
+ * spawns one thread per rank, each executing the app's own main(argc, argv)
+ * with its rank identity in TLS. To the zsim plugin this is an OMP-shaped
+ * process: N guest threads -> N cores, one Garnet, phase-barrier ordering --
+ * venue-independent by construction (no shm, no cut, no replay windows).
+ */
+
+#define PIMID_MPI_MAX_RANKS 1024
+
+static int (*g_app_main)(int, char**, char**) = nullptr;
+
+struct PimidRankThread {
+    int    rank;
+    int    argc;
+    char** argv;
+    char** envp;
+    int    ret;
+};
+
+static void* pimid_rank_trampoline(void* arg) {
+    PimidRankThread* rt = (PimidRankThread*)arg;
+    g_rank = rt->rank;   /* TLS: this thread IS rank r from before main() */
+    rt->ret = g_app_main(rt->argc, rt->argv, rt->envp);
+    return nullptr;
+}
+
+static int pimid_thread_main(int argc, char** argv, char** envp) {
+    const char* n = getenv("PIMID_MPI_RANKS");
+    int nranks = n ? atoi(n) : 1;
+    if (nranks < 1) nranks = 1;
+    if (nranks > PIMID_MPI_MAX_RANKS) nranks = PIMID_MPI_MAX_RANKS;
+
+    g_thread_mode = true;
+    g_nranks = nranks;
+    if (!create_heap_region(nranks)) return 1;
+
+    fprintf(stderr, "[pimid_mpi] thread mode: %d ranks as threads of one "
+            "process (in-process transport, no shm)\n", nranks);
+
+    /* Rank 0 runs ON this (the process main) thread -- the OMP master-is-
+     * worker-0 shape. Threads == simulated cores exactly: a separate harness
+     * thread would occupy a core slot blocked in pthread_join (the scheduler
+     * rightly refuses to fake-leave it) and starve one rank forever, which is
+     * precisely the hang the first smoke hit. */
+    static PimidRankThread rt[PIMID_MPI_MAX_RANKS];
+    static pthread_t       th[PIMID_MPI_MAX_RANKS];
+    for (int r = 1; r < nranks; r++) {
+        rt[r].rank = r; rt[r].argc = argc; rt[r].argv = argv;
+        rt[r].envp = envp; rt[r].ret = 0;
+        int rc = pthread_create(&th[r], nullptr, pimid_rank_trampoline, &rt[r]);
+        if (rc != 0) {
+            fprintf(stderr, "[pimid_mpi] pthread_create(rank %d) failed: %s\n",
+                    r, strerror(rc));
+            return 1;
+        }
+    }
+    g_rank = 0;
+    int worst = g_app_main(argc, argv, envp);
+    for (int r = 1; r < nranks; r++) {
+        pthread_join(th[r], nullptr);
+        if (rt[r].ret > worst) worst = rt[r].ret;
+    }
+    free(g_shared);
+    g_shared = nullptr;
+    return worst;
+}
+
+extern "C" int __libc_start_main(int (*main_fn)(int, char**, char**), int argc,
+                                 char** argv,
+                                 int (*init_fn)(int, char**, char**),
+                                 void (*fini_fn)(void),
+                                 void (*rtld_fini)(void), void* stack_end) {
+    using real_start_t = int (*)(int (*)(int, char**, char**), int, char**,
+                                 int (*)(int, char**, char**), void (*)(void),
+                                 void (*)(void), void*);
+    real_start_t real = (real_start_t)dlsym(RTLD_NEXT, "__libc_start_main");
+    if (!real) {
+        fprintf(stderr, "[pimid_mpi] cannot resolve real __libc_start_main\n");
+        _exit(127);
+    }
+    const char* threaded = getenv("PIMID_MPI_THREADED");
+    const char* ranks    = getenv("PIMID_MPI_RANKS");
+    /* Thread mode ONLY when the launcher says so AND this is not a legacy
+     * per-rank process (which carries PIMID_MPI_RANK). Everything else --
+     * OMP workloads, solo runs, legacy mode -- boots the app untouched. */
+    if (threaded && threaded[0] == '1' && !getenv("PIMID_MPI_RANK") &&
+        ranks && atoi(ranks) > 1) {
+        g_app_main = main_fn;
+        return real(pimid_thread_main, argc, argv, init_fn, fini_fn,
+                    rtld_fini, stack_end);
+    }
+    return real(main_fn, argc, argv, init_fn, fini_fn, rtld_fini, stack_end);
+}

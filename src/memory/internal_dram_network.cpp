@@ -717,8 +717,11 @@ void InternalDRAMNetwork::configureLPDDR5Network() {
     network_configs_[2].latency_cycles = 2;
     network_configs_[2].topology = "bus";
 
-    // L3: Chip DQ pins: x16 (wider than DDR4/DDR5)
-    network_configs_[3].link_width_bits = 16;      // x16 device DQ
+    // L3: Chip DQ pins: x16 device @ 6.4 Gbps/pin (LPDDR5-6400).
+    // Model BW = width/8 * core_freq; width absorbs the per-pin data-rate
+    // multiplier (6.4 Gbps / 1.6 GHz core = 4x), like DDR5's 64b*2=128b.
+    // x16 * 4 = 64b -> 12.8 GB/s (JEDEC LPDDR5 x16 channel).
+    network_configs_[3].link_width_bits = 64;      // x16 DQ @ 6.4Gbps -> 12.8 GB/s
     network_configs_[3].frequency_GHz = 1.6;
     network_configs_[3].bandwidth_GBs =
         (network_configs_[3].link_width_bits / 8.0) *
@@ -726,8 +729,8 @@ void InternalDRAMNetwork::configureLPDDR5Network() {
     network_configs_[3].latency_cycles = 3;        // PoP packaging, short traces
     network_configs_[3].topology = "point-to-point";
 
-    // L4: Rank network (typically 1 rank in mobile)
-    network_configs_[4].link_width_bits = 16;      // Single x16 die per channel
+    // L4: Rank network (typically 1 rank in mobile): sustains channel BW.
+    network_configs_[4].link_width_bits = 64;      // x16 @ 6.4Gbps -> 12.8 GB/s
     network_configs_[4].frequency_GHz = 1.6;
     network_configs_[4].bandwidth_GBs =
         (network_configs_[4].link_width_bits / 8.0) *
@@ -735,8 +738,8 @@ void InternalDRAMNetwork::configureLPDDR5Network() {
     network_configs_[4].latency_cycles = 3;        // Minimal rank overhead
     network_configs_[4].topology = "bus";
 
-    // L5: Channel network (to MC)
-    network_configs_[5].link_width_bits = 16;      // 16b channel
+    // L5: Channel network (to MC): LPDDR5 x16 channel @ 6.4 Gbps = 12.8 GB/s.
+    network_configs_[5].link_width_bits = 64;      // x16 @ 6.4Gbps -> 12.8 GB/s
     network_configs_[5].frequency_GHz = 1.6;
     network_configs_[5].bandwidth_GBs =
         (network_configs_[5].link_width_bits / 8.0) *
@@ -793,8 +796,11 @@ void InternalDRAMNetwork::configureGDDR6Network() {
     network_configs_[2].latency_cycles = 2;
     network_configs_[2].topology = "bus";
 
-    // L3: Chip DQ pins: 2 × x8 = 16b per chip (dual-channel)
-    network_configs_[3].link_width_bits = 16;      // 2 channels × 8 DQ each
+    // L3: Chip DQ pins: x16 device @ 16 Gbps/pin (GDDR6-16Gbps).
+    // Model BW = width/8 * core_freq; width absorbs the per-pin data-rate
+    // multiplier (16 Gbps / 2.0 GHz core = 8x), like DDR5's 64b*2=128b.
+    // x16 * 8 = 128b -> 32 GB/s per device (JEDEC GDDR6 x16 @ 16Gbps).
+    network_configs_[3].link_width_bits = 128;     // x16 DQ @ 16Gbps -> 32 GB/s
     network_configs_[3].frequency_GHz = 2.0;
     network_configs_[3].bandwidth_GBs =
         (network_configs_[3].link_width_bits / 8.0) *
@@ -802,8 +808,8 @@ void InternalDRAMNetwork::configureGDDR6Network() {
     network_configs_[3].latency_cycles = 4;        // On-board traces, short
     network_configs_[3].topology = "point-to-point";
 
-    // L4: Rank network (no ranks in GDDR6 — point-to-point)
-    network_configs_[4].link_width_bits = 16;      // Single chip = single rank
+    // L4: Rank network (no ranks in GDDR6 — point-to-point): sustains device BW.
+    network_configs_[4].link_width_bits = 128;     // x16 @ 16Gbps -> 32 GB/s
     network_configs_[4].frequency_GHz = 2.0;
     network_configs_[4].bandwidth_GBs =
         (network_configs_[4].link_width_bits / 8.0) *
@@ -811,8 +817,10 @@ void InternalDRAMNetwork::configureGDDR6Network() {
     network_configs_[4].latency_cycles = 1;        // No rank switching
     network_configs_[4].topology = "point-to-point";
 
-    // L5: Channel network (chip to MC)
-    network_configs_[5].link_width_bits = 16;      // 16b per chip-channel
+    // L5: Channel network (chip to MC): point-to-point, no bus sharing, so the
+    // device DQ BW (32 GB/s) is sustained to the MC. (A 32-bit channel = 2 chips
+    // aggregates to 64 GB/s; per-chip access path is gated at 32 GB/s.)
+    network_configs_[5].link_width_bits = 128;     // x16 @ 16Gbps -> 32 GB/s
     network_configs_[5].frequency_GHz = 2.0;
     network_configs_[5].bandwidth_GBs =
         (network_configs_[5].link_width_bits / 8.0) *

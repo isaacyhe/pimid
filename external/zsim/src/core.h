@@ -83,6 +83,22 @@ class Core : public GlobAlloc {
         virtual uint64_t getPhaseCycles() const = 0; // used by RDTSC faking --- we need to know how far along we are in the phase, but not the total number of phases
         virtual uint64_t getCycles() const = 0;
 
+        /* 1.6 thread-MPI frozen-clock waits: rewind the cycle counter by the
+         * raw growth a transport wait injected (park-rejoin fast-forward is
+         * wall-dependent; the rendezvous ADVANCE re-places the clock from
+         * deterministic arithmetic right after). No-op for cores with weave
+         * event state (rewinding under scheduled events is unsafe) -- those
+         * get frozen-clock support in 1.6.1. */
+        virtual void pimidRewindCycles(uint64_t delta) { (void)delta; }
+
+        /* 1.6.1 thread-MPI: set while the guest is parked in a transport wait
+         * (COMM window). OOOCore::join consults it: a parked core's pipeline
+         * is empty, so the post-wake join JUMPS to the phase clock instead of
+         * simulating the pipeline across a wall-dependent gap (advance() there
+         * converted wake luck into unhalted cycles -- the +-1-phase ooo
+         * nondeterminism signature). */
+        volatile bool pimidCommParked = false;
+
         virtual void initStats(AggregateStat* parentStat) = 0;
         virtual void contextSwitch(int32_t gid) = 0; //gid == -1 means descheduled, otherwise this is the new gid
 

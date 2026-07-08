@@ -184,7 +184,18 @@ class InOrderCore : public Core {
 
         uint64_t getInstrs() const {return instrs;}
         uint64_t getPhaseCycles() const;
-        uint64_t getCycles() const {return cRec.getUnhaltedCycles(curCycle);}
+        // 1.6.1 frozen-clock MPI waits for weave cores: rewinding the bound
+        // clock under scheduled weave events is unsafe, so the wait's raw
+        // growth accumulates here and is SUBTRACTED at every reporting point
+        // (getCycles + the ROI cycles stat) instead. One accumulator, two
+        // read sites -- stamps, rendezvous math, and zsim.out all see the
+        // same wall-free clock.
+        uint64_t pimidPhantomWait = 0;
+        void pimidRewindCycles(uint64_t delta) override { pimidPhantomWait += delta; }
+        uint64_t getCycles() const {
+            uint64_t c = cRec.getUnhaltedCycles(curCycle);
+            return (c > pimidPhantomWait) ? (c - pimidPhantomWait) : 0;
+        }
 
         void contextSwitch(int32_t gid);
         virtual void join();
@@ -193,7 +204,7 @@ class InOrderCore : public Core {
         InstrFuncPtrs GetFuncPtrs();
 
         // Snapshot current counters as the ROI baseline (called on roi_begin).
-        void markRoiBegin() override { roiBaseInstrs = instrs; roiBaseCycle = cRec.getUnhaltedCycles(curCycle); }
+        void markRoiBegin() override { roiBaseInstrs = instrs; roiBaseCycle = getCycles(); }  // adjusted clock: pre-ROI phantom excluded
 
         // Virtual type check for use without RTTI (Pin 4.x requires -fno-rtti)
         InOrderCore* asInOrderCore() override { return this; }

@@ -179,6 +179,20 @@ public:
     // coexist -- OMP contention systematically understated. The honest shared
     // axis inside a process is the GLOBAL phase clock; the core's intra-phase
     // offset spreads injections deterministically within the phase.
+    // 1.6 thread-MPI deterministic pricing: the batch-smoothed EWMA read is
+    // wall-order-dependent (which drains completed before this access is a
+    // host race), and making it causal across parked ranks is a conservative-
+    // synchronization (PDES) problem. In thread mode we therefore price from
+    // the STATIC analytic NoC latency -- topology-pure, load-independent,
+    // bit-deterministic. The Garnet batch replay still runs and reports
+    // measured contention in stats; it just does not feed back into per-access
+    // latency. Documented model boundary (HANDOFF_16_THREAD_MPI.md).
+    static bool mpiThreadDetPricing() {
+        static int v = -1;
+        if (v < 0) v = getenv("PIMID_MPI_THREADED") ? 1 : 0;
+        return v == 1;
+    }
+
     static uint64_t phaseStamp(uint64_t coreCycle) {
         uint32_t pl = zinfo->phaseLength > 0 ? zinfo->phaseLength : 10000;
         // Stamp on numPhases -- THE SAME counter that gates batch claims -- not
@@ -487,7 +501,8 @@ public:
                 if (srcNode == dstNode) {
                     networkLat = 0;
                 } else {
-                    uint32_t garnetLat = gn->getBatchAvgLatency();
+                    uint32_t garnetLat = mpiThreadDetPricing()
+                        ? 0 : gn->getBatchAvgLatency();
                     networkLat = (garnetLat > 0)
                         ? 2 * garnetLat
                         : 2 * zinfo->hierarchy.nocAvgOneWayLatency;
@@ -770,7 +785,8 @@ protected:
                     batchLastPhase_ = zinfo->numPhases;
                 }
             }
-            uint32_t garnetLat = gn->getBatchAvgLatency();
+            uint32_t garnetLat = mpiThreadDetPricing()
+                ? 0 : gn->getBatchAvgLatency();
             return (garnetLat > 0)
                 ? 2 * garnetLat
                 : 2 * zinfo->hierarchy.nocAvgOneWayLatency;

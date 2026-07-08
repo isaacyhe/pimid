@@ -88,6 +88,13 @@ class ALUCore : public Core {
         InstrFuncPtrs GetFuncPtrs();
 
         void addDelay(uint32_t cycles) override { curCycle += cycles; }
+        void pimidRewindCycles(uint64_t delta) override {
+            /* Floor at the ROI baseline: rewinding below it makes the
+             * reported (curCycle - roiBaseCycle) wrap negative. */
+            uint64_t floorCyc = roiBaseCycle;
+            uint64_t tgt = (curCycle > delta) ? (curCycle - delta) : 0;
+            curCycle = (tgt > floorCyc) ? tgt : floorCyc;
+        }
 
         // Snapshot current counters as the ROI baseline (called on roi_begin).
         void markRoiBegin() override { roiBaseInstrs = instrs; roiBaseCycle = curCycle; }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(PIMID VERSION 1.5.16 LANGUAGES CXX)
+project(PIMID VERSION 1.6.4 LANGUAGES CXX)
 
 # C++17 standard required
 set(CMAKE_CXX_STANDARD 17)
@@ -270,6 +270,7 @@ target_include_directories(pimid_mpi PRIVATE
 )
 target_link_libraries(pimid_mpi PRIVATE
     Threads::Threads
+    ${CMAKE_DL_LIBS}   # dlsym(RTLD_NEXT): 1.6 __libc_start_main interposer
 )
 target_compile_options(pimid_mpi PRIVATE
     -fvisibility=default   # MPI symbols must be visible for LD_PRELOAD interception
