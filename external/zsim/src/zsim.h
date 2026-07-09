@@ -395,6 +395,31 @@ struct GlobSimInfo {
         volatile uint64_t flushCyclesCharged = 0;
     } coherence;
 
+    // Kernel LAUNCH cost tree (1.7.3, HANDOFF ISSUE 2). The host launches a
+    // device kernel at the offload doorbell (co-sim roi_begin / WORK_BEGIN).
+    // Real launch overhead = a user-mode doorbell write + cmd-packet formation
+    // (NO syscall) + a HIP/CUDA-runtime dispatch software cost + a small cmd
+    // packet crossing the bridge + a small ack packet returning. Charged on the
+    // HOST core BEFORE the device migration, so it lands on the host inside the
+    // task-region window. Deterministic (fixed cycle counts + deterministic
+    // bridge crossings) so the boundary cost reproduces exactly.
+    //   total = doorbellCycles + dispatchCycles
+    //           + getBridgeLatency(cmdBytes) + getBridgeLatency(ackBytes)
+    // Real GPU kernel-launch latency is famously ~5-20us (driver + dispatch);
+    // the decomposed defaults (~300ns doorbell + ~5us dispatch + ~tens of ns of
+    // bridge) sit at the low end of that band. NO_OFFLOAD baselines never enter
+    // the co-sim offload block, so they are never charged (self-zeroing).
+    struct {
+        bool enabled = false;
+        uint32_t doorbellCycles = 0;   // doorbell write + cmd-packet formation (user-mode, no syscall)
+        uint32_t dispatchCycles = 0;   // HIP/CUDA-launch-analog runtime dispatch software cost
+        uint32_t cmdBytes = 64;        // cmd packet size (host->device, crosses bridge)
+        uint32_t ackBytes = 64;        // ack packet size (device->host, crosses bridge)
+        // Stats (accumulated at each charged offload doorbell)
+        volatile uint64_t launchCount = 0;
+        volatile uint64_t launchCyclesCharged = 0;
+    } launch;
+
     // Multi-host/multi-device node map
     struct {
         uint32_t numNodes = 0;

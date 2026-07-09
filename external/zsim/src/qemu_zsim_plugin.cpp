@@ -1466,6 +1466,69 @@ static void chargeCoherenceFlush(uint32_t tid) {
 }
 
 /**
+ * Kernel LAUNCH cost (cycles) charged on the host core at the offload doorbell
+ * (1.7.3, HANDOFF ISSUE 2). Composed of documented components:
+ *   - doorbellCycles: user-mode doorbell write + cmd-packet formation (no syscall)
+ *   - dispatchCycles: the HIP/CUDA-launch-analog runtime/OS software cost
+ *   - a small cmd packet crossing the bridge (host->device) via getBridgeLatency
+ *   - a small ack packet crossing the bridge back (device->host)
+ * Anchor: real GPU kernel-launch latency is ~5-20us; the decomposed defaults
+ * (~300ns doorbell + ~5us dispatch + ~tens of ns bridge) sit at that band's low
+ * end. Deterministic: the fixed cycle terms plus the deterministic 1.7.1 bridge
+ * crossings reproduce exactly run-to-run. DDR5 vs HBM3 differ ONLY in the bridge
+ * component (phy pipeline + aggregate bandwidth); doorbell/dispatch are shared.
+ * NO_OFFLOAD baselines never reach a co-sim doorbell, so they are never charged.
+ */
+static uint64_t launchCostCycles() {
+    if (!zinfo || !zinfo->launch.enabled) return 0;
+    uint64_t cyc = (uint64_t)zinfo->launch.doorbellCycles + zinfo->launch.dispatchCycles;
+    // cmd packet crosses the bridge to the device; ack packet returns. Reuse the
+    // 1.7.1 two-layer bridge crossing so per-tech phy/bandwidth is priced.
+    cyc += getBridgeLatency(zinfo->launch.cmdBytes);
+    cyc += getBridgeLatency(zinfo->launch.ackBytes);
+    return cyc;
+}
+
+/**
+ * Apply the kernel launch cost on the host core running `tid` at the offload
+ * doorbell, BEFORE the device migration (thread still on its host core, so the
+ * cost lands on the host and is inside the ROI/task-region window -- exactly
+ * like chargeCoherenceFlush). Uses the synthetic BblInfo path because the ooo
+ * host core does not override addDelay. Accumulates the launch stats.
+ */
+static void chargeLaunchCost(uint32_t tid) {
+    uint64_t launchCyc = launchCostCycles();
+    if (launchCyc == 0) return;
+    uint32_t lc = (uint32_t)std::min<uint64_t>(launchCyc, 0xFFFFFFFFull);
+    BblInfo* bbl = createSimpleBblInfo(lc, lc * 4);
+    fPtrs[tid].bblPtr(tid, 0, bbl);
+    __sync_fetch_and_add(&zinfo->launch.launchCount, 1);
+    __sync_fetch_and_add(&zinfo->launch.launchCyclesCharged, launchCyc);
+    info("Thread %d: kernel launch cost at offload doorbell (doorbell %u + dispatch %u + bridge cmd/ack -> %llu cycles)",
+         tid, zinfo->launch.doorbellCycles, zinfo->launch.dispatchCycles,
+         (unsigned long long)launchCyc);
+}
+
+/**
+ * Drain/commit pending synthetic host charges before the host->device migration.
+ *
+ * The OOO host core commits a BBL's cycles only when the FOLLOWING BBL is
+ * decoded (decodeCycle pipeline lag); sched->leave()/finish() at migration does
+ * NOT drain the window, so the LAST synthetic BBL issued before migration would
+ * be dropped from the host core's cycle count. Without this drain the coherence
+ * flush (1.7.2) landed only because the launch BBL happened to follow it, and
+ * the launch BBL itself was lost. Issuing one trailing minimal BBL forces the
+ * real flush+launch charges to retire onto the host timeline; this 1-instr
+ * trailer becomes the new (negligible, ~1 cycle) orphan. Call AFTER the last
+ * pre-migration host charge and BEFORE thread_domain flips to DOMAIN_DEVICE.
+ */
+static void drainHostCharges(uint32_t tid) {
+    if (tid >= MAX_THREADS || !thread_initialized[tid]) return;
+    BblInfo* bbl = createSimpleBblInfo(1, 4);
+    fPtrs[tid].bblPtr(tid, 0, bbl);
+}
+
+/**
  * Magic instruction callback — dispatches ZSim magic ops detected at
  * translation time.  The opcode (from the preceding mov $imm, %rcx) is
  * passed as userdata.
@@ -1537,6 +1600,16 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
             // writeback cost lands on the host and inside the ROI/task window.
             // No-op for mode=separate (Case 2 bypass) or when coherence disabled.
             chargeCoherenceFlush(tid);
+            // PART B (1.7.3): kernel LAUNCH cost (doorbell + runtime dispatch +
+            // cmd/ack bridge crossings) charged on the HOST core at the offload
+            // doorbell, also before the device migration so it lands on the host
+            // inside the task window. No-op when launch disabled/unset.
+            chargeLaunchCost(tid);
+            // Force the flush+launch synthetic BBLs to retire onto the host
+            // timeline before the migration drops the last one (see drainHost-
+            // Charges). Without this the launch charge is dropped from the host
+            // core's cycle count.
+            drainHostCharges(tid);
             thread_domain[tid].store(DOMAIN_DEVICE);
             g_in_device_region.store(true);
             ++offload_count;
@@ -1559,6 +1632,22 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
         if (g_cosim_mode && !g_cosim_no_offload && tid < MAX_THREADS) {
             g_in_device_region.store(false);
             thread_domain[tid].store(DOMAIN_HOST);
+            // BUSY-WAIT occupancy (1.7.3, HANDOFF ISSUE 2, CUDA-default -- no IRQ,
+            // no polling knob): while the device kernel ran, the host core was NOT
+            // free to do other useful work -- it spun on the completion fence. In
+            // device-only co-sim this is represented BY CONSTRUCTION: the single
+            // launcher thread is either on the host (pre-offload flush+launch, and
+            // post-offload readback) or on the device PE running the kernel -- it
+            // is NEVER two places at once and NEVER races ahead to do other host
+            // work during the device compute (there IS no other work in device-
+            // only mode). The task-region measurement window (the makespan across
+            // all cores) therefore already includes the device-execution duration
+            // via the device PE, and the launch/flush costs charged at the doorbell
+            // sit inside that window on the host timeline. The host cannot skip
+            // ahead free -- it is self-penalized for the wait, exactly as a CUDA
+            // busy-wait would be. (A multi-core host that could overlap independent
+            // host work during offload would need an explicit spin charge here;
+            // deferred with the multi-core-host baseline ladder.)
             if (thread_initialized[tid]) {
                 uint32_t cid = cids[tid];
                 if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
@@ -1600,6 +1689,12 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
     } else if (opcode == ZSIM_MAGIC_OP_WORK_BEGIN) {
         if (g_cosim_no_offload) return;  // NO_OFFLOAD baseline: WORK is stat-only (no migrate/charge)
         if (tid < MAX_THREADS) {
+            // Kernel LAUNCH cost (1.7.3) charged on the HOST core at the WORK
+            // offload doorbell BEFORE the device migration, so it lands on the
+            // host inside the task window (the workloads here use ROI markers, but
+            // the explicit-work offload path prices the launch identically).
+            chargeLaunchCost(tid);
+            drainHostCharges(tid);  // retire the launch BBL before migration drops it
             thread_domain[tid].store(DOMAIN_DEVICE);
             g_in_device_region.store(true);
             uint64_t cnt = ++offload_count;
@@ -1745,6 +1840,16 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
             // writeback cost lands on the host and inside the ROI/task window.
             // No-op for mode=separate (Case 2 bypass) or when coherence disabled.
             chargeCoherenceFlush(tid);
+            // PART B (1.7.3): kernel LAUNCH cost (doorbell + runtime dispatch +
+            // cmd/ack bridge crossings) charged on the HOST core at the offload
+            // doorbell, also before the device migration so it lands on the host
+            // inside the task window. No-op when launch disabled/unset.
+            chargeLaunchCost(tid);
+            // Force the flush+launch synthetic BBLs to retire onto the host
+            // timeline before the migration drops the last one (see drainHost-
+            // Charges). Without this the launch charge is dropped from the host
+            // core's cycle count.
+            drainHostCharges(tid);
             thread_domain[tid].store(DOMAIN_DEVICE);
             g_in_device_region.store(true);
             ++offload_count;
@@ -1764,6 +1869,22 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         if (g_cosim_mode && !g_cosim_no_offload && tid < MAX_THREADS) {
             g_in_device_region.store(false);
             thread_domain[tid].store(DOMAIN_HOST);
+            // BUSY-WAIT occupancy (1.7.3, HANDOFF ISSUE 2, CUDA-default -- no IRQ,
+            // no polling knob): while the device kernel ran, the host core was NOT
+            // free to do other useful work -- it spun on the completion fence. In
+            // device-only co-sim this is represented BY CONSTRUCTION: the single
+            // launcher thread is either on the host (pre-offload flush+launch, and
+            // post-offload readback) or on the device PE running the kernel -- it
+            // is NEVER two places at once and NEVER races ahead to do other host
+            // work during the device compute (there IS no other work in device-
+            // only mode). The task-region measurement window (the makespan across
+            // all cores) therefore already includes the device-execution duration
+            // via the device PE, and the launch/flush costs charged at the doorbell
+            // sit inside that window on the host timeline. The host cannot skip
+            // ahead free -- it is self-penalized for the wait, exactly as a CUDA
+            // busy-wait would be. (A multi-core host that could overlap independent
+            // host work during offload would need an explicit spin charge here;
+            // deferred with the multi-core-host baseline ladder.)
             if (thread_initialized[tid]) {
                 uint32_t cid = cids[tid];
                 if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
@@ -1804,6 +1925,10 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         }
     } else if (opcode == ZSIM_MAGIC_OP_WORK_BEGIN) {
         if (g_cosim_no_offload) return;  // NO_OFFLOAD baseline: WORK is stat-only (no migrate/charge)
+        // Kernel LAUNCH cost (1.7.3) charged on the HOST core at the WORK offload
+        // doorbell BEFORE the device migration (see the twin handler above).
+        chargeLaunchCost(tid);
+        drainHostCharges(tid);  // retire the launch BBL before migration drops it
         thread_domain[tid].store(DOMAIN_DEVICE);
         g_in_device_region.store(true);
         uint64_t cnt = ++offload_count;

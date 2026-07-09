@@ -790,6 +790,23 @@ static void InitSystem(Config& config) {
              zinfo->coherence.writebackBytesPerCycle, zinfo->coherence.flushFixedCycles);
     }
 
+    // Kernel LAUNCH cost tree (1.7.3, HANDOFF ISSUE 2). Standalone top-level
+    // block, read whether or not a DRAM hierarchy is present. Charged on the host
+    // core at the offload doorbell (co-sim roi_begin / WORK_BEGIN) in system-scope
+    // co-sim (see qemu_zsim_plugin launchCostCycles). Cycle-converted at emission
+    // to the host/reference clock; cmd/ack bytes cross the two-layer bridge.
+    if (config.exists("sys.launch")) {
+        zinfo->launch.enabled = config.get<uint32_t>("sys.launch.enabled", 0) != 0;
+        zinfo->launch.doorbellCycles = config.get<uint32_t>("sys.launch.doorbellCycles", 0);
+        zinfo->launch.dispatchCycles = config.get<uint32_t>("sys.launch.dispatchCycles", 0);
+        zinfo->launch.cmdBytes = config.get<uint32_t>("sys.launch.cmdBytes", 64);
+        zinfo->launch.ackBytes = config.get<uint32_t>("sys.launch.ackBytes", 64);
+        info("[ZSim] Kernel launch cost %s (doorbell=%u cyc + dispatch=%u cyc + bridge(cmd=%u B, ack=%u B))",
+             zinfo->launch.enabled ? "enabled" : "present-disabled",
+             zinfo->launch.doorbellCycles, zinfo->launch.dispatchCycles,
+             zinfo->launch.cmdBytes, zinfo->launch.ackBytes);
+    }
+
     // Read node map (multi-host/multi-device system mode)
     if (config.exists("sys.nodeMap")) {
         zinfo->nodeMap.numNodes = config.get<uint32_t>("sys.nodeMap.numNodes", 0);

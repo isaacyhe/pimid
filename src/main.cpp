@@ -945,6 +945,17 @@ struct UnifiedConfig {
     // footprint is treated as dirty (upper bound, conservative-against-PIM).
     long long coherence_footprint_bytes = 16777216;  // 16 MiB default
 
+    // Kernel LAUNCH cost tree (1.7.3, HANDOFF ISSUE 2). Emitted as sys.launch.*
+    // in system scope; charged on the host core at the offload doorbell. Real GPU
+    // kernel-launch latency is famously ~5-20us (driver + runtime dispatch); the
+    // decomposed defaults sit at that band's low end. doorbell/dispatch given in
+    // ns (cycle-converted at the host/reference clock at emission); cmd/ack sized
+    // in bytes and priced by the two-layer bridge crossing.
+    double launch_doorbell_ns = 300.0;   // doorbell write + cmd-packet formation (user-mode, no syscall)
+    double launch_dispatch_ns = 5000.0;  // HIP/CUDA-launch-analog runtime dispatch software cost (~5us)
+    int    launch_cmd_bytes   = 64;      // cmd packet size (host->device, crosses bridge)
+    int    launch_ack_bytes   = 64;      // ack packet size (device->host, crosses bridge)
+
     // Output configuration
     std::string stats_file;
     bool enable_detailed_stats;
@@ -4809,6 +4820,57 @@ static void emitZSimCoherenceBlock(std::ostream& out, const UnifiedConfig& confi
     }
 }
 
+// Deterministic bridge crossing cost (cycles) for `bytes`, mirroring the plugin's
+// getBridgeLatency: phy pipeline + protocol overhead + size/aggregate-BW
+// serialization. Used only for the emitted launch block's debug preview; the
+// plugin recomputes it at runtime from the emitted sys.bridge.* fields.
+static uint32_t bridgeCrossingCycles(const BridgeDefaults& d, uint32_t bytes,
+                                     double ref_freq_mhz) {
+    double f = (ref_freq_mhz > 0.0) ? ref_freq_mhz : 1000.0;
+    uint32_t phy_cyc = (uint32_t)(d.latency_ns * f / 1000.0 + 0.5);
+    uint32_t proto_cyc = (uint32_t)(d.protocol_overhead_ns * f / 1000.0 + 0.5);
+    double agg_gbs = d.bandwidth_gbs * (double)d.channels;
+    double bytes_per_cycle = (agg_gbs * 1e9) / (f * 1e6);
+    uint32_t ser = 0;
+    if (bytes_per_cycle > 0.0 && bytes > 0)
+        ser = (uint32_t)std::ceil((double)bytes / bytes_per_cycle);
+    return phy_cyc + proto_cyc + ser;
+}
+
+// Emit the sys.launch { ... } block (1.7.3, HANDOFF ISSUE 2). doorbell/dispatch
+// ns are cycle-converted at the host/reference clock; cmd/ack bytes cross the
+// two-layer bridge at runtime. The plugin charges the total on the host core at
+// the offload doorbell (co-sim roi_begin / WORK_BEGIN), before device migration.
+static void emitZSimLaunchBlock(std::ostream& out, const UnifiedConfig& config,
+                                const BridgeDefaults& d, double ref_freq_mhz) {
+    double f = (ref_freq_mhz > 0.0) ? ref_freq_mhz : 1000.0;
+    uint32_t doorbell_cyc = (uint32_t)(config.launch_doorbell_ns * f / 1000.0 + 0.5);
+    uint32_t dispatch_cyc = (uint32_t)(config.launch_dispatch_ns * f / 1000.0 + 0.5);
+    uint32_t cmd_bytes = (uint32_t)(config.launch_cmd_bytes > 0 ? config.launch_cmd_bytes : 0);
+    uint32_t ack_bytes = (uint32_t)(config.launch_ack_bytes > 0 ? config.launch_ack_bytes : 0);
+    out << "\n    launch = {\n";
+    out << "        enabled = 1;\n";
+    out << "        doorbellCycles = " << doorbell_cyc << ";\n";
+    out << "        dispatchCycles = " << dispatch_cyc << ";\n";
+    out << "        cmdBytes = " << cmd_bytes << ";\n";
+    out << "        ackBytes = " << ack_bytes << ";\n";
+    out << "    };\n";
+    if (getenv("PIMID_DEBUG_LAUNCH")) {
+        // Login-node observable: the deterministic launch charge the plugin will
+        // apply at the offload doorbell = doorbell + dispatch + 2 bridge crossings.
+        uint32_t cmd_cyc = bridgeCrossingCycles(d, cmd_bytes, f);
+        uint32_t ack_cyc = bridgeCrossingCycles(d, ack_bytes, f);
+        uint64_t total = (uint64_t)doorbell_cyc + dispatch_cyc + cmd_cyc + ack_cyc;
+        double total_ns = (double)total * 1000.0 / f;
+        std::cerr << "[launch] tech=" << d.protocol << "/" << d.phy
+                  << " doorbell=" << config.launch_doorbell_ns << "ns(" << doorbell_cyc << "cy)"
+                  << " dispatch=" << config.launch_dispatch_ns << "ns(" << dispatch_cyc << "cy)"
+                  << " bridge_cmd(" << cmd_bytes << "B)=" << cmd_cyc << "cy"
+                  << " bridge_ack(" << ack_bytes << "B)=" << ack_cyc << "cy"
+                  << " -> total=" << total << "cy (" << total_ns << "ns @ " << f << "MHz)\n";
+    }
+}
+
 static std::string generateSystemConfig(UnifiedConfig& config) {
     std::string cfg_path = "/tmp/pimid_system_zsim_" + std::to_string(getpid()) + ".cfg";
     std::ofstream cfg(cfg_path);
@@ -5146,6 +5208,12 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
                 wb_bw_gbs = ((double)hbw.per_channel_mbs * (double)hbw.channels) / 1000.0;  // MB/s -> GB/s
             }
             emitZSimCoherenceBlock(cfg, config, wb_bw_gbs, ref_freq);
+
+            // -- Kernel LAUNCH cost tree (1.7.3, HANDOFF ISSUE 2) --
+            // Charged on the host core at the offload doorbell in co-sim. Bridge
+            // crossings for the cmd/ack packets are priced by the same `bd`
+            // resolved above, so DDR5 vs HBM3 differ only in the bridge component.
+            emitZSimLaunchBlock(cfg, config, bd, ref_freq);
         }
     }
 
@@ -5970,7 +6038,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.7.2" << std::endl;
+    std::cout << "Version 1.7.3" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -7101,6 +7169,15 @@ int main(int argc, char** argv) {
                         co["flush_fixed_ns"].as<double>(config.coherence_flush_fixed_ns);
                     config.coherence_footprint_bytes =
                         co["footprint_bytes"].as<long long>(config.coherence_footprint_bytes);
+                }
+
+                // Kernel LAUNCH cost tree (1.7.3). All fields optional.
+                if (sys["launch"]) {
+                    auto la = sys["launch"];
+                    config.launch_doorbell_ns = la["doorbell_ns"].as<double>(config.launch_doorbell_ns);
+                    config.launch_dispatch_ns = la["dispatch_ns"].as<double>(config.launch_dispatch_ns);
+                    config.launch_cmd_bytes = la["cmd_bytes"].as<int>(config.launch_cmd_bytes);
+                    config.launch_ack_bytes = la["ack_bytes"].as<int>(config.launch_ack_bytes);
                 }
             }
 
