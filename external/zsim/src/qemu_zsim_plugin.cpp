@@ -248,6 +248,15 @@ static g_vector<bool> device_mask;   // true for ALU cores
 static std::atomic<uint64_t> offload_count{0};
 /* Co-sim mode: a real host and a real device coexist; ROI = offload region. */
 static bool g_cosim_mode = false;
+/* NO_OFFLOAD baseline knob (PIMID_COSIM_NO_OFFLOAD=1, read once at init). In a
+ * co-sim (system-scope) run the ROI/WORK magic ops become STAT-ONLY: threads
+ * never migrate to the device domain, no bridge/PCIe transfer latency is
+ * charged, and no offload_count-driven device pricing happens. The workload
+ * runs on the host cores end to end; ROI begin/end still delimit the measured
+ * region (baseline stat snapshot + termination) exactly as when the knob is
+ * OFF. This yields the host-only baseline cells (1/4/16 OOO host cores running
+ * the unmodified OMP/MPI kernels) from the SAME binary. */
+static bool g_cosim_no_offload = false;
 /* Env-gated thread-lifecycle trace for the in-image startup-hang hunt
  * (PIMID_COSIM_TRACE=1): timestamps around scheduler start/join at thread
  * birth and offload migration. Zero overhead when unset. */
@@ -1437,7 +1446,7 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
         // every thread spawned inside the region) executes on the DEVICE;
         // out-of-ROI code executes on the host. Ordinary workloads are
         // co-sim workloads -- there is no special kind.
-        if (g_cosim_mode && tid < MAX_THREADS) {
+        if (g_cosim_mode && !g_cosim_no_offload && tid < MAX_THREADS) {
             thread_domain[tid].store(DOMAIN_DEVICE);
             g_in_device_region.store(true);
             ++offload_count;
@@ -1457,7 +1466,7 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
         // Co-sim: return the launching thread to a host core BEFORE the
         // termination flag, so the host core rejoin fast-forwards to the
         // global phase clock and host cycles absorb the device execution.
-        if (g_cosim_mode && tid < MAX_THREADS) {
+        if (g_cosim_mode && !g_cosim_no_offload && tid < MAX_THREADS) {
             g_in_device_region.store(false);
             thread_domain[tid].store(DOMAIN_HOST);
             if (thread_initialized[tid]) {
@@ -1499,6 +1508,7 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
             zinfo->terminationConditionMet = true;  // Let watchdog trigger SimEnd()
         }
     } else if (opcode == ZSIM_MAGIC_OP_WORK_BEGIN) {
+        if (g_cosim_no_offload) return;  // NO_OFFLOAD baseline: WORK is stat-only (no migrate/charge)
         if (tid < MAX_THREADS) {
             thread_domain[tid].store(DOMAIN_DEVICE);
             g_in_device_region.store(true);
@@ -1526,6 +1536,7 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
         }
         return;
     } else if (opcode == ZSIM_MAGIC_OP_WORK_END) {
+        if (g_cosim_no_offload) return;  // NO_OFFLOAD baseline: WORK is stat-only (no migrate/charge)
         g_in_device_region.store(false);
         if (tid < MAX_THREADS) {
             /* Migrate the offloading thread BACK to a host core (mirror of
@@ -1638,7 +1649,7 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         mpi_roi_baselined = true;
         snapshotRoiBaseCyc();
         // Co-sim: ROI = offload region (see the twin handler above).
-        if (g_cosim_mode && tid < MAX_THREADS) {
+        if (g_cosim_mode && !g_cosim_no_offload && tid < MAX_THREADS) {
             thread_domain[tid].store(DOMAIN_DEVICE);
             g_in_device_region.store(true);
             ++offload_count;
@@ -1655,7 +1666,7 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
             info("Thread %d: ROI offload begin (co-sim)", tid);
         }
     } else if (opcode == ZSIM_MAGIC_OP_ROI_END) {
-        if (g_cosim_mode && tid < MAX_THREADS) {
+        if (g_cosim_mode && !g_cosim_no_offload && tid < MAX_THREADS) {
             g_in_device_region.store(false);
             thread_domain[tid].store(DOMAIN_HOST);
             if (thread_initialized[tid]) {
@@ -1697,6 +1708,7 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
             zinfo->terminationConditionMet = true;  // Let watchdog trigger SimEnd()
         }
     } else if (opcode == ZSIM_MAGIC_OP_WORK_BEGIN) {
+        if (g_cosim_no_offload) return;  // NO_OFFLOAD baseline: WORK is stat-only (no migrate/charge)
         thread_domain[tid].store(DOMAIN_DEVICE);
         g_in_device_region.store(true);
         uint64_t cnt = ++offload_count;
@@ -1722,6 +1734,7 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
              (unsigned long)cnt, payload_size);
         return;
     } else if (opcode == ZSIM_MAGIC_OP_WORK_END) {
+        if (g_cosim_no_offload) return;  // NO_OFFLOAD baseline: WORK is stat-only (no migrate/charge)
         g_in_device_region.store(false);
         /* Migrate back to a host core -- see the WORK_END handler above. */
         thread_domain[tid].store(DOMAIN_HOST);
@@ -2336,6 +2349,11 @@ int qemu_plugin_install(qemu_plugin_id_t id,
     g_cosim_trace = (getenv("PIMID_COSIM_TRACE") != nullptr);
     if (g_cosim_trace) {
         info("[ZSim] Co-sim thread-lifecycle trace enabled (PIMID_COSIM_TRACE)");
+    }
+    g_cosim_no_offload = (getenv("PIMID_COSIM_NO_OFFLOAD") != nullptr);
+    if (g_cosim_no_offload) {
+        info("[ZSim] NO_OFFLOAD baseline: ROI/WORK markers are stat-only "
+             "(no device migration, no transfer charged; host-only run)");
     }
 
     char msg[512];

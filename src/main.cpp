@@ -953,6 +953,23 @@ struct UnifiedConfig {
         std::string memory_tech = "DDR4";
         int ports_per_bank = 1;
         int banks = 0;                 // 0 = use global default
+        // Host memory bandwidth/channel overrides (HOST role). -1 = auto from
+        // technology (per-channel BW = aggregate/channels; DDR5 c=1 x 25.6 GB/s,
+        // HBM3 c=16 x 51.2 GB/s). User-settable via host memory: block.
+        int mem_bandwidth_mbs = -1;    // per-channel bandwidth override (MB/s)
+        int mem_channels = -1;         // channel (host MC) count override
+        // Host-path idle-latency adder (ns). Calibrated constant added on top of
+        // the physical composition (tRCD+tCAS + MC/queue + hop) so the effective
+        // idle host memory latency matches measured real sockets. -1 = auto
+        // per-tech default (getHostPathAdderNs); >=0 = user override (0 = none).
+        // HOST-ROLE ONLY -- never applied to device (PE) memory pricing.
+        double mem_latency_adder_ns = -1.0;
+
+        // Host NoC config (HOST with num_cores>1): analytic crossbar fabric.
+        // 1-core hosts have no fabric (crossbar degenerates at a single core).
+        std::string host_noc_topology = "crossbar";
+        std::string host_noc_model = "analytical";
+        int host_noc_hop_cycles = 4;   // core->LLC/MC one-hop latency (core clock)
 
         // PIM config (DEVICE+COMPUTE only)
         std::string pe_type;
@@ -4327,6 +4344,181 @@ private:
  * - Node map for runtime core→node resolution
  * - Frequency normalized to reference (max of all nodes)
  */
+// Per-tech host-memory bandwidth defaults. Aggregate BW + channel count come
+// from the SAME per-tech source the device hierarchy uses (RamulatorWrapper:
+// DDR5 25.6 GB/s c=1; HBM3 819 GB/s c=16 -> 51.2 GB/s per channel). Per-channel
+// bandwidth = aggregate / channels. NVM/SRAM derive an analytic aggregate from
+// banks x line-size / access-ns (single channel). This feeds the EXISTING
+// SimpleMemory/WeaveSimpleMemory M/D/1 queueing (Pollaczek-Khinchine) per
+// controller -- no new analytic term is introduced (that would double-count
+// the bandwidth cap the MC already models; see co-sim defect #4).
+struct HostMemBW { int per_channel_mbs; int channels; };
+static HostMemBW getHostMemBandwidth(const std::string& tech_in,
+                                     int num_banks, int line_size) {
+    std::string tech = tech_in;
+    std::transform(tech.begin(), tech.end(), tech.begin(), ::toupper);
+    HostMemBW r; r.per_channel_mbs = 6400; r.channels = 1;
+    if (pimid::isDRAM(pimid::parseMemoryTechnology(tech_in))) {
+        try {
+            pimid::RamulatorWrapper bw_q("", tech);
+            bw_q.initialize();
+            double agg = static_cast<double>(bw_q.getBandwidth());  // aggregate MB/s
+            uint32_t nch = bw_q.getNumChannels();
+            r.channels = (nch >= 1) ? static_cast<int>(nch) : 1;
+            r.per_channel_mbs = static_cast<int>(agg / static_cast<double>(r.channels));
+        } catch (...) { /* keep defaults */ }
+    } else if (tech == "STT_MRAM" || tech == "STTMRAM" || tech == "STT-MRAM" || tech == "MRAM") {
+        r.per_channel_mbs = num_banks * line_size * 1000 / 10;   // ~10ns access
+    } else if (tech == "PCM" || tech == "PCRAM" || tech == "3DXPOINT") {
+        r.per_channel_mbs = num_banks * line_size * 1000 / 50;   // ~50ns access
+    } else if (tech == "RERAM" || tech == "RESISTIVE" || tech == "MEMRISTOR") {
+        r.per_channel_mbs = num_banks * line_size * 1000 / 20;   // ~20ns access
+    } else if (tech == "SRAM") {
+        r.per_channel_mbs = num_banks * line_size * 1000 / 2;    // ~2ns access
+    }
+    if (r.per_channel_mbs < 1) r.per_channel_mbs = 1;
+    if (r.channels < 1) r.channels = 1;
+    return r;
+}
+
+// -----------------------------------------------------------------------------
+// HOST-PATH IDLE-LATENCY ADDER (ns) -- per-tech calibrated constant.
+//
+// SCOPE: HOST-role memory pricing in SYSTEM scope (co-sim + baseline) ONLY.
+//        Called exclusively from emitHostMemBlock(); NEVER touches device (PE)
+//        memory pricing (that path is getMemoryLatencyCycles + the device NoC/
+//        PE-MI hierarchy, unchanged). The 270-cell device-only dataset is
+//        therefore bit-unaffected by this table.
+//
+// MECHANISM: the physical composition alone (tRCD+tCAS from Ramulator, plus the
+// MC M/D/1 queue and any host-fabric hop) idles ~30-40ns -- far below what real
+// CPU sockets measure, because it omits the IO-die / mesh / fabric traversal and
+// the deep MC command pipeline that a real host load-to-use pays. This adder
+// closes that gap so the effective idle host memory latency matches measured
+// machines. Adder = target_total - physical(tRCD+tCAS); at a 1-core host the
+// hop is 0 and the idle MC queue adds ~0, so effective idle ~= physical + adder.
+//
+// LITERATURE ANCHORS (idle load-to-use, cached demand-miss class):
+//   DDR5   target ~110ns  adder 77  -- Sapphire Rapids ~107, Genoa 118
+//                                       (73 IO-die + 35 device); server class.
+//   HBM3   target ~235ns  adder 203 -- MI300A CPU->HBM3 measured 236-241ns
+//                                       (arXiv 2508.12743), the only shipping
+//                                       HBM3-CPU class. Penalty is the COMMAND-
+//                                       INTERFACE + MC pipeline (low-clocked
+//                                       parallel CA bus, pseudo-channel
+//                                       arbitration, deep MC queueing) -- HBM
+//                                       has NO SerDes; core timings comparable.
+//   HBM2   target ~130ns  adder 98  -- Xeon Max HBM2e flat-mode measured 121-135.
+//   DDR3   target ~110ns  adder 82  -- same server class as DDR5.
+//   DDR4   target ~110ns  adder 83  -- same server class as DDR5.
+//   LPDDR5 target ~120ns  adder 84  -- client-class fabric but slower device.
+//   GDDR6  target ~150ns  adder 120 -- graphics MC pipeline (deep reordering).
+//   SRAM   target ~physical adder 0 -- on-die, below any IO-die/fabric.
+//   STT    target ~physical adder 0 -- on-die, same as SRAM (user decree).
+//   ReRAM  adder 77 (= DDR5)        -- pcb-attached; device media slowness is
+//   PCM    adder 77 (= DDR5)           already in the NVSim tech tables, so the
+//                                      host-path adder is the DDR5-class fabric
+//                                      cost only (avoid double-counting media).
+//
+// TODO(1.7.1+, HANDOFF "CACHED VS PURE ACCESS SPLIT"): this adder calibrates the
+// CACHED demand-miss price only. The PURE serialized/uncached price
+// (mem.uncached_ns, DDR5 ~200 / HBM3 ~335) belongs to the bridge/bypass step and
+// is NOT implemented here.
+static double getHostPathAdderNs(const std::string& tech_in) {
+    std::string tech = tech_in;
+    std::transform(tech.begin(), tech.end(), tech.begin(), ::toupper);
+    if (tech == "DDR5" || tech == "DRAM")                 return 77.0;
+    if (tech == "DDR4")                                   return 83.0;
+    if (tech == "DDR3")                                   return 82.0;
+    if (tech == "LPDDR5")                                 return 84.0;
+    if (tech == "GDDR6")                                  return 120.0;
+    if (tech == "HBM2")                                   return 98.0;
+    if (tech == "HBM3")                                   return 203.0;
+    if (tech == "SRAM")                                   return 0.0;
+    if (tech == "STT_MRAM" || tech == "STTMRAM" ||
+        tech == "STT-MRAM" || tech == "MRAM")             return 0.0;
+    if (tech == "RERAM" || tech == "RESISTIVE" ||
+        tech == "MEMRISTOR")                              return 77.0;  // DDR5-class fabric
+    if (tech == "PCM" || tech == "PCRAM" ||
+        tech == "3DXPOINT")                               return 77.0;  // DDR5-class fabric
+    return 77.0;  // unknown DRAM-class default
+}
+
+// Emit the shared sys.mem block as the HOST main memory (Mode-1: host tech =
+// device tech; under NO_OFFLOAD the host runs the whole kernel against it, and
+// under offload the device is served by its own PE-MIs so this block is still
+// the host's memory).
+//
+// PART-A design: reuse the EXISTING SimpleMemory/WeaveSimpleMemory M/D/1
+// (Pollaczek-Khinchine) -- NOT a new analytic term (that would double-count the
+// bandwidth cap the MC already prices; co-sim defect #4) and NOT a per-host
+// Ramulator (the detailed host tier is a later 1.7.x increment). The host MC is
+// a SINGLE M/D/1 queue clocked at the AGGREGATE bandwidth = channel_count x
+// per-channel GB/s (DDR5 1 x 25.6; HBM3 16 x 51.2 = 819 GB/s). The utilization
+// rho = host_demand / aggregate_bandwidth then saturates the one DDR5 channel
+// under many host cores while HBM3's 32x-wider aggregate stays unsaturated --
+// the designed contrast, from ONE honest queue.
+//
+// (A per-channel SplitAddrMemory fan-out over `controllers = channel_count` was
+// prototyped but inflates single-core cycles ~40% at zero contention via a
+// weave-phase multi-domain scheduling artifact; the aggregate single-queue form
+// is the standard M/D/1 memory-BW model and avoids that artifact. The channel
+// count enters as the aggregate multiplier, exactly the PART-A specification.)
+static void emitHostMemBlock(std::ostream& out, const UnifiedConfig& config,
+                             const UnifiedConfig::SystemNode& host) {
+    double host_freq = (host.frequency_mhz > 0.0) ? host.frequency_mhz
+                                                   : config.reference_frequency_mhz;
+    // Idle per-access latency (cycles @ host clock). Physical composition first:
+    // the DRAM tRCD+tCAS from getMemoryLatencyCycles() (DRAM path). Then add the
+    // per-tech HOST-PATH ADDER (getHostPathAdderNs, ns) so the effective idle
+    // host memory latency matches measured real sockets (DDR5 ~110, HBM3 ~235).
+    // The adder is HOST-ROLE ONLY -- device (PE) pricing never routes here.
+    int phys_latency = getMemoryLatencyCycles(host.memory_tech, host_freq, false, 0.0);
+    phys_latency = std::max(1, phys_latency);
+    double adder_ns = (host.mem_latency_adder_ns >= 0.0)
+                          ? host.mem_latency_adder_ns
+                          : getHostPathAdderNs(host.memory_tech);
+    int adder_cycles = static_cast<int>(std::round(adder_ns * host_freq / 1000.0));
+    if (adder_cycles < 0) adder_cycles = 0;
+    int mem_latency = std::max(1, phys_latency + adder_cycles);
+    // Diagnostic (stderr, ASCII, gated): host memory idle-latency composition in
+    // ns for calibration/validation. Effective idle = physical(tRCD+tCAS) +
+    // host-path adder (1-core host: hop 0, idle MC queue ~0).
+    if (getenv("PIMID_DEBUG_HOSTMEM")) {
+        double inv_ghz = 1000.0 / host_freq;  // ns per cycle
+        std::cerr << "[host-mem] tech=" << host.memory_tech
+                  << " phys=" << (phys_latency * inv_ghz) << "ns"
+                  << " adder=" << adder_ns << "ns"
+                  << " effective_idle=" << (mem_latency * inv_ghz) << "ns"
+                  << " (" << mem_latency << " cy @ " << host_freq << "MHz)\n";
+    }
+
+    HostMemBW bw = getHostMemBandwidth(host.memory_tech,
+                                       config.num_banks, config.cache_line_size);
+    if (host.mem_bandwidth_mbs > 0) bw.per_channel_mbs = host.mem_bandwidth_mbs;
+    if (host.mem_channels > 0)      bw.channels = host.mem_channels;
+    // Aggregate host memory bandwidth = per-channel x channels (the M/D/1 cap).
+    long long agg_mbs = (long long)bw.per_channel_mbs * (long long)bw.channels;
+    if (agg_mbs < 1) agg_mbs = 1;
+
+    // OoO / in-order host cores need the weave-phase MC (SimpleMemory subclass,
+    // same M/D/1); ALU / simple cores use the plain Simple MC.
+    bool weave = (host.core_type == "ooo_core" || host.core_type == "in_order_core");
+    out << "    mem = {\n";
+    if (weave) {
+        out << "        type = \"WeaveSimple\";\n";
+        out << "        latency = " << mem_latency << ";\n";
+        out << "        bandwidth = " << agg_mbs << ";\n";
+        out << "        boundLatency = " << mem_latency << ";\n";
+    } else {
+        out << "        type = \"Simple\";\n";
+        out << "        latency = " << mem_latency << ";\n";
+        out << "        bandwidth = " << agg_mbs << ";\n";
+    }
+    out << "        controllers = 1;\n";
+    out << "    };\n";
+}
+
 static std::string generateSystemConfig(UnifiedConfig& config) {
     std::string cfg_path = "/tmp/pimid_system_zsim_" + std::to_string(getpid()) + ".cfg";
     std::ofstream cfg(cfg_path);
@@ -4559,21 +4751,32 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
         }
         cfg << "    };\n\n";
     } else {
-        // Single device: use standard MC
+        // Single device. The shared sys.mem block is the HOST main memory: in
+        // co-sim the device is served by its own PE-MIs (init.cpp clears `mems`
+        // then rebuilds the host MC from sys.mem), and under NO_OFFLOAD the host
+        // runs the whole kernel against it. Emit it from the HOST node so the
+        // host memory carries the correct per-tech bandwidth + channel count and
+        // the existing SimpleMemory/WeaveSimpleMemory M/D/1 saturates honestly.
+        const UnifiedConfig::SystemNode* host_node = nullptr;
         for (const auto& node : config.system_nodes) {
-            if (node.role != UnifiedConfig::SystemNode::DEVICE) continue;
-            // CLOCK-INVARIANT device memory latency: convert the access latency to
-            // cycles at the DEVICE's own clock, not the reference/max (host) clock.
-            // Using ref_freq here inflated the device memory cycles by host/device
-            // (e.g. x5 at host4000/dev800) and leaked the host clock into the
-            // device cycle count. Device scope uses the device's own clock.
-            double dev_freq = (node.frequency_mhz > 0.0) ? node.frequency_mhz : ref_freq;
-            int mem_latency = getMemoryLatencyCycles(node.memory_tech, dev_freq, false, 0.0);
-            mem_latency = std::max(1, mem_latency);
-            // Use the main config's MC type (already derived)
-            emitZSimMemBlock(cfg, config, mem_latency);
+            if (node.role == UnifiedConfig::SystemNode::HOST) { host_node = &node; break; }
+        }
+        if (host_node) {
+            emitHostMemBlock(cfg, config, *host_node);
             cfg << "\n";
-            break;
+        } else {
+            // No host node (pure device system scope): legacy device-MC emit.
+            for (const auto& node : config.system_nodes) {
+                if (node.role != UnifiedConfig::SystemNode::DEVICE) continue;
+                // CLOCK-INVARIANT device memory latency: convert to cycles at the
+                // DEVICE's own clock, not the reference/max (host) clock.
+                double dev_freq = (node.frequency_mhz > 0.0) ? node.frequency_mhz : ref_freq;
+                int mem_latency = getMemoryLatencyCycles(node.memory_tech, dev_freq, false, 0.0);
+                mem_latency = std::max(1, mem_latency);
+                emitZSimMemBlock(cfg, config, mem_latency);
+                cfg << "\n";
+                break;
+            }
         }
     }
 
@@ -4678,6 +4881,30 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
         }
     }
     cfg << "    };\n";
+
+    // ── Host Network (analytic crossbar fabric for multi-core hosts) ──
+    // ISSUE-5 host-side default topology = crossbar (uniform one-hop; contention
+    // at ports, not hops). A 1-core host has NO fabric (a crossbar degenerates at
+    // a single core: core->caches->MC direct) -- emit enabled=0. For >1 core we
+    // add a fixed one-hop crossbar latency (hopCycles, core-clock) on the host
+    // memory path; port CONTENTION is already priced by the host MC M/D/1 (PART
+    // A), so this stays analytic -- no Garnet instance (the detailed host tier is
+    // a later 1.7.x increment).
+    {
+        const UnifiedConfig::SystemNode* host_node = nullptr;
+        for (const auto& n : config.system_nodes)
+            if (n.role == UnifiedConfig::SystemNode::HOST) { host_node = &n; break; }
+        bool host_fabric = host_node && host_node->num_cores > 1;
+        cfg << "\n    hostNetwork = {\n";
+        cfg << "        enabled = " << (host_fabric ? 1 : 0) << ";\n";
+        if (host_node) {
+            cfg << "        topology = \"" << host_node->host_noc_topology << "\";\n";
+            cfg << "        model = \"" << host_node->host_noc_model << "\";\n";
+            cfg << "        hopCycles = "
+                << (host_fabric ? host_node->host_noc_hop_cycles : 0) << ";\n";
+        }
+        cfg << "    };\n";
+    }
 
     cfg << "};\n\n";
 
@@ -5415,7 +5642,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.6.4" << std::endl;
+    std::cout << "Version 1.7.0" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -6327,6 +6554,25 @@ int main(int argc, char** argv) {
                         if (h["memory"]) {
                             node.memory_tech = canonicalMemTech(
                                 h["memory"]["technology"].as<std::string>(node.memory_tech));
+                            // Optional per-channel BW / channel-count overrides
+                            // (auto-derived from technology when absent).
+                            node.mem_bandwidth_mbs =
+                                h["memory"]["bandwidth_mbs"].as<int>(node.mem_bandwidth_mbs);
+                            node.mem_channels =
+                                h["memory"]["channels"].as<int>(node.mem_channels);
+                            // Host-path idle-latency adder override (ns). Absent =
+                            // auto per-tech default (getHostPathAdderNs).
+                            node.mem_latency_adder_ns =
+                                h["memory"]["latency_adder_ns"].as<double>(node.mem_latency_adder_ns);
+                        }
+                        // Host NoC (analytic crossbar): topology/model/hop_cycles.
+                        if (h["noc"]) {
+                            node.host_noc_topology =
+                                h["noc"]["topology"].as<std::string>(node.host_noc_topology);
+                            node.host_noc_model =
+                                h["noc"]["model"].as<std::string>(node.host_noc_model);
+                            node.host_noc_hop_cycles =
+                                h["noc"]["hop_cycles"].as<int>(node.host_noc_hop_cycles);
                         }
                         if (h["workload"]) {
                             node.workload_binary = h["workload"]["binary"].as<std::string>("");

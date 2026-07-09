@@ -1023,6 +1023,20 @@ static void InitSystem(Config& config) {
                     mems[0] = splitter;
                 }
             }
+
+            // Host crossbar fabric hop (analytic, multi-core host). A 1-core host
+            // emits enabled=0 (no fabric). When enabled, add a fixed one-hop
+            // latency on the host memory path; port contention is already priced
+            // by the host MC M/D/1 above. Wraps the (single) host MC / splitter.
+            if (config.get<uint32_t>("sys.hostNetwork.enabled", 0) != 0 &&
+                mems.size() == 1) {
+                uint32_t hop = config.get<uint32_t>("sys.hostNetwork.hopCycles", 0);
+                if (hop > 0) {
+                    g_string hopName("host-xbar");
+                    mems[0] = new CrossbarHopMemory(mems[0], hop, hopName.c_str());
+                    info("[ZSim] Host crossbar fabric: +%u-cycle one-hop on host memory path", hop);
+                }
+            }
         }
     }
 

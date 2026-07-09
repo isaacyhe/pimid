@@ -115,6 +115,39 @@ class SplitAddrMemory : public MemObject {
         }
 };
 
+/* Fixed one-hop crossbar latency for a MULTI-CORE host memory path.
+ *
+ * Wraps the host memory controller (or the SplitAddrMemory fan-out over the
+ * per-tech channels) and adds a constant hop latency AFTER the MC access -- so
+ * the hop is NOT inflated by the MC's M/D/1 port queueing (port contention is
+ * the MC's job; this term is only the uncontended core->LLC/MC crossbar
+ * traversal). Analytic host-side fabric term (ISSUE-5 crossbar tier): a 1-core
+ * host emits no fabric, so this wrapper is only installed for num_cores>1.
+ * Deliberately NOT a Garnet instance -- the detailed host tier is a later
+ * increment; and the host caches are deliberately NOT pointed at the device
+ * system network's getRTT (that link is host<->device, not host-internal).
+ */
+class CrossbarHopMemory : public MemObject {
+    private:
+        MemObject* mem;
+        uint32_t hopCycles;
+        g_string name;
+    public:
+        CrossbarHopMemory(MemObject* _mem, uint32_t _hopCycles, const char* _name)
+            : mem(_mem), hopCycles(_hopCycles), name(_name) {}
+
+        uint64_t access(MemReq& req) {
+            uint64_t respCycle = mem->access(req);
+            // PUTS (clean writeback) is not a real access -- charge no hop.
+            if (req.type != PUTS) respCycle += hopCycles;
+            return respCycle;
+        }
+
+        const char* getName() { return name.c_str(); }
+
+        void initStats(AggregateStat* parentStat) { mem->initStats(parentStat); }
+};
+
 /**
  * System-level address router for multi-device configurations.
  * Routes memory requests to per-device MCs based on address range.
