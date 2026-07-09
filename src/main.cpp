@@ -990,6 +990,12 @@ struct UnifiedConfig {
         std::string memory_tech = "DDR4";
         int ports_per_bank = 1;
         int banks = 0;                 // 0 = use global default
+        // Memory-topology knob (1.7.4, HANDOFF MEMORY-TOPOLOGY ADDENDUM).
+        // DEVICE role only. true (DEFAULT): this PIM device IS the host's main
+        // memory -- host tech = device tech BY CONSTRUCTION (preserves the
+        // matrix). false: the device is accelerator-side memory only and the
+        // host MUST supply a host.mem block (resolveMemoryTopology enforces).
+        bool is_default_mem = true;
         // Host memory bandwidth/channel overrides (HOST role). -1 = auto from
         // technology (per-channel BW = aggregate/channels; DDR5 c=1 x 25.6 GB/s,
         // HBM3 c=16 x 51.2 GB/s). User-settable via host memory: block.
@@ -1011,6 +1017,21 @@ struct UnifiedConfig {
         double host_path_mc_pipeline_ns = -1.0;
         double host_path_phy_ns       = -1.0;
         bool   host_path_any_set = false;   // true if any host_path.* was given
+
+        // SEPARATE host main memory (1.7.4, HANDOFF UNIVERSALITY ADDENDUM).
+        // HOST role only; consumed when the paired device sets is_default_mem
+        // false. host.mem instantiates any of the 11 techs as a PLAIN non-PIM
+        // host main memory (no PE arrays, H-tree, or PIM windows) reusing the
+        // SAME per-tech channel/timing tables the device path uses. When the
+        // device is_default_mem is true (default) this block is ignored (the
+        // device tech drives host mem). resolveMemoryTopology validates + wires
+        // host_mem_tech -> memory_tech and the optional BW/channel overrides
+        // into mem_bandwidth_mbs / mem_channels.
+        bool        host_mem_present = false;   // host.mem block supplied
+        std::string host_mem_tech;              // host.mem.technology (canonical)
+        double      host_mem_capacity_gb = -1.0; // host.mem.capacity_gb (advisory)
+        int         host_mem_bandwidth_mbs = -1; // host.mem.bandwidth_gbs -> per-channel MB/s override
+        int         host_mem_channels = -1;      // host.mem.channels override
 
         // Host NoC config (HOST with num_cores>1): analytic crossbar fabric.
         // 1-core hosts have no fabric (crossbar degenerates at a single core).
@@ -2693,6 +2714,90 @@ static void normalizeSystemConfig(UnifiedConfig& config) {
                 n.workload_args = config.workload_args;
         }
     }
+}
+
+/**
+ * @brief Resolve the memory-topology knob (1.7.4, HANDOFF MEMORY-TOPOLOGY +
+ *        UNIVERSALITY ADDENDA). System scope only; runs after normalize.
+ *
+ * device.is_default_mem TRUE (default): the PIM device IS the host's main
+ *   memory -- the host memory technology is forced = the device technology BY
+ *   CONSTRUCTION (preserving the host-tech = device-tech matrix). A host.mem
+ *   block is redundant here and is ignored with a warning.
+ * device.is_default_mem FALSE: the device is accelerator-side memory only. The
+ *   host MUST supply host.mem.technology (one of the 11 known techs); it drives
+ *   the host memory pricing (emitHostMemBlock's host-path adder + BW keyed on
+ *   host.mem.technology). Omission = config ERROR (rc=1, no silent fallback).
+ *
+ * The two-layer bridge (1.7.1) ALWAYS keys off the DEVICE tech regardless of
+ * this knob -- the device is still attached over its own bridge. Only
+ * host<->device boundary traffic crosses it; the host's own memory traffic is
+ * priced at host.mem tech. Coherence mode (1.7.2) stays an INDEPENDENT knob
+ * (no force-coupling to is_default_mem).
+ *
+ * @return 0 on success, 1 on a config error (missing/unknown host.mem).
+ */
+static int resolveMemoryTopology(UnifiedConfig& config) {
+    if (config.scope != "system") return 0;
+
+    UnifiedConfig::SystemNode* host = nullptr;
+    UnifiedConfig::SystemNode* dev  = nullptr;
+    for (auto& n : config.system_nodes)
+        if (n.role == UnifiedConfig::SystemNode::HOST) { host = &n; break; }
+    // Prefer a compute device (the PIM device); fall back to any device.
+    for (auto& n : config.system_nodes)
+        if (n.role == UnifiedConfig::SystemNode::DEVICE &&
+            n.device_type == UnifiedConfig::SystemNode::COMPUTE) { dev = &n; break; }
+    if (!dev)
+        for (auto& n : config.system_nodes)
+            if (n.role == UnifiedConfig::SystemNode::DEVICE) { dev = &n; break; }
+
+    if (!host) return 0;  // pure-device system scope: no host memory to resolve
+
+    // Canonical whitelist -- the 11 role-independent techs (UNIVERSALITY
+    // ADDENDUM: any may be host mem OR PIM device). Same set device scope uses.
+    static const std::set<std::string> kValidTechs = {
+        "DDR3", "DDR4", "DDR5", "LPDDR5", "GDDR6", "HBM2", "HBM3",
+        "SRAM", "STT_MRAM", "PCM", "RERAM"
+    };
+
+    bool is_default = dev ? dev->is_default_mem : true;
+
+    if (is_default) {
+        // Default: device IS host main memory. host.mem is redundant here;
+        // warn + ignore rather than error (the default path must stay lenient;
+        // the dangerous direction -- FALSE without host.mem -- is hard-errored
+        // below). The device tech drives host mem by construction.
+        if (host->host_mem_present) {
+            std::cerr << "Warning: host '" << host->name << "' supplies a host.mem "
+                      << "block but the paired device is_default_mem=true; "
+                      << "ignoring host.mem (the device technology drives host "
+                      << "main memory by construction).\n";
+        }
+        if (dev) host->memory_tech = dev->memory_tech;
+    } else {
+        // Separate memory: the host must declare its own main memory tech.
+        if (!host->host_mem_present || host->host_mem_tech.empty()) {
+            std::cerr << "ERROR: device.is_default_mem=false requires a host.mem "
+                      << "block with host.mem.technology on host '" << host->name
+                      << "'.\n  The accelerator-side device is NOT the host's "
+                      << "main memory; there is no silent DDR5 fallback.\n";
+            return 1;
+        }
+        if (kValidTechs.find(host->host_mem_tech) == kValidTechs.end()) {
+            std::cerr << "ERROR: unknown host.mem.technology '"
+                      << host->host_mem_tech << "' on host '" << host->name << "'.\n"
+                      << "Supported: DDR3, DDR4, DDR5, LPDDR5, GDDR6, HBM2, HBM3, "
+                      << "SRAM, STT_MRAM, PCM, ReRAM.\n";
+            return 1;
+        }
+        // host.mem.technology drives the host memory pricing; the device keeps
+        // its own tech (and its own bridge). Genuinely decoupled techs.
+        host->memory_tech = host->host_mem_tech;
+        if (host->host_mem_bandwidth_mbs > 0) host->mem_bandwidth_mbs = host->host_mem_bandwidth_mbs;
+        if (host->host_mem_channels > 0)      host->mem_channels      = host->host_mem_channels;
+    }
+    return 0;
 }
 
 /**
@@ -4612,6 +4717,13 @@ static void emitHostMemBlock(std::ostream& out, const UnifiedConfig& config,
     // OoO / in-order host cores need the weave-phase MC (SimpleMemory subclass,
     // same M/D/1); ALU / simple cores use the plain Simple MC.
     bool weave = (host.core_type == "ooo_core" || host.core_type == "in_order_core");
+    // Self-documenting (1.7.4): host main-memory technology + effective idle
+    // latency. Under is_default_mem=true this tech = the device tech; under
+    // false it is host.mem.technology (decoupled from the device / bridge tech).
+    out << "    // host main memory (1.7.4): tech=" << host.memory_tech
+        << " idle=" << std::fixed << std::setprecision(1)
+        << (mem_latency * 1000.0 / host_freq) << "ns" << std::defaultfloat
+        << " (" << mem_latency << " cy @ " << static_cast<int>(host_freq) << "MHz)\n";
     out << "    mem = {\n";
     if (weave) {
         out << "        type = \"WeaveSimple\";\n";
@@ -6038,7 +6150,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.7.3" << std::endl;
+    std::cout << "Version 1.7.4" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -6993,6 +7105,27 @@ int main(int argc, char** argv) {
                                 exit(1);
                             }
                         }
+                        // SEPARATE host main memory (1.7.4). Consumed only when
+                        // the paired device sets is_default_mem=false; a plain
+                        // non-PIM memory of any of the 11 techs. technology is
+                        // canonicalized + validated in resolveMemoryTopology.
+                        // bandwidth_gbs / channels are optional per-channel
+                        // overrides (auto-derived from tech when absent).
+                        if (h["mem"]) {
+                            node.host_mem_present = true;
+                            if (h["mem"]["technology"])
+                                node.host_mem_tech = canonicalMemTech(
+                                    h["mem"]["technology"].as<std::string>());
+                            node.host_mem_capacity_gb =
+                                h["mem"]["capacity_gb"].as<double>(node.host_mem_capacity_gb);
+                            if (h["mem"]["bandwidth_gbs"]) {
+                                double gbs = h["mem"]["bandwidth_gbs"].as<double>();
+                                node.host_mem_bandwidth_mbs =
+                                    (int)std::llround(gbs * 1000.0);  // GB/s -> per-channel MB/s
+                            }
+                            node.host_mem_channels =
+                                h["mem"]["channels"].as<int>(node.host_mem_channels);
+                        }
                         // Host NoC (analytic crossbar): topology/model/hop_cycles.
                         if (h["noc"]) {
                             node.host_noc_topology =
@@ -7039,6 +7172,12 @@ int main(int argc, char** argv) {
                             node.ports_per_bank = d["memory"]["ports_per_bank"].as<int>(node.ports_per_bank);
                             node.banks = d["memory"]["banks"].as<int>(node.banks);
                         }
+
+                        // Memory-topology knob (1.7.4). true (default): this
+                        // device IS host main memory (host tech = device tech).
+                        // false: accelerator-side memory only -- the host MUST
+                        // supply a host.mem block (resolveMemoryTopology enforces).
+                        node.is_default_mem = d["is_default_mem"].as<bool>(node.is_default_mem);
 
                         // PIM config (only for compute devices)
                         if (node.device_type == UnifiedConfig::SystemNode::COMPUTE) {
@@ -7230,6 +7369,11 @@ int main(int argc, char** argv) {
     // Synthesize system nodes from device/cosim config (backward compat)
     synthesizeSystemNodes(config);
     normalizeSystemConfig(config);
+
+    // Resolve the memory-topology knob (1.7.4): is_default_mem + host.mem.
+    // TRUE  -> host tech = device tech by construction.
+    // FALSE -> host.mem.technology drives host memory (required; else rc=1).
+    if (resolveMemoryTopology(config) != 0) return 1;
 
     // Configure the characterization-cache warehouse ONCE, after CLI + YAML are
     // both parsed and before any backend (NVSim/CACTI/Ramulator) characterization.
