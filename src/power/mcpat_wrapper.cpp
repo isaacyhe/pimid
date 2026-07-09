@@ -859,6 +859,13 @@ std::string McPATWrapper::generateXMLConfig() const {
     const char* lsu_order = is_ooo ? "OOO" : "inorder";
     int pipeline_depth = is_ooo ? 19 : config_.pipeline_depth;
     int issue_width = is_ooo ? 4 : config_.issue_width;
+    // FP issue width: McPAT never defaults fp_issue_width, so it MUST be emitted
+    // for the OOO profile or the FPIssueQueue array is built with zero ports and
+    // CACTI aborts ("Must have at least one port", exit 21). 2 matches McPAT's
+    // own 4-wide x86 OOO references (Xeon, Penryn). Emitted only for is_ooo so
+    // the inorder/ALU device XML stays byte-identical (those profiles never
+    // build the FP issue queue, so they neither need nor previously emitted it).
+    int fp_issue_width = is_ooo ? 2 : 0;
     int store_buffer = is_ooo ? 32 : 4;
     int load_buffer = is_ooo ? 32 : 4;
 
@@ -917,6 +924,9 @@ std::string McPATWrapper::generateXMLConfig() const {
         xml << "      <param name=\"decode_width\" value=\"" << issue_width << "\"/>\n";
         xml << "      <param name=\"issue_width\" value=\"" << issue_width << "\"/>\n";
         xml << "      <param name=\"peak_issue_width\" value=\"" << issue_width << "\"/>\n";
+        if (is_ooo) {
+            xml << "      <param name=\"fp_issue_width\" value=\"" << fp_issue_width << "\"/>\n";
+        }
         xml << "      <param name=\"commit_width\" value=\"" << issue_width << "\"/>\n";
         xml << "      <param name=\"pipelines_per_core\" value=\"1,1\"/>\n";
         xml << "      <param name=\"pipeline_depth\" value=\"" << pipeline_depth << ","
