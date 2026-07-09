@@ -146,6 +146,19 @@ machines. The residual ~40 ns under real sockets is the legitimate
 no-mesh/no-directory footnote (this model has no coherence directory or mesh
 of its own; that traversal is exactly what the host-path adder supplies).
 
+## Power and energy (1.7.6)
+
+Co-sim cells now report `total_power_W` and `total_energy_nJ` on the same
+McPAT path as the device-only figures -- there is no co-sim-specific power
+methodology, the host cores are priced by the standard McPAT core/cache models
+and the device by the usual PE/memory models. This was gated in earlier 1.7.x
+by a host-OoO McPAT defect: a missing `fp_issue_width` XML parameter left the
+floating-point issue queue with zero ports, so power analysis aborted with
+"Must have at least one port" and co-sim had to run `--no-power` (cycles only).
+1.7.6 supplies the parameter; co-sim energy is now available by default. The
+boundary/host-memory constants on this page are timing constants and are
+unaffected by the power path.
+
 ## Caveats to state in the manuscript
 
 - The NVM trio (SRAM/STT on_die, ReRAM pcb, PCM serdes) varies media AND

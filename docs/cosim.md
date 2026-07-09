@@ -22,14 +22,22 @@ added around that same region.
     --workload-type openmp
 ```
 
+> **Power + energy (1.7.6).** Co-sim runs now emit `total_power_W` and
+> `total_energy_nJ` alongside cycles, exactly like the device-only figures --
+> the host OoO McPAT power path is fixed (a missing `fp_issue_width` XML param
+> had left the FP issue queue with zero ports, crashing power analysis; earlier
+> 1.7.x co-sim had to run `--no-power`, cycles-only). Power is on by default;
+> `--no-power` remains available for fast timing-only iteration.
+
 ## System model
 
 - **Host = rank-0 master.** The co-sim host is a **single OoO core** at
   2 GHz (crossbar degenerates to core + MC + bridge ports; the busy-wait
   occupies it during the kernel; the rank-0-master requirement is trivially
   satisfied). Under MPI the host runs legitimate serial master work (per-rank
-  prep) -- not an artifact. **Only the OoO host core is supported** for the
-  device-only offload path; see [Limitations](#limitations).
+  prep) -- not an artifact. The default (and the fig5 cells) is a single OoO
+  core; an **in-order host core is also supported** as of 1.7.7 (the recorder
+  `memRespCycle` skew fix -- see [Limitations](#limitations)).
 - **Device = PIM.** PEs (default `alu_core`) placed at a memory level (BANK,
   SUBARRAY, ...) behind the device's own memory technology and NoC.
 - **Two fabrics, one bridge.** The device-internal H-tree (JEDEC-derived) and
@@ -236,17 +244,25 @@ and [benchmarks.md](benchmarks.md) for the experiment shape.
 
 ## Limitations
 
-- **OoO host only (device-only offload path).** The co-sim host must be
-  `ooo_core`. The busy-wait / boundary-charge accounting is expressed for the
-  single OoO launcher thread, and the in-order pipeline's CoreRecorder event
-  chain asserts `startCycle >= prevRespCycle` (no side-effect-free hit probe,
-  memory serialized via `memRespCycle`), so an in-order host on the migration
-  path trips that recorder assertion. Use `ooo_core` for co-sim hosts.
+- **In-order host supported (fixed 1.7.7).** Both `ooo_core` and
+  `in_order_core` now work as the co-sim host. Earlier 1.7.x required an OoO
+  host: the in-order pipeline's CoreRecorder event chain asserts
+  `startCycle >= prevRespCycle`, but `CoreRecorder::cSimEnd` folds a contention
+  skew into the phase-1 clock while InOrderCore's private `memRespCycle` cursor
+  never received it, so an in-order host on the migration path tripped that
+  recorder assertion. The 1.7.7 one-line fix advances `memRespCycle` by the
+  same skew, so the cursor and the recorded clock stay consistent. (The
+  busy-wait / boundary-charge accounting is core-type agnostic.)
 - **Single device in 1.7.x.** One PIM device (plus an optional separate
   `host.mem`). Multiple attached memory devices are a later increment; the
   schema already generalizes but the plumbing is not built.
 - **Detailed host NoC not wired** (decision 3 note above): the analytical
   host tier is shipped; the detailed host Garnet is a later increment.
+- **Device-side weave +-1-phase quantum.** The device-side weave (in-order /
+  OOO weave cores) has a residual +-1-phase QUANTUM nondeterminism in how a
+  phase boundary lands relative to contention (<=0.4% at production scale).
+  This is a device-model effect, independent of the host core type, and is
+  deferred to the 1.8 PDES rework -- it is NOT fixed by 1.7.7.
 - **Phase-exclusivity assumed.** Host and PEs are temporally disjoint by
   construction in serial offload (host touches memory only outside the ROI,
   PEs only inside), so the only shared cost at the boundary is the flush. This
