@@ -91,6 +91,30 @@ bandwidth roofline. The default `M` is calibrated against `detailed`.
 Runs at analytical speed (~seconds) — use it for large design-space sweeps,
 and `detailed` for ground truth.
 
+## Host fabric and the host<->device bridge (co-sim)
+
+Under `scope: system` the device H-tree above is joined to a **host fabric**
+by a **bridge**. The two are priced separately and traffic is charged to
+exactly one of them:
+
+- **Device H-tree** prices every device-PE memory access (as above).
+- **Host crossbar** (`system.hosts[].noc`, default `crossbar` /
+  `analytical`) prices host-core loads/stores. A 1-core host has NO fabric
+  (crossbar degenerates: core -> caches -> MC direct). A multi-core host adds
+  a fixed one-hop latency (`hop_cycles`, core clock) on the host memory path;
+  port contention is already priced by the host memory M/D/1, so the fabric
+  stays analytic. (`model: detailed` is parsed but currently inert -- no host
+  Garnet is instantiated; a later 1.7.x increment.) Host memory bandwidth is
+  a single aggregate M/D/1 queue at per-channel x channels GB/s, so one DDR5
+  channel saturates under many host cores while HBM3's wide aggregate does
+  not.
+- **Bridge** (`system.bridge`, two-layer `protocol` x `phy`) prices only the
+  host<->device boundary traffic -- launch cmd/ack, Case-1 coherence flush,
+  Case-2 DMA. A crossing costs `phy_latency + protocol_overhead +
+  ceil(bytes / aggregate_bytes_per_cycle)`. Neither fabric's ordinary traffic
+  crosses it. Defaults derive from the device memory tech; the per-tech table
+  and illegal-combo rules are in [cosim.md](cosim.md).
+
 ## Synthetic traffic mode
 
 `--method synthetic` injects parametric traffic directly into Garnet — no

@@ -22,6 +22,35 @@ and `integration/` (external-model adapter example -- see
 [external_models.md](external_models.md)). Per-benchmark run configs live
 with each suite under `benchmarks/` (see [benchmarks.md](benchmarks.md)).
 
+### Co-sim configs (`cosim/`)
+
+| File | Covers |
+|---|---|
+| `host_device_basic.yaml` | Minimal host + PIM device, `attachment: internal` (the device is host main memory). |
+| `multi_device.yaml` | Host + multiple devices reference layout. |
+| `baseline_host_1core.yaml` | Host-only NO_OFFLOAD baseline: 1 OoO core @2GHz, no fabric (1-core crossbar is degenerate). |
+| `baseline_host_4core.yaml` | Host-only NO_OFFLOAD baseline: 4 OoO cores, analytic crossbar fabric (`hop_cycles: 4`). |
+| `baseline_host_16core.yaml` | Host-only NO_OFFLOAD baseline: 16 OoO cores, analytic crossbar fabric. |
+
+The three `baseline_host_*core.yaml` are the conventional-multicore reference
+for the co-sim figure. Each is a system-scope config run under
+`PIMID_COSIM_NO_OFFLOAD=1`: the ROI/WORK markers become stat-only (no device
+migration, no boundary charge), so the unmodified OMP/MPI kernel runs on the
+host cores end to end against the host memory tech. The device block is
+required by the parser but is inert under the knob. The sweep runner overrides
+`memory.technology` per cell (host tech = device tech of the paired co-sim
+cell -- no host-tech confound); `DDR5` in the files is a placeholder default.
+
+```bash
+PIMID_COSIM_NO_OFFLOAD=1 ./build/pimid --method exec --scope system \
+    --config examples/cosim/baseline_host_4core.yaml \
+    --workload benchmarks/pim_kernels/gemv/gemv_omp \
+    --workload-type openmp --size 512
+```
+
+See [cosim.md](cosim.md) and [benchmarks.md](benchmarks.md) for the full
+experiment shape.
+
 ## Run one
 
 ```bash

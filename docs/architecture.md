@@ -38,13 +38,34 @@ workload binary
 - `scope: system` — multi-node: hosts (with caches) + devices connected by a
   system interconnect; supports host->device offload ([cosim.md](cosim.md)).
 
-## Two-Garnet hierarchy
+## Two-fabric system view (co-sim)
 
-The device-internal fabric and the host<->device system interconnect are two
-separate Garnet instances; the memory hierarchy is their composition. The
-device side of DRAM technologies is always a tree derived from the JEDEC
-organization ([network.md](network.md)); the host network uses the classic
-flat topologies.
+A co-sim system has **two fabrics joined by one bridge**:
+
+```
+        host cores                              device PEs
+           |                                        |
+      host crossbar          host<->device       device H-tree
+   (analytic; 1-hop,        BRIDGE (protocol      (JEDEC-derived,
+    contention at ports)  --  x phy; boundary  --  placement-driven
+           |                traffic only)             tree)
+       host main memory                          device memory tech
+       (M/D/1, host-path adder)                  (PE-MI + Garnet)
+```
+
+- **Device H-tree** -- the device side of DRAM technologies is always a tree
+  derived from the JEDEC organization ([network.md](network.md)). Every PE
+  memory access is priced here (own unit = 0 hops; elsewhere = tree distance).
+- **Host crossbar** -- classic flat topology; at 1 core it degenerates (no
+  fabric), at multi-core it adds a fixed one-hop latency, with host memory
+  bandwidth as an aggregate M/D/1 queue. Host core loads/stores are priced
+  here (out-of-ROI code, and the whole kernel under NO_OFFLOAD baselines).
+- **Bridge** -- the two-layer (`protocol` x `phy`) join. It carries ONLY
+  boundary traffic: launch cmd/ack, Case-1 coherence flush, Case-2 DMA. It is
+  where host-core traffic and device-PE traffic meet; neither fabric's ordinary
+  traffic crosses it. The device-internal fabric and the host<->device
+  interconnect remain two separate Garnet instances; the analytic host tier
+  and bridge charges compose over them. See [cosim.md](cosim.md).
 
 ## Execution models for parallel workloads
 

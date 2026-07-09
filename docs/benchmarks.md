@@ -16,10 +16,36 @@
 Additionally:
 - `benchmarks/host/` -- host-side variants of the core kernels.
 
-Co-simulation has NO separate workload family: any ordinary workload runs in
-co-sim (`--scope system`). Its ROI region executes on the device, the
-out-of-ROI code on the host, and boundary crossings are charged with the
-host-device link and memory technology models (see [cosim.md](cosim.md)).
+Co-simulation has NO separate workload family: any ordinary ROI-marked
+workload runs in co-sim (`--scope system`). Its ROI region executes on the
+device PEs, the out-of-ROI code on the host, and the boundary costs (launch,
+coherence flush, and the two-layer host<->device bridge) are charged
+explicitly (see [cosim.md](cosim.md)).
+
+### Co-sim experiment shape (fig5)
+
+The co-sim figure compares PIM offload against conventional multicore
+scaling, both measured over the **task region** ("inputs ready in host mem"
+-> "results visible in host mem"), never kernel-only or whole-process:
+
+- **Techs:** HBM3 (bandwidth-rich interposer host, `native/interposer`) and
+  DDR5 (commodity bus host, `native/pcb`). Host HBM3 has no idle-latency edge
+  over DDR5 -- only bandwidth -- so the contest is PIM latency-elimination vs
+  host bandwidth-abundance.
+- **Kernels (5):** `stream_triad`, `gemv`, `bfs`, `stencil_2d`, `histogram`
+  (the near-data-prep sweep set; see below).
+- **APIs (2):** OMP and MPI (the 1.6 thread-MPI stack; MPI cells run coupled).
+- **Co-sim cells:** single OoO@2GHz host + device (8 `alu_core` PEs @ BANK,
+  same tech) -> 2 techs x 5 kernels x 2 APIs = 20 cells.
+- **Baseline cells:** host-only, **same tech as the paired co-sim cell** (no
+  host-tech confound), 1/4/16 OoO cores x {OMP, MPI}, via
+  `PIMID_COSIM_NO_OFFLOAD=1` on the same binary -> 2 x 5 x 3 x 2 = 60 cells.
+  1-core cells subsume the old serial baseline; 1-core MPI = a single rank on
+  the thread-MPI runtime.
+
+The three baseline configs are `examples/cosim/baseline_host_{1,4,16}core.yaml`
+(see [examples.md](examples.md)); the sweep runner overrides
+`memory.technology` per cell.
 
 ```bash
 make -C benchmarks all        # build everything

@@ -24,7 +24,13 @@ Complete reference for all YAML configuration keys supported by PIMID.
   - [PCIe Configuration](#pcie-configuration)
 - [System Configuration](#system-configuration)
   - [Hosts](#hosts)
+  - [Host Memory Path (co-sim)](#host-memory-path-co-sim)
+  - [Host NoC (co-sim)](#host-noc-co-sim)
+  - [Separate Host Memory (co-sim)](#separate-host-memory-co-sim)
   - [Devices](#devices)
+  - [Host-Device Bridge (co-sim)](#host-device-bridge-co-sim)
+  - [Coherence (co-sim)](#coherence-co-sim)
+  - [Kernel Launch (co-sim)](#kernel-launch-co-sim)
   - [System Network](#system-network)
 - [Enumerations](#enumerations)
 - [Override Rules](#override-rules)
@@ -553,12 +559,64 @@ system:
 | `system.hosts[].num_cores` | int | `4` | Number of host cores. |
 | `system.hosts[].frequency_mhz` | double | `3000.0` | Host frequency. |
 | `system.hosts[].tech_node_nm` | int | `7` | Host technology node. |
-| `system.hosts[].memory.technology` | string | `"DDR4"` | Host memory technology. |
+| `system.hosts[].memory.technology` | string | `"DDR4"` | Host memory technology. Under `is_default_mem: true` (default) it is forced = the device tech; under `false` it is set from `host.mem.technology`. |
+| `system.hosts[].memory.bandwidth_mbs` | int | `-1` | Per-channel host memory bandwidth (MB/s). `-1` = auto from tech. |
+| `system.hosts[].memory.channels` | int | `-1` | Host memory channel (MC) count. `-1` = auto from tech (DDR5 c=1, HBM3 c=16). |
 | `system.hosts[].cache.l1d_kb` | int | `32` | Host L1D size. |
 | `system.hosts[].cache.l1i_kb` | int | `32` | Host L1I size. |
 | `system.hosts[].cache.l2_kb` | int | `256` | Host L2 size. |
 | `system.hosts[].cache.l3_kb` | int | `0` | Host L3 size; `0` disables the L3. |
 | `system.hosts[].workload` | map | — | Per-host workload (binary, args, env). Inherits top-level workload if empty. |
+
+#### Host Memory Path (co-sim)
+
+The host main-memory idle latency is a physical composition (tRCD + tCAS)
+plus a **calibrated host-path adder** so the effective idle latency matches
+measured real sockets (DDR5 ~110 ns, HBM3 ~235 ns). Host-role only -- never
+applied to device (PE) memory. The adder is expressed either as an aggregate
+or as a four-way decomposition; see
+[cosim_calibration.md](cosim_calibration.md). `PIMID_DEBUG_HOSTMEM` prints the
+composition.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `system.hosts[].memory.latency_adder_ns` | double | `-1` | Aggregate host-path adder (ns). `-1` = auto per-tech default (DDR5 77, HBM3 203). |
+| `system.hosts[].memory.host_path.fabric_ns` | double | `-1` | IO-die / mesh / interconnect traversal (core->MC). `-1` = per-tech default. |
+| `system.hosts[].memory.host_path.coherence_ns` | double | `-1` | Snoop / directory / coherence-engine latency. `-1` = per-tech default. |
+| `system.hosts[].memory.host_path.mc_pipeline_ns` | double | `-1` | Memory-controller command pipeline + queueing depth. `-1` = per-tech default. |
+| `system.hosts[].memory.host_path.phy_ns` | double | `-1` | PHY / command-interface wire + serialization tail. `-1` = per-tech default. |
+
+Validity: `latency_adder_ns` and any `host_path.*` are **mutually exclusive**
+(competing totals) -- setting both is a config error. A partial `host_path`
+merges over the per-tech default split (e.g. `coherence_ns: 0` = a
+"no coherence machinery" what-if).
+
+#### Host NoC (co-sim)
+
+Host-side fabric. A 1-core host has no fabric (crossbar degenerates:
+core->caches->MC direct); a multi-core host adds a fixed one-hop crossbar
+latency on the host memory path (port contention priced by the host MC M/D/1).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `system.hosts[].noc.topology` | string | `"crossbar"` | Host fabric topology. |
+| `system.hosts[].noc.model` | string | `"analytical"` | `analytical` (shipped). `detailed` is parsed but currently inert -- no host Garnet is instantiated (later 1.7.x increment). |
+| `system.hosts[].noc.hop_cycles` | int | `4` | Core->LLC/MC one-hop latency (core clock). Applied only when `num_cores > 1`. |
+
+#### Separate Host Memory (co-sim)
+
+Consumed only when the paired device sets `is_default_mem: false`: a plain
+non-PIM host main memory of any of the 11 techs (no PE arrays / H-tree / PIM
+windows), reusing the same per-tech channel/timing tables. Omitting it when
+`is_default_mem: false` is a **config error** (no silent DDR5 fallback).
+Ignored (with a warning) when the device is `is_default_mem: true`.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `system.hosts[].mem.technology` | string | (required) | Host main-memory tech (one of the 11). Required when device `is_default_mem: false`. |
+| `system.hosts[].mem.capacity_gb` | double | `-1` | Advisory capacity (GB); user's realism responsibility. |
+| `system.hosts[].mem.bandwidth_gbs` | double | auto | Per-channel bandwidth (GB/s); converted to MB/s. Absent = auto from tech. |
+| `system.hosts[].mem.channels` | int | `-1` | Host memory channel count. `-1` = auto from tech. |
 
 ### Devices
 
@@ -594,10 +652,72 @@ system:
 | `system.devices[].frequency_mhz` | int | `1000` | Device frequency. |
 | `system.devices[].tech_node_nm` | int | `22` | Device technology node. |
 | `system.devices[].memory` | map | — | Device memory config (`technology`, etc.). |
+| `system.devices[].is_default_mem` | bool | `true` | `true`: this PIM device IS the host's main memory (host tech = device tech by construction). `false`: accelerator-side memory only -- the host MUST supply a `host.mem` block (else config error). |
 | `system.devices[].pim` | map | — | Device PIM config (`placement`, `mc`, `mapping`). |
 | `system.devices[].noc` | map | — | Parsed but currently inert (reserved). |
 | `system.devices[].cache` | map | — | Device cache config. |
 | `system.devices[].workload` | map | — | Per-device workload. Inherits top-level if empty. |
+
+### Host-Device Bridge (co-sim)
+
+Two-layer host<->device link (`protocol` x `phy`). Carries only boundary
+traffic (launch cmd/ack, Case-1 flush, Case-2 DMA). All fields optional;
+unset fields default from the **device** memory technology. Supersedes the
+flat `system.network.links[].type` charge whenever a system-scope config is
+emitted. See [cosim.md](cosim.md) for the per-tech default table and
+[cosim_calibration.md](cosim_calibration.md) for the anchors.
+
+```yaml
+system:
+  bridge:
+    protocol: native        # native | ddr_t | cxl_mem | loadstore
+    phy: interposer         # on_die | pcb | interposer | serdes
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `system.bridge.protocol` | string | auto (device tech) | Per-transaction overhead class: `native`, `ddr_t`, `cxl_mem`, `loadstore`. |
+| `system.bridge.phy` | string | auto (device tech) | Physical attach: `on_die`, `pcb`, `interposer`, `serdes`. |
+| `system.bridge.bandwidth_gbs` | double | auto | Per-channel bandwidth (GB/s). |
+| `system.bridge.latency_ns` | double | auto | Wire + command-interface/MC pipeline latency (ns). |
+| `system.bridge.channels` | int | auto | Bridge channel count (aggregate BW = per-channel x channels). |
+| `system.bridge.protocol_overhead_ns` | double | auto | Per-transaction protocol handshake (ns). Defaults to the protocol's own overhead (ddr_t 30, cxl_mem 40, native/loadstore 0). |
+| `system.bridge.uncached_ns` | double | auto | Pure serialized cross-bridge access (ns); charged to Case-2 / uncached-window ops. |
+
+**Validity (illegal combos = config error):** `cxl_mem` requires `serdes`;
+`loadstore` requires `on_die`; `native` is forbidden on `serdes`.
+
+### Coherence (co-sim)
+
+Case-1 (unified address space) flush accounting, charged on the host core at
+`roi_begin`. `mode: separate` = Case-2 cache bypass (no flush; the bridge
+bulk-DMA path prices the crossing). Baselines never flush.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `system.coherence.mode` | string | `"unified"` | `unified` (Case 1: flush inputs + invalidate outputs) or `separate` (Case 2: cache bypass, no flush). |
+| `system.coherence.writeback_bw_gbs` | double | `-1` | Host cache writeback bandwidth (GB/s). `-1` = auto = host memory aggregate BW. |
+| `system.coherence.flush_fixed_ns` | double | `200` | Fixed flush/wbinvd latency (ns), added to the size-proportional writeback. |
+| `system.coherence.footprint_bytes` | long | `16777216` | Input+output working-set treated as dirty (16 MiB; upper bound, conservative-against-PIM). |
+
+`flush_cycles = flush_fixed_ns + ceil(footprint_bytes / writeback_bytes_per_cycle)`.
+`PIMID_DEBUG_COHERENCE` prints the resolved charge.
+
+### Kernel Launch (co-sim)
+
+Offload launch cost tree, charged on the host core at the offload doorbell
+(before device migration). `total = doorbell + dispatch + bridge(cmd) +
+bridge(ack)`. DDR5 vs HBM3 differ only in the bridge component.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `system.launch.doorbell_ns` | double | `300` | User-mode doorbell write + cmd-packet formation (no syscall). |
+| `system.launch.dispatch_ns` | double | `5000` | Runtime/OS dispatch software cost (~5 us; low end of the 5-20 us GPU launch band). |
+| `system.launch.cmd_bytes` | int | `64` | Command packet size (host->device, crosses the bridge). |
+| `system.launch.ack_bytes` | int | `64` | Acknowledgement packet size (device->host, crosses the bridge). |
+
+Completion is busy-wait only (no IRQ mode, no polling knob).
+`PIMID_DEBUG_LAUNCH` prints the resolved charge.
 
 ### System Network
 
@@ -628,7 +748,7 @@ system:
 | `system.network.virtual_channels_per_vn` | int | `1` | VCs per virtual network. |
 | `system.network.input_buffer_depth` | int | `4` | Input buffer depth. |
 | `system.network.output_buffer_depth` | int | `4` | Output buffer depth. |
-| `system.network.links` | list | `[]` | Per-link overrides: `{src, dst, type, lanes, base_latency_ns, bandwidth_GBs}`. |
+| `system.network.links` | list | `[]` | Per-link overrides: `{src, dst, type, lanes, base_latency_ns, bandwidth_GBs}`. **Superseded by [`system.bridge`](#host-device-bridge-co-sim)** for the host<->device boundary charge in co-sim; still parsed for backward compatibility. |
 
 ---
 
