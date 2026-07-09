@@ -919,6 +919,19 @@ struct UnifiedConfig {
     int pcie_header_bytes = 20;            // per-transaction protocol overhead bytes
     double pcie_coherence_extra_ns = 0.0;  // avg extra latency for coherent access
 
+    // Host<->device TWO-LAYER BRIDGE (1.7.1). protocol x phy selects the
+    // per-transaction overhead + phy pipeline latency; ALL fields optional,
+    // defaults derive from the DEVICE memory technology (resolveBridge).
+    // Emitted as sys.bridge.* in system scope; supersedes the flat pcie charge.
+    bool   bridge_present = false;             // system-scope co-sim -> emit sys.bridge
+    std::string bridge_protocol;               // "" = auto: native|ddr_t|cxl_mem|loadstore
+    std::string bridge_phy;                    // "" = auto: on_die|pcb|interposer|serdes
+    double bridge_bandwidth_gbs = -1.0;        // per-channel GB/s (-1 = auto)
+    double bridge_latency_ns = -1.0;           // wire + cmd-iface/MC pipeline (-1 = auto)
+    int    bridge_channels = -1;               // -1 = auto
+    double bridge_protocol_overhead_ns = -1.0; // -1 = auto
+    double bridge_uncached_ns = -1.0;          // pure serialized crossing (-1 = auto)
+
     // Output configuration
     std::string stats_file;
     bool enable_detailed_stats;
@@ -4519,6 +4532,160 @@ static void emitHostMemBlock(std::ostream& out, const UnifiedConfig& config,
     out << "    };\n";
 }
 
+//===========================================================================
+// Host<->device TWO-LAYER BRIDGE defaults (1.7.1).
+//
+// bridge.protocol (native|ddr_t|cxl_mem|loadstore) selects the per-transaction
+// overhead terms; bridge.phy (on_die|pcb|interposer|serdes) selects the
+// physical-attach latency = WIRE + COMMAND-INTERFACE/MC PIPELINE (for HBM the
+// pipeline is the low-clocked parallel CA bus + pseudo-channel arbitration + MC
+// queueing -- HBM has NO SerDes, so the interposer phy latency is NEVER a
+// "SerDes/PHY pipeline"). Anchors: Xeon Max HBM idle +22-25ns over DDR5, and
+// MI300A CPU->HBM3 ~236-241ns as the loaded/serialized bound.
+//
+// ALL fields optional; unset fields derive from the DEVICE memory technology
+// via the locked per-tech table below (BW = simulator L5 channel rates).
+//===========================================================================
+struct BridgeDefaults {
+    std::string protocol;          // native | ddr_t | cxl_mem | loadstore
+    std::string phy;               // on_die | pcb | interposer | serdes
+    double bandwidth_gbs;          // PER-CHANNEL GB/s
+    double latency_ns;             // wire + command-interface/MC pipeline
+    int    channels;
+    double protocol_overhead_ns;   // per-transaction protocol handshake
+    double uncached_ns;            // pure serialized cross-bridge access
+};
+
+// Locked per-tech defaults (HANDOFF ISSUE 6 table + calibration corrections).
+static BridgeDefaults bridgeDefaultsForTech(const std::string& tech_in) {
+    std::string t = tech_in;
+    std::transform(t.begin(), t.end(), t.begin(), ::toupper);
+    // canonicalize NVM spellings
+    if (t == "STTMRAM" || t == "STT-MRAM" || t == "MRAM") t = "STT_MRAM";
+    if (t == "PCRAM" || t == "3DXPOINT") t = "PCM";
+    if (t == "RESISTIVE" || t == "MEMRISTOR") t = "RERAM";
+
+    // {protocol, phy, bw/ch GB/s, latency_ns (wire+pipeline), channels,
+    //  protocol_overhead_ns, uncached_ns}
+    if (t == "DDR3")     return {"native",    "pcb",        12.8, 20.0,  1,  0.0, 200.0};
+    if (t == "DDR4")     return {"native",    "pcb",        19.2, 20.0,  1,  0.0, 200.0};
+    if (t == "DDR5" ||
+        t == "DRAM")     return {"native",    "pcb",        25.6, 18.0,  1,  0.0, 200.0};
+    if (t == "LPDDR5")   return {"native",    "pcb",        12.8, 12.0,  1,  0.0, 200.0};
+    if (t == "GDDR6")    return {"native",    "pcb",        32.0, 10.0,  2,  0.0, 200.0};
+    // HBM interposer latency = 5-6ns wire + ~24-25ns command-interface/MC
+    // pipeline = ~30ns (NOT SerDes). uncached bound from MI300A anchor.
+    if (t == "HBM2")     return {"native",    "interposer", 38.4, 30.0,  8,  0.0, 230.0};
+    if (t == "HBM3")     return {"native",    "interposer", 51.2, 30.0, 16,  0.0, 335.0};
+    // On-die load/store port at core clock (~1-2ns). STT locked == SRAM.
+    if (t == "SRAM")     return {"loadstore", "on_die",    128.0,  2.0,  1,  0.0,  30.0};
+    if (t == "STT_MRAM") return {"loadstore", "on_die",    128.0,  2.0,  1,  0.0,  30.0};
+    // ReRAM = middle rung: DDR-transactional attach over a pcb + a ~30ns
+    // media/handshake overhead on top of the ~18ns pcb pipeline.
+    if (t == "RERAM")    return {"ddr_t",     "pcb",        25.6, 18.0,  1, 30.0, 250.0};
+    // PCM = post-Optane CXL.mem over SerDes: ~150-250ns RT (200 default) +
+    // CXL flit packetization overhead.
+    if (t == "PCM")      return {"cxl_mem",   "serdes",     64.0, 200.0, 1, 40.0, 300.0};
+    // Unknown -> DDR5-class commodity default.
+    return {"native", "pcb", 25.6, 18.0, 1, 0.0, 200.0};
+}
+
+// Default per-transaction overhead for a protocol (used when the user overrides
+// bridge.protocol without giving protocol_overhead_ns).
+static double bridgeProtocolOverheadNs(const std::string& protocol) {
+    if (protocol == "ddr_t")   return 30.0;  // DDR-transactional handshake
+    if (protocol == "cxl_mem") return 40.0;  // CXL flit packetization
+    return 0.0;                              // native / loadstore = direct MC
+}
+
+// Validate a (protocol, phy) combination. Returns "" if legal, else an error
+// message. Rules (HANDOFF ISSUE 6): cxl_mem needs serdes; loadstore needs
+// on_die; native forbidden on serdes (native needs the tech's own MC class).
+static std::string bridgeValidityError(const std::string& protocol,
+                                       const std::string& phy) {
+    static const char* PROTOS[] = {"native", "ddr_t", "cxl_mem", "loadstore"};
+    static const char* PHYS[]   = {"on_die", "pcb", "interposer", "serdes"};
+    bool proto_ok = false, phy_ok = false;
+    for (auto* p : PROTOS) if (protocol == p) proto_ok = true;
+    for (auto* p : PHYS)   if (phy == p)       phy_ok = true;
+    if (!proto_ok)
+        return "bridge.protocol '" + protocol +
+               "' invalid (native|ddr_t|cxl_mem|loadstore)";
+    if (!phy_ok)
+        return "bridge.phy '" + phy +
+               "' invalid (on_die|pcb|interposer|serdes)";
+    if (protocol == "cxl_mem" && phy != "serdes")
+        return "bridge.protocol 'cxl_mem' requires phy 'serdes' (got '" + phy + "')";
+    if (protocol == "loadstore" && phy != "on_die")
+        return "bridge.protocol 'loadstore' requires phy 'on_die' (got '" + phy + "')";
+    if (protocol == "native" && phy == "serdes")
+        return "bridge.protocol 'native' forbidden on phy 'serdes' "
+               "(native requires the tech's own memory-controller class)";
+    return "";
+}
+
+// Resolve the effective bridge parameters for a device tech, applying user
+// overrides on top of the locked defaults and validating the combo. On a
+// validity error prints to stderr and exits (config error, not a warning).
+// Fills config.bridge_* resolved fields in place.
+static BridgeDefaults resolveBridge(UnifiedConfig& config,
+                                    const std::string& device_tech) {
+    BridgeDefaults d = bridgeDefaultsForTech(device_tech);
+    // Protocol / phy: user override or tech default.
+    std::string protocol = config.bridge_protocol.empty() ? d.protocol
+                                                           : config.bridge_protocol;
+    std::string phy = config.bridge_phy.empty() ? d.phy : config.bridge_phy;
+
+    std::string err = bridgeValidityError(protocol, phy);
+    if (!err.empty()) {
+        std::cerr << "ERROR: illegal host<->device bridge configuration: "
+                  << err << ".\n"
+                  << "  Legal rules: cxl_mem->serdes, loadstore->on_die, "
+                  << "native forbidden on serdes.\n";
+        exit(1);
+    }
+
+    d.protocol = protocol;
+    d.phy = phy;
+    // Numeric fields: user override (>=0 / >0) or tech default. If the user
+    // overrode protocol but not the overhead, fall to the protocol's default
+    // overhead so an override reads sensibly.
+    if (config.bridge_bandwidth_gbs > 0.0) d.bandwidth_gbs = config.bridge_bandwidth_gbs;
+    if (config.bridge_latency_ns >= 0.0)   d.latency_ns = config.bridge_latency_ns;
+    if (config.bridge_channels > 0)        d.channels = config.bridge_channels;
+    if (config.bridge_protocol_overhead_ns >= 0.0)
+        d.protocol_overhead_ns = config.bridge_protocol_overhead_ns;
+    else if (!config.bridge_protocol.empty())
+        d.protocol_overhead_ns = bridgeProtocolOverheadNs(protocol);
+    if (config.bridge_uncached_ns >= 0.0)  d.uncached_ns = config.bridge_uncached_ns;
+    return d;
+}
+
+// Emit the sys.bridge { ... } block (cycle-converted at the host/reference
+// clock the plugin's host cores run on) into a system-scope ZSim config.
+static void emitZSimBridgeBlock(std::ostream& out, const BridgeDefaults& d,
+                                double ref_freq_mhz) {
+    double f = (ref_freq_mhz > 0.0) ? ref_freq_mhz : 1000.0;
+    uint32_t phy_cyc = (uint32_t)(d.latency_ns * f / 1000.0 + 0.5);
+    uint32_t proto_cyc = (uint32_t)(d.protocol_overhead_ns * f / 1000.0 + 0.5);
+    uint32_t unc_cyc = (uint32_t)(d.uncached_ns * f / 1000.0 + 0.5);
+    // Aggregate bandwidth = per-channel x channels (all channels serve a bulk
+    // transfer in parallel); bytes/cycle at the host/reference clock.
+    double agg_gbs = d.bandwidth_gbs * (double)d.channels;
+    double bytes_per_cycle = (agg_gbs * 1e9) / (f * 1e6);
+    out << "\n    bridge = {\n";
+    out << "        enabled = 1;\n";
+    out << "        protocol = \"" << d.protocol << "\";\n";
+    out << "        phy = \"" << d.phy << "\";\n";
+    out << "        phyLatencyCycles = " << phy_cyc << ";\n";
+    out << "        protocolOverheadCycles = " << proto_cyc << ";\n";
+    out << "        channels = " << d.channels << ";\n";
+    out << "        bytesPerCycle = \"" << std::fixed << std::setprecision(4)
+        << bytes_per_cycle << "\";\n" << std::defaultfloat;
+    out << "        uncachedCycles = " << unc_cyc << ";\n";
+    out << "    };\n";
+}
+
 static std::string generateSystemConfig(UnifiedConfig& config) {
     std::string cfg_path = "/tmp/pimid_system_zsim_" + std::to_string(getpid()) + ".cfg";
     std::ofstream cfg(cfg_path);
@@ -4819,6 +4986,26 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
         // No DRAM hierarchy block, but still emit the host↔device offload-link
         // pcie* keys so getPCIeLatency charges the chosen link_type.
         emitZSimPcieBlock(cfg, config);
+    }
+
+    // -- Host<->device TWO-LAYER BRIDGE (1.7.1) --
+    // Emitted whenever a device node with a memory tech is present (the co-sim
+    // path). Supersedes the flat pcie charge at WORK_BEGIN/END; the plugin
+    // falls back to getPCIeLatency only when no sys.bridge block is present
+    // (legacy configs). Defaults derive from the device tech; user overrides
+    // (system.bridge.*) validated here -- illegal combos are config errors.
+    {
+        const UnifiedConfig::SystemNode* dev_node = nullptr;
+        for (const auto& node : config.system_nodes) {
+            if (node.role != UnifiedConfig::SystemNode::DEVICE) continue;
+            if (node.device_type == UnifiedConfig::SystemNode::COMPUTE) { dev_node = &node; break; }
+            if (!dev_node) dev_node = &node;  // fall back to first (memory-only) device
+        }
+        if (dev_node) {
+            BridgeDefaults bd = resolveBridge(config, dev_node->memory_tech);
+            config.bridge_present = true;
+            emitZSimBridgeBlock(cfg, bd, ref_freq);
+        }
     }
 
     // ── Node Map ──
@@ -5642,7 +5829,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.7.0" << std::endl;
+    std::cout << "Version 1.7.1" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -6715,6 +6902,20 @@ int main(int argc, char** argv) {
                             config.system_network.links.push_back(link);
                         }
                     }
+                }
+
+                // Host<->device two-layer bridge (1.7.1). All fields optional;
+                // unset fields derive from the device memory tech at emission.
+                if (sys["bridge"]) {
+                    auto br = sys["bridge"];
+                    config.bridge_protocol = br["protocol"].as<std::string>(config.bridge_protocol);
+                    config.bridge_phy = br["phy"].as<std::string>(config.bridge_phy);
+                    config.bridge_bandwidth_gbs = br["bandwidth_gbs"].as<double>(config.bridge_bandwidth_gbs);
+                    config.bridge_latency_ns = br["latency_ns"].as<double>(config.bridge_latency_ns);
+                    config.bridge_channels = br["channels"].as<int>(config.bridge_channels);
+                    config.bridge_protocol_overhead_ns =
+                        br["protocol_overhead_ns"].as<double>(config.bridge_protocol_overhead_ns);
+                    config.bridge_uncached_ns = br["uncached_ns"].as<double>(config.bridge_uncached_ns);
                 }
             }
 
@@ -8602,6 +8803,16 @@ int main(int argc, char** argv) {
                 return 1;
             }
             std::cout << "  ZSim config: " << zsim_cfg_path << std::endl;
+
+            // Config-only mode (1.7.1 validation aid): emit the generated ZSim
+            // config and stop WITHOUT launching QEMU. Lets the sys.bridge
+            // defaults table be inspected on the login node without running any
+            // simulation. Gated on PIMID_EMIT_CONFIG_ONLY.
+            if (getenv("PIMID_EMIT_CONFIG_ONLY")) {
+                std::cout << "  (PIMID_EMIT_CONFIG_ONLY set: config emitted, "
+                          << "skipping simulation launch)" << std::endl;
+                return 0;
+            }
 
             // Find QEMU and plugin
             std::string qemu_binary = findQemuBinary();

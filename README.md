@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
-[![Version](https://img.shields.io/badge/version-1.7.0-green.svg)]()
+[![Version](https://img.shields.io/badge/version-1.7.1-green.svg)]()
 
 PIMID is a cycle-accurate simulator for Processing-in-Memory (PIM)
 architectures. Workloads execute under QEMU user-mode emulation; a TCG plugin

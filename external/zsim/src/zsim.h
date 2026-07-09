@@ -361,6 +361,20 @@ struct GlobSimInfo {
         lock_t updateLock;
     } pcie;
 
+    // Host<->device TWO-LAYER BRIDGE (1.7.1). Supersedes the flat pcie charge
+    // in system-scope co-sim: phy layer = wire + command-interface/MC pipeline
+    // latency (for HBM the low-clocked CA bus + pseudo-channel arbitration + MC
+    // queueing -- NOT a SerDes/PHY); protocol layer = per-transaction overhead.
+    // Deterministic charge (no phase M/D/1) so boundary costs reproduce exactly.
+    struct {
+        bool enabled = false;
+        uint32_t phyLatencyCycles = 0;        // wire + command-interface/MC pipeline
+        uint32_t protocolOverheadCycles = 0;  // per-transaction protocol handshake
+        double   bytesPerCycle = 0.0;         // AGGREGATE bandwidth (per-ch x channels)
+        uint32_t channels = 1;
+        uint32_t uncachedCycles = 0;          // pure serialized cross-bridge access
+    } bridge;
+
     // Multi-host/multi-device node map
     struct {
         uint32_t numNodes = 0;

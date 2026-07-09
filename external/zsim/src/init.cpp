@@ -750,6 +750,24 @@ static void InitSystem(Config& config) {
         }
     }
 
+    // Host<->device TWO-LAYER BRIDGE (1.7.1). Standalone top-level block so it
+    // is read whether or not a DRAM hierarchy block is present. When enabled it
+    // supersedes the flat pcie charge at WORK_BEGIN/END (see qemu_zsim_plugin
+    // boundaryTransferCycles). Cycle-converted at the host/reference clock.
+    if (config.exists("sys.bridge")) {
+        zinfo->bridge.enabled = config.get<uint32_t>("sys.bridge.enabled", 0) != 0;
+        zinfo->bridge.phyLatencyCycles = config.get<uint32_t>("sys.bridge.phyLatencyCycles", 0);
+        zinfo->bridge.protocolOverheadCycles = config.get<uint32_t>("sys.bridge.protocolOverheadCycles", 0);
+        zinfo->bridge.channels = config.get<uint32_t>("sys.bridge.channels", 1);
+        zinfo->bridge.uncachedCycles = config.get<uint32_t>("sys.bridge.uncachedCycles", 0);
+        const char* bpc = config.get<const char*>("sys.bridge.bytesPerCycle", "0.0");
+        zinfo->bridge.bytesPerCycle = atof(bpc);
+        info("[ZSim] Host<->device bridge %s (phy=%u cyc + proto=%u cyc, %.4f B/cyc, c=%u, uncached=%u cyc)",
+             zinfo->bridge.enabled ? "enabled" : "present-disabled",
+             zinfo->bridge.phyLatencyCycles, zinfo->bridge.protocolOverheadCycles,
+             zinfo->bridge.bytesPerCycle, zinfo->bridge.channels, zinfo->bridge.uncachedCycles);
+    }
+
     // Read node map (multi-host/multi-device system mode)
     if (config.exists("sys.nodeMap")) {
         zinfo->nodeMap.numNodes = config.get<uint32_t>("sys.nodeMap.numNodes", 0);

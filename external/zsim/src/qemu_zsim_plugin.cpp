@@ -1381,6 +1381,37 @@ static uint32_t getPCIeLatency(uint32_t transfer_bytes = 0) {
 }
 
 /**
+ * Two-layer bridge transfer latency (1.7.1). Deterministic host<->device
+ * boundary charge = bridge latency (phy pipeline + protocol overhead) +
+ * size/aggregate-bandwidth serialization. The phy latency is wire +
+ * command-interface/MC pipeline (interposer HBM has NO SerDes). No phase M/D/1
+ * so the boundary cost is reproducible run-to-run. Supersedes the flat
+ * getPCIeLatency for system-scope co-sim; the flat model remains the fallback
+ * for legacy configs with no sys.bridge block.
+ */
+static uint32_t getBridgeLatency(uint32_t transfer_bytes = 0) {
+    if (!zinfo || !zinfo->bridge.enabled) return 0;
+    uint32_t base = zinfo->bridge.phyLatencyCycles + zinfo->bridge.protocolOverheadCycles;
+    uint32_t serCycles = 0;
+    if (zinfo->bridge.bytesPerCycle > 0.0 && transfer_bytes > 0) {
+        serCycles = static_cast<uint32_t>(
+            std::ceil(static_cast<double>(transfer_bytes) / zinfo->bridge.bytesPerCycle));
+    }
+    return base + serCycles;
+}
+
+/**
+ * Host<->device boundary transfer charge (cycles). Uses the two-layer bridge
+ * model when a sys.bridge block is present (1.7.1), else falls back to the flat
+ * getPCIeLatency (backward compat with pre-1.7.1 configs). NO_OFFLOAD baselines
+ * never reach here (the g_cosim_no_offload guards return before the WORK path).
+ */
+static uint32_t boundaryTransferCycles(uint32_t transfer_bytes = 0) {
+    if (zinfo && zinfo->bridge.enabled) return getBridgeLatency(transfer_bytes);
+    return getPCIeLatency(transfer_bytes);
+}
+
+/**
  * Magic instruction callback — dispatches ZSim magic ops detected at
  * translation time.  The opcode (from the preceding mov $imm, %rcx) is
  * passed as userdata.
@@ -1526,7 +1557,7 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
             }
             ensureThreadInit(tid);  // will use device_mask
             /* PCIe/CXL offload timing: host→device transfer latency */
-            uint32_t pcieLat = getPCIeLatency(payload_size);
+            uint32_t pcieLat = boundaryTransferCycles(payload_size);
             if (pcieLat > 0) {
                 BblInfo* bbl = createSimpleBblInfo(pcieLat, pcieLat * 4);
                 fPtrs[tid].bblPtr(tid, 0, bbl);
@@ -1560,7 +1591,7 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
             ensureThreadInit(tid);  // will use host_mask
             /* PCIe/CXL return timing: device→host transfer latency,
              * charged on the host core (it pays for the return DMA wait) */
-            uint32_t pcieLat = getPCIeLatency(payload_size);
+            uint32_t pcieLat = boundaryTransferCycles(payload_size);
             if (pcieLat > 0) {
                 BblInfo* bbl = createSimpleBblInfo(pcieLat, pcieLat * 4);
                 fPtrs[tid].bblPtr(tid, 0, bbl);
@@ -1725,7 +1756,7 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         }
         ensureThreadInit(tid);
         /* PCIe/CXL offload timing: host→device transfer latency */
-        uint32_t pcieLat = getPCIeLatency(payload_size);
+        uint32_t pcieLat = boundaryTransferCycles(payload_size);
         if (pcieLat > 0) {
             BblInfo* bbl = createSimpleBblInfo(pcieLat, pcieLat * 4);
             fPtrs[tid].bblPtr(tid, 0, bbl);
@@ -1749,7 +1780,7 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         }
         ensureThreadInit(tid);  // will use host_mask
         /* PCIe/CXL return timing: device→host transfer latency */
-        uint32_t pcieLat = getPCIeLatency(payload_size);
+        uint32_t pcieLat = boundaryTransferCycles(payload_size);
         if (pcieLat > 0) {
             BblInfo* bbl = createSimpleBblInfo(pcieLat, pcieLat * 4);
             fPtrs[tid].bblPtr(tid, 0, bbl);
