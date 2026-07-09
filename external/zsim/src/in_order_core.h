@@ -215,7 +215,43 @@ class InOrderCore : public Core {
         bool hasContentionSim() const override { return true; }
         EventRecorder* getEventRecorder() override {return cRec.getEventRecorder();}
         void cSimStart() override {drainPipeline(); curCycle = cRec.cSimStart(curCycle);}
-        void cSimEnd() override {drainPipeline(); curCycle = cRec.cSimEnd(curCycle);}
+        void cSimEnd() override {
+            drainPipeline();
+            uint64_t pre = curCycle;
+            curCycle = cRec.cSimEnd(curCycle);
+            // cSimEnd may fold a contention SKEW into the phase-1 clock: it
+            // advances BOTH curCycle and the CoreRecorder's prevRespCycle by the
+            // same `skew` (curCycle - pre). memRespCycle is this core's private
+            // phase-1-clock serialization cursor -- the response cycle of the
+            // last cache access threaded through the weave -- and it gates the
+            // start cycle of the NEXT recorded access (startCycle =
+            // MAX(issueCursor, memRespCycle)). It lives outside the recorder, so
+            // the skew never reached it. When memRespCycle runs AHEAD of the
+            // issue cursor (an ifetch/load miss whose response outran the
+            // front-end -- the intended cross-BBL/separate-front-end overlap),
+            // an un-skewed memRespCycle leaves the next access starting BEFORE
+            // the skew-bumped prevRespCycle, tripping CoreRecorder::recordAccess'
+            // startCycle>=prevRespCycle assert (seen with an in-order co-sim
+            // HOST: its L1/L2/DRAM miss latencies routinely push memRespCycle
+            // past the issue cursor at a skewed phase boundary). Advance the
+            // cursor by the same skew so it stays in the recorder's clock. This
+            // only changes an access start when memRespCycle is the binding
+            // term (memRespCycle > issue cursor) -- exactly the crash case;
+            // otherwise the issue cursor dominates the MAX and the shift is
+            // unobservable, so contention-free / cache-less (wired-MI device PE)
+            // runs are bit-identical.
+            if (curCycle > pre) {
+                // Diagnostic (PIMID_DEBUG_JOINQ): a "binding" firing is one where
+                // memRespCycle was AHEAD of the issue cursor (the crash case) and
+                // so the skew shift is observable. 0 binding firings on a run =>
+                // the fix is inert for that run (byte-identical). Non-binding
+                // firings do not change any recorded access start.
+                if (getenv("PIMID_DEBUG_JOINQ"))
+                    fprintf(stderr, "[JOINQ %s] cSimEnd-skewfix delta=%lu memRespCycle=%lu curCycle=%lu binding=%d\n",
+                        name.c_str(), (unsigned long)(curCycle - pre), (unsigned long)memRespCycle, (unsigned long)curCycle, (int)(memRespCycle > curCycle));
+                memRespCycle += (curCycle - pre);
+            }
+        }
 
     private:
         // Drain the in-order pipeline: advance the issue cursor to the newest

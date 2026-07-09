@@ -63,7 +63,11 @@ CoreRecorder::CoreRecorder(uint32_t _domain, g_string& _name)
 }
 
 
+static bool joinqDbg() { static int v = getenv("PIMID_DEBUG_JOINQ") ? 1 : 0; return v; }
+
 uint64_t CoreRecorder::notifyJoin(uint64_t curCycle) {
+    if (joinqDbg()) fprintf(stderr, "[JOINQ %s] notifyJoin in curCycle=%lu state=%d gpc=%lu lastUnhalted=%lu prevRespCycle(pre)=%lu\n",
+        name.c_str(), (unsigned long)curCycle, state, (unsigned long)zinfo->globPhaseCycles, (unsigned long)lastUnhaltedCycle, (unsigned long)prevRespCycle);
     if (state == HALTED) {
         assert(!prevRespEvent);
         curCycle = zinfo->globPhaseCycles; //start at beginning of the phase
@@ -94,6 +98,8 @@ uint64_t CoreRecorder::notifyJoin(uint64_t curCycle) {
 
 
 void CoreRecorder::notifyLeave(uint64_t curCycle) {
+    if (joinqDbg()) fprintf(stderr, "[JOINQ %s] notifyLeave curCycle=%lu prevRespCycle=%lu gpc=%lu\n",
+        name.c_str(), (unsigned long)curCycle, (unsigned long)prevRespCycle, (unsigned long)zinfo->globPhaseCycles);
     assert(state == RUNNING);
     state = DRAINING;
     assert(prevRespEvent);
@@ -120,6 +126,11 @@ void CoreRecorder::recordAccess(uint64_t startCycle) {
     TimingRecord tr = eventRecorder.popRecord();
     TimingEvent* origPrevResp = prevRespEvent;
 
+    if (joinqDbg())
+        fprintf(stderr, "[JOINQ %s] recordAccess startCycle=%lu prevRespCycle=%lu diff=%ld state=%d reqCycle=%lu respCycle=%lu isGet=%d%s\n",
+            name.c_str(), (unsigned long)startCycle, (unsigned long)prevRespCycle, (long)((int64_t)startCycle - (int64_t)prevRespCycle), state,
+            (unsigned long)tr.reqCycle, (unsigned long)tr.respCycle, (int)IsGet(tr.type),
+            (startCycle < prevRespCycle) ? " <<<VIOLATION" : "");
     assert(startCycle >= prevRespCycle);
     assert(tr.reqCycle >= startCycle);
 
@@ -199,6 +210,8 @@ uint64_t CoreRecorder::cSimEnd(uint64_t curCycle) {
     // Skew clock
     // Note that by adding to gapCycles, we keep the zll clock (defined as curCycle - gapCycles) constant.
     // We use the zll clock to translate origStartCycle correctly, even if it's coming from several phases back.
+    if (joinqDbg() && skew) fprintf(stderr, "[JOINQ %s] cSimEnd SKEW=%lu curCycle %lu->%lu prevRespCycle %lu->%lu (memRespCycle NOT adjusted here)\n",
+        name.c_str(), (unsigned long)skew, (unsigned long)curCycle, (unsigned long)(curCycle+skew), (unsigned long)prevRespCycle, (unsigned long)(prevRespCycle+skew));
     curCycle += skew;
     gapCycles += skew;
     prevRespCycle += skew;
