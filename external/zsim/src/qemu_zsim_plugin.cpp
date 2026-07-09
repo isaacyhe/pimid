@@ -577,6 +577,13 @@ void SimEnd() {
              zinfo->mpiStats.barrierCount);
     }
 
+    if (zinfo->coherence.enabled) {
+        info("Coherence Stats: %s mode, %lu roi_begin flushes, %lu total flush cycles charged",
+             zinfo->coherence.mode == 0 ? "unified" : "separate",
+             (unsigned long)zinfo->coherence.flushCount,
+             (unsigned long)zinfo->coherence.flushCyclesCharged);
+    }
+
     if (zinfo->sched) zinfo->sched->notifyTermination();
 
     /* Terminate the process.  Background threads (contention sim, scheduler
@@ -1412,6 +1419,53 @@ static uint32_t boundaryTransferCycles(uint32_t transfer_bytes = 0) {
 }
 
 /**
+ * Case-1 coherence FLUSH cycles charged on the host core at roi_begin (1.7.2).
+ *
+ * Unified address space (mode==0): the host writes back dirty INPUT lines and
+ * invalidates OUTPUT lines before the device reads DRAM. Analytic upper bound
+ * (HANDOFF ISSUE 3 F1): the whole input+output footprint is treated as dirty
+ * writeback traffic (conservative-against-PIM), so
+ *   cycles = flushFixedCycles + ceil(footprintBytes / writebackBytesPerCycle).
+ * Separate address space (mode==1): cache bypass (Case 2) -> NO flush; the
+ * 1.7.1 bridge bulk-DMA path already prices the crossing, so return 0.
+ * Deterministic (no phase M/D/1) so the boundary cost reproduces exactly.
+ * NO_OFFLOAD baselines never reach the co-sim roi_begin block, so they are
+ * never charged.
+ */
+static uint64_t coherenceFlushCycles() {
+    if (!zinfo || !zinfo->coherence.enabled) return 0;
+    if (zinfo->coherence.mode != 0) return 0;   // separate = cache bypass, no flush
+    uint64_t cyc = zinfo->coherence.flushFixedCycles;
+    if (zinfo->coherence.writebackBytesPerCycle > 0.0 &&
+        zinfo->coherence.footprintBytes > 0) {
+        cyc += (uint64_t)std::ceil(
+            (double)zinfo->coherence.footprintBytes /
+            zinfo->coherence.writebackBytesPerCycle);
+    }
+    return cyc;
+}
+
+/**
+ * Apply the Case-1 coherence flush charge on the host core running `tid` at
+ * roi_begin, BEFORE the device migration (thread still on its host core, so the
+ * cost lands on the host and is inside the ROI/task window). Uses the synthetic
+ * BblInfo path (like the bridge WORK charge) because the ooo host core does not
+ * override addDelay. Accumulates the flush stats.
+ */
+static void chargeCoherenceFlush(uint32_t tid) {
+    uint64_t flushCyc = coherenceFlushCycles();
+    if (flushCyc == 0) return;
+    uint32_t fc = (uint32_t)std::min<uint64_t>(flushCyc, 0xFFFFFFFFull);
+    BblInfo* bbl = createSimpleBblInfo(fc, fc * 4);
+    fPtrs[tid].bblPtr(tid, 0, bbl);
+    __sync_fetch_and_add(&zinfo->coherence.flushCount, 1);
+    __sync_fetch_and_add(&zinfo->coherence.flushCyclesCharged, flushCyc);
+    info("Thread %d: Case-1 coherence flush at roi_begin (footprint %llu B -> %llu cycles)",
+         tid, (unsigned long long)zinfo->coherence.footprintBytes,
+         (unsigned long long)flushCyc);
+}
+
+/**
  * Magic instruction callback — dispatches ZSim magic ops detected at
  * translation time.  The opcode (from the preceding mov $imm, %rcx) is
  * passed as userdata.
@@ -1478,6 +1532,11 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
         // out-of-ROI code executes on the host. Ordinary workloads are
         // co-sim workloads -- there is no special kind.
         if (g_cosim_mode && !g_cosim_no_offload && tid < MAX_THREADS) {
+            // PART A (1.7.2): Case-1 coherence flush charged on the HOST core
+            // BEFORE the device migration (thread still on its host core), so the
+            // writeback cost lands on the host and inside the ROI/task window.
+            // No-op for mode=separate (Case 2 bypass) or when coherence disabled.
+            chargeCoherenceFlush(tid);
             thread_domain[tid].store(DOMAIN_DEVICE);
             g_in_device_region.store(true);
             ++offload_count;
@@ -1681,6 +1740,11 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         snapshotRoiBaseCyc();
         // Co-sim: ROI = offload region (see the twin handler above).
         if (g_cosim_mode && !g_cosim_no_offload && tid < MAX_THREADS) {
+            // PART A (1.7.2): Case-1 coherence flush charged on the HOST core
+            // BEFORE the device migration (thread still on its host core), so the
+            // writeback cost lands on the host and inside the ROI/task window.
+            // No-op for mode=separate (Case 2 bypass) or when coherence disabled.
+            chargeCoherenceFlush(tid);
             thread_domain[tid].store(DOMAIN_DEVICE);
             g_in_device_region.store(true);
             ++offload_count;

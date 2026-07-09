@@ -932,6 +932,19 @@ struct UnifiedConfig {
     double bridge_protocol_overhead_ns = -1.0; // -1 = auto
     double bridge_uncached_ns = -1.0;          // pure serialized crossing (-1 = auto)
 
+    // Case-1 COHERENCE flush accounting (1.7.2, HANDOFF ISSUE 3). Emitted as
+    // sys.coherence.* in system scope; charged on the host core at roi_begin.
+    // mode: "unified" (Case 1, flush inputs + invalidate outputs) or "separate"
+    // (Case 2, cache bypass -> no flush). Present only in the co-sim path.
+    std::string coherence_mode = "unified";        // unified | separate
+    double coherence_writeback_bw_gbs = -1.0;      // host cache writeback BW (-1 = auto from host tech)
+    double coherence_flush_fixed_ns = 200.0;       // fixed flush/wbinvd latency (ns)
+    // Kernel input+output working-set footprint (bytes). REG_DEVBUF is retired to
+    // a no-op (no live buffer registration), so this is an explicit config field
+    // with a conservative default. LIMITATION: no per-run WSS tracking; the whole
+    // footprint is treated as dirty (upper bound, conservative-against-PIM).
+    long long coherence_footprint_bytes = 16777216;  // 16 MiB default
+
     // Output configuration
     std::string stats_file;
     bool enable_detailed_stats;
@@ -977,6 +990,16 @@ struct UnifiedConfig {
         // per-tech default (getHostPathAdderNs); >=0 = user override (0 = none).
         // HOST-ROLE ONLY -- never applied to device (PE) memory pricing.
         double mem_latency_adder_ns = -1.0;
+
+        // Host-path DECOMPOSITION overrides (1.7.2). Optional per-component
+        // overrides that MERGE over the per-tech default split (getHostPathSplit).
+        // -1 = use the default for that component; >=0 = override. Setting ANY of
+        // these AND mem_latency_adder_ns is a config error (competing totals).
+        double host_path_fabric_ns    = -1.0;
+        double host_path_coherence_ns = -1.0;
+        double host_path_mc_pipeline_ns = -1.0;
+        double host_path_phy_ns       = -1.0;
+        bool   host_path_any_set = false;   // true if any host_path.* was given
 
         // Host NoC config (HOST with num_cores>1): analytic crossbar fabric.
         // 1-core hosts have no fabric (crossbar degenerates at a single core).
@@ -4437,24 +4460,60 @@ static HostMemBW getHostMemBandwidth(const std::string& tech_in,
 // CACHED demand-miss price only. The PURE serialized/uncached price
 // (mem.uncached_ns, DDR5 ~200 / HBM3 ~335) belongs to the bridge/bypass step and
 // is NOT implemented here.
-static double getHostPathAdderNs(const std::string& tech_in) {
+//
+// HOST-PATH DECOMPOSITION (1.7.2, HANDOFF "HOST-PATH DECOMPOSITION KNOBS"):
+// the per-tech adder is expressed as the SUM of four documented components --
+//   fabric_ns      IO-die / mesh / interconnect traversal (core->MC path)
+//   coherence_ns   snoop / directory / coherence-engine latency
+//   mc_pipeline_ns memory-controller command pipeline + queueing depth
+//   phy_ns         PHY / command-interface wire + serialization tail
+// The TOTAL is measurement-anchored (real-socket idle load-to-use, per the
+// LITERATURE ANCHORS above); the four-way SPLIT is INFERRED -- no published
+// per-component decomposition exists (user acceptance 2026-07-09: docs state
+// the total is measured, the default split is a documented allocation, and any
+// override makes the split the user's own modeling choice). The two anchored
+// splits are HBM3 (90+60+45+8=203) and DDR5 (45+15+13+4=77); the rest are
+// INFERRED allocations that SUM EXACTLY to the shipped 1.7.0 totals.
+struct HostPathSplit {
+    double fabric_ns    = 0.0;
+    double coherence_ns = 0.0;
+    double mc_pipeline_ns = 0.0;
+    double phy_ns       = 0.0;
+    double sum() const { return fabric_ns + coherence_ns + mc_pipeline_ns + phy_ns; }
+};
+
+// Per-tech DEFAULT decomposition. Every row SUMS to the pre-1.7.2 adder total
+// (see getHostPathAdderNs history: DDR5 77, DDR4 83, DDR3 82, LPDDR5 84,
+// GDDR6 120, HBM2 98, HBM3 203, SRAM/STT 0, ReRAM/PCM 77). LOCKED rows carry
+// the two anchored splits; INFERRED rows apportion the same buckets sensibly.
+static HostPathSplit getHostPathSplit(const std::string& tech_in) {
     std::string tech = tech_in;
     std::transform(tech.begin(), tech.end(), tech.begin(), ::toupper);
-    if (tech == "DDR5" || tech == "DRAM")                 return 77.0;
-    if (tech == "DDR4")                                   return 83.0;
-    if (tech == "DDR3")                                   return 82.0;
-    if (tech == "LPDDR5")                                 return 84.0;
-    if (tech == "GDDR6")                                  return 120.0;
-    if (tech == "HBM2")                                   return 98.0;
-    if (tech == "HBM3")                                   return 203.0;
-    if (tech == "SRAM")                                   return 0.0;
-    if (tech == "STT_MRAM" || tech == "STTMRAM" ||
-        tech == "STT-MRAM" || tech == "MRAM")             return 0.0;
-    if (tech == "RERAM" || tech == "RESISTIVE" ||
-        tech == "MEMRISTOR")                              return 77.0;  // DDR5-class fabric
-    if (tech == "PCM" || tech == "PCRAM" ||
-        tech == "3DXPOINT")                               return 77.0;  // DDR5-class fabric
-    return 77.0;  // unknown DRAM-class default
+    HostPathSplit s;
+    if (tech == "DDR5" || tech == "DRAM")      { s = {45, 15, 13, 4}; }  // LOCKED  sum 77
+    else if (tech == "DDR4")                   { s = {48, 16, 15, 4}; }  // INFERRED sum 83
+    else if (tech == "DDR3")                   { s = {48, 16, 14, 4}; }  // INFERRED sum 82
+    else if (tech == "LPDDR5")                 { s = {49, 16, 15, 4}; }  // INFERRED sum 84
+    else if (tech == "GDDR6")                  { s = {60, 20, 34, 6}; }  // INFERRED sum 120 (deep graphics MC reorder)
+    else if (tech == "HBM2")                   { s = {43, 29, 22, 4}; }  // INFERRED sum 98  (interposer, HBM3-scaled)
+    else if (tech == "HBM3")                   { s = {90, 60, 45, 8}; }  // LOCKED  sum 203
+    else if (tech == "SRAM")                   { s = {0, 0, 0, 0}; }     // on-die, below any fabric
+    else if (tech == "STT_MRAM" || tech == "STTMRAM" ||
+             tech == "STT-MRAM" || tech == "MRAM") { s = {0, 0, 0, 0}; } // on-die, same as SRAM
+    else if (tech == "RERAM" || tech == "RESISTIVE" ||
+             tech == "MEMRISTOR")              { s = {45, 15, 13, 4}; }  // DDR5-class fabric, sum 77
+    else if (tech == "PCM" || tech == "PCRAM" ||
+             tech == "3DXPOINT")               { s = {45, 15, 13, 4}; }  // DDR5-class fabric, sum 77
+    else                                       { s = {45, 15, 13, 4}; }  // unknown DRAM-class default, sum 77
+    return s;
+}
+
+// Aggregate per-tech host-path adder (ns) = sum of the four decomposed
+// components. Backward-compatible: same effective totals as pre-1.7.2. Retained
+// as the documented aggregate entry point (emitHostMemBlock now composes the
+// split directly to allow per-component overrides).
+[[maybe_unused]] static double getHostPathAdderNs(const std::string& tech_in) {
+    return getHostPathSplit(tech_in).sum();
 }
 
 // Emit the shared sys.mem block as the HOST main memory (Mode-1: host tech =
@@ -4488,9 +4547,21 @@ static void emitHostMemBlock(std::ostream& out, const UnifiedConfig& config,
     // The adder is HOST-ROLE ONLY -- device (PE) pricing never routes here.
     int phys_latency = getMemoryLatencyCycles(host.memory_tech, host_freq, false, 0.0);
     phys_latency = std::max(1, phys_latency);
-    double adder_ns = (host.mem_latency_adder_ns >= 0.0)
-                          ? host.mem_latency_adder_ns
-                          : getHostPathAdderNs(host.memory_tech);
+    // Host-path adder (ns): the aggregate override wins outright; otherwise the
+    // per-tech DECOMPOSED default split (getHostPathSplit) with any per-component
+    // host_path.* override merged over it (1.7.2). Aggregate vs decomposed forms
+    // are mutually exclusive (enforced as a config error at parse time).
+    double adder_ns;
+    if (host.mem_latency_adder_ns >= 0.0) {
+        adder_ns = host.mem_latency_adder_ns;
+    } else {
+        HostPathSplit sp = getHostPathSplit(host.memory_tech);
+        if (host.host_path_fabric_ns    >= 0.0) sp.fabric_ns    = host.host_path_fabric_ns;
+        if (host.host_path_coherence_ns >= 0.0) sp.coherence_ns = host.host_path_coherence_ns;
+        if (host.host_path_mc_pipeline_ns >= 0.0) sp.mc_pipeline_ns = host.host_path_mc_pipeline_ns;
+        if (host.host_path_phy_ns       >= 0.0) sp.phy_ns       = host.host_path_phy_ns;
+        adder_ns = sp.sum();
+    }
     int adder_cycles = static_cast<int>(std::round(adder_ns * host_freq / 1000.0));
     if (adder_cycles < 0) adder_cycles = 0;
     int mem_latency = std::max(1, phys_latency + adder_cycles);
@@ -4499,10 +4570,23 @@ static void emitHostMemBlock(std::ostream& out, const UnifiedConfig& config,
     // host-path adder (1-core host: hop 0, idle MC queue ~0).
     if (getenv("PIMID_DEBUG_HOSTMEM")) {
         double inv_ghz = 1000.0 / host_freq;  // ns per cycle
+        HostPathSplit dbg = getHostPathSplit(host.memory_tech);
+        if (host.host_path_fabric_ns    >= 0.0) dbg.fabric_ns    = host.host_path_fabric_ns;
+        if (host.host_path_coherence_ns >= 0.0) dbg.coherence_ns = host.host_path_coherence_ns;
+        if (host.host_path_mc_pipeline_ns >= 0.0) dbg.mc_pipeline_ns = host.host_path_mc_pipeline_ns;
+        if (host.host_path_phy_ns       >= 0.0) dbg.phy_ns       = host.host_path_phy_ns;
         std::cerr << "[host-mem] tech=" << host.memory_tech
                   << " phys=" << (phys_latency * inv_ghz) << "ns"
-                  << " adder=" << adder_ns << "ns"
-                  << " effective_idle=" << (mem_latency * inv_ghz) << "ns"
+                  << " adder=" << adder_ns << "ns";
+        if (host.mem_latency_adder_ns >= 0.0) {
+            std::cerr << " (aggregate override)";
+        } else {
+            std::cerr << " [fabric=" << dbg.fabric_ns
+                      << " coherence=" << dbg.coherence_ns
+                      << " mc_pipeline=" << dbg.mc_pipeline_ns
+                      << " phy=" << dbg.phy_ns << "]";
+        }
+        std::cerr << " effective_idle=" << (mem_latency * inv_ghz) << "ns"
                   << " (" << mem_latency << " cy @ " << host_freq << "MHz)\n";
     }
 
@@ -4684,6 +4768,45 @@ static void emitZSimBridgeBlock(std::ostream& out, const BridgeDefaults& d,
         << bytes_per_cycle << "\";\n" << std::defaultfloat;
     out << "        uncachedCycles = " << unc_cyc << ";\n";
     out << "    };\n";
+}
+
+// Emit the sys.coherence { ... } block (1.7.2, Case-1 flush accounting). The
+// writeback bandwidth is cycle-converted to bytes/cycle at the host/reference
+// clock the host cores run on; footprintBytes stays as a decimal string
+// (64-bit). mode=unified charges the flush at roi_begin; mode=separate emits the
+// block disabled-for-flush (Case-2 cache bypass -> no flush, the 1.7.1 bridge
+// bulk-DMA path already prices the crossing).
+static void emitZSimCoherenceBlock(std::ostream& out, const UnifiedConfig& config,
+                                   double writeback_bw_gbs, double ref_freq_mhz) {
+    double f = (ref_freq_mhz > 0.0) ? ref_freq_mhz : 1000.0;
+    bool unified = (config.coherence_mode != "separate");
+    uint32_t fixed_cyc = (uint32_t)(config.coherence_flush_fixed_ns * f / 1000.0 + 0.5);
+    // bytes/cycle at the host/reference clock: GB/s * 1e9 / (MHz * 1e6).
+    double wb_bytes_per_cycle = (writeback_bw_gbs > 0.0)
+                                    ? (writeback_bw_gbs * 1e9) / (f * 1e6)
+                                    : 0.0;
+    out << "\n    coherence = {\n";
+    out << "        enabled = 1;\n";
+    out << "        mode = " << (unified ? 0 : 1) << ";  // 0=unified(flush) 1=separate(bypass)\n";
+    out << "        footprintBytes = \"" << config.coherence_footprint_bytes << "\";\n";
+    out << "        writebackBytesPerCycle = \"" << std::fixed << std::setprecision(4)
+        << wb_bytes_per_cycle << "\";\n" << std::defaultfloat;
+    out << "        flushFixedCycles = " << fixed_cyc << ";\n";
+    out << "    };\n";
+    if (getenv("PIMID_DEBUG_COHERENCE")) {
+        // Login-node observable: the deterministic flush charge the plugin will
+        // apply at roi_begin (unified) or skip (separate).
+        double flush_cyc = fixed_cyc;
+        if (unified && wb_bytes_per_cycle > 0.0 && config.coherence_footprint_bytes > 0)
+            flush_cyc += std::ceil((double)config.coherence_footprint_bytes / wb_bytes_per_cycle);
+        double flush_ns = flush_cyc * 1000.0 / f;
+        std::cerr << "[coherence] mode=" << (unified ? "unified" : "separate")
+                  << " footprint=" << config.coherence_footprint_bytes << "B"
+                  << " writeback_bw=" << writeback_bw_gbs << "GB/s"
+                  << " fixed=" << config.coherence_flush_fixed_ns << "ns"
+                  << " -> flush=" << (unified ? (uint64_t)flush_cyc : 0)
+                  << " cy (" << (unified ? flush_ns : 0.0) << "ns @ " << f << "MHz)\n";
+    }
 }
 
 static std::string generateSystemConfig(UnifiedConfig& config) {
@@ -5005,6 +5128,24 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
             BridgeDefaults bd = resolveBridge(config, dev_node->memory_tech);
             config.bridge_present = true;
             emitZSimBridgeBlock(cfg, bd, ref_freq);
+
+            // -- Case-1 COHERENCE flush accounting (1.7.2) --
+            // Charged on the host core at roi_begin in co-sim. Writeback BW
+            // defaults to the HOST memory aggregate bandwidth (per-channel x
+            // channels); user override via system.coherence.writeback_bw_gbs.
+            const UnifiedConfig::SystemNode* host_node2 = nullptr;
+            for (const auto& node : config.system_nodes) {
+                if (node.role == UnifiedConfig::SystemNode::HOST) { host_node2 = &node; break; }
+            }
+            double wb_bw_gbs = config.coherence_writeback_bw_gbs;
+            if (wb_bw_gbs <= 0.0 && host_node2) {
+                HostMemBW hbw = getHostMemBandwidth(host_node2->memory_tech,
+                                                    config.num_banks, config.cache_line_size);
+                if (host_node2->mem_bandwidth_mbs > 0) hbw.per_channel_mbs = host_node2->mem_bandwidth_mbs;
+                if (host_node2->mem_channels > 0)      hbw.channels = host_node2->mem_channels;
+                wb_bw_gbs = ((double)hbw.per_channel_mbs * (double)hbw.channels) / 1000.0;  // MB/s -> GB/s
+            }
+            emitZSimCoherenceBlock(cfg, config, wb_bw_gbs, ref_freq);
         }
     }
 
@@ -5829,7 +5970,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.7.1" << std::endl;
+    std::cout << "Version 1.7.2" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -6751,6 +6892,38 @@ int main(int argc, char** argv) {
                             // auto per-tech default (getHostPathAdderNs).
                             node.mem_latency_adder_ns =
                                 h["memory"]["latency_adder_ns"].as<double>(node.mem_latency_adder_ns);
+                            // Host-path DECOMPOSITION overrides (1.7.2). Partial
+                            // override merges over the per-tech default split.
+                            if (h["memory"]["host_path"]) {
+                                auto hp = h["memory"]["host_path"];
+                                if (hp["fabric_ns"]) {
+                                    node.host_path_fabric_ns = hp["fabric_ns"].as<double>();
+                                    node.host_path_any_set = true;
+                                }
+                                if (hp["coherence_ns"]) {
+                                    node.host_path_coherence_ns = hp["coherence_ns"].as<double>();
+                                    node.host_path_any_set = true;
+                                }
+                                if (hp["mc_pipeline_ns"]) {
+                                    node.host_path_mc_pipeline_ns = hp["mc_pipeline_ns"].as<double>();
+                                    node.host_path_any_set = true;
+                                }
+                                if (hp["phy_ns"]) {
+                                    node.host_path_phy_ns = hp["phy_ns"].as<double>();
+                                    node.host_path_any_set = true;
+                                }
+                            }
+                            // Competing-totals guard: the aggregate adder and the
+                            // decomposed host_path form are mutually exclusive.
+                            if (h["memory"]["latency_adder_ns"] && node.host_path_any_set) {
+                                std::cerr << "ERROR: host '" << node.name
+                                          << "' sets BOTH memory.latency_adder_ns AND "
+                                          << "memory.host_path.* -- competing host-path "
+                                          << "totals. Use one form only (aggregate "
+                                          << "latency_adder_ns OR the decomposed "
+                                          << "host_path block)." << std::endl;
+                                exit(1);
+                            }
                         }
                         // Host NoC (analytic crossbar): topology/model/hop_cycles.
                         if (h["noc"]) {
@@ -6916,6 +7089,18 @@ int main(int argc, char** argv) {
                     config.bridge_protocol_overhead_ns =
                         br["protocol_overhead_ns"].as<double>(config.bridge_protocol_overhead_ns);
                     config.bridge_uncached_ns = br["uncached_ns"].as<double>(config.bridge_uncached_ns);
+                }
+
+                // Case-1 COHERENCE flush accounting (1.7.2). All fields optional.
+                if (sys["coherence"]) {
+                    auto co = sys["coherence"];
+                    config.coherence_mode = co["mode"].as<std::string>(config.coherence_mode);
+                    config.coherence_writeback_bw_gbs =
+                        co["writeback_bw_gbs"].as<double>(config.coherence_writeback_bw_gbs);
+                    config.coherence_flush_fixed_ns =
+                        co["flush_fixed_ns"].as<double>(config.coherence_flush_fixed_ns);
+                    config.coherence_footprint_bytes =
+                        co["footprint_bytes"].as<long long>(config.coherence_footprint_bytes);
                 }
             }
 

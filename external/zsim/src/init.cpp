@@ -768,6 +768,28 @@ static void InitSystem(Config& config) {
              zinfo->bridge.bytesPerCycle, zinfo->bridge.channels, zinfo->bridge.uncachedCycles);
     }
 
+    // Case-1 COHERENCE flush accounting (1.7.2). Standalone top-level block,
+    // read whether or not a DRAM hierarchy is present. Charged on the host core
+    // at roi_begin in system-scope co-sim (see qemu_zsim_plugin coherenceFlushCycles).
+    if (config.exists("sys.coherence")) {
+        zinfo->coherence.enabled = config.get<uint32_t>("sys.coherence.enabled", 0) != 0;
+        zinfo->coherence.mode = config.get<uint32_t>("sys.coherence.mode", 0);
+        // footprintBytes is 64-bit; ZSim config get<> lacks uint64_t, so parse
+        // the string form the emitter writes.
+        {
+            const char* fb = config.get<const char*>("sys.coherence.footprintBytes", "0");
+            zinfo->coherence.footprintBytes = strtoull(fb, nullptr, 10);
+        }
+        zinfo->coherence.flushFixedCycles = config.get<uint32_t>("sys.coherence.flushFixedCycles", 0);
+        const char* wbpc = config.get<const char*>("sys.coherence.writebackBytesPerCycle", "0.0");
+        zinfo->coherence.writebackBytesPerCycle = atof(wbpc);
+        info("[ZSim] Case-1 coherence flush %s (mode=%s, footprint=%llu B, %.4f B/cyc writeback, fixed=%u cyc)",
+             zinfo->coherence.enabled ? "enabled" : "present-disabled",
+             zinfo->coherence.mode == 0 ? "unified" : "separate",
+             (unsigned long long)zinfo->coherence.footprintBytes,
+             zinfo->coherence.writebackBytesPerCycle, zinfo->coherence.flushFixedCycles);
+    }
+
     // Read node map (multi-host/multi-device system mode)
     if (config.exists("sys.nodeMap")) {
         zinfo->nodeMap.numNodes = config.get<uint32_t>("sys.nodeMap.numNodes", 0);

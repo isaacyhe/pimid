@@ -375,6 +375,26 @@ struct GlobSimInfo {
         uint32_t uncachedCycles = 0;          // pure serialized cross-bridge access
     } bridge;
 
+    // Case-1 COHERENCE flush accounting (1.7.2, HANDOFF ISSUE 3). In a unified
+    // address space the PEs dereference host pointers, so at roi_begin (offload
+    // start) the host must write back dirty INPUT lines (so the device sees
+    // current data) and invalidate OUTPUT lines (so the host re-reads device
+    // results). Analytic upper-bound charge on the HOST core before the device
+    // clock starts: cycles = footprintBytes/writebackBytesPerCycle + flushFixed.
+    // mode: 0 = unified (Case 1, flush) ; 1 = separate (Case 2, cache bypass, no
+    // flush). NO_OFFLOAD baselines never enter the co-sim ROI block, so they are
+    // never charged (self-zeroing).
+    struct {
+        bool enabled = false;
+        uint32_t mode = 0;                    // 0=unified(flush), 1=separate(bypass)
+        uint64_t footprintBytes = 0;          // input+output working-set (upper bound)
+        double   writebackBytesPerCycle = 0.0;// host cache writeback BW @ ref clock
+        uint32_t flushFixedCycles = 0;        // fixed flush/wbinvd latency
+        // Stats (accumulated at each charged roi_begin flush)
+        volatile uint64_t flushCount = 0;
+        volatile uint64_t flushCyclesCharged = 0;
+    } coherence;
+
     // Multi-host/multi-device node map
     struct {
         uint32_t numNodes = 0;
