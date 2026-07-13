@@ -38,10 +38,10 @@ int main(int argc, char* argv[]) {
 
     /* Device organization + D1 identity-mapping guard: ranks must == num_pes. */
     pimid_devorg_t dev = pimid_devorg_from_args(argc, argv);
-    if (dev.num_pes != nprocs) {
+    if (nprocs > dev.num_pes) {
         if (rank == 0)
             fprintf(stderr, "pimid_devorg: MPI world size (%d) != num_pes (%d); "
-                    "D1 identity mapping requires ranks == PEs. Aborting.\n",
+                    "identity mapping requires ranks <= PEs (rank r -> slot r). Aborting.\n",
                     nprocs, dev.num_pes);
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
