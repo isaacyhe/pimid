@@ -1,12 +1,26 @@
 /* bfs_mpi.c — Breadth-First Search on random graph (adjacency list via CSR)
  * MPI parallelization. All ranks share full graph and dist[]. Frontier
  * expansion is split across ranks; Allgatherv collects candidates, then
- * all ranks perform identical dedup to maintain consistent state. */
+ * all ranks perform identical dedup to maintain consistent state.
+ *
+ * Device-organization aware (PIMID), mirroring bfs_omp.c's choice of WHICH
+ * arrays get slotted: the CSR (row_ptr, col_idx) and dist go in the PE slot;
+ * the frontier/candidate work queues stay host-side (they ARE the shared
+ * structure). D1 identity mapping -- rank r owns PE r's slot (enforced ranks ==
+ * num_pes). STRUCTURAL NOTE: unlike bfs_omp (which owner-partitions the CSR by
+ * vertex range because OMP threads share one address space), bfs_mpi replicates
+ * the FULL graph + dist on every rank (its Allgatherv model), so each rank
+ * SPMD-relocates its OWN full replicated row_ptr/col_idx/dist into its OWN PE
+ * slot -- analogous to gemv_mpi slotting its replicated x. The ROI's frontier
+ * expansion + dedup then read/write the CSR and dist LOCAL; the cross-PE traffic
+ * is the Allgatherv (priced by the NoC model). Arithmetic is identical. Coarse
+ * placement runs the host-layout path. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <mpi.h>
 #include "zsim_hooks.h"
+#include "../../include/pimid_devorg.h"
 
 #define DEFAULT_VERTICES 512
 #define DEFAULT_DEGREE   8
@@ -32,6 +46,16 @@ int main(int argc, char* argv[]) {
     int V = parse_int_arg(argc, argv, "--vertices", DEFAULT_VERTICES);
     int deg = parse_int_arg(argc, argv, "--degree", DEFAULT_DEGREE);
     int source = parse_int_arg(argc, argv, "--source", 0);
+
+    /* Device organization + D1 identity-mapping guard: ranks must == num_pes. */
+    pimid_devorg_t dev = pimid_devorg_from_args(argc, argv);
+    if (dev.num_pes != nprocs) {
+        if (rank == 0)
+            fprintf(stderr, "pimid_devorg: MPI world size (%d) != num_pes (%d); "
+                    "D1 identity mapping requires ranks == PEs. Aborting.\n",
+                    nprocs, dev.num_pes);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
 
     /* All ranks generate the same graph with the same seed */
     uint32_t seed = 42;
@@ -60,6 +84,43 @@ int main(int argc, char* argv[]) {
     frontier[0] = source;
     int fsize = 1;
 
+    /* ---- DATA PREP (before ROI, not timed): this rank's full replicated CSR +
+     * dist -> its PE slot. Slot layout: [row_ptr V+1][col_idx V*deg][dist V].
+     * rp/ci/ds are the working pointers (slot-resident when prepped).
+     * Assumes thread-MPI (the default/only supported mode): slot r maps to PE
+     * r's units directly. Under the retired PIMID_MPI_PROCESS=1 legacy mode the
+     * simulator's per-rank unit rotation (pe_memory_interface.h) would
+     * double-shift these prepped slots. */
+    int prep = pimid_devorg_needs_prep(&dev);
+    size_t need = ((size_t)(V + 1) + (size_t)V * deg + (size_t)V) * sizeof(int);
+    size_t slot_bytes = 0;
+    int* dbuf = NULL;
+    int* rp = row_ptr;
+    int* ci = col_idx;
+    int* ds = dist;
+    if (prep) {
+        dbuf = (int*)pimid_devorg_alloc(&dev, &slot_bytes);
+        if (!dbuf || need > slot_bytes) {
+            fprintf(stderr, "rank %d: devorg: per-PE need %zu > slot %zu (or alloc "
+                    "fail); running host-layout (no prep)\n", rank, need, slot_bytes);
+            prep = 0;
+        }
+    }
+    if (prep) {
+        int* slot = (int*)pimid_devorg_pe_slot(dbuf, rank, slot_bytes);
+        rp = slot;
+        ci = slot + (V + 1);
+        ds = slot + (V + 1) + (size_t)V * deg;
+        memcpy(rp, row_ptr, (size_t)(V + 1) * sizeof(int));
+        memcpy(ci, col_idx, (size_t)V * deg * sizeof(int));
+        memcpy(ds, dist, (size_t)V * sizeof(int));
+    }
+
+    if (prep)
+        fprintf(stderr, "[devorg] PREP ACTIVE: kernel=bfs level=%s pes=%d "
+                "rank=%d slot_bytes=%zu\n",
+                pimid_devorg_level_name(dev.level), dev.num_pes, rank, slot_bytes);
+
     MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0) zsim_roi_begin();
 
@@ -77,9 +138,9 @@ int main(int argc, char* argv[]) {
         int ncand = 0;
         for (int f = my_start; f < my_start + my_count; f++) {
             int u = frontier[f];
-            for (int e = row_ptr[u]; e < row_ptr[u + 1]; e++) {
-                int v = col_idx[e];
-                if (dist[v] == -1)
+            for (int e = rp[u]; e < rp[u + 1]; e++) {
+                int v = ci[e];
+                if (ds[v] == -1)
                     candidates[ncand++] = v;
             }
         }
@@ -99,8 +160,8 @@ int main(int argc, char* argv[]) {
         int new_fsize = 0;
         for (int i = 0; i < total_cand; i++) {
             int v = all_candidates[i];
-            if (dist[v] == -1) {
-                dist[v] = level;
+            if (ds[v] == -1) {
+                ds[v] = level;
                 frontier[new_fsize++] = v;
             }
         }
@@ -108,6 +169,10 @@ int main(int argc, char* argv[]) {
     }
 
     if (rank == 0) zsim_roi_end();
+
+    /* Gather this rank's dist back to host layout for the (untimed) check. */
+    if (prep)
+        memcpy(dist, ds, (size_t)V * sizeof(int));
 
     if (rank == 0) {
         long visited = 0;

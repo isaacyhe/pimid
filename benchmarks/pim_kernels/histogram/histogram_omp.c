@@ -69,6 +69,9 @@ int main(int argc, char* argv[]) {
             memset(dpe + chunk, 0, (size_t)nbins * sizeof(int));  /* local hist */
         }
 
+        fprintf(stderr, "[devorg] PREP ACTIVE: kernel=histogram level=%s pes=%d "
+                "slot_bytes=%zu\n",
+                pimid_devorg_level_name(dev.level), P, slot_bytes);
         zsim_roi_begin();
         #pragma omp parallel for schedule(static, 1)
         for (int p = 0; p < P; p++) {

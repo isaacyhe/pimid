@@ -9,7 +9,7 @@ HOOKS    := ../../external/zsim/misc/hooks
 CXXFLAGS := -std=c++11 -O2 -Wall -I$(HOOKS)
 LDFLAGS  := -lpthread
 
-HOSTPHASE := $(foreach k,reduction histogram spmv stencil stream gemv,$(k)_hostphase)
+HOSTPHASE := $(foreach k,reduction histogram spmv stencil stream gemv bfs,$(k)_hostphase)
 
 all: $(HOSTPHASE)
 

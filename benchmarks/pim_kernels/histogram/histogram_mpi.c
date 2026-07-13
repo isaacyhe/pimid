@@ -1,11 +1,20 @@
 /* histogram_mpi.c — Histogram construction: random scatter into bins
  * MPI domain decomposition. Each rank processes N/nprocs data elements
- * into a local histogram, then MPI_Reduce sums all local histograms. */
+ * into a local histogram, then MPI_Reduce sums all local histograms.
+ *
+ * Device-organization aware (PIMID), mirroring histogram_omp.c: the simulator
+ * prices each PE access by LOCATION. D1 identity mapping -- rank r owns PE r's
+ * slot (enforced ranks == num_pes). Prep (before the ROI, untimed, SPMD): each
+ * rank relocates ITS input chunk + its private histogram into ITS own PE slot;
+ * the ROI scan is then PE-local. Slot layout: [chunk][local hist]. The final
+ * MPI_Reduce (the shared cross-PE step) is unchanged. Coarse placement runs the
+ * host path. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <mpi.h>
 #include "zsim_hooks.h"
+#include "../../include/pimid_devorg.h"
 
 #define DEFAULT_SIZE 16384
 #define DEFAULT_BINS 256
@@ -30,6 +39,16 @@ int main(int argc, char* argv[]) {
 
     int N = parse_int_arg(argc, argv, "--size", DEFAULT_SIZE);
     int nbins = parse_int_arg(argc, argv, "--bins", DEFAULT_BINS);
+
+    /* Device organization + D1 identity-mapping guard: ranks must == num_pes. */
+    pimid_devorg_t dev = pimid_devorg_from_args(argc, argv);
+    if (dev.num_pes != nprocs) {
+        if (rank == 0)
+            fprintf(stderr, "pimid_devorg: MPI world size (%d) != num_pes (%d); "
+                    "D1 identity mapping requires ranks == PEs. Aborting.\n",
+                    nprocs, dev.num_pes);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
 
     /* All ranks generate the full data array with the same seed,
      * but each rank only processes its chunk */
@@ -59,15 +78,57 @@ int main(int argc, char* argv[]) {
 
     if (!local_hist) { fprintf(stderr, "rank %d: malloc failed\n", rank); MPI_Abort(MPI_COMM_WORLD, 1); }
 
+    /* ---- DATA PREP (before ROI, not timed): this rank's chunk + private hist
+     * -> its PE slot. Slot layout: [chunk][local hist].
+     * Assumes thread-MPI (the default/only supported mode): slot r maps to PE
+     * r's units directly. Under the retired PIMID_MPI_PROCESS=1 legacy mode the
+     * simulator's per-rank unit rotation (pe_memory_interface.h) would
+     * double-shift these prepped slots. */
+    int prep = pimid_devorg_needs_prep(&dev);
+    size_t need = ((size_t)local_n + (size_t)nbins) * sizeof(int);
+    size_t slot_bytes = 0;
+    int* dbuf = NULL;
+    int* dpe = NULL, *hpe = NULL;
+    if (prep) {
+        dbuf = (int*)pimid_devorg_alloc(&dev, &slot_bytes);
+        if (!dbuf || need > slot_bytes) {
+            fprintf(stderr, "rank %d: devorg: per-PE need %zu > slot %zu (or alloc "
+                    "fail); running host-layout (no prep)\n", rank, need, slot_bytes);
+            prep = 0;
+        }
+    }
+    if (prep) {
+        dpe = (int*)pimid_devorg_pe_slot(dbuf, rank, slot_bytes);
+        hpe = dpe + local_n;
+        memcpy(dpe, local_data, (size_t)local_n * sizeof(int));
+        memset(hpe, 0, (size_t)nbins * sizeof(int));
+    }
+
+    if (prep)
+        fprintf(stderr, "[devorg] PREP ACTIVE: kernel=histogram level=%s pes=%d "
+                "rank=%d slot_bytes=%zu\n",
+                pimid_devorg_level_name(dev.level), dev.num_pes, rank, slot_bytes);
+
     MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0) zsim_roi_begin();
 
-    /* Kernel: each rank builds a local histogram from its data chunk */
-    for (int i = 0; i < local_n; i++)
-        local_hist[local_data[i]]++;
+    /* Kernel: each rank builds a local histogram from its data chunk
+     * (on slot pointers if prepped) */
+    if (prep) {
+        for (int i = 0; i < local_n; i++)
+            hpe[dpe[i]]++;
+    } else {
+        for (int i = 0; i < local_n; i++)
+            local_hist[local_data[i]]++;
+    }
 
     if (rank == 0) zsim_roi_end();
     MPI_Barrier(MPI_COMM_WORLD);
+
+    /* Gather this rank's private histogram back to host layout for the
+     * MPI_Reduce (post-ROI, not timed). */
+    if (prep)
+        memcpy(local_hist, hpe, (size_t)nbins * sizeof(int));
 
     /* Reduce local histograms to global histogram on rank 0 */
     MPI_Reduce(local_hist, global_hist, nbins, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);

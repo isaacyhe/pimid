@@ -97,6 +97,9 @@ int main(int argc, char* argv[]) {
             memcpy(s_dist[p], dist + v0, (size_t)(v1 - v0) * sizeof(int));
         }
 
+        fprintf(stderr, "[devorg] PREP ACTIVE: kernel=bfs level=%s pes=%d "
+                "slot_bytes=%zu\n",
+                pimid_devorg_level_name(dev.level), P, slot_bytes);
         zsim_roi_begin();
         int level = 0;
         while (fsize > 0) {

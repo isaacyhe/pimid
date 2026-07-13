@@ -1,10 +1,18 @@
 /* stream_triad_mpi.c — STREAM Triad: a[i] = b[i] + scalar * c[i]
- * MPI domain decomposition. Each rank processes N/nprocs elements. */
+ * MPI domain decomposition. Each rank processes N/nprocs elements.
+ *
+ * Device-organization aware (PIMID), mirroring stream_triad_omp.c: the
+ * simulator prices each PE access by LOCATION. D1 identity mapping -- rank r
+ * owns PE r's slot (enforced ranks == num_pes). Prep (before the ROI, untimed,
+ * SPMD): each rank relocates ITS b + c chunk into ITS own PE slot; the ROI
+ * writes a's chunk there. Slot layout: [a chunk][b chunk][c chunk]. Coarse /
+ * host-shared placement runs the original host-layout path. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <mpi.h>
 #include "zsim_hooks.h"
+#include "../../include/pimid_devorg.h"
 
 #define DEFAULT_SIZE 8192
 
@@ -24,6 +32,16 @@ int main(int argc, char* argv[]) {
     int N = parse_int_arg(argc, argv, "--size", DEFAULT_SIZE);
     float scalar = 3.0f;
 
+    /* Device organization + D1 identity-mapping guard: ranks must == num_pes. */
+    pimid_devorg_t dev = pimid_devorg_from_args(argc, argv);
+    if (dev.num_pes != nprocs) {
+        if (rank == 0)
+            fprintf(stderr, "pimid_devorg: MPI world size (%d) != num_pes (%d); "
+                    "D1 identity mapping requires ranks == PEs. Aborting.\n",
+                    nprocs, dev.num_pes);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
     /* Domain decomposition: each rank handles a contiguous chunk */
     int base = N / nprocs;
     int rem  = N % nprocs;
@@ -39,15 +57,56 @@ int main(int argc, char* argv[]) {
         c[i] = 2.0f;
     }
 
+    /* ---- DATA PREP (before ROI, not timed): this rank's chunk -> its PE slot.
+     * Slot layout: [a chunk][b chunk][c chunk], each local_n floats.
+     * Assumes thread-MPI (the default/only supported mode): slot r maps to PE
+     * r's units directly. Under the retired PIMID_MPI_PROCESS=1 legacy mode the
+     * simulator's per-rank unit rotation (pe_memory_interface.h) would
+     * double-shift these prepped slots. */
+    int prep = pimid_devorg_needs_prep(&dev);
+    size_t need = 3ull * (size_t)local_n * sizeof(float);
+    size_t slot_bytes = 0;
+    float* dbuf = NULL;
+    float* ape = NULL, *bpe = NULL, *cpe = NULL;
+    if (prep) {
+        dbuf = (float*)pimid_devorg_alloc(&dev, &slot_bytes);
+        if (!dbuf || need > slot_bytes) {
+            fprintf(stderr, "rank %d: devorg: per-PE need %zu > slot %zu (or alloc "
+                    "fail); running host-layout (no prep)\n", rank, need, slot_bytes);
+            prep = 0;
+        }
+    }
+    if (prep) {
+        ape = (float*)pimid_devorg_pe_slot(dbuf, rank, slot_bytes);
+        bpe = ape + (size_t)local_n;
+        cpe = bpe + (size_t)local_n;
+        memcpy(bpe, b, (size_t)local_n * sizeof(float));
+        memcpy(cpe, c, (size_t)local_n * sizeof(float));
+    }
+
+    if (prep)
+        fprintf(stderr, "[devorg] PREP ACTIVE: kernel=stream_triad level=%s pes=%d "
+                "rank=%d slot_bytes=%zu\n",
+                pimid_devorg_level_name(dev.level), dev.num_pes, rank, slot_bytes);
+
     MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0) zsim_roi_begin();
 
-    /* Kernel: each rank processes its chunk */
-    for (int i = 0; i < local_n; i++)
-        a[i] = b[i] + scalar * c[i];
+    /* Kernel: each rank processes its chunk (on slot pointers if prepped) */
+    if (prep) {
+        for (int i = 0; i < local_n; i++)
+            ape[i] = bpe[i] + scalar * cpe[i];
+    } else {
+        for (int i = 0; i < local_n; i++)
+            a[i] = b[i] + scalar * c[i];
+    }
 
     if (rank == 0) zsim_roi_end();
     MPI_Barrier(MPI_COMM_WORLD);
+
+    /* Gather this rank's chunk of a back to host layout (post-ROI, not timed). */
+    if (prep)
+        memcpy(a, ape, (size_t)local_n * sizeof(float));
 
     /* Checksum: each rank computes partial sum, reduce to rank 0 */
     double local_sum = 0.0;

@@ -71,6 +71,9 @@ int main(int argc, char* argv[]) {
             memset(rowsB[i], 0, (size_t)N * sizeof(float));
         }
 
+        fprintf(stderr, "[devorg] PREP ACTIVE: kernel=stencil_2d level=%s pes=%d "
+                "slot_bytes=%zu\n",
+                pimid_devorg_level_name(dev.level), P, slot_bytes);
         zsim_roi_begin();
         for (int t = 0; t < iters; t++) {
             /* Preserve Dirichlet boundary rows */

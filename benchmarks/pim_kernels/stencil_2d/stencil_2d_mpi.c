@@ -1,11 +1,21 @@
 /* stencil_2d_mpi.c — 2D 5-point Jacobi stencil (nearest-neighbor average)
  * MPI domain decomposition. Rows of the N*N grid are distributed across
- * ranks. Ghost rows are exchanged via MPI_Sendrecv between neighbors. */
+ * ranks. Ghost rows are exchanged via MPI_Sendrecv between neighbors.
+ *
+ * Device-organization aware (PIMID), mirroring stencil_2d_omp.c: the simulator
+ * prices each PE access by LOCATION. D1 identity mapping -- rank r owns PE r's
+ * slot (enforced ranks == num_pes). Prep (before the ROI, untimed, SPMD): each
+ * rank relocates ITS grid + tmp (both including the +2 ghost rows -- D3: halo
+ * rows live INSIDE this rank's slot) into ITS own PE slot; the ROI then reads
+ * its own rows locally. Slot layout: [grid alloc_rows][tmp alloc_rows].
+ * MPI_Sendrecv halo exchange is unchanged (it writes into the slot's ghost
+ * rows). Coarse placement runs the original host-layout path. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <mpi.h>
 #include "zsim_hooks.h"
+#include "../../include/pimid_devorg.h"
 
 #define DEFAULT_SIZE  64
 #define DEFAULT_ITERS 5
@@ -26,6 +36,16 @@ int main(int argc, char* argv[]) {
     int N = parse_int_arg(argc, argv, "--size", DEFAULT_SIZE);
     int iters = parse_int_arg(argc, argv, "--iters", DEFAULT_ITERS);
 
+    /* Device organization + D1 identity-mapping guard: ranks must == num_pes. */
+    pimid_devorg_t dev = pimid_devorg_from_args(argc, argv);
+    if (dev.num_pes != nprocs) {
+        if (rank == 0)
+            fprintf(stderr, "pimid_devorg: MPI world size (%d) != num_pes (%d); "
+                    "D1 identity mapping requires ranks == PEs. Aborting.\n",
+                    nprocs, dev.num_pes);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
     /* Domain decomposition: distribute rows across ranks.
      * Each rank owns local_rows rows of the grid but allocates
      * local_rows+2 rows to hold ghost rows (top and bottom). */
@@ -35,11 +55,15 @@ int main(int argc, char* argv[]) {
     int local_rows  = base + (rank < rem ? 1 : 0);
 
     /* Allocate grid with ghost rows: row 0 = top ghost, rows 1..local_rows = data,
-     * row local_rows+1 = bottom ghost */
+     * row local_rows+1 = bottom ghost. grid_host/tmp_host own the allocations
+     * (freed at the end); grid/tmp are the compute pointers (repointed into the
+     * PE slot when prepped). */
     int alloc_rows = local_rows + 2;
-    float* grid = (float*)calloc((size_t)alloc_rows * N, sizeof(float));
-    float* tmp  = (float*)calloc((size_t)alloc_rows * N, sizeof(float));
-    if (!grid || !tmp) { fprintf(stderr, "rank %d: malloc failed\n", rank); MPI_Abort(MPI_COMM_WORLD, 1); }
+    float* grid_host = (float*)calloc((size_t)alloc_rows * N, sizeof(float));
+    float* tmp_host  = (float*)calloc((size_t)alloc_rows * N, sizeof(float));
+    if (!grid_host || !tmp_host) { fprintf(stderr, "rank %d: malloc failed\n", rank); MPI_Abort(MPI_COMM_WORLD, 1); }
+    float* grid = grid_host;
+    float* tmp  = tmp_host;
 
     /* Initialize: hot boundary on global top row (row 0).
      * If this rank owns global row 0, set it in local row 1. */
@@ -50,6 +74,39 @@ int main(int argc, char* argv[]) {
 
     int up_rank   = (rank > 0) ? rank - 1 : MPI_PROC_NULL;
     int down_rank = (rank < nprocs - 1) ? rank + 1 : MPI_PROC_NULL;
+
+    /* ---- DATA PREP (before ROI, not timed): grid + tmp (each alloc_rows*N,
+     * including the +2 ghost rows -- D3) -> this rank's PE slot.
+     * Slot layout: [grid alloc_rows][tmp alloc_rows].
+     * Assumes thread-MPI (the default/only supported mode): slot r maps to PE
+     * r's units directly. Under the retired PIMID_MPI_PROCESS=1 legacy mode the
+     * simulator's per-rank unit rotation (pe_memory_interface.h) would
+     * double-shift these prepped slots. */
+    int prep = pimid_devorg_needs_prep(&dev);
+    size_t need = 2ull * (size_t)alloc_rows * N * sizeof(float);
+    size_t slot_bytes = 0;
+    float* dbuf = NULL;
+    if (prep) {
+        dbuf = (float*)pimid_devorg_alloc(&dev, &slot_bytes);
+        if (!dbuf || need > slot_bytes) {
+            fprintf(stderr, "rank %d: devorg: per-PE need %zu > slot %zu (or alloc "
+                    "fail); running host-layout (no prep)\n", rank, need, slot_bytes);
+            prep = 0;
+        }
+    }
+    if (prep) {
+        float* gslot = (float*)pimid_devorg_pe_slot(dbuf, rank, slot_bytes);
+        float* tslot = gslot + (size_t)alloc_rows * N;
+        memcpy(gslot, grid_host, (size_t)alloc_rows * N * sizeof(float));
+        memcpy(tslot, tmp_host,  (size_t)alloc_rows * N * sizeof(float));
+        grid = gslot;
+        tmp  = tslot;
+    }
+
+    if (prep)
+        fprintf(stderr, "[devorg] PREP ACTIVE: kernel=stencil_2d level=%s pes=%d "
+                "rank=%d slot_bytes=%zu\n",
+                pimid_devorg_level_name(dev.level), dev.num_pes, rank, slot_bytes);
 
     MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0) zsim_roi_begin();
@@ -109,7 +166,7 @@ int main(int argc, char* argv[]) {
         printf("BENCH_DONE\n");
     }
 
-    free(grid); free(tmp);
+    free(grid_host); free(tmp_host);
     MPI_Finalize();
     return 0;
 }

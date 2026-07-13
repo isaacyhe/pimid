@@ -103,6 +103,20 @@ static inline int pimid_devorg_needs_prep(const pimid_devorg_t* d) {
         && (d->units_per_pe < d->total_units);
 }
 
+/* Human-readable placement-level name (for unambiguous PREP status lines). */
+static inline const char* pimid_devorg_level_name(int lvl) {
+    switch (lvl) {
+        case PIMID_LVL_SUBARRAY:   return "SUBARRAY";
+        case PIMID_LVL_BANK:       return "BANK";
+        case PIMID_LVL_BANK_GROUP: return "BANK_GROUP";
+        case PIMID_LVL_CHIP:       return "CHIP";
+        case PIMID_LVL_RANK:       return "RANK";
+        case PIMID_LVL_CHANNEL:    return "CHANNEL";
+        case PIMID_LVL_LOGIC_DIE:  return "LOGIC_DIE";
+        default:                   return "UNKNOWN";
+    }
+}
+
 /* Bytes per PE slot: the address span of a PE's owned units. */
 static inline size_t pimid_devorg_slot_bytes(const pimid_devorg_t* d) {
     return (size_t)d->units_per_pe * (size_t)d->pages_per_unit * PIMID_PAGE_BYTES;

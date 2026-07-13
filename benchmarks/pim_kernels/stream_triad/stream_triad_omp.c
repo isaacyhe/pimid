@@ -64,6 +64,9 @@ int main(int argc, char* argv[]) {
             memcpy(cpe, c + i0, (size_t)(i1 - i0) * sizeof(float));
         }
 
+        fprintf(stderr, "[devorg] PREP ACTIVE: kernel=stream_triad level=%s pes=%d "
+                "slot_bytes=%zu\n",
+                pimid_devorg_level_name(dev.level), P, slot_bytes);
         zsim_roi_begin();
         #pragma omp parallel for schedule(static, 1)
         for (int pe = 0; pe < P; pe++) {
