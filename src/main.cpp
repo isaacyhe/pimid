@@ -1411,9 +1411,9 @@ static bool dramHTreeBuilder(const std::string& tech,
     } else if (tech == "DDR5") {
         L[0]={512,2.4}; L[1]={256,2.4}; L[2]={256,2.4}; L[3]={128,2.4}; N=1;
     } else if (tech == "LPDDR5") {
-        L[0]={256,1.6}; L[1]={256,1.6}; L[2]={256,1.6}; L[3]={16,1.6};  N=1;
+        L[0]={256,1.6}; L[1]={256,1.6}; L[2]={256,1.6}; L[3]={64,1.6};  N=1;
     } else if (tech == "GDDR6") {
-        L[0]={256,2.0}; L[1]={256,2.0}; L[2]={256,2.0}; L[3]={16,2.0};  N=1;
+        L[0]={256,2.0}; L[1]={256,2.0}; L[2]={256,2.0}; L[3]={128,2.0}; N=1;
     } else if (tech == "HBM2") {
         // freq = 1.2 GHz (= 2.4 GT/s I/O clock / 2), NOT 1.0: at 1.0 the leaf
         // L0 = 256/8*1.0 = 32 GB/s fell BELOW HBM2's 38.4 GB/s per-channel rate
@@ -6150,7 +6150,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.7.10" << std::endl;
+    std::cout << "Version 1.7.11" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
