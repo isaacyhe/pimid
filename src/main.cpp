@@ -5417,7 +5417,14 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
     cfg << "};\n\n";
 
     // ── Simulation parameters ──
-    int parallelism = (config.workload_type == "openmp" || config.workload_type == "mpi")
+    // 1.6 thread-MPI REQUIRES parallelism=1, exactly as the device-scope config
+    // does: the ranks are run by zsim's deterministic round-robin core rotation
+    // (they park/wake on transport waits). With parallelism>1 the rotation never
+    // engages and only rank 0 ever executes -- which silently made every
+    // system-scope MPI run (host baseline AND co-sim) single-rank.
+    // OpenMP keeps num_pes: all PEs/threads run concurrently under work-locked
+    // phases.
+    int parallelism = (config.workload_type == "openmp")
                       ? config.num_pes : 1;
     cfg << "sim = {\n";
     cfg << "    phaseLength = " << config.phase_length << ";\n";
@@ -6150,7 +6157,7 @@ void printUsage(const char* program_name) {
 
 void printVersion() {
     std::cout << "PIMID - Processing-In-Memory Infrastructure for Design-space exploration" << std::endl;
-    std::cout << "Version 1.7.11" << std::endl;
+    std::cout << "Version 1.8.0" << std::endl;
     std::cout << std::endl;
     std::cout << "Integrated External Models:" << std::endl;
 #ifdef HAVE_RAMULATOR
@@ -7370,6 +7377,20 @@ int main(int argc, char** argv) {
     synthesizeSystemNodes(config);
     normalizeSystemConfig(config);
 
+    // Explicit system-scope configs parse the host's core count into the HOST
+    // system node (see line ~7052), but config.host_num_cores stays at its
+    // default. Sync it so host-baseline parallelism -- OMP threads, MPI ranks,
+    // and the devorg --pes injection below -- uses the REAL host core count
+    // rather than the default (which silently capped multi-core baselines).
+    if (config.scope == "system") {
+        for (const auto& n : config.system_nodes) {
+            if (n.role == UnifiedConfig::SystemNode::HOST && n.num_cores > 0) {
+                config.host_num_cores = n.num_cores;
+                break;
+            }
+        }
+    }
+
     // Resolve the memory-topology knob (1.7.4): is_default_mem + host.mem.
     // TRUE  -> host tech = device tech by construction.
     // FALSE -> host.mem.technology drives host memory (required; else rc=1).
@@ -7405,9 +7426,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // If workload_type is "mpi" but mpi_ranks not set, default to num_pes
+    // If workload_type is "mpi" but mpi_ranks not set, default to the parallel
+    // worker count: host_num_cores for a host baseline (NO_OFFLOAD, system scope),
+    // where ranks partition work across host cores; else num_pes (device offload
+    // maps ranks -> PEs).
     if (config.workload_type == "mpi" && config.mpi_ranks <= 0) {
-        config.mpi_ranks = config.num_pes;
+        bool host_baseline = (getenv("PIMID_COSIM_NO_OFFLOAD") != nullptr)
+                             && (config.scope == "system");
+        config.mpi_ranks = host_baseline ? config.host_num_cores : config.num_pes;
     }
 
     // Validate method
@@ -7756,9 +7782,13 @@ int main(int argc, char** argv) {
             ? config.total_mem_orgs
             : (config.pe_hierarchy_level == 0
                ? config.num_banks * config.subarrays_per_bank : config.num_banks);
+        // Host baseline (NO_OFFLOAD, system scope) partitions work across host cores,
+        // not device PEs -- the MPI kernel's ranks==pes guard must see host_num_cores.
+        int devorg_pes = ((getenv("PIMID_COSIM_NO_OFFLOAD") != nullptr) && config.scope == "system")
+                         ? config.host_num_cores : config.num_pes;
         auto add_devorg = [&](std::vector<std::string>& args) {
             args.push_back("--placement");     args.push_back(config.placement_level);
-            args.push_back("--pes");           args.push_back(std::to_string(config.num_pes));
+            args.push_back("--pes");           args.push_back(std::to_string(devorg_pes));
             args.push_back("--total-units");   args.push_back(std::to_string(devorg_total_units));
             args.push_back("--pages-per-unit");args.push_back(std::to_string(config.pages_per_unit));
         };
@@ -8310,7 +8340,11 @@ int main(int argc, char** argv) {
                     // (other OMP modes, from oversubscription). Cap to num_pes +
                     // passive waits. overwrite=0 so explicit workload_env wins.
                     if (config.workload_type == "openmp") {
-                        int omp_threads = (config.num_pes > 0) ? config.num_pes : 1;
+                        // Host baseline runs OMP threads across host cores, not device PEs.
+                        bool host_baseline = (getenv("PIMID_COSIM_NO_OFFLOAD") != nullptr)
+                                             && (config.scope == "system");
+                        int par = host_baseline ? config.host_num_cores : config.num_pes;
+                        int omp_threads = (par > 0) ? par : 1;
                         setenv("OMP_NUM_THREADS", std::to_string(omp_threads).c_str(), 0);
                         setenv("OMP_DYNAMIC", "FALSE", 0);
                         setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
@@ -8995,7 +9029,11 @@ int main(int argc, char** argv) {
                     // (other OMP modes, from oversubscription). Cap to num_pes +
                     // passive waits. overwrite=0 so explicit workload_env wins.
                     if (config.workload_type == "openmp") {
-                        int omp_threads = (config.num_pes > 0) ? config.num_pes : 1;
+                        // Host baseline runs OMP threads across host cores, not device PEs.
+                        bool host_baseline = (getenv("PIMID_COSIM_NO_OFFLOAD") != nullptr)
+                                             && (config.scope == "system");
+                        int par = host_baseline ? config.host_num_cores : config.num_pes;
+                        int omp_threads = (par > 0) ? par : 1;
                         setenv("OMP_NUM_THREADS", std::to_string(omp_threads).c_str(), 0);
                         setenv("OMP_DYNAMIC", "FALSE", 0);
                         setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
@@ -9327,6 +9365,27 @@ int main(int argc, char** argv) {
                 std::string plugin_arg = plugin_path
                     + ",cfg=" + zsim_cfg_path
                     + ",out=" + output_dir;
+
+                // 1.6 thread-MPI in SYSTEM scope (co-sim + host baseline).
+                // The device-scope path preloads libpimid_mpi.so so the ranks run
+                // as guest threads of one process. This path never did, so the
+                // guest resolved MPI against the SYSTEM MPI runtime and every
+                // system-scope MPI run silently executed as a SINGLE rank
+                // (rank 0, size 1) -- host baselines and co-sim alike. Resolve
+                // before the fork so a missing library is a clean launcher error.
+                std::string sys_mpi_lib;
+                if (config.workload_type == "mpi" && config.mpi_ranks > 0) {
+                    sys_mpi_lib = findPimidMpiLib();
+                    if (sys_mpi_lib.empty()) {
+                        std::cerr << "Error: libpimid_mpi.so not found (searched "
+                                  << "build dirs); required for thread-MPI"
+                                  << std::endl;
+                        return 1;
+                    }
+                    std::cout << "MPI Mode: " << config.mpi_ranks
+                              << " ranks as threads in ONE process (1.6 emu)"
+                              << std::endl;
+                }
                 pid_t pid = fork();
                 if (pid == 0) {
                     setenv("ZSIM_CFG_FILE", zsim_cfg_path.c_str(), 1);
@@ -9363,12 +9422,28 @@ int main(int argc, char** argv) {
                         setenv("OMP_PROC_BIND", "true", 0);
                         setenv("OMP_PLACES", "cores", 0);
                     }
+                    // Thread-MPI: ranks become guest threads of this one process.
+                    // OMP_NUM_THREADS=1 so each rank stays single-threaded.
+                    if (config.workload_type == "mpi" && config.mpi_ranks > 0) {
+                        setenv("PIMID_MPI_RANKS",
+                               std::to_string(config.mpi_ranks).c_str(), 1);
+                        setenv("PIMID_MPI_THREADED", "1", 1);
+                        setenv("OMP_NUM_THREADS", "1", 0);
+                    }
                     for (const auto& [key, val] : config.workload_env) {
                         setenv(key.c_str(), val.c_str(), 1);
                     }
 
                     std::vector<const char*> args;
+                    std::string sys_guest_preload;
                     args.push_back(qemu_binary.c_str());
+                    // LD_PRELOAD must be GUEST-scoped (qemu -E): a host-env preload
+                    // would load the interposer into QEMU itself.
+                    if (config.workload_type == "mpi" && config.mpi_ranks > 0) {
+                        sys_guest_preload = "LD_PRELOAD=" + sys_mpi_lib;
+                        args.push_back("-E");
+                        args.push_back(sys_guest_preload.c_str());
+                    }
                     args.push_back("-plugin");
                     args.push_back(plugin_arg.c_str());
                     args.push_back("--");
