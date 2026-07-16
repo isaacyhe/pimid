@@ -242,6 +242,22 @@ This yields the host-only baseline cells (1/4/16 OoO host cores). See
 [examples.md](examples.md) for the `baseline_host_{1,4,16}core.yaml` configs
 and [benchmarks.md](benchmarks.md) for the experiment shape.
 
+**Host parallelism (fixed 1.8.0).** The baseline parallelises across the
+configured host cores for **both** programming models: OpenMP sizes its team to
+`host.num_cores`, and MPI runs `host.num_cores` ranks as guest threads of one
+process (thread-MPI, the same emulation the device scope uses). Before 1.8.0
+this was broken two ways in system scope, both silently and with exit 0:
+
+- Thread-MPI was never wired outside device scope (no `libpimid_mpi.so`
+  preload, no `PIMID_MPI_RANKS`), so the guest resolved MPI against the system
+  MPI runtime and ran as a **single rank** -- host baselines *and* co-sim.
+- `host.num_cores` was read only from a top-level `host:` block, never from
+  `system.hosts[]`, so it stayed at its default and capped OMP threads, MPI
+  ranks, and the devorg `--pes` injection.
+
+System-scope MPI results produced before 1.8.0 are single-rank and must be
+regenerated. Device-scope sweeps were never affected.
+
 ## Limitations
 
 - **In-order host supported (fixed 1.7.7).** Both `ooo_core` and
