@@ -74,8 +74,23 @@ void ProcessStats::updateCore(uint32_t cid, uint32_t p) {
     uint64_t cCycles = zinfo->cores[cid]->getCycles();
     uint64_t cInstrs = zinfo->cores[cid]->getInstrs();
 
-    assert(cCycles >= lastCoreCycles[cid] && cInstrs >= lastCoreInstrs[cid]);
-    processCycles[p]  += cCycles - lastCoreCycles[cid];
+    /* 1.6 thread-MPI: a core's CYCLE counter is NOT monotonic. A rank parking
+     * in a transport wait rewinds the core at MPI_COMM_END -- OoO/in-order
+     * cores subtract pimidPhantomWait from getCycles(), ALU cores roll curCycle
+     * back to the ROI baseline -- so the wall-dependent wait growth is erased
+     * and the run stays deterministic (see Core::pimidRewindCycles). This only
+     * surfaces in system scope, where a host domain and multi-rank MPI coexist;
+     * asserting monotonic cycles here aborted every co-sim MPI run.
+     * INSTRUCTIONS remain monotonic (the rewind is cycles-only), so that
+     * invariant is still checked. Mirror a rollback in the process total rather
+     * than underflowing the unsigned subtraction. */
+    assert(cInstrs >= lastCoreInstrs[cid]);
+    if (likely(cCycles >= lastCoreCycles[cid])) {
+        processCycles[p] += cCycles - lastCoreCycles[cid];
+    } else {
+        uint64_t rewound = lastCoreCycles[cid] - cCycles;
+        processCycles[p] = (processCycles[p] > rewound) ? (processCycles[p] - rewound) : 0;
+    }
     processInstrs[p]  += cInstrs - lastCoreInstrs[cid];
 
     lastCoreCycles[cid] = cCycles;
