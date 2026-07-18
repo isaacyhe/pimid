@@ -188,8 +188,16 @@ public:
     // measured contention in stats; it just does not feed back into per-access
     // latency. Documented model boundary (HANDOFF_16_THREAD_MPI.md).
     static bool mpiThreadDetPricing() {
+        // Thread-based rank emulation is the only exec-method MPI model
+        // (1.8.3): active whenever the launcher requested >1 rank and this
+        // is not a per-rank trace-gen process. MUST match the plugin's
+        // g_mpi_thread_mode resolution -- pricing and scheduling semantics
+        // have to flip together.
         static int v = -1;
-        if (v < 0) v = getenv("PIMID_MPI_THREADED") ? 1 : 0;
+        if (v < 0) {
+            const char* r = getenv("PIMID_MPI_RANKS");
+            v = (r && atoi(r) > 1 && !getenv("PIMID_MPI_RANK")) ? 1 : 0;
+        }
         return v == 1;
     }
 

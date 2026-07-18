@@ -243,6 +243,38 @@ static inline uint64_t roiRelCycles(uint32_t tid) {
 enum SimDomain { DOMAIN_HOST = 0, DOMAIN_DEVICE = 1 };
 static std::atomic<int> thread_domain[MAX_THREADS];    // default HOST
 static bool thread_initialized[MAX_THREADS];            // false until ensureThreadInit
+
+/* Thread-based MPI rank emulation active in THIS process (the only
+ * exec-method MPI model since 1.8.3). Resolved ONCE at plugin init from the
+ * internal launcher channel (PIMID_MPI_RANKS > 1) so hot paths never call
+ * getenv; false in per-rank trace-gen processes (PIMID_MPI_RANK set), which
+ * keep process-mode semantics. */
+static bool g_mpi_thread_mode = false;
+
+/* 1.8.4 co-sim ROI window (defect #14): population of device workers in the
+ * CURRENT window, and whether the window has been closed by the opener's
+ * roi_end. The opener (rank 0 / OMP master) counts 1 at ROI_BEGIN; every
+ * MPI rank that lazily migrates in counts 1; each migrate-out decrements.
+ * Stats freeze when the population drains to ZERO after the close -- the
+ * opener's roi_end alone must not truncate the other ranks' compute tails.
+ * OMP workers born inside the window are NOT counted: the master's own
+ * out-migration drains the population exactly as before (OMP unchanged). */
+static std::atomic<int> g_deviceWorkers{0};
+static std::atomic<bool> g_roiClosing{false};
+
+/* Defined below (cost model helpers); used by the kernel-entry migration in
+ * handleMpiMagicOp, which precedes them in this file. */
+static void chargeCoherenceFlush(uint32_t tid);
+static void chargeLaunchCost(uint32_t tid);
+static void drainHostCharges(uint32_t tid);
+
+/* Serializes the 1.8.4 window migrations. A barrier release wakes ALL ranks
+ * at once and every earlier caller of the charge+leave/finish+re-init
+ * sequence (roi_begin/roi_end/WORK markers) was a single thread -- the
+ * concurrent stampede corrupted the process heap (glibc unaligned-tcache
+ * abort, v184 rounds 3-4). Two events per rank per run: serializing is
+ * free. */
+static std::mutex g_migrateMutex;
 static g_vector<bool> host_mask;     // true for OOO cores
 static g_vector<bool> device_mask;   // true for ALU cores
 static std::atomic<uint64_t> offload_count{0};
@@ -815,6 +847,42 @@ static void mem_cb(unsigned int vcpu_index,
     if (vcpu_index < MAX_VCPUS) in_zsim[vcpu_index] = false;
 }
 
+/* Move a thread to the given domain by leaving its current core and
+ * re-initializing against the domain's core mask -- the exact sequence the
+ * ROI/WORK offload handlers use inline, factored for the 1.8.4 lazy
+ * window migration. */
+static void migrateThreadToDomain(uint32_t tid, int domain) {
+    thread_domain[tid].store(domain);
+    if (thread_initialized[tid]) {
+        uint32_t cid = cids[tid];
+        if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
+            zinfo->sched->leave(procIdx, tid, cid);
+        }
+        zinfo->sched->finish(procIdx, tid);
+        thread_initialized[tid] = false;
+        clearCid(tid);
+    }
+    ensureThreadInit(tid);
+}
+
+/* 1.8.4 concurrent-safe split of the above. detach runs under
+ * g_migrateMutex (non-blocking bookkeeping only); the re-init -- which can
+ * BLOCK on the scheduler's phase machinery -- must run OUTSIDE the lock, or
+ * a barrier-release stampede deadlocks (one rank blocks in the join while
+ * the phase system waits on ranks queued behind the mutex; v184 round 5). */
+static void detachThreadForMigration(uint32_t tid, int domain) {
+    thread_domain[tid].store(domain);
+    if (thread_initialized[tid]) {
+        uint32_t cid = cids[tid];
+        if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
+            zinfo->sched->leave(procIdx, tid, cid);
+        }
+        zinfo->sched->finish(procIdx, tid);
+        thread_initialized[tid] = false;
+        clearCid(tid);
+    }
+}
+
 /**
  * Instruction execution callback — called on first instruction of each TB.
  * Drives the BBL function pointer which triggers phase counting.
@@ -826,6 +894,26 @@ static void insn_exec_cb(unsigned int vcpu_index, void *userdata) {
     TbUserdata* tud = (TbUserdata*)userdata;
     uint32_t tid = getOrAssignTid(vcpu_index);
     if (tid >= MAX_THREADS) return;
+
+    /* 1.8.4 co-sim ROI window (defect #14): an MPI rank alive BEFORE the
+     * window opened was born DOMAIN_HOST and cannot inherit the device
+     * domain at birth the way OMP workers forked inside the ROI do. It
+     * migrates ITSELF here, at its first BBL after the window opens.
+     * Deterministic under the serial weave. */
+    if (unlikely(g_mpi_thread_mode && g_cosim_mode && !g_cosim_no_offload &&
+                 g_in_device_region.load(std::memory_order_acquire) &&
+                 thread_domain[tid].load() == DOMAIN_HOST)) {
+        /* TODO(1.8.4 follow-up): per-rank flush+launch charges -- see the
+         * entry-barrier leg. */
+        {
+            std::lock_guard<std::mutex> mig(g_migrateMutex);
+            detachThreadForMigration(tid, DOMAIN_DEVICE);
+            g_deviceWorkers.fetch_add(1);
+        }
+        ensureThreadInit(tid);  // may block on the scheduler: OUTSIDE the lock
+        info("Thread %d: ROI window migrate-in (co-sim MPI rank)", tid);
+    }
+
     ensureThreadInit(tid);
 
     /* Inside an MPI comm window: keep the core attached but do not count the
@@ -927,7 +1015,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
          * core by the wait's raw cycle growth -- the wall-dependent rejoin
          * fast-forward is erased and the rendezvous ADVANCE re-places the
          * clock from deterministic arithmetic alone. */
-        if (getenv("PIMID_MPI_THREADED")) {
+        if (g_mpi_thread_mode) {
             if (tid < MAX_THREADS && cores[tid]) {
                 mpi_comm_saved[tid] = cores[tid]->getCycles();
                 cores[tid]->pimidCommParked = true;
@@ -943,7 +1031,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         return;
     }
     if (op == ZSIM_MAGIC_OP_MPI_COMM_END) {
-        if (getenv("PIMID_MPI_THREADED")) {
+        if (g_mpi_thread_mode) {
             if (tid < MAX_THREADS && cores[tid] && mpi_comm_saved[tid] != ~0ull) {
                 cores[tid]->pimidCommParked = false;
                 uint64_t raw = cores[tid]->getCycles();
@@ -976,6 +1064,62 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
     }
 
     if (op == ZSIM_MAGIC_OP_MPI_BARRIER) {
+        /* 1.8.4 co-sim ROI window (defect #14), KERNEL-ENTRY migration.
+         * Rank 0's roi_begin cannot open the window early enough: a parked
+         * rank 0 wakes AFTER the other ranks have already raced through
+         * their compute (observed in the v184 first-fed-BBL diagnostic).
+         * The entry barrier is the one point every rank passes BEFORE its
+         * compute IN ITS OWN PROGRAM ORDER -- the same first-barrier =
+         * kernel-entry convention the per-rank ROI baseline below already
+         * relies on. Each rank charges its own coherence flush + launch on
+         * ITS host core, then migrates ITSELF to its device PE. */
+        if (unlikely(g_mpi_thread_mode && g_cosim_mode && !g_cosim_no_offload &&
+                     !g_roiClosing.load() && tid < MAX_THREADS &&
+                     thread_domain[tid].load() == DOMAIN_HOST)) {
+            /* TODO(1.8.4 follow-up): reinstate per-rank flush+launch charges
+             * here once the concurrent charge path is proven safe -- pulled
+             * for now to validate the migration machinery in isolation. */
+            {
+                std::lock_guard<std::mutex> mig(g_migrateMutex);
+                detachThreadForMigration(tid, DOMAIN_DEVICE);
+                if (!g_in_device_region.exchange(true)) {
+                    g_deviceWorkers.store(1);
+                } else {
+                    g_deviceWorkers.fetch_add(1);
+                }
+            }
+            ensureThreadInit(tid);  // may block on the scheduler: OUTSIDE the lock
+            info("Thread %d: ROI window migrate-in at entry barrier (co-sim)", tid);
+        }
+        /* 1.8.4 co-sim ROI window (defect #14): the post-kernel join. Once
+         * the window is closing, each rank leaves the device at ITS OWN
+         * barrier arrival -- compute tail fully on-device, MPI protocol
+         * work back on the host. The LAST rank out freezes stats exactly
+         * where the opener's roi_end used to. (bfs has no closing barrier;
+         * it drains via the guest-exit dump path -- documented fallback.) */
+        if (unlikely(g_mpi_thread_mode && g_cosim_mode && !g_cosim_no_offload &&
+                     g_roiClosing.load() && tid < MAX_THREADS &&
+                     thread_domain[tid].load() == DOMAIN_DEVICE)) {
+            {
+                std::lock_guard<std::mutex> mig(g_migrateMutex);
+                detachThreadForMigration(tid, DOMAIN_HOST);
+            }
+            ensureThreadInit(tid);  // may block on the scheduler: OUTSIDE the lock
+            info("Thread %d: ROI window migrate-out (co-sim MPI rank)", tid);
+            if (g_deviceWorkers.fetch_sub(1) - 1 == 0) {
+                /* Last rank out: the window close is PURELY a migration
+                 * event -- no dump (heap abort, round 3), no termination
+                 * (kill-mid-protocol, rounds 4-6), and no in_roi freeze
+                 * either (round 7: every crashing run stored in_roi=false
+                 * here; every clean run kept it true to guest exit). The
+                 * freeze is unnecessary by construction: drained ranks are
+                 * back on HOST cores, so continued feeding prices the
+                 * post-ROI protocol work on the host -- where the co-sim
+                 * model wants it -- and device counters stay clean. The
+                 * guest runs to natural exit; the exit path dumps. */
+                info("Thread %d: ROI window drained (last rank out)", tid);
+            }
+        }
         /* Per-rank ROI baseline (collective-first benchmarks). Some MPI
          * kernels (e.g. bfs) reach their communication ONLY through
          * collectives/barriers -- their frontier exchange is Allgather/
@@ -1177,7 +1321,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         uint32_t srcNode = params.src_pe % gn->getNumNodes();
         uint32_t dstNode = params.dst_pe % gn->getNumNodes();
 
-        if (gn->isCycleAccurate() && getenv("PIMID_MPI_THREADED")) {
+        if (gn->isCycleAccurate() && g_mpi_thread_mode) {
             /* 1.6 thread mode: DETERMINISTIC message path. Live accessNetwork
              * injection is order-sensitive (persistent garnetTick_/in-flight
              * state means each RTT depends on the wall interleaving of the 16
@@ -1528,6 +1672,50 @@ static void drainHostCharges(uint32_t tid) {
     fPtrs[tid].bblPtr(tid, 0, bbl);
 }
 
+/* Co-sim ROI offload entry for a thread that executes zsim_roi_begin() (the
+ * opener). Factored out of the ROI_BEGIN handlers because the thread-MPI
+ * branch RETURNS before the legacy inline block -- which meant no thread
+ * ever opened the device window in thread-MPI runs (defect #14's deeper
+ * layer: 'ROI offload begin' count was 0 while 'end' fired). Both paths and
+ * both handler twins now share this one sequence. */
+static void cosimRoiBeginOffload(uint32_t tid) {
+    if (!(g_cosim_mode && !g_cosim_no_offload && tid < MAX_THREADS)) return;
+    /* Thread-MPI: this rank already migrated in at the kernel-entry barrier
+     * (flush+launch charged there); its roi_begin is just the marker. */
+    if (g_mpi_thread_mode && thread_domain[tid].load() == DOMAIN_DEVICE) return;
+    // PART A (1.7.2): Case-1 coherence flush charged on the HOST core BEFORE
+    // the device migration (thread still on its host core), so the writeback
+    // cost lands on the host and inside the ROI/task window.
+    chargeCoherenceFlush(tid);
+    // PART B (1.7.3): kernel LAUNCH cost charged on the HOST core at the
+    // offload doorbell, also before the device migration.
+    chargeLaunchCost(tid);
+    // Retire the flush+launch synthetic BBLs onto the host timeline before
+    // the migration drops the last one.
+    drainHostCharges(tid);
+    thread_domain[tid].store(DOMAIN_DEVICE);
+    // 1.8.4 ROI window: first opener initializes the population; any later
+    // opener (kernels where every rank calls roi_begin) just joins it.
+    if (!g_in_device_region.exchange(true)) {
+        g_deviceWorkers.store(1);
+    } else {
+        g_deviceWorkers.fetch_add(1);
+    }
+    g_roiClosing.store(false);
+    ++offload_count;
+    if (thread_initialized[tid]) {
+        uint32_t cid = cids[tid];
+        if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
+            zinfo->sched->leave(procIdx, tid, cid);
+        }
+        zinfo->sched->finish(procIdx, tid);
+        thread_initialized[tid] = false;
+        clearCid(tid);
+    }
+    ensureThreadInit(tid);  // device mask
+    info("Thread %d: ROI offload begin (co-sim)", tid);
+}
+
 /**
  * Magic instruction callback — dispatches ZSim magic ops detected at
  * translation time.  The opcode (from the preceding mov $imm, %rcx) is
@@ -1567,7 +1755,7 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
         // A first-rank-baselines-all sweep would capture the other 15 cores
         // at wall-arbitrary points -- stamps relative to those baselines
         // carried run-to-run jitter into every rendezvous downstream.
-        if (getenv("PIMID_MPI_THREADED")) {
+        if (g_mpi_thread_mode) {
             int prev = g_roiRefCount.fetch_add(1);
             uint32_t cid = (tid < MAX_THREADS) ? cids[tid] : INVALID_CID;
             if (cid != INVALID_CID && cid != UNINITIALIZED_CID &&
@@ -1578,6 +1766,9 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
                 mpi_roi_baselined = true;
                 snapshotRoiBaseCyc();
             }
+            // 1.8.4: the opener must open the co-sim device window HERE too
+            // -- this branch returns before the legacy block below.
+            cosimRoiBeginOffload(tid);
             return;
         }
         in_roi.store(true);
@@ -1594,37 +1785,7 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
         // every thread spawned inside the region) executes on the DEVICE;
         // out-of-ROI code executes on the host. Ordinary workloads are
         // co-sim workloads -- there is no special kind.
-        if (g_cosim_mode && !g_cosim_no_offload && tid < MAX_THREADS) {
-            // PART A (1.7.2): Case-1 coherence flush charged on the HOST core
-            // BEFORE the device migration (thread still on its host core), so the
-            // writeback cost lands on the host and inside the ROI/task window.
-            // No-op for mode=separate (Case 2 bypass) or when coherence disabled.
-            chargeCoherenceFlush(tid);
-            // PART B (1.7.3): kernel LAUNCH cost (doorbell + runtime dispatch +
-            // cmd/ack bridge crossings) charged on the HOST core at the offload
-            // doorbell, also before the device migration so it lands on the host
-            // inside the task window. No-op when launch disabled/unset.
-            chargeLaunchCost(tid);
-            // Force the flush+launch synthetic BBLs to retire onto the host
-            // timeline before the migration drops the last one (see drainHost-
-            // Charges). Without this the launch charge is dropped from the host
-            // core's cycle count.
-            drainHostCharges(tid);
-            thread_domain[tid].store(DOMAIN_DEVICE);
-            g_in_device_region.store(true);
-            ++offload_count;
-            if (thread_initialized[tid]) {
-                uint32_t cid = cids[tid];
-                if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
-                    zinfo->sched->leave(procIdx, tid, cid);
-                }
-                zinfo->sched->finish(procIdx, tid);
-                thread_initialized[tid] = false;
-                clearCid(tid);
-            }
-            ensureThreadInit(tid);  // device mask
-            info("Thread %d: ROI offload begin (co-sim)", tid);
-        }
+        cosimRoiBeginOffload(tid);
     } else if (opcode == ZSIM_MAGIC_OP_ROI_END) {
         // Co-sim: return the launching thread to a host core BEFORE the
         // termination flag, so the host core rejoin fast-forwards to the
@@ -1659,12 +1820,25 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
             }
             ensureThreadInit(tid);  // host mask
             info("Thread %d: ROI offload end (co-sim)", tid);
+            // 1.8.4 ROI window: the opener is out; the window is CLOSING.
+            // Remaining MPI ranks leave at their own barrier arrival.
+            g_deviceWorkers.fetch_sub(1);
+            g_roiClosing.store(true);
         }
         // 1.6 thread-MPI: only the LAST rank out freezes stats + terminates;
         // earlier enders still owe MPI protocol work (closing barrier,
         // serving collectives) on live cores.
-        if (getenv("PIMID_MPI_THREADED")) {
+        if (g_mpi_thread_mode) {
             if (g_roiRefCount.fetch_sub(1) - 1 > 0) return;
+            if (g_cosim_mode && !g_cosim_no_offload &&
+                g_deviceWorkers.load() > 0) {
+                /* 1.8.4 ROI window: the window is closing but other ranks
+                 * are still computing on device PEs. The LAST rank out (at
+                 * its barrier arrival, handleMpiMagicOp) freezes stats;
+                 * freezing here at the opener's roi_end would truncate
+                 * every other rank's compute tail. */
+                return;
+            }
             in_roi.store(false);
             dumpTerminationStats();
             zinfo->terminationConditionMet = true;
@@ -1810,7 +1984,7 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         // A first-rank-baselines-all sweep would capture the other 15 cores
         // at wall-arbitrary points -- stamps relative to those baselines
         // carried run-to-run jitter into every rendezvous downstream.
-        if (getenv("PIMID_MPI_THREADED")) {
+        if (g_mpi_thread_mode) {
             int prev = g_roiRefCount.fetch_add(1);
             uint32_t cid = (tid < MAX_THREADS) ? cids[tid] : INVALID_CID;
             if (cid != INVALID_CID && cid != UNINITIALIZED_CID &&
@@ -1821,6 +1995,9 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
                 mpi_roi_baselined = true;
                 snapshotRoiBaseCyc();
             }
+            // 1.8.4: the opener must open the co-sim device window HERE too
+            // -- this branch returns before the legacy block below.
+            cosimRoiBeginOffload(tid);
             return;
         }
         in_roi.store(true);
@@ -1834,37 +2011,7 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         mpi_roi_baselined = true;
         snapshotRoiBaseCyc();
         // Co-sim: ROI = offload region (see the twin handler above).
-        if (g_cosim_mode && !g_cosim_no_offload && tid < MAX_THREADS) {
-            // PART A (1.7.2): Case-1 coherence flush charged on the HOST core
-            // BEFORE the device migration (thread still on its host core), so the
-            // writeback cost lands on the host and inside the ROI/task window.
-            // No-op for mode=separate (Case 2 bypass) or when coherence disabled.
-            chargeCoherenceFlush(tid);
-            // PART B (1.7.3): kernel LAUNCH cost (doorbell + runtime dispatch +
-            // cmd/ack bridge crossings) charged on the HOST core at the offload
-            // doorbell, also before the device migration so it lands on the host
-            // inside the task window. No-op when launch disabled/unset.
-            chargeLaunchCost(tid);
-            // Force the flush+launch synthetic BBLs to retire onto the host
-            // timeline before the migration drops the last one (see drainHost-
-            // Charges). Without this the launch charge is dropped from the host
-            // core's cycle count.
-            drainHostCharges(tid);
-            thread_domain[tid].store(DOMAIN_DEVICE);
-            g_in_device_region.store(true);
-            ++offload_count;
-            if (thread_initialized[tid]) {
-                uint32_t cid = cids[tid];
-                if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
-                    zinfo->sched->leave(procIdx, tid, cid);
-                }
-                zinfo->sched->finish(procIdx, tid);
-                thread_initialized[tid] = false;
-                clearCid(tid);
-            }
-            ensureThreadInit(tid);  // device mask
-            info("Thread %d: ROI offload begin (co-sim)", tid);
-        }
+        cosimRoiBeginOffload(tid);
     } else if (opcode == ZSIM_MAGIC_OP_ROI_END) {
         if (g_cosim_mode && !g_cosim_no_offload && tid < MAX_THREADS) {
             g_in_device_region.store(false);
@@ -1896,12 +2043,25 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
             }
             ensureThreadInit(tid);  // host mask
             info("Thread %d: ROI offload end (co-sim)", tid);
+            // 1.8.4 ROI window: the opener is out; the window is CLOSING.
+            // Remaining MPI ranks leave at their own barrier arrival.
+            g_deviceWorkers.fetch_sub(1);
+            g_roiClosing.store(true);
         }
         // 1.6 thread-MPI: only the LAST rank out freezes stats + terminates;
         // earlier enders still owe MPI protocol work (closing barrier,
         // serving collectives) on live cores.
-        if (getenv("PIMID_MPI_THREADED")) {
+        if (g_mpi_thread_mode) {
             if (g_roiRefCount.fetch_sub(1) - 1 > 0) return;
+            if (g_cosim_mode && !g_cosim_no_offload &&
+                g_deviceWorkers.load() > 0) {
+                /* 1.8.4 ROI window: the window is closing but other ranks
+                 * are still computing on device PEs. The LAST rank out (at
+                 * its barrier arrival, handleMpiMagicOp) freezes stats;
+                 * freezing here at the opener's roi_end would truncate
+                 * every other rank's compute tail. */
+                return;
+            }
             in_roi.store(false);
             dumpTerminationStats();
             zinfo->terminationConditionMet = true;
@@ -2565,6 +2725,17 @@ int qemu_plugin_install(qemu_plugin_id_t id,
     g_cosim_mode = (nHostCores > 0 && nDeviceCores > 0 && nDeviceCores < zinfo->numCores);
     if (g_cosim_mode) {
         info("[ZSim] Co-sim mode: ROI = offload region (host runs out-of-ROI code, device runs the kernel)");
+    }
+
+    /* Thread-based MPI rank emulation: resolved once, before any guest code
+     * (and therefore any magic op) can run. See g_mpi_thread_mode decl. */
+    {
+        const char* mpi_ranks_env = getenv("PIMID_MPI_RANKS");
+        g_mpi_thread_mode = (mpi_ranks_env && atoi(mpi_ranks_env) > 1 &&
+                             !getenv("PIMID_MPI_RANK"));
+    }
+    if (g_mpi_thread_mode) {
+        info("[ZSim] MPI: emulated ranks in-process (deterministic serial weave)");
     }
     g_cosim_trace = (getenv("PIMID_COSIM_TRACE") != nullptr);
     if (g_cosim_trace) {

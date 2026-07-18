@@ -667,6 +667,15 @@ struct UnifiedConfig {
     std::string placement_level;
     int num_pes;
 
+    // Simulator parallelism (YAML: simulation.parallel, default true). ONE knob for
+    // both OMP and MPI paths: true = parallelize the simulation whenever it
+    // is safe to do so, false = force a serial simulation. OpenMP is exact at
+    // any simulator thread count (work-locked phases), so it parallelizes to
+    // the simulated core count. MPI is always simulated serially today for
+    // determinism regardless of this knob; when parallel MPI simulation
+    // becomes safe it will start honoring sim_parallel with no config change.
+    bool sim_parallel = true;
+
     // ALU scaling factors (5 design-point factors)
     double alu_compute_factor;     // cycles-per-instruction multiplier (default 1.0)
     double alu_access_factor;      // cycles per load/store (default 1.0)
@@ -4454,14 +4463,17 @@ public:
         cfg << "    phaseLength = " << config_.phase_length << ";\n";
         cfg << "    maxTotalInstrs = " << config_.max_instructions << "L;\n";
         cfg << "    statsPhaseInterval = " << config_.stats_interval << ";\n";
-        // OMP: all PEs run concurrently (work-locked phases keep it exact).
-        // 1.6 thread-MPI: parallelism=1 -- zsim's deterministic round-robin
-        // core rotation. Ranks park/wake on transport waits, and with a
-        // single simulator thread every interleaving (numPhases, batch
-        // content, EWMA order) is a pure function of simulated state:
-        // bit-exact by construction, on any host. The parallel-deterministic
-        // scheduler (idle-tick phases) is the 1.6.x speed roadmap.
-        int parallelism = (config_.workload_type == "openmp")
+        // Simulator thread count (sim_parallel knob):
+        // OMP + parallel: all PEs run concurrently (work-locked phases keep
+        // results exact at ANY simulator thread count -- speed knob only).
+        // MPI: always 1 -- zsim's deterministic round-robin core rotation.
+        // Ranks park/wake on transport waits, and with a single simulator
+        // thread every interleaving (numPhases, batch content, EWMA order)
+        // is a pure function of simulated state: bit-exact by construction,
+        // on any host. sim_parallel starts being honored for MPI when the
+        // PDES conservative-sync scheduler lands (1.8 roadmap).
+        int parallelism = (config_.workload_type == "openmp" &&
+                           config_.sim_parallel)
                           ? config_.num_pes : 1;
         cfg << "    parallelism = " << parallelism << ";\n";
         cfg << "    printHierarchy = true;\n";
@@ -5417,15 +5429,20 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
     cfg << "};\n\n";
 
     // ── Simulation parameters ──
-    // 1.6 thread-MPI REQUIRES parallelism=1, exactly as the device-scope config
-    // does: the ranks are run by zsim's deterministic round-robin core rotation
-    // (they park/wake on transport waits). With parallelism>1 the rotation never
-    // engages and only rank 0 ever executes -- which silently made every
-    // system-scope MPI run (host baseline AND co-sim) single-rank.
-    // OpenMP keeps num_pes: all PEs/threads run concurrently under work-locked
-    // phases.
-    int parallelism = (config.workload_type == "openmp")
-                      ? config.num_pes : 1;
+    // Simulator thread count (sim_parallel knob), same contract as the
+    // device-scope generator:
+    // MPI REQUIRES parallelism=1: the ranks are run by zsim's deterministic
+    // round-robin core rotation (they park/wake on transport waits). With
+    // parallelism>1 the rotation never engages and only rank 0 ever executes
+    // -- which silently made every system-scope MPI run single-rank.
+    // OMP + parallel sizes to the cores actually simulated: the HOST cores
+    // for a no-offload baseline (the workload runs there), the device PEs
+    // otherwise. Results are exact at any thread count (work-locked phases).
+    int omp_sim_cores = ((getenv("PIMID_COSIM_NO_OFFLOAD") != nullptr) &&
+                         config.host_num_cores > 0)
+                        ? config.host_num_cores : config.num_pes;
+    int parallelism = (config.workload_type == "openmp" && config.sim_parallel)
+                      ? omp_sim_cores : 1;
     cfg << "sim = {\n";
     cfg << "    phaseLength = " << config.phase_length << ";\n";
     cfg << "    maxTotalInstrs = " << config.max_instructions << "L;\n";
@@ -6931,6 +6948,9 @@ int main(int argc, char** argv) {
                 config.phase_length = yaml_cfg["simulation"]["phase_length"].as<int>(config.phase_length);
                 config.max_instructions = yaml_cfg["simulation"]["max_instructions"].as<long long>(config.max_instructions);
                 config.stats_interval = yaml_cfg["simulation"]["stats_interval"].as<int>(config.stats_interval);
+                // Simulator parallelism: ONE knob, both workload paths (see
+                // UnifiedConfig::sim_parallel).
+                config.sim_parallel = yaml_cfg["simulation"]["parallel"].as<bool>(config.sim_parallel);
             }
 
             // Power analysis toggle (CLI --power/--no-power overrides YAML)
@@ -8638,339 +8658,19 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // ── 1.6: thread-based MPI emu is THE MPI execution model ──
-            // All N ranks run as guest threads inside ONE QEMU/zsim process
-            // (the OMP execution substrate): one Garnet sees every rank's
-            // traffic directly in simulated time, ordered by the phase
-            // barriers -- venue-independent by construction. The legacy
-            // process-per-rank path (shm mailboxes + shared NoC record log +
-            // consistent-cut replay) survives only behind PIMID_MPI_PROCESS=1
-            // for A/B reference during bring-up and is slated for deletion.
-            bool mpi_process_mode = (config.workload_type == "mpi" &&
-                                     config.mpi_ranks > 0 &&
-                                     getenv("PIMID_MPI_PROCESS") != nullptr);
-            if (config.workload_type == "mpi" && config.mpi_ranks > 0 &&
-                !mpi_process_mode) {
+            // ── 1.8.3: thread-based MPI emu is the ONLY exec-method MPI
+            // model. All N ranks run as guest threads inside ONE QEMU/zsim
+            // process (the OMP execution substrate): one Garnet sees every
+            // rank's traffic directly in simulated time, ordered by the
+            // phase barriers -- venue-independent by construction. The
+            // legacy per-rank-process exec path (PIMID_MPI_PROCESS) is
+            // deleted; per-rank processes remain only in the trace method.
+            if (config.workload_type == "mpi" && config.mpi_ranks > 0) {
                 std::cout << "MPI Mode: " << config.mpi_ranks
-                          << " ranks as threads in ONE process (1.6 emu)"
+                          << " ranks (serial deterministic simulation)"
                           << std::endl;
             }
-            if (mpi_process_mode) {
-                // ── LEGACY MPI path: per-rank QEMU+ZSim processes ──
-                int ranks = config.mpi_ranks;
-                std::string output_base = "/tmp/pimid_qemu_" + std::to_string(getpid());
-                mkdir(output_base.c_str(), 0755);
-
-                std::cout << "MPI Mode: " << ranks << " ranks (LEGACY multi-process)" << std::endl;
-                std::cout << "Output directory: " << output_base << std::endl;
-
-                // Generate per-rank ZSim configs (1 core per rank, QEMU-mode)
-                ZSimSimulator zsim_helper(config);
-                for (int rank = 0; rank < ranks; rank++) {
-                    std::string rank_dir = output_base + "/rank" + std::to_string(rank);
-                    mkdir(rank_dir.c_str(), 0755);
-
-                    // Generate a QEMU-mode ZSim config with 1 core for this rank
-                    std::string cfg_path = rank_dir + "/zsim.cfg";
-                    std::ofstream cfg(cfg_path);
-                    if (!cfg.is_open()) {
-                        std::cerr << "Error: Failed to create config for rank " << rank << std::endl;
-                        return 1;
-                    }
-
-                    std::string core_type = "Simple";
-                    if (config.pe_type == "ooo_core") {
-                        core_type = "OoO";
-                    } else if (config.pe_type == "in_order_core") {
-                        core_type = "InOrder";
-                    } else if (config.pe_type == "alu_core" || config.pe_type == "alu") {
-                        core_type = "ALU";
-                    } else if (config.pe_type == "null_core" || config.pe_type == "null") {
-                        core_type = "Null";
-                    }
-
-                    // Memory latency: priority is override > YAML config > external models > defaults
-                    int mem_latency;
-                    if (config.memory_latency_override >= 0) {
-                        mem_latency = config.memory_latency_override;
-                    } else {
-                        // Use external models (default) or complete YAML override
-                        mem_latency = getMemoryLatencyCycles(config.memory_tech, config.frequency_mhz,
-                                                              config.use_yaml_memory_params,
-                                                              config.memory_params.read_latency_ns);
-                    }
-
-                    // Cache latencies: YAML override > CACTI > defaults
-                    int l1d_latency, l1i_latency, l2_latency = 0, l3_latency = 0;
-                    if (config.use_yaml_cache_params) {
-                        l1d_latency = static_cast<int>(std::round(
-                            config.l1d_params.latency_ns * config.frequency_mhz / 1000.0));
-                        l1i_latency = static_cast<int>(std::round(
-                            config.l1i_params.latency_ns * config.frequency_mhz / 1000.0));
-                        if (config.enable_l2)
-                            l2_latency = static_cast<int>(std::round(
-                                config.l2_params.latency_ns * config.frequency_mhz / 1000.0));
-                        if (config.enable_l3)
-                            l3_latency = static_cast<int>(std::round(
-                                config.l3_params.latency_ns * config.frequency_mhz / 1000.0));
-                    } else {
-                        l1d_latency = getCacheLatencyCycles(config.l1d_size_kb, config.l1d_ways,
-                                                             config.cache_line_size, config.frequency_mhz, config.tech_node_nm, 4);
-                        l1i_latency = getCacheLatencyCycles(config.l1i_size_kb, config.l1i_ways,
-                                                             config.cache_line_size, config.frequency_mhz, config.tech_node_nm, 3);
-                        if (config.enable_l2)
-                            l2_latency = getCacheLatencyCycles(config.l2_size_kb, config.l2_ways,
-                                                                config.cache_line_size, config.frequency_mhz, config.tech_node_nm, 12);
-                        if (config.enable_l3)
-                            l3_latency = getCacheLatencyCycles(config.l3_size_kb, config.l3_ways,
-                                                                config.cache_line_size, config.frequency_mhz, config.tech_node_nm, 20);
-                    }
-                    l1d_latency = std::max(1, l1d_latency);
-                    l1i_latency = std::max(1, l1i_latency);
-                    if (config.enable_l2) l2_latency = std::max(1, l2_latency);
-                    if (config.enable_l3) l3_latency = std::max(1, l3_latency);
-
-                    cfg << "// Auto-generated ZSim config by PIMID (QEMU MPI rank " << rank << ")\n";
-                    cfg << "// Memory: " << config.memory_tech << ", 1 core per rank\n";
-                    cfg << "// Frequency: " << config.frequency_mhz << " MHz\n\n";
-
-                    cfg << "sys = {\n";
-                    cfg << "    lineSize = " << config.cache_line_size << ";\n";
-                    cfg << "    frequency = " << config.frequency_mhz << ";\n\n";
-                    cfg << "    cores = {\n";
-                    cfg << "        pim_pe = {\n";
-                    cfg << "            type = \"" << core_type << "\";\n";
-                    cfg << "            cores = 1;\n";
-                    if (core_type == "ALU") {
-                        cfg << std::fixed << std::setprecision(2);
-                        cfg << "            computeFactor = " << config.alu_compute_factor << ";\n";
-                        cfg << "            accessFactor = " << config.alu_access_factor << ";\n";
-                        cfg << "            throughputFactor = " << config.alu_throughput_factor << ";\n";
-                        cfg << std::defaultfloat;
-                        cfg << "            operandWidth = " << config.alu_operand_width << ";\n";
-                        cfg << "            bitSerial = " << (config.alu_bit_serial ? "true" : "false") << ";\n";
-                        cfg << std::fixed << std::setprecision(2);
-                        cfg << "            energyFactor = " << config.alu_energy_factor << ";\n";
-                        cfg << std::defaultfloat;
-                    } else {
-                        cfg << "            dcache = \"l1d\";\n";
-                        cfg << "            icache = \"l1i\";\n";
-                        if (core_type == "InOrder") {
-                            // In-order issue width (YAML pim.pe.issue_width; default 2)
-                            cfg << "            issueWidth = " << config.inorder_issue_width << ";\n";
-                        }
-                    }
-                    cfg << "        };\n";
-                    cfg << "    };\n\n";
-
-                    if (core_type != "ALU") {
-                        cfg << "    caches = {\n";
-                        cfg << "        l1d = {\n";
-                        cfg << "            caches = 1;\n";
-                        cfg << "            size = " << (config.l1d_size_kb * 1024) << ";\n";
-                        cfg << "            array = { type = \"SetAssoc\"; ways = " << config.l1d_ways << "; };\n";
-                        cfg << "            latency = " << l1d_latency << ";\n";
-                        cfg << "        };\n";
-                        cfg << "        l1i = {\n";
-                        cfg << "            caches = 1;\n";
-                        cfg << "            size = " << (config.l1i_size_kb * 1024) << ";\n";
-                        cfg << "            array = { type = \"SetAssoc\"; ways = " << config.l1i_ways << "; };\n";
-                        cfg << "            latency = " << l1i_latency << ";\n";
-                        cfg << "        };\n";
-                        if (config.enable_l2) {
-                            cfg << "        l2 = {\n";
-                            // MPI per-rank: 1 core, so l2 caches=1 even if clustered globally
-                            cfg << "            caches = 1;\n";
-                            cfg << "            size = " << (config.l2_size_kb * 1024) << ";\n";
-                            cfg << "            array = { type = \"SetAssoc\"; ways = " << config.l2_ways << "; };\n";
-                            cfg << "            children = \"l1i|l1d\";\n";
-                            cfg << "            latency = " << l2_latency << ";\n";
-                            cfg << "        };\n";
-                        }
-                        if (config.enable_l3) {
-                            cfg << "        l3 = {\n";
-                            cfg << "            caches = 1;\n";
-                            cfg << "            size = " << (config.l3_size_kb * 1024) << ";\n";
-                            cfg << "            array = { type = \"SetAssoc\"; ways = " << config.l3_ways << "; };\n";
-                            cfg << "            children = \"l2\";\n";
-                            cfg << "            latency = " << l3_latency << ";\n";
-                            cfg << "        };\n";
-                        }
-                        cfg << "    };\n\n";
-                    }
-
-                    emitZSimMemBlock(cfg, config, mem_latency);
-
-                    // Configure Garnet-based network for all topologies
-                    emitZSimNetworkBlock(cfg, config);
-                    emitZSimHierarchyBlock(cfg, config);
-                    cfg << "};\n\n";
-
-                    int mpi_parallelism = (config.workload_type == "mpi") ? config.num_pes : 1;
-                    cfg << "sim = {\n";
-                    cfg << "    outputDir = \"" << rank_dir << "\";\n";
-                    cfg << "    phaseLength = " << config.phase_length << ";\n";
-                    cfg << "    maxTotalInstrs = " << config.max_instructions << "L;\n";
-                    cfg << "    statsPhaseInterval = " << config.stats_interval << ";\n";
-                    cfg << "    parallelism = " << mpi_parallelism << ";\n";
-                    cfg << "    printHierarchy = true;\n";
-                    cfg << "    aslr = false;\n";
-                    cfg << "    strictConfig = false;\n";
-                    cfg << "};\n\n";
-
-                    cfg << "// QEMU mode: workload is launched by QEMU, not by ZSim\n";
-                    cfg << "process0 = {\n";
-                    cfg << "    command = \"<qemu-managed>\";\n";
-                    cfg << "};\n";
-                    cfg.close();
-                }
-
-                // Find libpimid_mpi.so (PIMID's in-scope shm-mailbox MPI transport)
-                std::string pimid_mpi_lib = findPimidMpiLib();
-                if (pimid_mpi_lib.empty()) {
-                    std::cerr << "Error: libpimid_mpi.so not found (searched build dirs)" << std::endl;
-                    std::cerr << "Build pimid_mpi target before using --mpi-ranks" << std::endl;
-                    return 1;
-                }
-
-                // Unique shm name per launch so concurrent pimid invocations don't collide
-                std::string shm_name = "/pimid_mpi_" + std::to_string(getpid());
-
-                // Shared detailed-MPI Garnet: the launcher owns the NoC record-log
-                // lifecycle (create + size BEFORE forking; unlink after every child
-                // exited), so the segment exists from t=0 no matter which rank
-                // starts first. Every rank publishes its NoC accesses here and
-                // replays the identical merged multi-rank stream through its local
-                // Garnet replica -- ONE logical network driven by all ranks.
-                // This is the ONLY detailed-MPI NoC model: there is no isolated
-                // per-rank multi-Garnet mode and no fallback to one. Creation
-                // failure is FATAL -- silently degrading to N blind networks
-                // would fake the contention model.
-                std::string noc_shm_name = "/pimid_noc_" + std::to_string(getpid());
-                if (pimid_noc_shm_create(noc_shm_name.c_str(), (uint32_t)ranks,
-                                         (uint32_t)config.num_pes) != 0) {
-                    std::cerr << "Error: shared NoC log creation failed ("
-                              << noc_shm_name << ") -- cannot run detailed-MPI "
-                              << "without the shared Garnet stream" << std::endl;
-                    return 1;
-                }
-                std::cout << "Shared NoC log: " << noc_shm_name
-                          << " (one Garnet stream across " << ranks
-                          << " ranks)" << std::endl;
-
-                std::cout << "MPI transport: libpimid_mpi.so (shm=" << shm_name << ")" << std::endl;
-                std::cout << "Launching " << ranks << " ranks (PIMID-managed multi-process)" << std::endl;
-                std::cout << "────────────────────────────────────────" << std::endl;
-
-                std::vector<pid_t> child_pids;
-                child_pids.reserve(ranks);
-                for (int rank = 0; rank < ranks; rank++) {
-                    pid_t pid = fork();
-                    if (pid < 0) {
-                        std::cerr << "Error: fork() failed for rank " << rank << ": "
-                                  << strerror(errno) << std::endl;
-                        for (pid_t cp : child_pids) {
-                            kill(cp, SIGTERM);
-                            waitpid(cp, nullptr, 0);
-                        }
-                        return 1;
-                    }
-                    if (pid == 0) {
-                        std::string rank_dir = output_base + "/rank" + std::to_string(rank);
-                        std::string plugin_arg = plugin_path + ",cfg=" + rank_dir
-                                                 + "/zsim.cfg,out=" + rank_dir;
-
-                        setenv("OMP_NUM_THREADS", "1", 1);
-                        setenv("LD_PRELOAD", pimid_mpi_lib.c_str(), 1);
-                        setenv("PIMID_MPI_RANKS", std::to_string(ranks).c_str(), 1);
-                        setenv("PIMID_MPI_RANK", std::to_string(rank).c_str(), 1);
-                        setenv("PIMID_MPI_SHM", shm_name.c_str(), 1);
-                        setenv("PIMID_NOC_SHM", noc_shm_name.c_str(), 1);
-                        for (const auto& [key, val] : config.workload_env) {
-                            setenv(key.c_str(), val.c_str(), 1);
-                        }
-
-                        std::vector<std::string> argv_owned;
-                        argv_owned.push_back(qemu_binary);
-                        argv_owned.push_back("-plugin");
-                        argv_owned.push_back(plugin_arg);
-                        argv_owned.push_back("--");
-                        argv_owned.push_back(config.workload_binary);
-                        for (const auto& wa : config.workload_args) argv_owned.push_back(wa);
-
-                        std::vector<char*> argv_cstr;
-                        argv_cstr.reserve(argv_owned.size() + 1);
-                        for (auto& s : argv_owned) argv_cstr.push_back(s.data());
-                        argv_cstr.push_back(nullptr);
-
-                        execvp(qemu_binary.c_str(), argv_cstr.data());
-                        std::cerr << "Error: execvp(" << qemu_binary << ") failed: "
-                                  << strerror(errno) << std::endl;
-                        _exit(127);
-                    }
-                    child_pids.push_back(pid);
-                }
-
-                int worst_exit = 0;
-                for (pid_t cp : child_pids) {
-                    int st = 0;
-                    waitpid(cp, &st, 0);
-                    int rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + (WIFSIGNALED(st) ? WTERMSIG(st) : 0);
-                    if (rc > worst_exit) worst_exit = rc;
-                }
-
-                shm_unlink(shm_name.c_str());
-                shm_unlink(noc_shm_name.c_str());
-
-                std::cout << "────────────────────────────────────────" << std::endl;
-
-                {
-                    int exit_code = worst_exit;
-                    std::cout << "\nAll " << ranks << " ranks exited (worst exit code: "
-                              << exit_code << ")" << std::endl;
-
-                    // Parse per-rank ZSim stats
-                    std::cout << "\n========================================" << std::endl;
-                    std::cout << "MPI QEMU+ZSim Results (" << ranks << " ranks)" << std::endl;
-                    std::cout << "========================================" << std::endl;
-
-                    uint64_t total_cycles = 0;
-                    uint64_t max_cycles = 0;
-                    uint64_t total_instrs = 0;
-
-                    for (int rank = 0; rank < ranks; rank++) {
-                        std::string stats_path = output_base + "/rank" + std::to_string(rank) + "/zsim.out";
-                        ZSimParsedOutput rank_stats = parseZSimOutputFile(stats_path);
-
-                        std::cout << "Rank " << rank << ": ";
-                        if (rank_stats.cycles > 0 || rank_stats.instrs > 0) {
-                            std::cout << rank_stats.cycles << " cycles, "
-                                      << rank_stats.instrs << " instrs" << std::endl;
-                        } else {
-                            std::cout << "(no stats available)" << std::endl;
-                        }
-
-                        total_cycles += rank_stats.cycles;
-                        total_instrs += rank_stats.instrs;
-                        if (rank_stats.cycles > max_cycles) max_cycles = rank_stats.cycles;
-                    }
-
-                    std::cout << "────────────────────────────────────────" << std::endl;
-                    std::cout << "Total:  " << total_cycles << " cycles (max: " << max_cycles << ")" << std::endl;
-                    std::cout << "        " << total_instrs << " instructions" << std::endl;
-                    std::cout << "Per-rank results: " << output_base << "/rank*/zsim.out" << std::endl;
-
-                    // Power analysis using aggregate stats
-                    if (config.enable_power && exit_code == 0) {
-                        ZSimParsedOutput mpi_agg_stats;
-                        mpi_agg_stats.cycles = max_cycles;
-                        mpi_agg_stats.instrs = total_instrs;
-                        runPowerAnalysis(config, mpi_agg_stats, output_base + "/rank0");
-                    }
-
-                    success = (exit_code == 0);
-                }
-            } else {
+            {
                 // ── Single-process path (single-rank, OMP, and 1.6 thread-MPI) ──
                 // Thread-MPI needs libpimid_mpi.so resolvable BEFORE the fork
                 // so a missing library is a clean launcher error, not a child
@@ -8994,6 +8694,16 @@ int main(int argc, char** argv) {
                 }
 
                 std::cout << "ZSim config: " << zsim_cfg_path << std::endl;
+
+                // Config-only mode (same validation aid as the system-scope
+                // path): emit the generated ZSim config and stop WITHOUT
+                // launching QEMU, so wiring can be inspected on a login node
+                // without running any simulation.
+                if (getenv("PIMID_EMIT_CONFIG_ONLY")) {
+                    std::cout << "  (PIMID_EMIT_CONFIG_ONLY set: config emitted, "
+                              << "skipping simulation launch)" << std::endl;
+                    return 0;
+                }
 
                 // Output directory (also used by QEMU plugin via out= parameter)
                 std::string output_dir = "/tmp/pimid_qemu_" + std::to_string(getpid());
@@ -9039,12 +8749,13 @@ int main(int argc, char** argv) {
                         setenv("OMP_WAIT_POLICY", "PASSIVE", 0);
                         setenv("GOMP_SPINCOUNT", "0", 0);
                     }
-                    // 1.6 thread-MPI: the preloaded libpimid_mpi.so interposes
+                    // Thread-MPI: the preloaded libpimid_mpi.so interposes
                     // __libc_start_main and runs the app's UNTOUCHED main() once
-                    // per rank on its own guest thread. No PIMID_MPI_RANK, no
-                    // PIMID_MPI_SHM, no PIMID_NOC_SHM: rank identity is TLS and
+                    // per rank on its own guest thread. Rank identity is TLS and
                     // the transport is plain process memory; zsim sees an
                     // OMP-shaped world (N threads -> N cores, one Garnet).
+                    // PIMID_MPI_RANKS is the INTERNAL launcher->shim channel
+                    // (rank count > 1 engages the emulation; not a user knob).
                     if (config.workload_type == "mpi" && config.mpi_ranks > 0) {
                         // LD_PRELOAD must be GUEST-scoped (qemu -E below): a
                         // host-env preload loads the interposer into QEMU
@@ -9052,7 +8763,6 @@ int main(int argc, char** argv) {
                         // spawns N QEMUs in one process (instant SIGSEGV).
                         setenv("PIMID_MPI_RANKS",
                                std::to_string(config.mpi_ranks).c_str(), 1);
-                        setenv("PIMID_MPI_THREADED", "1", 1);
                         setenv("OMP_NUM_THREADS", "1", 0);
                     }
                     for (const auto& [key, val] : config.workload_env) {
@@ -9383,7 +9093,7 @@ int main(int argc, char** argv) {
                         return 1;
                     }
                     std::cout << "MPI Mode: " << config.mpi_ranks
-                              << " ranks as threads in ONE process (1.6 emu)"
+                              << " ranks (serial deterministic simulation)"
                               << std::endl;
                 }
                 pid_t pid = fork();
@@ -9424,10 +9134,10 @@ int main(int argc, char** argv) {
                     }
                     // Thread-MPI: ranks become guest threads of this one process.
                     // OMP_NUM_THREADS=1 so each rank stays single-threaded.
+                    // PIMID_MPI_RANKS is the internal launcher->shim channel.
                     if (config.workload_type == "mpi" && config.mpi_ranks > 0) {
                         setenv("PIMID_MPI_RANKS",
                                std::to_string(config.mpi_ranks).c_str(), 1);
-                        setenv("PIMID_MPI_THREADED", "1", 1);
                         setenv("OMP_NUM_THREADS", "1", 0);
                     }
                     for (const auto& [key, val] : config.workload_env) {

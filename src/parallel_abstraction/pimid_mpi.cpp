@@ -1109,7 +1109,8 @@ double MPI_Wtime(void) {
  *
  * The app binary is UNTOUCHED standard MPI. This library interposes
  * __libc_start_main (it is preloaded ahead of libc by the PIMID launcher):
- * when PIMID_MPI_THREADED=1, the app's real main() is captured and a harness
+ * when the launcher requests >1 rank (PIMID_MPI_RANKS, internal channel),
+ * the app's real main() is captured and a harness
  * main runs instead. The harness builds the in-process transport region and
  * spawns one thread per rank, each executing the app's own main(argc, argv)
  * with its rank identity in TLS. To the zsim plugin this is an OMP-shaped
@@ -1190,13 +1191,13 @@ extern "C" int __libc_start_main(int (*main_fn)(int, char**, char**), int argc,
         fprintf(stderr, "[pimid_mpi] cannot resolve real __libc_start_main\n");
         _exit(127);
     }
-    const char* threaded = getenv("PIMID_MPI_THREADED");
-    const char* ranks    = getenv("PIMID_MPI_RANKS");
-    /* Thread mode ONLY when the launcher says so AND this is not a legacy
-     * per-rank process (which carries PIMID_MPI_RANK). Everything else --
-     * OMP workloads, solo runs, legacy mode -- boots the app untouched. */
-    if (threaded && threaded[0] == '1' && !getenv("PIMID_MPI_RANK") &&
-        ranks && atoi(ranks) > 1) {
+    const char* ranks = getenv("PIMID_MPI_RANKS");
+    /* Thread-based rank emulation is THE MPI execution model (1.8.3): it
+     * engages whenever the launcher requests more than one rank AND this is
+     * not a per-rank trace-gen process (which carries PIMID_MPI_RANK).
+     * Everything else -- OMP workloads, solo runs, trace-gen ranks -- boots
+     * the app untouched. */
+    if (!getenv("PIMID_MPI_RANK") && ranks && atoi(ranks) > 1) {
         g_app_main = main_fn;
         return real(pimid_thread_main, argc, argv, init_fn, fini_fn,
                     rtld_fini, stack_end);
