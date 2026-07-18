@@ -903,15 +903,24 @@ static void insn_exec_cb(unsigned int vcpu_index, void *userdata) {
     if (unlikely(g_mpi_thread_mode && g_cosim_mode && !g_cosim_no_offload &&
                  g_in_device_region.load(std::memory_order_acquire) &&
                  thread_domain[tid].load() == DOMAIN_HOST)) {
-        /* TODO(1.8.4 follow-up): per-rank flush+launch charges -- see the
-         * entry-barrier leg. */
+        /* 1.8.5: per-rank flush+launch charges reinstated (mirrors the
+         * entry-barrier leg). Charge on THIS rank's host core -- still
+         * DOMAIN_HOST and scheduled (it has been feeding host BBLs, so it is
+         * initialized) -- BEFORE the locked detach and OUTSIDE g_migrateMutex
+         * (v184 round 5: drainHostCharges can block the phase system, so it
+         * must not run under the migrate mutex). */
+        if (thread_initialized[tid]) {
+            chargeCoherenceFlush(tid);   // PART A (1.7.2): Case-1 coherence flush
+            chargeLaunchCost(tid);       // PART B (1.7.3): kernel launch cost
+            drainHostCharges(tid);       // retire flush+launch onto the host timeline
+        }
         {
             std::lock_guard<std::mutex> mig(g_migrateMutex);
             detachThreadForMigration(tid, DOMAIN_DEVICE);
             g_deviceWorkers.fetch_add(1);
         }
         ensureThreadInit(tid);  // may block on the scheduler: OUTSIDE the lock
-        info("Thread %d: ROI window migrate-in (co-sim MPI rank)", tid);
+        info("Thread %d: ROI window migrate-in (co-sim MPI rank, flush+launch charged) [1.8.5]", tid);
     }
 
     ensureThreadInit(tid);
@@ -1076,9 +1085,20 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         if (unlikely(g_mpi_thread_mode && g_cosim_mode && !g_cosim_no_offload &&
                      !g_roiClosing.load() && tid < MAX_THREADS &&
                      thread_domain[tid].load() == DOMAIN_HOST)) {
-            /* TODO(1.8.4 follow-up): reinstate per-rank flush+launch charges
-             * here once the concurrent charge path is proven safe -- pulled
-             * for now to validate the migration machinery in isolation. */
+            /* 1.8.5: per-rank flush+launch charges reinstated. Each rank
+             * charges its OWN host core here -- still DOMAIN_HOST, still
+             * scheduled -- BEFORE the locked detach and OUTSIDE g_migrateMutex.
+             * v184 round 5: drainHostCharges feeds a synthetic BBL through the
+             * phase system, which can BLOCK, so the charges must never run while
+             * g_migrateMutex is held; running them here (before detach) is also
+             * semantically required -- the rank must be on its host core for the
+             * cost to land on the host inside the ROI window. Mirrors
+             * cosimRoiBeginOffload's PART A/B. */
+            if (thread_initialized[tid]) {
+                chargeCoherenceFlush(tid);   // PART A (1.7.2): Case-1 coherence flush
+                chargeLaunchCost(tid);       // PART B (1.7.3): kernel launch cost
+                drainHostCharges(tid);       // retire flush+launch onto the host timeline
+            }
             {
                 std::lock_guard<std::mutex> mig(g_migrateMutex);
                 detachThreadForMigration(tid, DOMAIN_DEVICE);
@@ -1089,7 +1109,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
                 }
             }
             ensureThreadInit(tid);  // may block on the scheduler: OUTSIDE the lock
-            info("Thread %d: ROI window migrate-in at entry barrier (co-sim)", tid);
+            info("Thread %d: ROI window migrate-in at entry barrier (co-sim, flush+launch charged) [1.8.5]", tid);
         }
         /* 1.8.4 co-sim ROI window (defect #14): the post-kernel join. Once
          * the window is closing, each rank leaves the device at ITS OWN
