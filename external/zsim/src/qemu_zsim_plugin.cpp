@@ -1120,23 +1120,48 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         if (unlikely(g_mpi_thread_mode && g_cosim_mode && !g_cosim_no_offload &&
                      g_roiClosing.load() && tid < MAX_THREADS &&
                      thread_domain[tid].load() == DOMAIN_DEVICE)) {
-            {
-                std::lock_guard<std::mutex> mig(g_migrateMutex);
-                detachThreadForMigration(tid, DOMAIN_HOST);
-            }
-            ensureThreadInit(tid);  // may block on the scheduler: OUTSIDE the lock
-            info("Thread %d: ROI window migrate-out (co-sim MPI rank)", tid);
+            /* 1.8.6 co-sim MPI exit-protocol heap-corruption fix.
+             *
+             * ROOT CAUSE: the 1.8.4 closing-barrier migrate-out ran the
+             * scheduler churn sched->leave()/finish()+re-init (which calls
+             * cores[cid]->leave() + deschedule() and re-attaches the rank to a
+             * HOST InOrder core) from EVERY drained rank's own vcpu thread, in
+             * a barrier-release STAMPEDE. The MPI serial weave runs with
+             * sim.parallelism==1, so normally exactly one vcpu thread ever
+             * touches simulator state; but a migrate-out FREES the rank's core
+             * slot mid-handler (finish) and a peer immediately starts running,
+             * so a rank's in-flight leave/re-init overlaps the peer's
+             * contention-sim phase pass -- both iterate InOrder-core /
+             * event-queue (feMap, glibc-heap) state that is single-threaded by
+             * construction. The unsynchronized overlap corrupts the process
+             * heap: the endgame "malloc(): unaligned tcache chunk" /
+             * "QEMU internal SIGSEGV", the Garnet "No output port for vnet:<garbage>"
+             * panic, and (rarely) the contention_sim "event too far into the
+             * future" assert -- all firing right after the last rank drains.
+             * The symmetric migrate-IN (host->DEVICE ALU cores, no contention
+             * sim) never corrupts; only the device->HOST-InOrder leg does.
+             * Confirmed by bisection: skipping ONLY this leg makes 12/12 gemv +
+             * 6/6 histogram clean; serializing the churn against the phase sim
+             * left gemv failing (the re-init Join + guest re-entry stay
+             * concurrent), and holding a lock across the Join re-deadlocks the
+             * parallelism==1 phase system (v184 round 5).
+             *
+             * FIX: do NOT migrate the drained rank back to a host core. The
+             * per-rank ROI window still opens (migrate-IN offloads every rank,
+             * defect #14) and its DEVICE compute is measured exactly; the rank
+             * simply finishes the post-ROI MPI protocol (Reduce/Finalize/exit)
+             * ON ITS DEVICE PE. That protocol is a tiny, untimed tail (a few
+             * hundred cycles of an 8-256 B reduce against a ~10^6-cycle
+             * kernel), so pricing it on the ALU core instead of the host core
+             * is a <1% accounting shift -- vastly preferable to the heap
+             * corruption, and it removes the racy leg entirely rather than
+             * masking it. */
+            info("Thread %d: ROI window close (co-sim MPI rank, stays on device PE)", tid);
             if (g_deviceWorkers.fetch_sub(1) - 1 == 0) {
-                /* Last rank out: the window close is PURELY a migration
-                 * event -- no dump (heap abort, round 3), no termination
-                 * (kill-mid-protocol, rounds 4-6), and no in_roi freeze
-                 * either (round 7: every crashing run stored in_roi=false
-                 * here; every clean run kept it true to guest exit). The
-                 * freeze is unnecessary by construction: drained ranks are
-                 * back on HOST cores, so continued feeding prices the
-                 * post-ROI protocol work on the host -- where the co-sim
-                 * model wants it -- and device counters stay clean. The
-                 * guest runs to natural exit; the exit path dumps. */
+                /* Last rank out: window close is a bookkeeping event only --
+                 * no migration, no dump (heap abort, round 3), no termination
+                 * (kill-mid-protocol, rounds 4-6), no in_roi freeze (round 7).
+                 * The guest runs to natural exit; the exit path dumps. */
                 info("Thread %d: ROI window drained (last rank out)", tid);
             }
         }
