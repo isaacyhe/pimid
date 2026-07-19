@@ -8847,6 +8847,50 @@ int main(int argc, char** argv) {
                                   << " instructions" << std::endl;
                     }
 
+                    // 1.8.8: OpenMP critical-path cycle summary. zsim.out holds one
+                    // "cycles: N # Simulated cycles" line per device PE (core). A PE's
+                    // per-core count is only ITS OWN active cycles, so the FIRST line
+                    // (core 0) -- which is what a "grep ... | head -1" sweep records and
+                    // what parseZSimOutputFile() latches into out.cycles -- is an
+                    // unreliable proxy for kernel completion: core 0 can finish well
+                    // before the slowest PE. Measured bfs BANK sweep spread: at 64 PEs
+                    // core 0 = 9.36M vs max 12.68M (26% low); at 16 PEs 10.98M vs 11.95M
+                    // (8% low); at 32 PEs 14.09M vs 14.28M (representative). Recording
+                    // core 0 therefore manufactured a spurious +28% "bump" at 32 PEs that
+                    // "reversed" at 64. The kernel finishes when the LAST PE finishes, so
+                    // the critical-path metric is the MAX across PEs -- exactly what the
+                    // MPI path above reports. Emit the same "Total: ... (max: N)" summary
+                    // so downstream OMP sweeps can grep a robust critical-path value
+                    // instead of head -1. Purely additive: the per-PE zsim.out lines,
+                    // out.cycles, and power analysis are untouched (bit-identical).
+                    if (config.workload_type == "openmp") {
+                        std::ifstream sf(stats_path);
+                        std::string ln;
+                        std::vector<uint64_t> peCycles;
+                        while (std::getline(sf, ln)) {
+                            size_t cpos = ln.find("cycles: ");
+                            if (cpos != std::string::npos &&
+                                ln.find("# Simulated") != std::string::npos) {
+                                uint64_t v = strtoull(ln.c_str() + cpos + 8, nullptr, 10);
+                                if (v > 0) peCycles.push_back(v);
+                            }
+                        }
+                        if (!peCycles.empty()) {
+                            uint64_t tot = 0, mx = 0, mn = UINT64_MAX;
+                            for (uint64_t v : peCycles) {
+                                tot += v;
+                                if (v > mx) mx = v;
+                                if (v < mn) mn = v;
+                            }
+                            uint64_t mean = tot / peCycles.size();
+                            std::cout << "OMP cycles: " << mx << " (mean: " << mean
+                                      << ", min: " << mn << ", pes: " << peCycles.size()
+                                      << ", critical-path max)" << std::endl;
+                            std::cout << "Total:  " << tot << " cycles (max: " << mx
+                                      << ")" << std::endl;
+                        }
+                    }
+
                     // Power analysis (runs if stats exist, even for non-zero guest exit)
                     // OOO cores may report cycles=0 (contention sim not triggered in QEMU mode)
                     // but still produce valid instrs — use instrs as fallback guard

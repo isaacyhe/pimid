@@ -26,7 +26,13 @@
 #include "alu_core.h"
 #include "pe_memory_interface.h"
 #include "zsim.h"
+#include "constants.h"
 #include <algorithm>
+
+// 1.8.7 post-ROI protocol-tail receipt, indexed by global core index (srcId_).
+// Fixed BSS storage (see core.h) -- deliberately NOT a Core member, so Core's
+// object size stays byte-identical and device-scope runs stay bit-identical.
+uint64_t g_mpiProtocolTailCyc[MAX_THREADS] = {0};
 
 // ALU Core: Pure computational core with optional PE memory interface
 
@@ -66,6 +72,32 @@ void ALUCore::initStats(AggregateStat* parentStat) {
     auto instrsStat = makeLambdaStat(xi);
     instrsStat->init("instrs", "Simulated instructions");
     coreStat->append(instrsStat);
+
+    // 1.8.7: explicit post-ROI protocol-tail RECEIPT for co-sim MPI (device PEs
+    // are the MPI ranks; the collective tail is device-resident work that stays
+    // in 'cycles' -- this line only exposes its magnitude). Read from the fixed
+    // global array (indexed by this PE's global core index srcId_), NOT a Core
+    // member, to keep Core's object layout byte-identical.
+    //
+    // Emitted ONLY in a co-sim run (host + device cores coexist). In a
+    // device-scope run every core is an ALU PE, protocolTail is always 0, and
+    // appending an extra LambdaStat here would shift heap layout and perturb the
+    // contention sim's address-ordered tie-breaking -- breaking device-scope
+    // bit-identity vs the 1.6/1.8.6 baseline. zinfo->cores is fully populated
+    // before this initStats pass (init.cpp), so the host-core probe is safe.
+    bool cosimRun = false;
+    for (uint32_t c = 0; c < zinfo->numCores; c++)
+        if (zinfo->cores[c] &&
+            (zinfo->cores[c]->asInOrderCore() || zinfo->cores[c]->asOOOCore())) {
+            cosimRun = true; break;
+        }
+    if (cosimRun) {
+        uint32_t sid = srcId_;
+        auto xt = [sid]() -> uint64_t { return g_mpiProtocolTailCyc[sid]; };
+        auto protocolTailStat = makeLambdaStat(xt);
+        protocolTailStat->init("protocolTail", "Post-ROI MPI inter-PE collective tail cycles (device-resident)");
+        coreStat->append(protocolTailStat);
+    }
 
     parentStat->append(coreStat);
 }

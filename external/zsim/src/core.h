@@ -66,6 +66,17 @@ class InOrderCore;
 class OOOCore;
 class EventRecorder;
 
+/* 1.8.7 co-sim MPI post-ROI protocol-tail RECEIPT, indexed by GLOBAL CORE INDEX
+ * (== ALUCore::srcId_ == the plugin's cid). Kept in a FIXED file-scope array
+ * rather than a Core member ON PURPOSE: adding a field to Core changes every
+ * core object's size and shifts heap layout, which perturbs the contention
+ * sim's address-ordered tie-breaking and made device-scope runs diverge ~10K on
+ * one PE (benign, but broke device-scope bit-identity vs the 1.6/1.8.6 baseline).
+ * A fixed BSS array leaves Core's layout byte-identical. Written by the plugin's
+ * recordProtocolTailStats() (co-sim MPI only; stays 0 otherwise) and read by the
+ * per-PE 'protocolTail' LambdaStat in ALUCore::initStats. Never alters 'cycles'. */
+extern uint64_t g_mpiProtocolTailCyc[];
+
 //Generic core class
 
 class Core : public GlobAlloc {

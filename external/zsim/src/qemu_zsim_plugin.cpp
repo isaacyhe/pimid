@@ -218,6 +218,11 @@ static bool mpi_roi_baselined = false;
  * leaking it into the rendezvous made the cross-rank critical path nondet). */
 static uint64_t mpi_roi_base_cyc[MAX_THREADS] = {0};
 
+/* Co-sim mode: a real host and a real device coexist; ROI = offload region.
+ * Defined HERE (moved up from its 1.6 site) so roiRelCycles() below can scope
+ * the 1.8.7 tid/cid baseline correction to co-sim only. */
+static bool g_cosim_mode = false;
+
 /* Snapshot every core's ROI baseline cycle (call right after markRoiBegin). */
 static inline void snapshotRoiBaseCyc() {
     uint64_t maxBase = 0;
@@ -233,10 +238,60 @@ static inline void snapshotRoiBaseCyc() {
     __sync_synchronize();
     zinfo->hierarchy.mpiNocBaselined = 1;
 }
-/* This core's simulated cycle measured from its ROI baseline (floor-free). */
+/* This rank's simulated cycle measured from its ROI baseline (floor-free).
+ *
+ * 1.8.7 tid/cid baseline-aliasing fix (SCOPED to co-sim). snapshotRoiBaseCyc()
+ * stores mpi_roi_base_cyc[] indexed by CORE INDEX (mpi_roi_base_cyc[c] =
+ * cores[c]->getCycles()). roiRel needs the baseline of the core the RANK is on.
+ *
+ * In SYSTEM-scope co-sim the two disagree catastrophically: a rank (tid) runs on
+ * a DEVICE PE whose cid != tid, and the old read mpi_roi_base_cyc[tid] aliased
+ * HOST cores 0..3 -- carrying their ~16.5M pre-ROI (MPI_Init-era) clock -- so
+ * roiRel clamped to 0 for tid 0..3. That collapsed the SEND/RECV rendezvous: the
+ * receiver's `cur` read 0, so each recv advanced by the FULL send_time and the
+ * reduce ROOT ACCUMULATED the senders' stamps (~2.6M) instead of advancing to
+ * their max. Reading the baseline of the rank's ACTUAL core (cids[tid]) puts
+ * getCycles() and the baseline on the same clock axis and fixes it.
+ *
+ * That correction is CONFINED to g_cosim_mode. The catastrophic aliasing exists
+ * ONLY where host and device cids coexist (system scope). In DEVICE scope every
+ * core is a device PE, the old [tid] indexing is already correct, AND it is
+ * DETERMINISTIC -- whereas [cids[tid]] would couple roiRel to the run-to-run
+ * PE assignment (cids[tid] is not stable across runs, per-PE baselines differ),
+ * making device-scope MPI nondeterministic and NOT bit-identical to prior data.
+ * So device scope keeps [tid] verbatim (bit-identical to the 1.8.6 baseline).
+ *
+ * Documented residual (both scopes): mpi_roi_base_cyc is a shared per-CORE-slot
+ * table, so a rank's stamp still carries a small per-rank baseline skew from the
+ * slot it reads. It is DETERMINISTIC and present in all prior co-sim MPI data; a
+ * proper per-RANK baseline table is a 1.9.x redesign candidate. */
+/* Per-rank cache of the last baseline read with a VALID cid (co-sim). A rank's
+ * cids[tid] is momentarily invalid (INVALID/UNINITIALIZED_CID) during migrate-in
+ * and other detached windows; without this cache the co-sim branch would fall
+ * back to mpi_roi_base_cyc[tid], which for tid 0..3 is the aliased HOST-core
+ * baseline (~16.5M) -- flipping roiRel between the correct value and 0 mid-run.
+ * That inconsistency made a rank publish alternating send-time stamps and, rarely
+ * (~4%), drove a downstream rendezvous cycle past 2^32 -> contention_sim "event
+ * too far into the future". Caching the last valid device baseline keeps roiRel
+ * consistent across transient cid-invalid windows. */
+static uint64_t g_rankRoiBaseCache[MAX_THREADS] = {0};
 static inline uint64_t roiRelCycles(uint32_t tid) {
     uint64_t now = cores[tid] ? cores[tid]->getCycles() : 0;
-    return (now > mpi_roi_base_cyc[tid]) ? (now - mpi_roi_base_cyc[tid]) : 0;
+    uint64_t base;
+    if (g_cosim_mode) {
+        uint32_t cid = (tid < MAX_THREADS) ? cids[tid] : tid;
+        if (cid < zinfo->numCores) {
+            base = mpi_roi_base_cyc[cid];
+            if (tid < MAX_THREADS) g_rankRoiBaseCache[tid] = base;   // remember last valid
+        } else if (tid < MAX_THREADS && g_rankRoiBaseCache[tid] != 0) {
+            base = g_rankRoiBaseCache[tid];                          // reuse across invalid window
+        } else {
+            base = mpi_roi_base_cyc[tid];                            // pre-first-valid fallback
+        }
+    } else {
+        base = mpi_roi_base_cyc[tid];   // device scope: unchanged, deterministic, bit-identical
+    }
+    return (now > base) ? (now - base) : 0;
 }
 
 /* Co-simulation: per-thread domain tracking and core-type masks */
@@ -262,6 +317,38 @@ static bool g_mpi_thread_mode = false;
 static std::atomic<int> g_deviceWorkers{0};
 static std::atomic<bool> g_roiClosing{false};
 
+/* 1.8.7 fully device-resident co-sim MPI ranks (ZERO migrations).
+ *
+ * Finalized model: the MPI ranks ARE the device PEs. The post-ROI inter-PE
+ * collective (closing barrier + Reduce + Finalize) is device work executed ON
+ * THE PE -- rank 0 collects on its PE; the host is only involved at final
+ * readback. So NO rank ever migrates at window close (the 1.8.6/1.8.4 residual
+ * device->host legs are all removed), and the tail cycles correctly STAY in the
+ * PE's reported cycles. Zero migrations = zero race, by construction.
+ *
+ * The only added machinery is a RECEIPT: each rank records, IN ITS OWN THREAD
+ * CONTEXT (plain per-tid array writes, no locks, no scheduler calls), a TAIL
+ * MARKER = its PE cycle count at its closing-barrier op (uniform for all ranks,
+ * INCLUDING rank 0 -- see below), plus the PE cid. At the termination dump,
+ * recordProtocolTailStats() sets g_mpiProtocolTailCyc[cid] = final PE cycles -
+ * surfaced as the per-PE 'protocolTail' visibility stat. No ledger move. */
+static uint64_t g_tailMarker[MAX_THREADS]   = {0};   // PE cycles at close (post-ADVANCE)
+static uint32_t g_tailDeviceCid[MAX_THREADS];         // PE cid at close
+static bool     g_tailMarked[MAX_THREADS]   = {false};
+
+/* Record a rank's post-ROI tail marker in its own thread context: the device
+ * PE cycle count at the instant the window closes for this rank. No locks, no
+ * scheduler calls -- just per-tid array writes. */
+static inline void recordTailMarker(uint32_t tid) {
+    if (tid >= MAX_THREADS || !thread_initialized[tid]) return;
+    uint32_t cid = cids[tid];
+    if (cid < zinfo->numCores && zinfo->cores[cid]) {
+        g_tailMarker[tid]    = zinfo->cores[cid]->getCycles();
+        g_tailDeviceCid[tid] = cid;
+        g_tailMarked[tid]    = true;
+    }
+}
+
 /* Defined below (cost model helpers); used by the kernel-entry migration in
  * handleMpiMagicOp, which precedes them in this file. */
 static void chargeCoherenceFlush(uint32_t tid);
@@ -278,8 +365,8 @@ static std::mutex g_migrateMutex;
 static g_vector<bool> host_mask;     // true for OOO cores
 static g_vector<bool> device_mask;   // true for ALU cores
 static std::atomic<uint64_t> offload_count{0};
-/* Co-sim mode: a real host and a real device coexist; ROI = offload region. */
-static bool g_cosim_mode = false;
+/* (g_cosim_mode is defined earlier, near mpi_roi_base_cyc, so roiRelCycles can
+ * scope the tid/cid baseline correction to co-sim.) */
 /* NO_OFFLOAD baseline knob (PIMID_COSIM_NO_OFFLOAD=1, read once at init). In a
  * co-sim (system-scope) run the ROI/WORK magic ops become STAT-ONLY: threads
  * never migrate to the device domain, no bridge/PCIe transfer latency is
@@ -553,6 +640,26 @@ static void dumpApproxProfile() {
 
 /* ---- SimEnd ---- */
 
+/* 1.8.7 protocol-tail RECEIPT, computed ONCE just before the stats dump
+ * (single-threaded guest-exit path). For each marked co-sim MPI rank (== PE):
+ *   tail = final PE cycles - the PE's closing-barrier marker
+ * and record it in g_mpiProtocolTailCyc[] for the explicit 'protocolTail' stat.
+ * NO ledger move: the tail is device-resident inter-PE collective work and
+ * correctly stays in the PE's 'cycles'. This only exposes its magnitude. */
+static void recordProtocolTailStats() {
+    if (!(g_mpi_thread_mode && g_cosim_mode && !g_cosim_no_offload)) return;
+    for (uint32_t tid = 0; tid < MAX_THREADS; tid++) {
+        if (!g_tailMarked[tid]) continue;
+        uint32_t dcid = g_tailDeviceCid[tid];
+        if (dcid >= zinfo->numCores || !zinfo->cores[dcid]) continue;
+        uint64_t finalDev = zinfo->cores[dcid]->getCycles();
+        uint64_t tail = (finalDev > g_tailMarker[tid]) ? (finalDev - g_tailMarker[tid]) : 0;
+        g_mpiProtocolTailCyc[dcid] = tail;   // receipt only (fixed global array), no ledger move
+        info("Protocol tail: rank %u PE(cid %u) post-ROI inter-PE collective tail %lu cyc "
+             "(device-resident)", tid, dcid, (unsigned long)tail);
+    }
+}
+
 /* Dump the termination stats exactly once. Split out of SimEnd so an MPI
  * rank can freeze its ROI-scoped stats at ROI END deterministically while the
  * process lives on to finish its MPI protocol (closing barrier, serving
@@ -562,6 +669,7 @@ static volatile uint32_t g_termStatsDumped = 0;
 static void dumpTerminationStats() {
     if (!__sync_bool_compare_and_swap(&g_termStatsDumped, 0, 1)) return;
 
+    recordProtocolTailStats();   // 1.8.7: fill the protocolTail receipt BEFORE the dump
     info("Dumping termination stats");
     zinfo->trigger = 20000;
     for (StatsBackend* backend : *(zinfo->statsBackends)) {
@@ -1119,7 +1227,14 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
          * it drains via the guest-exit dump path -- documented fallback.) */
         if (unlikely(g_mpi_thread_mode && g_cosim_mode && !g_cosim_no_offload &&
                      g_roiClosing.load() && tid < MAX_THREADS &&
-                     thread_domain[tid].load() == DOMAIN_DEVICE)) {
+                     thread_domain[tid].load() == DOMAIN_DEVICE &&
+                     !g_tailMarked[tid])) {
+            /* 1.8.7 guard: skip a rank already tail-marked. The opener (rank 0)
+             * marks at its roi_end and -- unlike 1.8.6, where it migrated to the
+             * host -- now STAYS DOMAIN_DEVICE, so without this guard it would
+             * re-enter here at the closing barrier and double-decrement
+             * g_deviceWorkers (and overwrite its roi_end marker). Ranks 1..N-1
+             * are unmarked until THIS branch marks them, so they are unaffected. */
             /* 1.8.6 co-sim MPI exit-protocol heap-corruption fix.
              *
              * ROOT CAUSE: the 1.8.4 closing-barrier migrate-out ran the
@@ -1156,7 +1271,11 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
              * is a <1% accounting shift -- vastly preferable to the heap
              * corruption, and it removes the racy leg entirely rather than
              * masking it. */
-            info("Thread %d: ROI window close (co-sim MPI rank, stays on device PE)", tid);
+            /* 1.8.7: NO migration (1.8.6 behavior preserved -- zero race). Just
+             * record the tail marker in this rank's OWN thread context; the tail
+             * it now runs on the device PE is attributed device->host at dump. */
+            recordTailMarker(tid);
+            info("Thread %d: ROI window close (co-sim MPI rank, stays on device PE, tail marked) [1.8.7]", tid);
             if (g_deviceWorkers.fetch_sub(1) - 1 == 0) {
                 /* Last rank out: window close is a bookkeeping event only --
                  * no migration, no dump (heap abort, round 3), no termination
@@ -1278,6 +1397,15 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         return;
     }
 
+    /* NOTE (1.8.7 discovered latent issue -- NOT fixed here): MPI_TIME (2058)
+     * and MPI_ADVANCE (2059) fall OUTSIDE isMpiMagicOp()'s [MPI_REGISTER 2048,
+     * MPI_CONTEND 2057] window, so these two handlers are DEAD -- never
+     * dispatched. The MPI_Barrier max-arrival rendezvous ADVANCE therefore never
+     * applies; the closing barrier's exit-time equalization is inert. This is a
+     * pre-existing dispatch-bound bug, orthogonal to the tid/cid aliasing fixed
+     * in this release. Enabling dead code is its own risk (it would suddenly arm
+     * an untested advance across every barrier); deferred to the 1.9.x train to
+     * assess deliberately rather than flipped on inside a targeted fix. */
     if (op == ZSIM_MAGIC_OP_MPI_TIME) {
         gp->sim_now = roiRelCycles(tid);
         return;
@@ -1476,16 +1604,42 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
                                   + (uint64_t)totalLat)
                                : (curCyc + (uint64_t)totalLat);
         uint64_t delta = (arrival > curCyc) ? (arrival - curCyc) : 0;
+        /* 1.8.7 cross-axis invariant guard. A single message's rendezvous
+         * advance can never exceed the whole ROI simulated so far -- arrival is
+         * a floor-free roiRel stamp bounded by the ROI span, and curCyc >= 0. If
+         * `delta` blows past that, the sender's send_time and the receiver's
+         * curCyc are on MISMATCHED clock axes (the tid/cid baseline aliasing this
+         * release fixes): the classic symptom is curCyc collapsing to 0 while the
+         * PE's raw clock is well into the ROI, so `delta` degenerates to the full
+         * send_time and the ROOT accumulates. Shout LOUDLY and cap rather than
+         * advance a PE by a garbage delta. Same defensive-tripwire discipline as
+         * the defect-13 thread-MPI cycle-rewind guard and the 1.7.7 co-sim
+         * memRespCycle-skew assert. */
+        uint64_t roiSpan = zinfo->globPhaseCycles;   // no one message can advance past the whole ROI
+        if (delta > roiSpan && roiSpan > 0) {
+            uint64_t raw = cores[tid] ? cores[tid]->getCycles() : 0;
+            uint32_t bcid = (tid < MAX_THREADS && cids[tid] < zinfo->numCores) ? cids[tid] : tid;
+            warn("[1.8.7 cross-axis guard] rank %u MPI_RECV advance delta=%lu exceeds ROI span "
+                 "%lu (send_time=%lu cwait=%lu cur=%lu raw=%lu base=%lu) -- clock-axis mismatch; "
+                 "capping to ROI span", tid, (unsigned long)delta, (unsigned long)roiSpan,
+                 (unsigned long)params.sim_send_time, (unsigned long)params.sim_contend_wait,
+                 (unsigned long)curCyc, (unsigned long)raw,
+                 (unsigned long)mpi_roi_base_cyc[bcid]);
+            delta = roiSpan;
+        }
         chargedCycles = delta;
         if (c && delta > 0) c->addDelay((uint32_t)std::min<uint64_t>(delta, 0xFFFFFFFFull));
         if (getenv("PIMID_DEBUG_RDV")) {
             info("Thread %d: MPI_RECV src=%u dst=%u size=%lu send_time=%lu cwait=%lu "
-                 "cur=%lu lat=%u arrival=%lu delta=%lu", tid, params.src_pe,
+                 "cur=%lu lat=%u arrival=%lu delta=%lu raw_getCyc=%lu roi_base=%lu",
+                 tid, params.src_pe,
                  params.dst_pe, (unsigned long)params.msg_size,
                  (unsigned long)params.sim_send_time,
                  (unsigned long)params.sim_contend_wait,
                  (unsigned long)curCyc, totalLat, (unsigned long)arrival,
-                 (unsigned long)delta);
+                 (unsigned long)delta,
+                 (unsigned long)(cores[tid] ? cores[tid]->getCycles() : 0),
+                 (unsigned long)mpi_roi_base_cyc[(tid < MAX_THREADS && cids[tid] < zinfo->numCores) ? cids[tid] : tid]);
         }
     } else {
         if (c && totalLat > 0) c->addDelay(totalLat);
@@ -1837,38 +1991,54 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
         // global phase clock and host cycles absorb the device execution.
         if (g_cosim_mode && !g_cosim_no_offload && tid < MAX_THREADS) {
             g_in_device_region.store(false);
-            thread_domain[tid].store(DOMAIN_HOST);
-            // BUSY-WAIT occupancy (1.7.3, HANDOFF ISSUE 2, CUDA-default -- no IRQ,
-            // no polling knob): while the device kernel ran, the host core was NOT
-            // free to do other useful work -- it spun on the completion fence. In
-            // device-only co-sim this is represented BY CONSTRUCTION: the single
-            // launcher thread is either on the host (pre-offload flush+launch, and
-            // post-offload readback) or on the device PE running the kernel -- it
-            // is NEVER two places at once and NEVER races ahead to do other host
-            // work during the device compute (there IS no other work in device-
-            // only mode). The task-region measurement window (the makespan across
-            // all cores) therefore already includes the device-execution duration
-            // via the device PE, and the launch/flush costs charged at the doorbell
-            // sit inside that window on the host timeline. The host cannot skip
-            // ahead free -- it is self-penalized for the wait, exactly as a CUDA
-            // busy-wait would be. (A multi-core host that could overlap independent
-            // host work during offload would need an explicit spin charge here;
-            // deferred with the multi-core-host baseline ladder.)
-            if (thread_initialized[tid]) {
-                uint32_t cid = cids[tid];
-                if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
-                    zinfo->sched->leave(procIdx, tid, cid);
+            if (g_mpi_thread_mode) {
+                /* 1.8.7: the MPI opener (rank 0) is a PE-resident rank exactly
+                 * like the others -- NO migration (removes even 1.8.6's residual
+                 * rank-0 device->host leg; now truly ZERO migrations), and NO
+                 * tail marker / g_deviceWorkers decrement HERE. It is tail-marked
+                 * UNIFORMLY at the closing-barrier op (post-barrier), identical
+                 * to ranks 1..N-1, and drains g_deviceWorkers there too, so its
+                 * reduce-ROOT tail is measured from the same point as every peer.
+                 * roi_end only flips the window to CLOSING. The OMP master (else
+                 * branch) is UNTOUCHED: its workers are joined before roi_end, so
+                 * its immediate host migration is validated. */
+                info("Thread %d: ROI offload end (co-sim MPI opener, PE-resident, marked at barrier) [1.8.7]", tid);
+                g_roiClosing.store(true);
+            } else {
+                thread_domain[tid].store(DOMAIN_HOST);
+                // BUSY-WAIT occupancy (1.7.3, HANDOFF ISSUE 2, CUDA-default -- no IRQ,
+                // no polling knob): while the device kernel ran, the host core was NOT
+                // free to do other useful work -- it spun on the completion fence. In
+                // device-only co-sim this is represented BY CONSTRUCTION: the single
+                // launcher thread is either on the host (pre-offload flush+launch, and
+                // post-offload readback) or on the device PE running the kernel -- it
+                // is NEVER two places at once and NEVER races ahead to do other host
+                // work during the device compute (there IS no other work in device-
+                // only mode). The task-region measurement window (the makespan across
+                // all cores) therefore already includes the device-execution duration
+                // via the device PE, and the launch/flush costs charged at the doorbell
+                // sit inside that window on the host timeline. The host cannot skip
+                // ahead free -- it is self-penalized for the wait, exactly as a CUDA
+                // busy-wait would be. (A multi-core host that could overlap independent
+                // host work during offload would need an explicit spin charge here;
+                // deferred with the multi-core-host baseline ladder.)
+                if (thread_initialized[tid]) {
+                    uint32_t cid = cids[tid];
+                    if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
+                        zinfo->sched->leave(procIdx, tid, cid);
+                    }
+                    zinfo->sched->finish(procIdx, tid);
+                    thread_initialized[tid] = false;
+                    clearCid(tid);
                 }
-                zinfo->sched->finish(procIdx, tid);
-                thread_initialized[tid] = false;
-                clearCid(tid);
+                ensureThreadInit(tid);  // host mask
+                info("Thread %d: ROI offload end (co-sim)", tid);
+                // OMP master leaves the device here; window is CLOSING.
+                g_deviceWorkers.fetch_sub(1);
+                g_roiClosing.store(true);
             }
-            ensureThreadInit(tid);  // host mask
-            info("Thread %d: ROI offload end (co-sim)", tid);
-            // 1.8.4 ROI window: the opener is out; the window is CLOSING.
-            // Remaining MPI ranks leave at their own barrier arrival.
-            g_deviceWorkers.fetch_sub(1);
-            g_roiClosing.store(true);
+            // (MPI opener path set g_roiClosing above and defers its
+            //  g_deviceWorkers decrement + tail marker to the closing barrier.)
         }
         // 1.6 thread-MPI: only the LAST rank out freezes stats + terminates;
         // earlier enders still owe MPI protocol work (closing barrier,
@@ -2060,38 +2230,54 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
     } else if (opcode == ZSIM_MAGIC_OP_ROI_END) {
         if (g_cosim_mode && !g_cosim_no_offload && tid < MAX_THREADS) {
             g_in_device_region.store(false);
-            thread_domain[tid].store(DOMAIN_HOST);
-            // BUSY-WAIT occupancy (1.7.3, HANDOFF ISSUE 2, CUDA-default -- no IRQ,
-            // no polling knob): while the device kernel ran, the host core was NOT
-            // free to do other useful work -- it spun on the completion fence. In
-            // device-only co-sim this is represented BY CONSTRUCTION: the single
-            // launcher thread is either on the host (pre-offload flush+launch, and
-            // post-offload readback) or on the device PE running the kernel -- it
-            // is NEVER two places at once and NEVER races ahead to do other host
-            // work during the device compute (there IS no other work in device-
-            // only mode). The task-region measurement window (the makespan across
-            // all cores) therefore already includes the device-execution duration
-            // via the device PE, and the launch/flush costs charged at the doorbell
-            // sit inside that window on the host timeline. The host cannot skip
-            // ahead free -- it is self-penalized for the wait, exactly as a CUDA
-            // busy-wait would be. (A multi-core host that could overlap independent
-            // host work during offload would need an explicit spin charge here;
-            // deferred with the multi-core-host baseline ladder.)
-            if (thread_initialized[tid]) {
-                uint32_t cid = cids[tid];
-                if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
-                    zinfo->sched->leave(procIdx, tid, cid);
+            if (g_mpi_thread_mode) {
+                /* 1.8.7: the MPI opener (rank 0) is a PE-resident rank exactly
+                 * like the others -- NO migration (removes even 1.8.6's residual
+                 * rank-0 device->host leg; now truly ZERO migrations), and NO
+                 * tail marker / g_deviceWorkers decrement HERE. It is tail-marked
+                 * UNIFORMLY at the closing-barrier op (post-barrier), identical
+                 * to ranks 1..N-1, and drains g_deviceWorkers there too, so its
+                 * reduce-ROOT tail is measured from the same point as every peer.
+                 * roi_end only flips the window to CLOSING. The OMP master (else
+                 * branch) is UNTOUCHED: its workers are joined before roi_end, so
+                 * its immediate host migration is validated. */
+                info("Thread %d: ROI offload end (co-sim MPI opener, PE-resident, marked at barrier) [1.8.7]", tid);
+                g_roiClosing.store(true);
+            } else {
+                thread_domain[tid].store(DOMAIN_HOST);
+                // BUSY-WAIT occupancy (1.7.3, HANDOFF ISSUE 2, CUDA-default -- no IRQ,
+                // no polling knob): while the device kernel ran, the host core was NOT
+                // free to do other useful work -- it spun on the completion fence. In
+                // device-only co-sim this is represented BY CONSTRUCTION: the single
+                // launcher thread is either on the host (pre-offload flush+launch, and
+                // post-offload readback) or on the device PE running the kernel -- it
+                // is NEVER two places at once and NEVER races ahead to do other host
+                // work during the device compute (there IS no other work in device-
+                // only mode). The task-region measurement window (the makespan across
+                // all cores) therefore already includes the device-execution duration
+                // via the device PE, and the launch/flush costs charged at the doorbell
+                // sit inside that window on the host timeline. The host cannot skip
+                // ahead free -- it is self-penalized for the wait, exactly as a CUDA
+                // busy-wait would be. (A multi-core host that could overlap independent
+                // host work during offload would need an explicit spin charge here;
+                // deferred with the multi-core-host baseline ladder.)
+                if (thread_initialized[tid]) {
+                    uint32_t cid = cids[tid];
+                    if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
+                        zinfo->sched->leave(procIdx, tid, cid);
+                    }
+                    zinfo->sched->finish(procIdx, tid);
+                    thread_initialized[tid] = false;
+                    clearCid(tid);
                 }
-                zinfo->sched->finish(procIdx, tid);
-                thread_initialized[tid] = false;
-                clearCid(tid);
+                ensureThreadInit(tid);  // host mask
+                info("Thread %d: ROI offload end (co-sim)", tid);
+                // OMP master leaves the device here; window is CLOSING.
+                g_deviceWorkers.fetch_sub(1);
+                g_roiClosing.store(true);
             }
-            ensureThreadInit(tid);  // host mask
-            info("Thread %d: ROI offload end (co-sim)", tid);
-            // 1.8.4 ROI window: the opener is out; the window is CLOSING.
-            // Remaining MPI ranks leave at their own barrier arrival.
-            g_deviceWorkers.fetch_sub(1);
-            g_roiClosing.store(true);
+            // (MPI opener path set g_roiClosing above and defers its
+            //  g_deviceWorkers decrement + tail marker to the closing barrier.)
         }
         // 1.6 thread-MPI: only the LAST rank out freezes stats + terminates;
         // earlier enders still owe MPI protocol work (closing barrier,
