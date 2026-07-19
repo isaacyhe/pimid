@@ -22,20 +22,29 @@ credit-based flow control, deadlock-free routing.
   consecutive runs of the previously freeze-prone cells across two
   partitions, zero hangs. `PIMID_MPI_TRACE=1` still dumps per-rank
   transport wait events to /tmp for diagnosis.
-- **ONE logical Garnet across MPI ranks (1.5.4).** MPI ranks run as separate
-  processes, but they drive a single logical network: every rank publishes its
-  network-traversing accesses `{src, dst, cycle}` to a launcher-owned shared
-  record log, and at its own phase drain replays the identical merged
-  multi-rank stream through its local Garnet replica. Because a drain resets
-  Garnet and replays a record window, N replicas of the same merged stream ARE
-  one network -- cross-rank packets (memory traffic and MPI message payloads
-  alike) physically contend on shared links. No barriers and no coordinator:
-  ranks blocked in MPI, exited ranks, and pre-ROI ranks are exempt from the
-  merge cut, so no rank ever waits on another (deadlock-free by construction).
-  There is NO isolated per-rank network mode; if the shared log cannot be
-  created or attached, the run refuses to start. Records are stamped on the
-  ROI-relative clock (the floor-free cross-rank axis); the message rendezvous
-  (`send_time + contention_wait + NoC_latency`, 1.3.1) is unchanged.
+- **ONE logical Garnet across MPI ranks.** All MPI ranks drive a single
+  logical network; cross-rank packets (memory traffic and MPI message payloads
+  alike) physically contend on shared links. There is NO isolated per-rank
+  network mode. Two realizations:
+  - **exec / thread-MPI (the only exec-method MPI model, 1.8.3).** The N ranks
+    are core-threads inside **ONE process** sharing **ONE in-process Garnet**
+    directly (`sharedNoc() == null`) -- the same single-network machinery the
+    OpenMP/device path uses, not a per-rank record log. (1.9.0's fold-dump
+    instrumentation corrected the earlier assumption that thread-MPI went
+    through the per-rank shm consistent-cut; it does not.)
+  - **trace method (per-rank processes).** Ranks run as separate processes and
+    drive one logical network via a launcher-owned shared record log: every
+    rank publishes its network-traversing accesses `{src, dst, cycle}` and at
+    its own phase drain replays the identical merged multi-rank stream through
+    its local Garnet replica. A drain resets Garnet and replays a record
+    window, so N replicas of the same merged stream ARE one network. No
+    barriers and no coordinator: ranks blocked in MPI, exited ranks, and
+    pre-ROI ranks are exempt from the merge cut (deadlock-free by
+    construction); if the shared log cannot be created or attached the run
+    refuses to start.
+  Records are stamped on the ROI-relative clock (the floor-free cross-rank
+  axis); the message rendezvous (`send_time + contention_wait + NoC_latency`,
+  1.3.1) is unchanged.
 - **One timeline inside a process too (1.5.6).** Per-core cycle counters are
   private work clocks (an init-heavy thread runs far ahead of fresh workers),
   so single-process (OpenMP/device) batch records are stamped on the global
@@ -90,6 +99,45 @@ t_eff = max( (L + W_q) / M ,  P * D / c )
 bandwidth roofline. The default `M` is calibrated against `detailed`.
 Runs at analytical speed (~seconds) — use it for large design-space sweeps,
 and `detailed` for ground truth.
+
+## Thread-MPI per-access pricing (measured feedback, 1.9.0)
+
+For thread-MPI under `detailed` Garnet, per-access memory latency is priced
+from **measured** Garnet congestion, not from the analytical closed form.
+Ranks share one in-process Garnet (above), so an access can be charged the
+contention the replay actually observed. To keep reported cycles
+**deterministic** the feedback is **epoch-frozen** rather than read live:
+
+- Garnet congestion is sampled once per N-phase **epoch** on the per-core
+  ROI-relative axis; ROI-gated recording, single-actor complete-bucket folds.
+  An access in epoch `k` prices from epoch `k-1`'s **frozen** sample, looked up
+  by epoch index from the access's own simulated cycle -- a keyed table lookup,
+  never a live rolling scalar.
+- This replaces the naive "read the live per-drain EWMA" feedback, which was
+  **26-196% per-core / ~25% makespan nondeterministic** (a fast rank blended
+  fewer drains than a slow one) and read-depth inflated. The frozen level sits
+  **+5-12% above the analytical floor** with real congestion priced in.
+- OMP single-process pricing is **unchanged**: it keeps the rolling-EWMA live
+  feedback (one process, one wall-order, already reproducible for its use).
+
+**Repeatability (measured, dev8 gemv 8-rank HBM3, 4 reps x 2 host classes):**
+
+| axis | spread |
+|---|---|
+| within-host, per-core | <=0.15% typical (occasional ~0.5% outlier) |
+| cross-host, per-core | 2-7% systematic (host-dependent fixpoint) |
+| rank-0 / cut-pinning core | host-independent to ~0.05% |
+
+The residual is fundamental: the one-pass measured-feedback loop
+(contention -> pricing -> fold membership -> contention) converges to a
+**host-dependent fixpoint**, so cores that price from the epoch samples inherit
+that host's level. **MPI sweeps must therefore be run single-venue** for
+internal consistency; true venue-independent bit-exactness would need two-pass
+deterministic replay (future work).
+
+**Escape hatch.** `PIMID_MPI_ANALYTICAL_PRICING=1` forces the old analytical
+override (the topology-pure, load-independent `2 * nocAvgOneWayLatency`) for
+A/B comparison. It is no longer the default MPI model.
 
 ## Host fabric and the host<->device bridge (co-sim)
 

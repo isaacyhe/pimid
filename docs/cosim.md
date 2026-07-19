@@ -31,13 +31,16 @@ added around that same region.
 
 ## System model
 
-- **Host = rank-0 master.** The co-sim host is a **single OoO core** at
-  2 GHz (crossbar degenerates to core + MC + bridge ports; the busy-wait
-  occupies it during the kernel; the rank-0-master requirement is trivially
-  satisfied). Under MPI the host runs legitimate serial master work (per-rank
-  prep) -- not an artifact. The default (and the fig5 cells) is a single OoO
-  core; an **in-order host core is also supported** as of 1.7.7 (the recorder
-  `memRespCycle` skew fix -- see [Limitations](#limitations)).
+- **Host.** The co-sim host is a **single OoO core** at 2 GHz (crossbar
+  degenerates to core + MC + bridge ports). Under **OMP** offload the host
+  busy-waits on the device fence during the kernel (decision 1). Under
+  **MPI** the finalized model (1.8.7) is different: the MPI ranks **are** the
+  device PEs, so the host is not a busy-waiting rank-0 master -- it does the
+  per-rank prep before the window and the final readback after it (see
+  [Co-sim MPI](#co-sim-mpi-the-per-rank-device-window)). The default (and the
+  fig5 cells) is a single OoO core; an **in-order host core is also supported**
+  as of 1.7.7 (the recorder `memRespCycle` skew fix -- see
+  [Limitations](#limitations)).
 - **Device = PIM.** PEs (default `alu_core`) placed at a memory level (BANK,
   SUBARRAY, ...) behind the device's own memory technology and NoC.
 - **Two fabrics, one bridge.** The device-internal H-tree (JEDEC-derived) and
@@ -65,10 +68,12 @@ not the whole process. The window opens when "inputs are ready in host
 memory" and closes when "results are visible in host memory":
 
 - **Co-sim** opens BEFORE the first boundary action; the flush/invalidate,
-  launch cmd/ack, kernel execution, host busy-wait, and readback all sit
-  INSIDE it. At `roi_begin` the plugin snapshots each core's baseline
+  launch cmd/ack, kernel execution, host busy-wait (OMP offload), and readback
+  all sit INSIDE it. At `roi_begin` the plugin snapshots each core's baseline
   (`markRoiBegin`) so the reported cycles cover only the task region, not the
-  pre-ROI array-init/setup.
+  pre-ROI array-init/setup. Under **MPI** the window is per-rank and the
+  device-resident collective tail replaces the single host busy-wait -- see
+  [Co-sim MPI](#co-sim-mpi-the-per-rank-device-window).
 - **Baseline** (see [NO_OFFLOAD](#no_offload-baseline)) wraps the equivalent
   host compute, including MPI communication.
 
@@ -101,11 +106,16 @@ Defaults: `doorbell_ns: 300`, `dispatch_ns: 5000` (~5 us), `cmd_bytes: 64`,
 component; doorbell and dispatch are shared.
 
 Completion is **busy-wait only** on the device-written fence (CUDA-default:
-no IRQ mode, no polling knob). In device-only co-sim this is honest by
-construction -- the single launcher thread is either on the host or on the
-device PE, never two places at once and never racing ahead to do other host
-work during the device compute (there is none). The host is therefore
-self-penalized for the wait exactly as a CUDA busy-wait would be.
+no IRQ mode, no polling knob). In the single-launcher (OMP / serial) offload
+this is honest by construction -- the single launcher thread is either on the
+host or on the device PE, never two places at once and never racing ahead to
+do other host work during the device compute (there is none). The host is
+therefore self-penalized for the wait exactly as a CUDA busy-wait would be.
+
+Under **co-sim MPI** there is no single launcher: every rank charges its own
+flush + launch on its host core at its kernel-entry barrier and migrates
+**itself** into its device PE (the per-rank device window, 1.8.4/1.8.5). See
+[Co-sim MPI](#co-sim-mpi-the-per-rank-device-window).
 
 ### 2. Coherence -- address-space visibility (`system.coherence`)
 
@@ -295,11 +305,94 @@ the standard, so halo-exchange patterns run without deadlock. Collectives are
 chunks but do not apply the reduction operator -- workloads needing actual
 reduced values should compute them on the root from received chunks.
 
-Under `noc.model: detailed`, all ranks drive ONE logical Garnet network via a
-shared record log (see [network.md](network.md)): message payloads and every
-rank's memory traffic contend on the same tree. Each rank also occupies its
-own placement slice of the device (rank r's address space maps into PE r's
-region), so rank-local data is near-data by construction.
+Under `noc.model: detailed`, all ranks drive ONE logical Garnet network:
+message payloads and every rank's memory traffic contend on the same tree.
+For the exec method the ranks are core-threads inside one process sharing one
+in-process Garnet directly (the shared record-log / consistent-cut path is the
+trace method's per-rank-process realization -- see [network.md](network.md) and
+its 1.9.0 pricing note). Each rank also occupies its own placement slice of the
+device (rank r's address space maps into PE r's region), so rank-local data is
+near-data by construction.
+
+## Co-sim MPI: the per-rank device window
+
+Under `scope: system` the co-sim MPI model is **ranks-are-PEs** (finalized
+1.8.7): each MPI rank IS a device PE, computes on its PE, and the host is
+involved only at the final readback. The measurement window is a **per-rank
+device window**, not a single host-driven offload:
+
+- **Window open -- every rank migrates itself (1.8.4/1.8.5).** At its own
+  kernel-entry barrier each rank charges its flush + launch on its host core
+  (its own program order -- no wall-order race), then migrates **itself** into
+  its device PE and computes there. Window open is thus a per-rank event; the
+  1.8.4 fix replaced a broken rank-0-only ROI (the defect was four layers deep:
+  rank-0-only `roi_begin`; a `ROI_BEGIN` thread-branch early-return skipping the
+  offload; a parked-opener wall-order race; and non-thread-safe migration under
+  the rank stampede). 1.8.5 reinstated the per-rank flush + launch charges that
+  1.8.4 had deferred.
+- **Window close -- ZERO migrations (1.8.6/1.8.7).** No rank migrates back to
+  the host at the closing barrier. The ranks are device-resident PEs, so the
+  post-ROI inter-PE collective tail (closing barrier + Reduce + Finalize)
+  **executes and prices ON THE DEVICE**: rank 0 collects on its PE and lands at
+  the reduce-completion makespan (the gather is included); ranks `1..N-1` show a
+  deterministic short tail. The host's only remaining role is reading back the
+  result. Removing the device->host closing legs is also what eliminates the
+  1.8.6 exit race by construction (below).
+- **`protocolTail` per-PE stat (1.8.7).** An explicit per-PE receipt = final PE
+  cycles minus that PE's closing-barrier marker. It is visibility only and never
+  alters `cycles`. Emitted **only** in co-sim runs (host + device cores
+  present) and stored in a fixed global array, so device-scope `Core` object
+  size and `initStats` stay byte-identical (a `Core` field or an unconditional
+  stat would shift heap layout and perturb a device PE).
+
+**Counting contract.** Host cores are counted across the task region around the
+kernel; device PEs are counted within their per-rank kernel windows (window open
+at each rank's kernel-entry barrier through the device-resident collective tail).
+The device-side cycles remain identical to a standalone device-scope run (the
+parity invariant).
+
+### Fixes folded into the co-sim MPI window (1.8.6/1.8.7)
+
+- **Exit-protocol heap corruption (1.8.6).** The 1.8.4 closing device->host
+  migrate-out freed a rank's core slot mid-handler while a peer immediately
+  started its contention-sim phase pass; under the MPI serial weave
+  (`simulation.parallel` -> serial) the two overlapping handlers iterated
+  glibc-heap state unsynchronized and corrupted the process heap (the
+  "malloc(): unaligned tcache chunk" / QEMU SIGSEGV / Garnet "No output port for
+  vnet" panics right after the last rank drained). Fix: drop the closing
+  migrate-out entirely -- the drained rank finishes its short post-ROI protocol
+  on its device PE. (The mirror migrate-IN at window open never corrupts.) 1.8.7
+  then removed the last residual host legs, including rank 0's `roi_end`
+  migration, making the window strictly zero-migration.
+- **tid/cid ROI-baseline aliasing (1.8.7, defect #15 class).** `roiRelCycles(tid)`
+  read the ROI baseline table by rank id (`tid`) while it is written by **core
+  index** (`cid`). In system scope a rank's `cid != tid`, so for `tid` 0..3 the
+  slot aliased HOST cores' ~16.5M pre-ROI (MPI_Init-era) clock; `roiRel` then
+  clamped to 0 and collapsed the SEND/RECV rendezvous (the reduce root
+  accumulated senders' stamps instead of advancing to their max). Fix: index the
+  baseline by the rank's **actual** core (`cids[tid]`) so `getCycles()` and the
+  baseline share one clock axis; a per-rank cache holds the last valid-cid
+  baseline so a transient cid-invalid window cannot flip `roiRel` back to the
+  buggy path. Scoped to co-sim (`g_cosim_mode`): device scope keeps the `tid`
+  indexing verbatim (correct AND deterministic there; `cids[tid]` would couple
+  it to run-to-run PE assignment).
+- **Cross-axis invariant guard (1.8.7).** At the recv rendezvous, if a single
+  message's advance exceeds the ROI span the clock axes are mismatched -- the
+  guard shouts and caps rather than advancing a PE by a garbage delta (the
+  defect-13 / 1.7.7 tripwire lineage; it eliminated a rare ~4% `2^32`
+  rendezvous overflow that had tripped Garnet's "event too far into the future"
+  assert).
+
+### Known residuals (deferred to a later 1.9.x)
+
+- `MPI_TIME` / `MPI_ADVANCE` handlers fall outside the magic-op window that
+  `isMpiMagicOp()` checks, so the barrier max-arrival ADVANCE path is currently
+  dead code.
+- `mpiNocRoiBase` (max over ALL cores) picks up host cores' pre-ROI clocks in
+  co-sim (the "idle cores near 0" assumption breaks with host cores present).
+- Device-scope per-rank stamp skew from the shared per-core-slot baseline table
+  (deterministic, present in all prior data). All three point at one redesign:
+  a per-RANK baseline table.
 
 ## Diagnostics
 

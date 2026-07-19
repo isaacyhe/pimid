@@ -63,6 +63,13 @@ uint32_t procIdx;
 uint32_t lineBits;
 uint64_t procMask;
 Core* cores[MAX_THREADS];
+
+/* 1.9.0 thread-MPI epoch cut: per-core ROI state (0=ACTIVE, 1=QUIESCENT parked in
+ * MPI, 2=EXITED). Marked at DETERMINISTIC sim events (roi_end / thread-fini / MPI
+ * comm brackets), NOT by a wall-dependent advancement heuristic. Read by
+ * EndOfPhaseActions to build the consistent cut = min roiRel over ACTIVE cores.
+ * Static zero-init => all ACTIVE at start. */
+static std::atomic<uint32_t> g_coreRoiState[MAX_THREADS];
 InstrFuncPtrs fPtrs[MAX_THREADS] ATTR_LINE_ALIGNED;
 
 /* tid→cid mapping */
@@ -235,6 +242,10 @@ static inline void snapshotRoiBaseCyc() {
      * relative clock (the floor-free cross-rank axis). The max across cores is
      * the running core's baseline (idle cores sit near 0 in a 1-thread rank). */
     zinfo->hierarchy.mpiNocRoiBase = maxBase;
+    // 1.9.0 thread-MPI: capture the ROI-baseline global phase so epochs key
+    // ROI-relative -- the wall-dependent pre-ROI phase count cannot then shift the
+    // ROI epoch boundaries. Set BEFORE mpiNocBaselined so the flag gates cleanly.
+    zinfo->hierarchy.mpiNocRoiBasePhase = zinfo->numPhases;
     __sync_synchronize();
     zinfo->hierarchy.mpiNocBaselined = 1;
 }
@@ -580,6 +591,41 @@ void EndOfPhaseActions() {
         zinfo->profSimTime->transition(PROF_WEAVE);
     }
 
+    /* 1.9.0 thread-MPI deterministic NoC feedback: fold every COMPLETE phase's
+     * Garnet records into the per-epoch frozen table HERE -- this is the scheduler
+     * sync callback (atSyncFunc), run SINGLE-THREADED at the phase barrier while all
+     * cores wait, with numPhases = the phase that just finished (all its accesses
+     * recorded). Doing the fold at one deterministic point means a phase's whole
+     * record set is replayed together, not split across the drains of whichever
+     * access threads raced first -- the root of the 1.8.x epoch-membership
+     * nondeterminism. No-op for OMP/process-MPI (they drain inline / via the shm
+     * cut). */
+    if (g_mpi_thread_mode && zinfo->garnetNetwork &&
+        zinfo->garnetNetwork->isCycleAccurate() &&
+        zinfo->hierarchy.mpiNocBaselined) {
+        // Consistent cut = min per-core roiRel over ACTIVE cores. All cores are
+        // synced at this barrier, so their roiRel snapshots are a pure function of
+        // simulated state. A core that has EXITED (finished its ROI) or is QUIESCENT
+        // (parked in a frozen-clock MPI wait) injects nothing more and is EXEMPT --
+        // its state is set at DETERMINISTIC sim events (roi_end / thread-fini / comm
+        // brackets), not a wall-dependent advancement test (which glitched at the
+        // pre->post ROI-baseline transition where roiRel drops). Records whose whole
+        // roiRel-phase bucket is <= cut are final and get folded (foldByCut). No
+        // blocking spin -> deadlock-free.
+        uint64_t cut = ~0ull;
+        for (uint32_t c = 0; c < zinfo->numCores && c < MAX_THREADS; c++) {
+            Core* co = zinfo->cores[c];
+            if (!co) continue;
+            if (g_coreRoiState[c].load(std::memory_order_acquire) != 0) continue;
+            uint64_t base = co->getRoiBaseCycle();
+            uint64_t cyc  = co->getCycles();
+            uint64_t rr   = (cyc > base) ? cyc - base : 0;
+            if (rr == 0) continue;       // baselined but no ROI traffic yet
+            if (rr < cut) cut = rr;
+        }
+        zinfo->garnetNetwork->foldByCut(cut, zinfo->phaseLength);
+    }
+
     CheckForTermination();
     zinfo->contentionSim->simulatePhase(zinfo->globPhaseCycles + zinfo->phaseLength);
 
@@ -747,6 +793,9 @@ static void SimThreadStart(uint32_t tid) {
 }
 
 static void SimThreadFini(uint32_t tid) {
+    // Thread left permanently -> EXITED (exempt from the epoch cut).
+    if (g_mpi_thread_mode && tid < MAX_THREADS && cids[tid] < MAX_THREADS)
+        g_coreRoiState[cids[tid]].store(2, std::memory_order_release);
     zinfo->sched->finish(procIdx, tid);
     cids[tid] = UNINITIALIZED_CID;
 }
@@ -1136,7 +1185,18 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
             if (tid < MAX_THREADS && cores[tid]) {
                 mpi_comm_saved[tid] = cores[tid]->getCycles();
                 cores[tid]->pimidCommParked = true;
+                // Parked in a frozen-clock MPI wait -> QUIESCENT (exempt from the
+                // epoch cut) so it does not pin the barrier for still-running peers.
+                if (cids[tid] < MAX_THREADS)
+                    g_coreRoiState[cids[tid]].store(1, std::memory_order_release);
             }
+            /* 1.9.0 epoch-frozen feedback: a rank parked in a frozen-clock MPI
+             * wait injects nothing, so it must be QUIESCENT -- exempt from the
+             * consistent cut AND the epoch bounded-lag stall -- or its stale
+             * watermark would pin the epoch barrier on a parked peer. No-op in
+             * pure thread mode (no PIMID_NOC_SHM); load-bearing when a detailed
+             * process-MPI rank shares the shm NoC. */
+            pimid_noc_mark_state(PIMID_NOC_QUIESCENT);
             return;
         }
         /* Process mode: keep the core attached across transport sleeps and
@@ -1156,6 +1216,20 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
                     cores[tid]->pimidRewindCycles(raw - mpi_comm_saved[tid]);
                 mpi_comm_saved[tid] = ~0ull;
             }
+            // Resumed from the MPI wait -> ACTIVE (re-enters the epoch cut). Do not
+            // clobber an EXITED core (roi_end already fired): only ACTIVE<-QUIESCENT.
+            if (tid < MAX_THREADS && cids[tid] < MAX_THREADS) {
+                uint32_t q = 1;
+                g_coreRoiState[cids[tid]].compare_exchange_strong(q, 0);
+            }
+            /* 1.9.0 epoch-frozen feedback: rank resumes injecting -> ACTIVE, so
+             * the cut/epoch barrier accounts for it again. Publishing ACTIVE here
+             * (paired with QUIESCENT at COMM_BEGIN) is the single most important
+             * interaction with the frozen-clock brackets. The COMM_END rewind and
+             * the epoch boundaries share the roiRel axis, so the rewind cannot move
+             * a later access across an epoch boundary wall-dependently. No-op in
+             * pure thread mode (no PIMID_NOC_SHM). */
+            pimid_noc_mark_state(PIMID_NOC_ACTIVE);
             return;
         }
         mpi_comm_window[tid].store(false, std::memory_order_release);
@@ -2054,6 +2128,10 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
                  * every other rank's compute tail. */
                 return;
             }
+            // This rank finished its ROI -> EXITED, so the epoch cut advances over
+            // the still-running peers instead of pinning on this (now frozen) core.
+            if (tid < MAX_THREADS && cids[tid] < MAX_THREADS)
+                g_coreRoiState[cids[tid]].store(2, std::memory_order_release);
             in_roi.store(false);
             dumpTerminationStats();
             zinfo->terminationConditionMet = true;
@@ -2293,6 +2371,10 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
                  * every other rank's compute tail. */
                 return;
             }
+            // This rank finished its ROI -> EXITED, so the epoch cut advances over
+            // the still-running peers instead of pinning on this (now frozen) core.
+            if (tid < MAX_THREADS && cids[tid] < MAX_THREADS)
+                g_coreRoiState[cids[tid]].store(2, std::memory_order_release);
             in_roi.store(false);
             dumpTerminationStats();
             zinfo->terminationConditionMet = true;

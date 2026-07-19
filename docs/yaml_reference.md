@@ -829,6 +829,12 @@ Any other value (including the removed `timing_core`) is rejected with an error.
 
 No other values are accepted (legacy names `simple`, `md1`, `calibrated`, `calqueue`, `curve`, `injector`, `parallel` were removed).
 
+Under `detailed`, thread-MPI per-access latency is priced from **measured**
+Garnet congestion via epoch-frozen deterministic feedback (1.9.0); OMP keeps
+the rolling-EWMA live feedback. Env `PIMID_MPI_ANALYTICAL_PRICING=1` forces the
+analytical override on the MPI path (A/B only; not the default). See
+[network.md](network.md) "Thread-MPI per-access pricing".
+
 ### Link Types (system scope)
 
 | Value | Description |

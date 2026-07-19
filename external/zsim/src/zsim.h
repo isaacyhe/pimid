@@ -211,6 +211,11 @@ struct GlobSimInfo {
         // overruns the rings). 0/unset = not yet baselined: publish nothing.
         volatile uint32_t mpiNocBaselined = 0;
         volatile uint64_t mpiNocRoiBase = 0;
+        // 1.9.0 thread-MPI: global phase index (numPhases) at the ROI baseline.
+        // Epochs are keyed ROI-RELATIVE ((numPhases - this) / E_phases) so the
+        // wall-dependent PRE-ROI length (rank spawning, init) cannot shift the
+        // ROI's epoch boundaries run-to-run. Pre-ROI traffic is not recorded.
+        volatile uint64_t mpiNocRoiBasePhase = 0;
         // Real datasheet AGGREGATE sustainable DRAM bandwidth (MB/s) =
         // per-channel × channels (from Ramulator getBandwidth()). The detailed
         // NoC model uses this to cap effective DRAM bandwidth at the channel

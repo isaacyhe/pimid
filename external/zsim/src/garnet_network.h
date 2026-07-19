@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cmath>
 #include <fstream>
+#include <map>
 #include <queue>
 #include <sched.h>
 #include <sstream>
@@ -317,6 +318,17 @@ public:
         info("  Mode: %s", cycleAccurate ? "detailed" : "simple");
         futex_init(&garnetLock_);
         futex_init(&batchLock_);
+        // 1.9.0 deterministic epoch-frozen feedback (thread-MPI). E_phases is the
+        // epoch length in phases; larger = looser barrier / more lag, 1 = per-phase.
+        futex_init(&epochLock_);
+        {
+            const char* e = getenv("PIMID_DET_EPOCH_PHASES");
+            if (e && atoi(e) > 0) detEpochPhases_ = (uint32_t)atoi(e);
+        }
+        info("[EpochFeedback] det-epoch-frozen NoC pricing table init: "
+             "E_phases=%u (thread-MPI deterministic measured feedback; "
+             "PIMID_MPI_ANALYTICAL_PRICING=1 restores the analytical override)",
+             detEpochPhases_);
     }
 
     /**
@@ -593,6 +605,23 @@ private:
     volatile uint64_t batchLastPhase_ = 0;
     lock_t batchLock_;
 
+    // -- 1.9.0 deterministic epoch-frozen feedback (thread-MPI) --------------
+    // Per-epoch FROZEN one-way NoC latency, keyed by epoch = phaseNum / E_phases.
+    // Filled by runBatchDrain_ with an INTEGER sum/count reducer over the SET of
+    // phase buckets whose phase maps to the epoch (order-free => deterministic,
+    // independent of which thread drained which bucket first). Read by PE-MIs via
+    // latencyForEpoch(epochOf(access)-1): a keyed table lookup, NOT a rolling-EWMA
+    // snapshot -- this is what removes the read-instant nondeterminism (E1).
+    struct EpochLatAcc { uint64_t sumLat = 0; uint64_t cnt = 0; };
+    std::map<uint64_t, EpochLatAcc> epochAvgLat_;
+    lock_t epochLock_;
+    uint32_t detEpochPhases_ = 4;   // E_phases (env PIMID_DET_EPOCH_PHASES, def 4)
+    // Records accumulated but not yet <= the consistent cut. Drained ONLY by
+    // the single-threaded barrier fold (foldCompletePhases), never by racing access
+    // threads -- so a phase's whole record set is replayed exactly once, together,
+    // giving a deterministic per-epoch sample.
+    std::vector<BatchAccess> threadPending_;
+
 public:
 
     /**
@@ -632,6 +661,74 @@ public:
     uint32_t getBatchAvgLatency() const {
         return batchAvgLatency_.load(std::memory_order_relaxed);
     }
+
+    // -- 1.9.0 epoch-frozen feedback API -------------------------------------
+    uint32_t detEpochPhases() const {
+        return detEpochPhases_ > 0 ? detEpochPhases_ : 1;
+    }
+
+    /** Single-threaded BARRIER fold on the per-core roiRel axis (called from
+     *  EndOfPhaseActions / atSyncFunc while all cores wait at the phase barrier).
+     *  Records are stamped on each core's OWN roiRel (curCycle - its roiBaseCycle),
+     *  removing the cross-core startup SKEW (rank 0 did init, others spawned fresh)
+     *  that the global-numPhases stamp could not align. The caller computes the
+     *  CONSISTENT CUT = min roiRel over cores still making progress (finished/parked
+     *  cores excluded), read atomically at the barrier -> no blocking spin, no
+     *  deadlock. Every pending record with roiRel <= cut is FINAL (no active core
+     *  will inject below it), bucketed by roiRel-phase, replayed EXACTLY ONCE
+     *  through runBatchDrain_. ONE folder + roiRel axis => deterministic membership.
+     */
+    void foldByCut(uint64_t cut, uint32_t pl) {
+        futex_lock(&batchLock_);
+        for (auto& a : phaseBatch_) threadPending_.push_back(a);
+        phaseBatch_.clear();
+        std::map<uint64_t, std::vector<BatchAccess>> buckets;
+        std::vector<BatchAccess> keep;
+        keep.reserve(threadPending_.size());
+        for (auto& a : threadPending_) {
+            // Fold a record ONLY when its WHOLE roiRel-phase bucket is below the cut
+            // (cut >= (p+1)*pl): every active core has passed the bucket, so no more
+            // records will land in it. Folding at roiRel <= cut alone would fold a
+            // bucket PARTIALLY when the cut lands mid-bucket, splitting a phase's
+            // records across two fold-barriers -> each partial replay measures a
+            // different contention -> nondeterminism (the phase-3 first-divergence).
+            uint64_t p = (pl > 0) ? a.cycle / pl : 0;
+            if ((p + 1) * (uint64_t)pl <= cut) buckets[p].push_back(a);
+            else                               keep.push_back(a);
+        }
+        threadPending_.swap(keep);
+        futex_unlock(&batchLock_);
+        for (auto& kv : buckets)
+            runBatchDrain_(std::move(kv.second), kv.first);
+    }
+
+    /** Frozen one-way latency for a COMPLETED epoch: the integer mean over the
+     *  SET of phase buckets that mapped to it (order-free). 0 => no bucket yet,
+     *  caller bootstraps with the static analytical latency (as today). */
+    uint32_t latencyForEpoch(uint64_t epoch) {
+        futex_lock(&epochLock_);
+        uint32_t v = 0;
+        auto it = epochAvgLat_.find(epoch);
+        if (it != epochAvgLat_.end() && it->second.cnt > 0)
+            v = (uint32_t)(it->second.sumLat / it->second.cnt);
+        futex_unlock(&epochLock_);
+        return v;
+    }
+
+private:
+    /** Fold one drained phase bucket's delivered-latency total into its epoch
+     *  (epoch = phaseNum / E_phases) with an integer sum/count reducer. */
+    void foldEpochLat_(uint64_t phaseNum, uint64_t totalLat, uint32_t delivered) {
+        if (delivered == 0) return;
+        // phaseNum is already the roiRel-phase (records carry per-core roiRel).
+        uint64_t epoch = phaseNum / (detEpochPhases_ > 0 ? detEpochPhases_ : 1);
+        futex_lock(&epochLock_);
+        auto& e = epochAvgLat_[epoch];
+        e.sumLat += totalLat;
+        e.cnt    += delivered;
+        futex_unlock(&epochLock_);
+    }
+public:
 
     /**
      * Process accumulated remote accesses through Garnet as a concurrent batch.
@@ -735,6 +832,8 @@ private:
         //    concurrently. The network physically models contention. ──
         uint64_t tag = 1;
         std::unordered_map<uint64_t, uint64_t> tagToInjectTick;
+        std::unordered_map<uint64_t, uint32_t> tagToSrc;  // epoch-dump attribution
+        std::map<uint32_t, std::pair<uint64_t,uint32_t>> perSrcLat;  // src->{latSum,cnt}
         std::unordered_set<uint32_t> dstSet;
         uint32_t validCount = 0;
         size_t nextInjectIdx = 0;
@@ -784,6 +883,7 @@ private:
                     toNetBufs_[acc.src][0]->enqueue(
                         msg, gem5::curTickRef(), uint64_t(1));
                     tagToInjectTick[tag] = gem5::curTickRef();
+                    tagToSrc[tag] = acc.src;
                     tag++;
                 }
                 nextInjectIdx++;
@@ -800,9 +900,15 @@ private:
 
                     auto it = tagToInjectTick.find(pktTag);
                     if (it != tagToInjectTick.end()) {
-                        totalLat += gem5::curTickRef() - it->second;
+                        uint64_t lat = gem5::curTickRef() - it->second;
+                        totalLat += lat;
                         tagToInjectTick.erase(it);
                         delivered++;
+                        auto st = tagToSrc.find(pktTag);
+                        if (st != tagToSrc.end()) {
+                            auto& ps = perSrcLat[st->second];
+                            ps.first += lat; ps.second += 1;
+                        }
                     }
                 }
             }
@@ -828,6 +934,45 @@ private:
                      phaseNum, validCount, delivered, newAvg,
                      oldAvg, next,
                      gem5::curTickRef());
+            }
+        }
+
+        // 1.9.0: fold this phase bucket into its epoch's FROZEN sample (integer
+        // sum/count). The EWMA above stays for the OMP/non-MPI live-feedback path;
+        // thread-MPI reads latencyForEpoch() instead. Order-free => deterministic.
+        foldEpochLat_(phaseNum, totalLat, delivered);
+
+        // Epoch-fold DUMP (PIMID_DET_EPOCH_DUMP=<path>): per fold, append phase,
+        // epoch, delivered/total latency, an order-independent INPUT-record checksum
+        // (to separate membership divergence from measured-latency divergence), and
+        // per-source-node subtotals. Diff across reps to find the FIRST divergent
+        // epoch and which source diverged. Serialized by garnetLock_ (held here).
+        {
+            static const char* dumpPath = getenv("PIMID_DET_EPOCH_DUMP");
+            if (dumpPath && dumpPath[0]) {
+                static FILE* df = fopen(dumpPath, "w");
+                if (df) {
+                    uint32_t Ed = detEpochPhases_ > 0 ? detEpochPhases_ : 1;
+                    uint64_t epoch = phaseNum / Ed;
+                    uint64_t inChk = 0, inCnt = 0;
+                    for (auto& a : batch)
+                        if (a.src != a.dst && a.src < numNodes_ &&
+                            a.dst < numNodes_) {
+                            inChk += (uint64_t)a.src * 1000003ull +
+                                     (uint64_t)a.dst * 10007ull + a.cycle;
+                            inCnt++;
+                        }
+                    fprintf(df, "phase=%lu epoch=%lu valid=%u delivered=%u "
+                                "totalLat=%lu inCnt=%lu inChk=%lu |",
+                            (unsigned long)phaseNum, (unsigned long)epoch,
+                            validCount, delivered, (unsigned long)totalLat,
+                            (unsigned long)inCnt, (unsigned long)inChk);
+                    for (auto& kv : perSrcLat)
+                        fprintf(df, " s%u:%u/%lu", kv.first, kv.second.second,
+                                (unsigned long)kv.second.first);
+                    fprintf(df, "\n");
+                    fflush(df);
+                }
             }
         }
 

@@ -68,6 +68,22 @@ protected:
     uint32_t curPhaseAccesses_;
     lock_t updateLock_;
 
+    // -- 1.9.0 deterministic epoch-frozen scalar (E2 fix) --------------------
+    // Accumulate an integer access COUNT per epoch (on the per-core roiRel axis);
+    // an epoch is FINAL when the in-process consistent cut has cleared its end
+    // (all ACTIVE cores passed it), at which point a frozen value is computed from
+    // its total count. An access reads the PREVIOUS epoch's frozen value. All state
+    // under one lock, so the value is a pure function of the (order-free integer)
+    // per-epoch count -- independent of intra-epoch cross-thread arrival order.
+    // Removes the read-instant nondeterminism (E2) for the per-channel BW wait and
+    // the per-MI M/D/1 device time, on the SAME cut the NoC epoch pricing uses.
+    struct EpochFrozenScalar {
+        lock_t lk = {0};
+        std::map<uint64_t, uint64_t> acc;     // epoch -> accumulating count
+        std::map<uint64_t, uint32_t> frozen;  // epoch -> frozen value
+    };
+    EpochFrozenScalar md1Epoch_;   // per-MI M/D/1 epoch-frozen device time
+
     PAD();
 
     // Stats
@@ -198,6 +214,17 @@ public:
             const char* r = getenv("PIMID_MPI_RANKS");
             v = (r && atoi(r) > 1 && !getenv("PIMID_MPI_RANK")) ? 1 : 0;
         }
+        return v == 1;
+    }
+
+    // 1.9.0 escape hatch (A/B only). Default thread-MPI pricing is now the
+    // deterministic epoch-frozen MEASURED Garnet feedback (latencyForEpoch);
+    // PIMID_MPI_ANALYTICAL_PRICING=1 restores the pre-1.9.0 analytical override
+    // (static topology-pure one-way latency, load-independent) so the two models
+    // can be compared on one binary. NOT for production sweeps.
+    static bool forceAnalyticalPricing() {
+        static int v = -1;
+        if (v < 0) v = getenv("PIMID_MPI_ANALYTICAL_PRICING") ? 1 : 0;
         return v == 1;
     }
 
@@ -356,6 +383,53 @@ public:
         (void)phaseNum;
     }
 
+    // -- 1.9.0 in-process thread-MPI NoC cut (deterministic epoch membership) ----
+    // Per-core roiRel = curCycle - THIS core's own roiBaseCycle: a DETERMINISTIC,
+    // cross-core-comparable stamp (unlike the wall-decoupled global numPhases).
+    // Epoch index for an access on the epoch axis. Thread-MPI / OMP (sn == null)
+    // key on the GLOBAL phase clock numPhases: it is advanced ONLY at the phase
+    // barrier (all cores synced), so an access in numPhases-epoch k structurally
+    // GATES on epoch k-1 being complete -- the barrier fold has already replayed it
+    // (no blocking read needed). Shared/process MPI (sn != null) keys on roiRel.
+    // Per-core deterministic roiRel: curCycle - THIS core's own roiBaseCycle. This
+    // removes the cross-core startup SKEW (rank 0 did init, others spawned fresh),
+    // so contemporaneous ROI accesses from different cores align on ONE axis.
+    static uint64_t perCoreRoiRel(uint32_t srcId, uint64_t cycle) {
+        uint64_t base = 0;
+        if (srcId < zinfo->numCores && zinfo->cores[srcId])
+            base = zinfo->cores[srcId]->getRoiBaseCycle();
+        return (cycle > base) ? cycle - base : 0;
+    }
+
+    // NoC read-lag in EPOCHS. The barrier cut folds roiRel up to min-active-roiRel;
+    // with the cores kept within ~1 phase by the weave, a 2-epoch lag guarantees the
+    // read epoch is already folded (the cut has cleared it) => no read/fold race.
+    static const uint64_t kNocReadLagEpochs = 2;
+
+    static uint64_t epochOfAccess(GarnetNetwork* gn, SharedNoc* sn,
+                                  uint64_t reqCycle, uint32_t srcId) {
+        uint32_t E = gn->detEpochPhases();
+        uint32_t pl = zinfo->phaseLength > 0 ? zinfo->phaseLength : 10000;
+        uint64_t epochLen = (uint64_t)pl * E;
+        if (sn) {
+            uint64_t base = zinfo->hierarchy.mpiNocRoiBase;
+            uint64_t rel = (reqCycle > base) ? reqCycle - base : 0;
+            return epochLen ? rel / epochLen : 0;
+        }
+        if (!zinfo->hierarchy.mpiNocBaselined) return 0;   // pre-ROI: bootstrap
+        return epochLen ? perCoreRoiRel(srcId, reqCycle) / epochLen : 0;
+    }
+
+    // Epoch-frozen one-way NoC latency: read epoch (k - lag)'s frozen sample. The
+    // barrier cut guarantees it is folded (complete) by construction; the lag
+    // absorbs the small cross-core roiRel spread. 0 (bootstrap epochs) -> analytical.
+    static uint32_t epochFrozenNocLat(GarnetNetwork* gn, SharedNoc* sn,
+                                      uint64_t reqCycle, uint32_t srcId) {
+        uint64_t k = epochOfAccess(gn, sn, reqCycle, srcId);
+        uint64_t lag = sn ? 1 : kNocReadLagEpochs;
+        return (k >= lag) ? gn->latencyForEpoch(k - lag) : 0;
+    }
+
     uint64_t access(MemReq& req) override {
         // Update coherence state
         switch (req.type) {
@@ -396,7 +470,7 @@ public:
                 GarnetNetwork* gnLocal = zinfo->garnetNetwork;
                 if (gnLocal && gnLocal->isCycleAccurate() &&
                     zinfo->hierarchy.nocAggBandwidthMBs > 0) {
-                    lat += channelBandwidthWait();
+                    lat += channelBandwidthWait(req.srcId, req.cycle);
                 }
             }
 
@@ -410,7 +484,7 @@ public:
             // own MC (fewest hops -> fastest), coarser placement reaches a distant
             // shared MC (more hops). Keep it for device-only AND co-sim.
             if (zinfo->hierarchy.mcStandalone) {
-                lat += mcHopLatency(targetUnit, req.cycle);
+                lat += mcHopLatency(targetUnit, req.cycle, req.srcId);
             }
 
             profLocalAccesses_.inc();
@@ -437,8 +511,8 @@ public:
                     // Degenerate: the tree has no PEs (no placement) -> nothing to
                     // route to. Price as plain Ramulator DRAM (no Garnet traversal).
                     uint32_t lat = remoteLat + 2 * localLinkLat_;
-                    if (zinfo->hierarchy.nocAggBandwidthMBs > 0) lat += channelBandwidthWait();
-                    if (zinfo->hierarchy.mcStandalone) lat += mcHopLatency(targetUnit, req.cycle);
+                    if (zinfo->hierarchy.nocAggBandwidthMBs > 0) lat += channelBandwidthWait(req.srcId, req.cycle);
+                    if (zinfo->hierarchy.mcStandalone) lat += mcHopLatency(targetUnit, req.cycle, req.srcId);
                     profRemoteAccesses_.inc();
                     profRemoteLatency_.inc(lat);
                     return req.cycle + lat;
@@ -455,6 +529,9 @@ public:
                 //   shared log instead, and drain the MERGED multi-rank stream --
                 //   one logical Garnet driven by all ranks' traffic.
                 SharedNoc* sn = sharedNoc();
+                // Thread-MPI (one process, N core-threads, one Garnet): NOT the shm
+                // path (sn==null). Uses the in-process per-core roiRel cut.
+                bool threadDet = mpiThreadDetPricing() && !sn;
                 // POST-ROI GUARD: at ROI end the plugin requests termination and
                 // the scheduler -- the only writer of globPhaseCycles -- stops
                 // advancing it, while instrumentation keeps running until the
@@ -483,16 +560,33 @@ public:
                         else
                             pimid_noc_touch(sn->h, sn->rank, rel);
                     }
+                } else if (threadDet) {
+                    // Thread-MPI: record ONLY post-ROI-baseline. The pre-ROI init /
+                    // data-prep runs on rank 0 SOLO for thousands of phases while the
+                    // other ranks spawn (wall-dependent), and its traffic would
+                    // otherwise pollute the epoch table and make the ROI pricing
+                    // wall-dependent (the FIRST-DIVERGENCE was exactly a pre-ROI
+                    // rank-0 access). The record is stamped on the per-core roiRel
+                    // axis (skew-free); the replay/fold is NOT done here on the access
+                    // path -- it is done at the phase barrier by the single-threaded
+                    // barrier cut (foldByCut from EndOfPhaseActions).
+                    if (zinfo->hierarchy.mpiNocBaselined)
+                        gn->recordBatchAccess(srcNode, dstNode,
+                                              perCoreRoiRel(req.srcId, req.cycle));
                 } else {
-                    // Global-phase-clock stamp (see phaseStamp): per-core private
-                    // clocks are skewed by ~init length and are not one timeline.
+                    // OMP / non-MPI: record on the global phase clock + inline
+                    // per-phase processBatch (single process, live EWMA).
                     gn->recordBatchAccess(srcNode, dstNode, phaseStamp(req.cycle));
+                    if (zinfo->numPhases > batchLastPhase_) {
+                        __sync_fetch_and_add(&zinfo->hierarchy.nocInlineDrain, 1);
+                        gn->processBatch(zinfo->numPhases, zinfo->phaseLength);
+                        __sync_fetch_and_sub(&zinfo->hierarchy.nocInlineDrain, 1);
+                        batchLastPhase_ = zinfo->numPhases;
+                    }
                 }
-
-                if (zinfo->numPhases > batchLastPhase_) {
+                if (sn && zinfo->numPhases > batchLastPhase_) {
                     __sync_fetch_and_add(&zinfo->hierarchy.nocInlineDrain, 1);
-                    if (sn) sharedNocDrain(gn, sn, zinfo->numPhases);
-                    else    gn->processBatch(zinfo->numPhases, zinfo->phaseLength);
+                    sharedNocDrain(gn, sn, zinfo->numPhases);
                     __sync_fetch_and_sub(&zinfo->hierarchy.nocInlineDrain, 1);
                     batchLastPhase_ = zinfo->numPhases;
                 }
@@ -509,8 +603,19 @@ public:
                 if (srcNode == dstNode) {
                     networkLat = 0;
                 } else {
-                    uint32_t garnetLat = mpiThreadDetPricing()
-                        ? 0 : gn->getBatchAvgLatency();
+                    // 1.9.0 pricing:
+                    //  - thread-MPI DEFAULT: epoch-frozen MEASURED Garnet feedback
+                    //    (deterministic keyed lookup of the prior epoch's sample);
+                    //  - PIMID_MPI_ANALYTICAL_PRICING=1: static analytical override;
+                    //  - OMP/non-MPI: live rolling EWMA (unchanged).
+                    uint32_t garnetLat;
+                    if (mpiThreadDetPricing()) {
+                        garnetLat = forceAnalyticalPricing()
+                            ? 0
+                            : epochFrozenNocLat(gn, sn, req.cycle, req.srcId);
+                    } else {
+                        garnetLat = gn->getBatchAvgLatency();
+                    }
                     networkLat = (garnetLat > 0)
                         ? 2 * garnetLat
                         : 2 * zinfo->hierarchy.nocAvgOneWayLatency;
@@ -524,11 +629,11 @@ public:
                 // per-MI BW. Add a shared M/D/c channel-BW queueing wait so
                 // effective aggregate DRAM BW is capped at the datasheet value.
                 if (zinfo->hierarchy.nocAggBandwidthMBs > 0) {
-                    totalLat += channelBandwidthWait();
+                    totalLat += channelBandwidthWait(req.srcId, req.cycle);
                 }
                 // Standalone MC: extra core → MC node hop on top of routing.
                 if (zinfo->hierarchy.mcStandalone) {
-                    totalLat += mcHopLatency(targetUnit, req.cycle);
+                    totalLat += mcHopLatency(targetUnit, req.cycle, req.srcId);
                 }
                 profRemoteAccesses_.inc();
                 profRemoteLatency_.inc(totalLat);
@@ -670,7 +775,7 @@ public:
             }
             // Standalone MC: extra core → MC node hop on top of routing.
             if (zinfo->hierarchy.mcStandalone) {
-                totalLat += mcHopLatency(targetUnit, req.cycle);
+                totalLat += mcHopLatency(targetUnit, req.cycle, req.srcId);
             }
             profRemoteAccesses_.inc();
             profRemoteLatency_.inc(totalLat);
@@ -725,41 +830,140 @@ public:
     }
 
 protected:
-    uint32_t localAccessLatency(MemReq& req) {
-        // M/D/1 update on phase boundary (when bandwidth is configured)
-        if (maxRequestsPerCycle_ > 0.0 && zinfo->numPhases > lastPhase_) {
-            futex_lock(&updateLock_);
-            if (zinfo->numPhases > lastPhase_) {
-                double alpha = 0.5;
-                smoothedPhaseAccesses_ = (1.0 - alpha) * smoothedPhaseAccesses_
-                                         + alpha * (double)curPhaseAccesses_;
-                curPhaseAccesses_ = 0;
-
-                double load = smoothedPhaseAccesses_ /
-                              (zinfo->phaseLength * maxRequestsPerCycle_);
-
-                // TEMP (pre-arXiv) M/D/c stop-gap: numChannels_ independent DRAM
-                // channels serve requests in parallel, so the offered load is
-                // spread across c servers — effective per-server utilization is
-                // load / c. High-channel technologies (HBM) therefore stay
-                // unsaturated where a single-channel part (DDR) would queue.
-                // Approximated by reducing the utilization that drives the
-                // standard M/D/1 wait formula (a true M/D/c is future work).
-                if (numChannels_ > 1) load /= (double)numChannels_;
-                if (load > 0.95) load = 0.95;
-
-                // M/D/1: E[T] = S + (rho * S) / (2 * (1 - rho))
-                double svcTime = 1.0 / maxRequestsPerCycle_;
-                double waitTime = (load > 0.01)
-                    ? (load * svcTime) / (2.0 * (1.0 - load))
-                    : 0.0;
-                curLatency_ = localLatency_ + (uint32_t)(waitTime + 0.5);
-                lastPhase_ = zinfo->numPhases;
-            }
-            futex_unlock(&updateLock_);
+    // Count this access into curEpoch (= numPhases/E), FREEZE every epoch strictly
+    // below curEpoch via Compute(count), and return the PREVIOUS epoch's frozen
+    // value. curEpoch keys on the GLOBAL phase clock, advanced ONLY at the phase
+    // barrier, so an epoch below curEpoch is COMPLETE (every core finished all its
+    // phases) => its integer count is order-free and its frozen value is
+    // deterministic. Frozen epochs are erased from acc (they take no more accesses).
+    template <typename Compute>
+    static uint32_t epochFrozenScalar(EpochFrozenScalar& s, uint64_t curEpoch,
+                                      Compute compute) {
+        futex_lock(&s.lk);
+        s.acc[curEpoch] += 1;
+        while (!s.acc.empty() && s.acc.begin()->first < curEpoch) {
+            auto it = s.acc.begin();
+            if (!s.frozen.count(it->first))
+                s.frozen[it->first] = compute(it->second);
+            s.acc.erase(it);
         }
+        uint32_t v = 0;
+        if (curEpoch > 0) {
+            auto it = s.frozen.find(curEpoch - 1);
+            if (it != s.frozen.end()) v = it->second;
+        }
+        futex_unlock(&s.lk);
+        return v;
+    }
 
-        curPhaseAccesses_++;
+    // Shared M/D/c channel-BW queueing wait (cycles) for an aggregate offered rate
+    // (lines/cycle across the whole device). Extracted verbatim from the original
+    // channelBandwidthWait phase-update so the rolling-EWMA (OMP) path and the
+    // epoch-frozen (thread-MPI) path use one identical formula.
+    static uint32_t channelWaitFromRate(double aggArrivalRate) {
+        uint64_t aggMBs = zinfo->hierarchy.nocAggBandwidthMBs;
+        {
+            uint32_t lvl = zinfo->hierarchy.placementLevel;
+            aggMBs *= (lvl == 0) ? 4u : ((lvl == 1 || lvl == 2) ? 2u : 1u);
+        }
+        {
+            const char* e = getenv("PIMID_NOC_AGGBW_MBS");
+            if (e && e[0]) { long long v = atoll(e); if (v > 0) aggMBs = (uint64_t)v; }
+        }
+        double aggBytesPerSec = (double)aggMBs * 1e6;
+        double bwFreqMHz = (zinfo->hierarchy.nocBandwidthFreqMHz > 0)
+            ? (double)zinfo->hierarchy.nocBandwidthFreqMHz
+            : (double)zinfo->freqMHz;
+        double freqHz = bwFreqMHz * 1e6;
+        double lineSize = (double)zinfo->lineSize;
+        if (lineSize < 1.0) lineSize = 64.0;
+        double aggLinesPerCycle = (freqHz > 0.0)
+            ? (aggBytesPerSec / freqHz) / lineSize : 0.0;
+        uint32_t c = zinfo->hierarchy.dramChannels;
+        if (c < 1) c = 1;
+        double perChanSvcRate = aggLinesPerCycle / (double)c;
+        double wait = 0.0;
+        if (perChanSvcRate > 1e-9) {
+            double svcTime = 1.0 / perChanSvcRate;
+            double rho = (aggArrivalRate / (double)c) / perChanSvcRate;
+            if (rho > 0.98) rho = 0.98;
+            if (rho > 0.01)
+                wait = (rho * svcTime) / (2.0 * (1.0 - rho));
+        }
+        return (uint32_t)(wait + 0.5);
+    }
+
+    uint32_t localAccessLatency(MemReq& req) {
+        uint32_t result;
+        if (mpiThreadDetPricing() && !sharedNoc() && maxRequestsPerCycle_ > 0.0 &&
+            zinfo->hierarchy.mpiNocBaselined) {
+            // 1.9.0 thread-MPI: DETERMINISTIC epoch-frozen M/D/1 device time (E2).
+            // Count this MI's accesses per ROI-relative epoch; price from the
+            // PREVIOUS (barrier-final) epoch's frozen wait -- independent of
+            // intra-epoch cross-thread arrival order. The epoch key advances ONLY at
+            // the phase barrier, so epoch k-1's count is complete before any epoch-k
+            // access reads it. Pre-ROI (not baselined) falls to the base path below.
+            uint32_t E = zinfo->garnetNetwork
+                ? zinfo->garnetNetwork->detEpochPhases() : 4;
+            uint32_t pl = zinfo->phaseLength > 0 ? zinfo->phaseLength : 10000;
+            uint64_t epochLen = (uint64_t)pl * (E > 0 ? E : 1);
+            uint64_t bp = zinfo->hierarchy.mpiNocRoiBasePhase;
+            uint64_t rel = (zinfo->numPhases >= bp) ? zinfo->numPhases - bp : 0;
+            uint64_t curEpoch = rel / (E > 0 ? E : 1);
+            double mrpc = maxRequestsPerCycle_;
+            uint32_t nch = numChannels_;
+            uint32_t wait = epochFrozenScalar(md1Epoch_, curEpoch,
+                [epochLen, mrpc, nch](uint64_t cnt) -> uint32_t {
+                    double load = ((double)cnt / (double)epochLen) / mrpc;
+                    if (nch > 1) load /= (double)nch;
+                    if (load > 0.95) load = 0.95;
+                    double svcTime = 1.0 / mrpc;
+                    double waitTime = (load > 0.01)
+                        ? (load * svcTime) / (2.0 * (1.0 - load))
+                        : 0.0;
+                    return (uint32_t)(waitTime + 0.5);
+                });
+            result = localLatency_ + wait;
+        } else {
+            // OMP / non-MPI (or no BW model): original rolling-EWMA path, kept
+            // byte-identical so the live-feedback single-process behavior is
+            // unchanged.
+            // M/D/1 update on phase boundary (when bandwidth is configured)
+            if (maxRequestsPerCycle_ > 0.0 && zinfo->numPhases > lastPhase_) {
+                futex_lock(&updateLock_);
+                if (zinfo->numPhases > lastPhase_) {
+                    double alpha = 0.5;
+                    smoothedPhaseAccesses_ = (1.0 - alpha) * smoothedPhaseAccesses_
+                                             + alpha * (double)curPhaseAccesses_;
+                    curPhaseAccesses_ = 0;
+
+                    double load = smoothedPhaseAccesses_ /
+                                  (zinfo->phaseLength * maxRequestsPerCycle_);
+
+                    // TEMP (pre-arXiv) M/D/c stop-gap: numChannels_ independent DRAM
+                    // channels serve requests in parallel, so the offered load is
+                    // spread across c servers — effective per-server utilization is
+                    // load / c. High-channel technologies (HBM) therefore stay
+                    // unsaturated where a single-channel part (DDR) would queue.
+                    // Approximated by reducing the utilization that drives the
+                    // standard M/D/1 wait formula (a true M/D/c is future work).
+                    if (numChannels_ > 1) load /= (double)numChannels_;
+                    if (load > 0.95) load = 0.95;
+
+                    // M/D/1: E[T] = S + (rho * S) / (2 * (1 - rho))
+                    double svcTime = 1.0 / maxRequestsPerCycle_;
+                    double waitTime = (load > 0.01)
+                        ? (load * svcTime) / (2.0 * (1.0 - load))
+                        : 0.0;
+                    curLatency_ = localLatency_ + (uint32_t)(waitTime + 0.5);
+                    lastPhase_ = zinfo->numPhases;
+                }
+                futex_unlock(&updateLock_);
+            }
+
+            curPhaseAccesses_++;
+            result = curLatency_;
+        }
 
         if (req.type == GETS || req.type == GETX) {
             profReads_.inc();
@@ -767,7 +971,7 @@ protected:
             profWrites_.inc();
         }
 
-        return curLatency_;
+        return result;
     }
 
     // Standalone-MC extra hop: the MC fronting memory org `targetUnit` is a
@@ -775,26 +979,33 @@ protected:
     // RTT (core → MC node → and back) charged on top of the access. In
     // cycle-accurate mode this routes real packets through Garnet so the MC
     // traffic shows up in network contention; otherwise it is analytical.
-    uint32_t mcHopLatency(uint32_t targetUnit, uint64_t cycle) {
+    uint32_t mcHopLatency(uint32_t targetUnit, uint64_t cycle, uint32_t srcId = 0) {
+        (void)srcId;
         GarnetNetwork* gn = zinfo->garnetNetwork;
         if (gn && gn->isCycleAccurate()) {
             uint32_t srcNode = representativeUnit() % gn->getNumNodes();
             // MC node for memory org `targetUnit` is modeled as node `targetUnit`.
             uint32_t mcNode = targetUnit % gn->getNumNodes();
-            // Post-ROI: frozen phase clock -- charge, but never record (see the
-            // POST-ROI GUARD in access()).
+            // Post-ROI: charge, but never record (POST-ROI GUARD in access()).
             if (!zinfo->terminationConditionMet) {
-                // Global-phase-clock stamp (see phaseStamp): core-private clocks skew.
+                // Global-phase-clock stamp; thread-MPI folds at the barrier, OMP
+                // drains inline (single process).
                 gn->recordBatchAccess(srcNode, mcNode, phaseStamp(cycle));
-                if (zinfo->numPhases > batchLastPhase_) {
+                if (!mpiThreadDetPricing() && zinfo->numPhases > batchLastPhase_) {
                     __sync_fetch_and_add(&zinfo->hierarchy.nocInlineDrain, 1);
                     gn->processBatch(zinfo->numPhases, zinfo->phaseLength);
                     __sync_fetch_and_sub(&zinfo->hierarchy.nocInlineDrain, 1);
                     batchLastPhase_ = zinfo->numPhases;
                 }
             }
-            uint32_t garnetLat = mpiThreadDetPricing()
-                ? 0 : gn->getBatchAvgLatency();
+            uint32_t garnetLat;
+            if (mpiThreadDetPricing()) {
+                garnetLat = forceAnalyticalPricing()
+                    ? 0
+                    : epochFrozenNocLat(gn, nullptr, cycle, srcId);
+            } else {
+                garnetLat = gn->getBatchAvgLatency();
+            }
             return (garnetLat > 0)
                 ? 2 * garnetLat
                 : 2 * zinfo->hierarchy.nocAvgOneWayLatency;
@@ -983,7 +1194,7 @@ protected:
     //
     // Only active when nocAggBandwidthMBs > 0 (DRAM techs) AND detailed cycle-
     // accurate mode (gated by the caller). Returns the queueing wait in cycles.
-    uint32_t channelBandwidthWait() {
+    uint32_t channelBandwidthWait(uint32_t srcId = 0, uint64_t reqCycle = 0) {
         static volatile uint64_t cbwAccesses = 0;     // aggregate accesses this phase
         static volatile double   cbwSmoothedRate = 0.0;  // EWMA accesses/phase
         static volatile uint64_t cbwLastPhase = 0;
@@ -998,6 +1209,29 @@ protected:
                 return e && e[0] ? atol(e) : -1L;
             }();
             if (forceW >= 0) return (uint32_t)forceW;
+        }
+
+        // 1.9.0 thread-MPI: DETERMINISTIC epoch-frozen channel-BW wait (E2). The
+        // rolling process-wide EWMA below is closed at a wall-timed phase boundary
+        // and baked a +-1 phase into COMPUTE-COMPLETE. Instead, count the aggregate
+        // accesses per numPhases-epoch and price from the PREVIOUS (barrier-final)
+        // epoch's frozen M/D/c wait -- a keyed lookup of an order-free integer count.
+        (void)srcId; (void)reqCycle;
+        if (mpiThreadDetPricing() && !sharedNoc()) {
+            if (!zinfo->hierarchy.mpiNocBaselined) return 0;  // pre-ROI: no wait
+            static EpochFrozenScalar cbwEpoch;
+            uint32_t E = zinfo->garnetNetwork
+                ? zinfo->garnetNetwork->detEpochPhases() : 4;
+            uint32_t pl = zinfo->phaseLength > 0 ? zinfo->phaseLength : 10000;
+            uint64_t epochLen = (uint64_t)pl * (E > 0 ? E : 1);
+            uint64_t bp = zinfo->hierarchy.mpiNocRoiBasePhase;
+            uint64_t rel = (zinfo->numPhases >= bp) ? zinfo->numPhases - bp : 0;
+            uint64_t curEpoch = rel / (E > 0 ? E : 1);
+            return epochFrozenScalar(cbwEpoch, curEpoch,
+                [epochLen](uint64_t cnt) -> uint32_t {
+                    double rate = (double)cnt / (double)epochLen;
+                    return channelWaitFromRate(rate);
+                });
         }
 
         __sync_fetch_and_add(&cbwAccesses, 1);

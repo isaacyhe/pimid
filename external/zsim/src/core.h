@@ -138,6 +138,15 @@ class Core : public GlobAlloc {
         // the region of interest (roi_begin..roi_end). Default no-op.
         virtual void markRoiBegin() {}
 
+        // 1.9.0 deterministic thread-MPI epoch pricing: the ROI baseline cycle
+        // (set at markRoiBegin) and this core's global MemReq.srcId index. The
+        // per-core roiRel axis (curCycle - roiBaseCycle) is the DETERMINISTIC,
+        // cross-core-comparable stamp the epoch cut uses (the global numPhases is
+        // wall-decoupled from a core's own curCycle at COMM-window parks). Default
+        // 0 (non-ALU cores; only ALUCore overrides for the validated device path).
+        virtual uint64_t getRoiBaseCycle() const { return 0; }
+        virtual uint32_t getSrcId() const { return 0; }
+
         // Address-routed pricing DMA window (v1.1.1): while paused, loads and
         // stores are NOT priced by the serving memory -- used to bracket an
         // explicit staging memcpy whose transfer cost is already charged as a

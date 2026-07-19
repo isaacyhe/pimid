@@ -126,6 +126,28 @@ forked ranks.
 
 See [cosim.md](cosim.md) for the host-device link model used by cosim.
 
+## Reading the cycle metric
+
+A parallel (OMP or MPI) run leaves ONE `cycles: N # Simulated cycles` line per
+device PE in `zsim.out`. **The first such line is core 0 only** -- a PE's
+per-core count reflects only its own active cycles, and the kernel finishes
+when the LAST PE finishes. **Never use the first `cycles:` line as the kernel
+metric**: latching onto it (`grep cycles | head -1`, and the older
+`parseZSimOutputFile()`) is the pre-1.8.8 defect that manufactured a spurious
+bfs HBM3 32-PE cycle spike -- core 0 happened to be a low outlier at 16/64 PEs
+but representative at 32, so recording it made 32 look like a step.
+
+Use the **critical-path max** across PEs instead:
+
+- **OMP device runs** now emit an aggregate summary
+  `OMP cycles: <max> (mean, min, pes, critical-path max)` plus a
+  parser-compatible `Total: <sum> cycles (max: <max>)` line (1.8.8). This
+  mirrors the aggregation the MPI path already reported as `Total: ...
+  (max: N)`. Purely additive -- the per-PE `cycles:` lines, `out.cycles`, and
+  power analysis are untouched.
+- **The kernel metric is the `(max: N)` value** on either path, not the first
+  per-PE line. Harnesses must read `(max: N)`, not `grep cycles | head -1`.
+
 ## Device-organization-aware data prep (near-data placement)
 
 The simulator prices each PE access purely by data LOCATION (own unit = fast,
