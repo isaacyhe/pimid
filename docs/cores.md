@@ -74,6 +74,10 @@ suite (typical gaps 2-3.5x, tracking each kernel's ILP/MLP). Use
 `in_order_core` for dependency/issue-accurate in-order timing, `ooo_core` for
 the reordered upper bound, `simple_core` for the fast IPC = 1 approximation.
 
+Under thread-MPI, rendezvous clock jumps (barrier/reduce waits) are applied to
+the OOO scheduling window via a drain-then-jump bulk advance (1.9.2); the
+formerly-pulled OOO+MPI cell class is fully supported since that release.
+
 ## Model boundaries (documented, deliberate)
 
 - **In-order memory is blocking**: one outstanding miss at a time, no

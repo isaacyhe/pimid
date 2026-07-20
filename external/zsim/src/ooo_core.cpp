@@ -561,7 +561,18 @@ void OOOCore::join() {
     DEBUG_MSG("[%s] Joining, curCycle %ld phaseEnd %ld", name.c_str(), curCycle, phaseEndCycle);
     uint64_t targetCycle = cRec.notifyJoin(curCycle);
     if (targetCycle > curCycle) {
-        if (pimidCommParked) curCycle = targetCycle;  // empty pipeline: jump
+        // 1.9.2: window-safe bulk clock advance under thread-MPI rendezvous.
+        // The parked-join path used to raw-jump curCycle=targetCycle assuming
+        // an "empty pipeline". That assumption is false at the 1.6.3 weave-
+        // quantum boundary: bfs's per-frontier-level collectives park the core
+        // while long-latency NoC loads still sit in insWindow's unbounded
+        // window (ubWin). A raw jump of 100K-1M+ cycles orphans those entries
+        // behind curCycle; the next advancePos rebase then computes a negative
+        // nextWinPos and trips ooo_core.h:226. longAdvance() drains the window
+        // (retiring the in-flight uops) before jumping, and is byte-identical
+        // to the old raw jump when the window is genuinely empty (occupancy==0).
+        // Draining is bounded by the 1024-cycle window horizon, not the delta.
+        if (pimidCommParked) insWindow.longAdvance(curCycle, targetCycle);
         else advance(targetCycle);
     }
     phaseEndCycle = zinfo->globPhaseCycles + zinfo->phaseLength;

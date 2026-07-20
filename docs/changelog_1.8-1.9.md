@@ -1,4 +1,4 @@
-# Changelog / defect ledger -- 1.8.0 -> 1.9.1
+# Changelog / defect ledger -- 1.8.0 -> 1.9.3
 
 Release + defect ledger for the co-sim MPI window, the measured-feedback MPI
 pricing model, and the OMP critical-path metric. One entry per release; each
@@ -6,6 +6,32 @@ gives the defect fixed, a one-line root cause, and a data-impact note (which
 sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
+
+## 1.9.3 -- docs-only
+
+Documentation for 1.9.2 (this entry, cores.md OOO bulk-advance note, version
+badge). No source change; no data impact.
+
+## 1.9.2 -- window-safe bulk clock advance for OOO cores (1.6.3 boundary closed)
+
+- **Defect.** Under thread-MPI rendezvous, `OOOCore::join()` applied a raw
+  `curCycle = targetCycle` jump while parked, bypassing the window-safe
+  `longAdvance()`. A 100K-1M+ cycle rendezvous jump orphaned in-flight
+  unbounded-window entries behind `curCycle`; the next window rebase computed a
+  negative position and tripped the `ooo_core.h` assert (then SIGSEGV). bfs
+  (one collective per frontier level) is the reliable trigger; this is the
+  1.6.3 "weave quantum" boundary that had kept OOO+thread-MPI cells pulled.
+- **Fix.** Route the parked join through `insWindow.longAdvance()` (drain-then-
+  jump; retires in-flight uops instead of discarding; byte-identical to the old
+  code when the window is empty; drain bounded by the 1024-cycle horizon).
+  OOO-only -- ALU/simple/in-order joins untouched (gate-verified).
+- **Data impact.** OOO+MPI cells are now simulatable; the coremodel MPI family
+  is re-run on 1.9.2 for single-binary consistency (v192 tag). Validation:
+  the crashing cell completes at 3.92M cycles (OOO fastest on MPI bfs, as
+  latency hiding predicts); non-bfs OOO cells reproduce v190 to <0.1%; OMP
+  path unshifted (0.047%). Note: thread-MPI bfs cells carry multi-percent
+  run-to-run spread (worst case of the documented weave nondeterminism), so
+  bfs census checks use a tolerance band, not bit-equality.
 
 ## 1.9.1 -- docs-only
 
