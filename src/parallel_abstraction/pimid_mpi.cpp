@@ -35,6 +35,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cerrno>
+#include <vector>
 
 /* ---- ZSim/QEMU magic ops (only effective under instrumentation) ---- */
 
@@ -588,7 +589,34 @@ static void recv_slot(MessageSlot* out, int want_src = -1) {
          * slot from want_src (or any). Popping in wall-arrival order made the
          * rendezvous consume varying send_time stamps run-to-run -- the 6%
          * determinism jitter. Matching by source makes the consumed stamp a
-         * pure function of the program's communication pattern. */
+         * pure function of the program's communication pattern.
+         *
+         * UNEXPECTED-MESSAGE STAGING (1.9.6 deadlock fix). The mailbox ring holds
+         * only PIMID_MPI_RING_SLOTS (16) slots. A source-matched receiver that
+         * wants a specific source can head-of-line block: an all-to-root
+         * collective (MPI_Gather/Reduce, the shape bfs runs every frontier level)
+         * fills this mailbox with 16 senders the receiver has not asked for yet
+         * while the source it IS waiting for is a sender BLOCKED in send_chunk
+         * (ring full) and thus can never enqueue -> deadlock. It fires precisely
+         * once nranks > RING_SLOTS (bfs 8/16 ranks are safe, 32/64 hang) and grows
+         * more likely the more per-level gathers a kernel runs (bfs, not the
+         * one-shot-reduce kernels). CURE: this rank keeps a private staging queue;
+         * when the ring is full and the wanted source is absent, EVICT the
+         * head-most message into staging (freeing a slot, waking a blocked
+         * sender). Messages are still matched by source when consumed -- from
+         * staging (older) before the ring (newer) so per-source FIFO and the
+         * consumed sim_send_time stamp are unchanged -> determinism preserved;
+         * only the transport buffering depth changes. Deadlock-free: the receiver
+         * always drains the ring, so every sender eventually enqueues. */
+        static thread_local std::vector<MessageSlot> tl_stage;
+        for (size_t i = 0; i < tl_stage.size(); i++) {
+            if (want_src < 0 || tl_stage[i].src == want_src) {
+                *out = tl_stage[i];
+                tl_stage.erase(tl_stage.begin() + (long)i);
+                MPITRACE("recv_done src=%d tag=%d (stage)", out->src, out->tag);
+                return;
+            }
+        }
         mpi_comm_begin();   /* frozen-clock bracket: plugin rewinds at END */
         pthread_mutex_lock(&mb->mtx);
         for (;;) {
@@ -612,6 +640,25 @@ static void recv_slot(MessageSlot* out, int want_src = -1) {
                     pthread_cond_signal(&mb->can_send);
                 }
                 break;
+            }
+            /* No match in the ring. If it is FULL, evict the head-most message to
+             * staging to break a possible head-of-line deadlock (see above). The
+             * head is unconsumed and, since the scan above found no want_src, is
+             * never the message we want, so eviction cannot drop it. */
+            if (mb->count >= PIMID_MPI_RING_SLOTS) {
+                tl_stage.push_back(mb->slots[mb->head]);
+                mb->consumed[mb->head] = 0;
+                mb->head = (mb->head + 1) % PIMID_MPI_RING_SLOTS;
+                mb->count--;
+                pthread_cond_signal(&mb->can_send);
+                while (mb->count > 0 && mb->consumed[mb->head]) {
+                    mb->consumed[mb->head] = 0;
+                    mb->head = (mb->head + 1) % PIMID_MPI_RING_SLOTS;
+                    mb->count--;
+                    pthread_cond_signal(&mb->can_send);
+                }
+                MPITRACE("recv_EVICT_to_stage src=%d want=%d", tl_stage.back().src, want_src);
+                continue;   /* re-scan: ring now has space, blocked sender can enqueue */
             }
             MPITRACE("recv_WAIT_src=%d", want_src);
             pthread_cond_wait(&mb->can_recv, &mb->mtx);

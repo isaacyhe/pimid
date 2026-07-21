@@ -1,4 +1,4 @@
-# Changelog / defect ledger -- 1.8.0 -> 1.9.5
+# Changelog / defect ledger -- 1.8.0 -> 1.9.7
 
 Release + defect ledger for the co-sim MPI window, the measured-feedback MPI
 pricing model, and the OMP critical-path metric. One entry per release; each
@@ -6,6 +6,29 @@ gives the defect fixed, a one-line root cause, and a data-impact note (which
 sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
+
+## 1.9.7 -- docs-only
+
+Documentation for 1.9.6 (this entry, badge). No source change.
+
+## 1.9.6 -- thread-MPI head-of-line deadlock at >16 ranks
+
+- **Defect.** The in-process MPI transport's per-rank mailbox ring (16 slots)
+  deadlocked under source-matched receive when >16 ranks flooded a collective
+  root: the receiver would not consume the ring head (wrong source) and the
+  wanted sender could not append (ring full). bfs (per-level gathers) at
+  32/64 ranks froze within ~5 phases; 8/16 ranks and one-shot-reduce kernels
+  never filled the ring. Latent since 1.6; exposed when measured pricing
+  (1.9.0) changed rank arrival patterns.
+- **Fix.** Unexpected-message staging queue per receiver: when the ring is
+  full and the wanted source absent, the head message is staged (freeing the
+  slot, waking the sender). Source matching, per-source FIFO, and consumed
+  timestamps unchanged -- deadlock-free by construction, deterministic.
+  Capacity is now elastic at any rank count.
+- **Data impact.** pc_32/pc_64 MPI bfs cells producible (v196 tags); all
+  other cells gate-verified unchanged (pe16 -3.5% cross-host band, gemv-32
+  +1.6%, cosim clean with exact 16x flush arithmetic, OMP within its
+  documented band at 0.82%).
 
 ## 1.9.5 -- docs-only
 
