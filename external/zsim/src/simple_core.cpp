@@ -35,7 +35,12 @@ void SimpleCore::initStats(AggregateStat* parentStat) {
     coreStat->init(name.c_str(), "Core stats");
     // Report cycles/instrs RELATIVE to the ROI baseline (roi_begin); roiBase* are
     // 0 until roi_begin, so non-ROI workloads are unaffected.
-    auto x = [this]() -> uint64_t { assert(curCycle >= haltedCycles); return (curCycle - haltedCycles) - roiBaseCycle; };
+    auto x = [this]() -> uint64_t {
+        assert(curCycle >= haltedCycles);
+        uint64_t c = curCycle - haltedCycles;
+        c = (c > pimidPhantomWait) ? (c - pimidPhantomWait) : 0;   // 1.9.4 wall-free (frozen-clock MPI rewind)
+        return (c > roiBaseCycle) ? (c - roiBaseCycle) : 0;
+    };
     auto cyclesStat = makeLambdaStat(x);
     cyclesStat->init("cycles", "Simulated cycles");
     auto xi = [this]() -> uint64_t { return instrs - roiBaseInstrs; };

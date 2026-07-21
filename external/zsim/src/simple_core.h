@@ -56,7 +56,22 @@ class SimpleCore : public Core {
 
         uint64_t getInstrs() const {return instrs;}
         uint64_t getPhaseCycles() const;
-        uint64_t getCycles() const {return curCycle - haltedCycles;}
+        // 1.9.4 frozen-clock MPI waits: like the weave cores (in_order/ooo), the
+        // rendezvous rewind is applied on the REPORTED side via pimidPhantomWait,
+        // NOT by lowering curCycle. curCycle is re-pinned to the wall-pumped
+        // globPhaseCycles by join() on every phase crossing, so a curCycle rewind
+        // does not stick: it reappears at the next join and the wall-clock phase
+        // floor leaks into the reported clock (thread-MPI cycles that tracked
+        // globPhaseCycles instead of real work -- IPC << 1, size-independent).
+        // Subtracting the accumulator at every read site (getCycles + the ROI
+        // cycles stat) makes the rewind wall-free and join-immune, mirroring
+        // in_order_core.h / ooo_core.h. 0 outside MPI frozen-clock waits, so
+        // OMP and non-MPI paths are byte-identical.
+        uint64_t pimidPhantomWait = 0;
+        uint64_t getCycles() const {
+            uint64_t c = curCycle - haltedCycles;
+            return (c > pimidPhantomWait) ? (c - pimidPhantomWait) : 0;
+        }
 
         void contextSwitch(int32_t gid);
         virtual void join();
@@ -64,16 +79,11 @@ class SimpleCore : public Core {
         InstrFuncPtrs GetFuncPtrs();
 
         void addDelay(uint32_t cycles) override { curCycle += cycles; }
-        void pimidRewindCycles(uint64_t delta) override {
-            /* Floor at the ROI baseline: rewinding below it makes the
-             * reported (curCycle - roiBaseCycle) wrap negative. */
-            uint64_t floorCyc = roiBaseCycle;
-            uint64_t tgt = (curCycle > delta) ? (curCycle - delta) : 0;
-            curCycle = (tgt > floorCyc) ? tgt : floorCyc;
-        }
+        void pimidRewindCycles(uint64_t delta) override { pimidPhantomWait += delta; }
 
         // Snapshot current counters as the ROI baseline (called on roi_begin).
-        void markRoiBegin() override { roiBaseInstrs = instrs; roiBaseCycle = curCycle - haltedCycles; }
+        // getCycles() already nets out pimidPhantomWait (0 at roi_begin).
+        void markRoiBegin() override { roiBaseInstrs = instrs; roiBaseCycle = getCycles(); }
 
     protected:
         //Simulation functions

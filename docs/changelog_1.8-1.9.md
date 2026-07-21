@@ -1,4 +1,4 @@
-# Changelog / defect ledger -- 1.8.0 -> 1.9.3
+# Changelog / defect ledger -- 1.8.0 -> 1.9.5
 
 Release + defect ledger for the co-sim MPI window, the measured-feedback MPI
 pricing model, and the OMP critical-path metric. One entry per release; each
@@ -6,6 +6,25 @@ gives the defect fixed, a one-line root cause, and a data-impact note (which
 sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
+
+## 1.9.5 -- docs-only
+
+Documentation for 1.9.4 (this entry, cores.md note, badge). No source change.
+
+## 1.9.4 -- simple_core phantom wall-clock leak under thread-MPI
+
+- **Defect.** simple_core's frozen-clock rewind (COMM_END) lowered curCycle
+  directly, but SimpleCore::join() re-pins curCycle to the wall-pumped global
+  phase clock on every phase crossing -- the rewind did not stick. Rank clocks
+  tracked wall time instead of work; on rendezvous-heavy kernels the phantom
+  dominated (bfs: 34.6M of 36.9M cycles). Same family as the 1.9.2 OOO defect:
+  per-class rewind paths unsafe against clock re-pinning.
+- **Fix.** Accumulate the rewind in pimidPhantomWait and net it out at the
+  read sites (getCycles / ROI stat) -- join-immune, byte-inert outside MPI
+  frozen-clock waits. simple_core-only; other cores + OMP gate-verified
+  unchanged (0.1%).
+- **Data impact.** simple_core MPI cells re-run (v194): bfs 36.9M -> 8.37M
+  (physical: between ooo 3.8M and alu 24.5M, just above in_order 8.1M).
 
 ## 1.9.3 -- docs-only
 
