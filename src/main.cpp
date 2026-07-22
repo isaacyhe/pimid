@@ -3406,7 +3406,14 @@ static std::vector<pimid::McPATWrapper::NoCLevelConfig> buildNoCLevelsForMcPAT(
                 // Higher levels have fewer nodes
                 int factor = 1;
                 for (int l = pe_level; l < lvl; l++) {
-                    if (l == 1) factor *= config.hierarchy_banks_per_bg;
+                    // Fan-in from level l to l+1 = physical org count ratio.
+                    // l==0 (subarray->bank) MUST use subarrays_per_bank, not a
+                    // hardcoded 2: at SUBARRAY placement (pe_level==0) a wrong ratio
+                    // leaves every upper level (bank/bankgroup/chip) over-counted by
+                    // subarrays_per_bank/2, inflating NoC leakage ~10x. This branch
+                    // only executes for pe_level==0, so BANK+ placements are unchanged.
+                    if (l == 0) factor *= config.subarrays_per_bank;
+                    else if (l == 1) factor *= config.hierarchy_banks_per_bg;
                     else if (l == 2) factor *= config.hierarchy_bg_per_chip;
                     else if (l == 3) factor *= config.hierarchy_chips_per_rank;
                     else factor *= 2;
@@ -3568,7 +3575,11 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         mcfg.num_memory_controllers = 1;
     }
     mcfg.mc_clock_mhz = config.frequency_mhz / 2.0;
-    mcfg.has_noc = (config.num_pes > 1);
+    // The in-memory NoC (DRAM datapath hierarchy) is a property of the memory
+    // organization, not the PE count: it exists whenever the hierarchy is enabled,
+    // even for a single PE. Gating on num_pes>1 alone dropped the ~4.6W NoC leakage
+    // for 1-PE device/hierarchy runs, collapsing their power to core+MC (~0.1W).
+    mcfg.has_noc = (config.num_pes > 1 || config.hierarchy_enabled);
     mcfg.noc_clock_mhz = config.frequency_mhz;
     mcfg.noc_num_routers = config.num_pes;
     int grid_side = static_cast<int>(std::ceil(std::sqrt(config.num_pes)));
@@ -3626,8 +3637,9 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     std::string garnet_path = output_dir + "/garnet_stats.txt";
     GarnetParsedStats garnet = parseGarnetStatsFile(garnet_path);
 
-    // Build per-level NoC configs
-    if (config.num_pes > 1) {
+    // Build per-level NoC configs. Include the single-PE hierarchy case: the
+    // in-memory network spans all memory-org levels regardless of PE count.
+    if (config.num_pes > 1 || config.hierarchy_enabled) {
         auto noc_levels = buildNoCLevelsForMcPAT(config, garnet, cycles, overrides);
         mcpat.setNoCLevels(noc_levels);
     }

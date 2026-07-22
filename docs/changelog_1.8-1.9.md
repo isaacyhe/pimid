@@ -1,4 +1,4 @@
-# Changelog / defect ledger -- 1.8.0 -> 1.9.7
+# Changelog / defect ledger -- 1.8.0 -> 1.9.9
 
 Release + defect ledger for the co-sim MPI window, the measured-feedback MPI
 pricing model, and the OMP critical-path metric. One entry per release; each
@@ -6,6 +6,28 @@ gives the defect fixed, a one-line root cause, and a data-impact note (which
 sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
+
+## 1.9.9 -- docs-only
+
+Documentation for 1.9.8 (this entry, badge). No source change.
+
+## 1.9.8 -- power-derivation fixes (1-PE NoC gating; subarray fan-in overcount)
+
+- **Defect 1.** runPowerAnalysis gated the in-memory-network power on
+  num_pes > 1, dropping ~4.57 W of H-tree leakage for every 1-PE device run
+  (reported 0.099 W). Fixed: gate also fires on hierarchy_enabled. 1-PE
+  pecount power/energy re-derived from existing logs (no re-simulation);
+  multi-PE cells bit-identical.
+- **Defect 2.** buildNoCLevelsForMcPAT used a hardcoded x2 subarray->bank
+  fan-in instead of config.subarrays_per_bank (32 for HBM3), overfeeding
+  McPAT ~16x router counts at SUBARRAY placement only (65 W vs a physical
+  ~5.5 W). Fixed; SUBARRAY placement rows re-derived; other levels
+  bit-identical.
+- **Documented (no code change).** Power templates key off microarch class,
+  not timing fidelity: simple_core and in_order_core share the single-issue
+  template (~9.06 W). total_power_W is leakage/config-dominated; activity
+  moves only trailing digits; Ramulator2 array dynamic energy is reported
+  separately.
 
 ## 1.9.7 -- docs-only
 
