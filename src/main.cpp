@@ -370,6 +370,20 @@ struct ZSimParsedOutput {
     uint64_t cycles = 0;
     uint64_t instrs = 0;
 
+    // 1.9.10 co-sim power-integration fix: contention-INCLUSIVE wall-clock cycle
+    // counts, tracked per core group. `cycles` above is the FIRST core's unhalted
+    // (contention-excluded) count, which grossly understates the true runtime for
+    // memory-contended or offloaded workloads and was inflating co-sim/baseline
+    // McPAT power by 1-3 orders of magnitude. These give each system node a runtime
+    // that matches the window over which its accesses actually occurred.
+    //   host_wall_cycles = max over host cores of (unhalted cycles + contention cycles)
+    //   dev_wall_cycles  = max over device PEs of (simulated cycles)  [Garnet-timed;
+    //                      device PE cycles already fold in memory-network stalls]
+    // Only consumed by runPerNodePowerAnalysis (system scope). The device-SCOPE
+    // path (runPowerAnalysis) keeps using `cycles`, so its values are unchanged.
+    uint64_t host_wall_cycles = 0;
+    uint64_t dev_wall_cycles = 0;
+
     // L1I: fhGETS (filtered hits), hGETS (hits), mGETS (misses) — accumulated across all instances
     uint64_t l1i_fhGETS = 0;
     uint64_t l1i_hGETS = 0;
@@ -441,6 +455,12 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
     Scope scope = Scope::NONE;
     int scope_indent = 0;  // indentation level of the current scope header
 
+    // 1.9.10: track which core group we are inside (host_cores vs device_pes) so
+    // we can accumulate contention-inclusive per-group wall-clock cycles.
+    enum class CoreGroup { NONE, HOST, DEVICE };
+    CoreGroup core_group = CoreGroup::NONE;
+    uint64_t cur_core_cycles = 0;  // last "cycles:" seen in the current core block
+
     auto extractScalarValue = [](const std::string& line) -> uint64_t {
         // Format: " statname: value # description"
         auto colon = line.find(':');
@@ -501,6 +521,14 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
             scope = Scope::ROOT;
         }
 
+        // Core-group detection: "host_cores"/"device_pes"/"cores" aggregate headers.
+        // These are NOT cache scopes; core scalars are read at ROOT scope, so we only
+        // tag which group's cores we are currently traversing.
+        if (is_aggregate) {
+            if (key.substr(0, 10) == "host_cores") { core_group = CoreGroup::HOST; }
+            else if (key.substr(0, 10) == "device_pes") { core_group = CoreGroup::DEVICE; }
+        }
+
         // Scope detection: match "l1d-N:", "l1i-N:", "l2-N:", "mem-N:" aggregate headers
         if (is_aggregate) {
             if (key.substr(0, 4) == "l1d-" || key.substr(0, 4) == "l1d_") {
@@ -535,6 +563,20 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
             if (scope == Scope::NONE || scope == Scope::ROOT) {
                 if (key == "cycles" && out.cycles == 0) out.cycles = val;
                 else if (key == "instrs" && out.instrs == 0) out.instrs = val;
+
+                // 1.9.10: contention-inclusive per-group wall-clock cycles.
+                if (key == "cycles") {
+                    cur_core_cycles = val;
+                    if (core_group == CoreGroup::HOST)
+                        out.host_wall_cycles = std::max(out.host_wall_cycles, val);
+                    else if (core_group == CoreGroup::DEVICE)
+                        out.dev_wall_cycles = std::max(out.dev_wall_cycles, val);
+                } else if (key == "cCycles" && core_group == CoreGroup::HOST) {
+                    // Host cores report "cCycles" (contention stall cycles) separately
+                    // from unhalted "cycles"; the true elapsed time is their sum.
+                    out.host_wall_cycles =
+                        std::max(out.host_wall_cycles, cur_core_cycles + val);
+                }
             }
 
             // L1D scope
@@ -902,7 +944,7 @@ struct UnifiedConfig {
     int host_l2_kb = 1024;
     int host_l3_kb = 8192;
     std::string host_memory_tech = "DDR4";
-    int host_tech_node_nm = 7;
+    int host_tech_node_nm = -1;  // -1 = inherit device node (config.tech_node_nm); see power.host_tech_node_nm
 
     // Power analysis
     bool enable_power = true;  // --power / --no-power / YAML power.enabled
@@ -2602,7 +2644,10 @@ static void synthesizeSystemNodes(UnifiedConfig& config) {
         host.core_type = config.host_core_type;
         host.num_cores = config.host_num_cores;
         host.frequency_mhz = config.host_frequency_mhz;
-        host.tech_node_nm = config.host_tech_node_nm;
+        // Resolve host process node: inherit the device node (config.tech_node_nm)
+        // when no explicit host override was given (host_tech_node_nm < 0).
+        host.tech_node_nm = (config.host_tech_node_nm >= 0)
+            ? config.host_tech_node_nm : config.tech_node_nm;
         host.l1d_kb = config.host_l1d_kb;
         host.l1i_kb = config.host_l1i_kb;
         host.l2_kb = config.host_l2_kb;
@@ -3755,7 +3800,14 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         host_cfg.num_memory_controllers = 1;
         host_cfg.mc_clock_mhz = 1200.0;
         host_cfg.has_noc = false;
-        host_cfg.tech_node_nm = std::max(22, config.host_tech_node_nm);
+        // Host process node: resolved host override, else the device node (uniform).
+        // std::max(22,...) is the CACTI/McPAT lower-bound floor (models below 22nm are
+        // not supported by the linked CACTI), not a study default.
+        {
+            int host_tn = (config.host_tech_node_nm >= 0)
+                ? config.host_tech_node_nm : config.tech_node_nm;
+            host_cfg.tech_node_nm = std::max(22, host_tn);
+        }
         host_cfg.temperature_k = 350;
 
         McPAT host_mcpat(host_cfg);
@@ -3813,25 +3865,32 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         try {
             pimid::RamulatorWrapper ram_oracle("", config.memory_tech);
             ram_oracle.initialize();
-            double rd_energy = ram_oracle.getReadEnergy();
-            double wr_energy = ram_oracle.getWriteEnergy();
-            double act_energy = ram_oracle.getActivationEnergy();
-            double pre_energy = ram_oracle.getPrechargeEnergy();
-            double ref_energy = ram_oracle.getRefreshEnergy();
-            double leakage_mw = ram_oracle.getLeakagePower();
+            // 1.9.10: use the INTENSIVE per-access accessors. The old code called
+            // getReadEnergy()/getWriteEnergy() -- which return total_reads_*per-access
+            // (== 0 on this fresh, never-fed oracle) -- and then multiplied by mem_rd
+            // again, yielding 0.000 nJ everywhere. getArrayReadEnergyNJ() already folds
+            // activation + column access, so act/pre are not added separately (would
+            // double-count). Interface (off-chip I/O) is charged HOST-side only.
+            double rd_energy = ram_oracle.getArrayReadEnergyNJ();
+            double wr_energy = ram_oracle.getArrayWriteEnergyNJ();
+            double iface_energy = ram_oracle.getInterfaceEnergyNJ();
+            double bg_power_mw = ram_oracle.getBackgroundPowerMW();
+            double ref_energy = ram_oracle.getRefreshPowerMW();  // per-device mW
+            double leakage_mw = bg_power_mw;
 
-            // Scale by actual access counts
+            // Scale by actual access counts (array term; interface added host-side)
             double total_rd_nj = rd_energy * zsim_stats.mem_rd;
             double total_wr_nj = wr_energy * zsim_stats.mem_wr;
-            double total_act_nj = act_energy * (zsim_stats.mem_rd + zsim_stats.mem_wr);
-            double total_pre_nj = pre_energy * (zsim_stats.mem_rd + zsim_stats.mem_wr);
+            double total_act_nj = 0.0;  // folded into array rd/wr (no double-count)
+            double total_pre_nj = iface_energy * (zsim_stats.mem_rd + zsim_stats.mem_wr);
 
             std::cout << "  Technology:      " << config.memory_tech << " (Ramulator2 energy model)" << std::endl;
             std::cout << "  Per-access:      read=" << std::fixed << std::setprecision(3)
                       << rd_energy << " nJ, write=" << wr_energy << " nJ" << std::endl;
-            std::cout << "  Activation:      " << act_energy << " nJ/access" << std::endl;
-            std::cout << "  Precharge:       " << pre_energy << " nJ/access" << std::endl;
-            std::cout << "  Refresh:         " << ref_energy << " nJ/op" << std::endl;
+            std::cout << "  Interface (I/O): " << iface_energy << " nJ/access (host-side / off-chip)" << std::endl;
+            std::cout << "  Array incl act+col in read/write terms above" << std::endl;
+            std::cout << "  Refresh:         " << ref_energy << " mW/device" << std::endl;
+            std::cout << "  Background:      " << bg_power_mw << " mW/device (standby+refresh)" << std::endl;
             std::cout << "  Leakage:         " << leakage_mw << " mW" << std::endl;
             std::cout << "  Total dynamic:   " << std::setprecision(1)
                       << (total_rd_nj + total_wr_nj + total_act_nj + total_pre_nj) / 1e6
@@ -4105,6 +4164,28 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
     uint64_t total_cycles = zsim_stats.cycles > 0 ? zsim_stats.cycles : 1;
     uint64_t total_instrs = zsim_stats.instrs > 0 ? zsim_stats.instrs : 1;
 
+    // 1.9.10 power-integration fix: derive a single wall-clock TIME (seconds) that
+    // every node is priced over, from the contention-INCLUSIVE per-group wall cycles
+    // in their own clock domains. Previously each node's McPAT runtime was
+    // `zsim_stats.cycles * core_frac`, where zsim_stats.cycles is the FIRST (host)
+    // core's contention-EXCLUDED unhalted count. For memory-latency-bound kernels
+    // (bfs: 5M unhalted but ~790M elapsed) and offloaded co-sim runs (host offloads
+    // in ~41K cycles while the device runs for hundreds of millions), that runtime
+    // was 1-3 orders of magnitude too short, so accesses/cycle became nonphysical
+    // and McPAT dynamic power exploded to hundreds/thousands of Watts (or, when the
+    // host ran long, collapsed below the host-only baseline). Pricing each node over
+    // the true wall-clock in its own clock domain fixes all three failure modes.
+    double wall_seconds = 0.0;
+    for (const auto& node : config.system_nodes) {
+        if (node.num_cores == 0 || node.frequency_mhz <= 0) continue;
+        uint64_t node_wall =
+            (node.role == UnifiedConfig::SystemNode::HOST)
+                ? zsim_stats.host_wall_cycles : zsim_stats.dev_wall_cycles;
+        if (node_wall == 0) continue;
+        double t = static_cast<double>(node_wall) / (node.frequency_mhz * 1e6);
+        if (t > wall_seconds) wall_seconds = t;
+    }
+
     const std::map<std::string, double>& overrides = config.mcpat_overrides;
     auto ov_get_int = [&overrides](const std::string& key, int fallback) -> int {
         auto it = overrides.find(key);
@@ -4235,7 +4316,19 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                     for (const auto& n : config.system_nodes) total += n.num_cores;
                     return total;
                 }());
-            uint64_t node_cycles = static_cast<uint64_t>(total_cycles * core_frac);
+            // 1.9.10 fix: price this node over the true wall-clock TIME in ITS OWN
+            // clock domain (node_cycles = wall_seconds * node_clock), instead of the
+            // first-core contention-excluded count scaled by core fraction. The access
+            // counts below stay core-fraction split, so accesses/node_cycles now equals
+            // the physical access RATE over the real elapsed time. When wall_seconds is
+            // unavailable (no per-group contention stats parsed), fall back to the
+            // legacy total_cycles*core_frac basis to preserve prior behavior.
+            uint64_t node_cycles;
+            if (wall_seconds > 0.0 && node.frequency_mhz > 0) {
+                node_cycles = static_cast<uint64_t>(wall_seconds * node.frequency_mhz * 1e6);
+            } else {
+                node_cycles = static_cast<uint64_t>(total_cycles * core_frac);
+            }
             uint64_t node_instrs = static_cast<uint64_t>(total_instrs * core_frac);
             if (node_cycles == 0) node_cycles = 1;
             if (node_instrs == 0) node_instrs = 1;
@@ -6975,6 +7068,27 @@ int main(int argc, char** argv) {
                 config.power_report_detail = yaml_cfg["power"]["report_detail"].as<std::string>(config.power_report_detail);
             }
 
+            // 1.9.10: user-controllable process (technology) node.
+            //   power.tech_node_nm         -> applies to ALL domains (host + device)
+            //   power.device_tech_node_nm  -> device-only override
+            //   power.host_tech_node_nm    -> host-only override
+            // Default: host inherits the device node (uniform process unless
+            // overridden). The device default (config.tech_node_nm, 22nm) is
+            // unchanged, so existing device-side flows are bit-identical at default.
+            if (yaml_cfg["power"] && yaml_cfg["power"]["tech_node_nm"]) {
+                int n = yaml_cfg["power"]["tech_node_nm"].as<int>(config.tech_node_nm);
+                config.tech_node_nm = n;
+                config.host_tech_node_nm = n;  // uniform unless a host override follows
+            }
+            if (yaml_cfg["power"] && yaml_cfg["power"]["device_tech_node_nm"]) {
+                config.tech_node_nm =
+                    yaml_cfg["power"]["device_tech_node_nm"].as<int>(config.tech_node_nm);
+            }
+            if (yaml_cfg["power"] && yaml_cfg["power"]["host_tech_node_nm"]) {
+                config.host_tech_node_nm =
+                    yaml_cfg["power"]["host_tech_node_nm"].as<int>(config.host_tech_node_nm);
+            }
+
             // McPAT derived-parameter overrides
             if (yaml_cfg["power"] && yaml_cfg["power"]["mcpat_overrides"]) {
                 auto ov = yaml_cfg["power"]["mcpat_overrides"];
@@ -7090,7 +7204,15 @@ int main(int argc, char** argv) {
                         node.core_type = normalizeCoreType(h["core_type"].as<std::string>("ooo_core"));
                         node.num_cores = h["num_cores"].as<int>(4);
                         node.frequency_mhz = h["frequency_mhz"].as<double>(3000.0);
-                        node.tech_node_nm = h["tech_node_nm"].as<int>(7);
+                        // Host node process node: explicit YAML wins; else the
+                        // resolved host default (power.host_tech_node_nm if set, else
+                        // the device node -- uniform process). Replaces the old
+                        // hardcoded 7nm host default.
+                        {
+                            int host_default = (config.host_tech_node_nm >= 0)
+                                ? config.host_tech_node_nm : config.tech_node_nm;
+                            node.tech_node_nm = h["tech_node_nm"].as<int>(host_default);
+                        }
                         if (h["cache"]) {
                             node.l1d_kb = h["cache"]["l1d_kb"].as<int>(node.l1d_kb);
                             node.l1i_kb = h["cache"]["l1i_kb"].as<int>(node.l1i_kb);
@@ -7203,7 +7325,11 @@ int main(int argc, char** argv) {
                             UnifiedConfig::SystemNode::EXTERNAL;
 
                         node.frequency_mhz = d["frequency_mhz"].as<double>(1000.0);
-                        node.tech_node_nm = d["tech_node_nm"].as<int>(22);
+                        // Device node process node: explicit YAML wins; else the
+                        // device default (config.tech_node_nm / power.device_tech_node_nm,
+                        // 22nm unless overridden). Default unchanged -> device flows
+                        // are bit-identical when no override is given.
+                        node.tech_node_nm = d["tech_node_nm"].as<int>(config.tech_node_nm);
 
                         if (d["memory"]) {
                             node.memory_tech = canonicalMemTech(

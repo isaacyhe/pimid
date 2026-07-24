@@ -7,6 +7,17 @@ class HBM2 : public IDRAM, public Implementation {
   RAMULATOR_REGISTER_IMPLEMENTATION(IDRAM, HBM2, "HBM2", "HBM2 Device Model")
 
   public:
+  /* PIMID 1.9.10: datasheet IDD/VDD presets (JESD235 HBM2) -- relocated energy layer.
+     Intensive per-access model lives in dram/pimid_energy.h (active source); these
+     mirror it in upstream convention for Ramulator2's command-driven power path. */
+    inline static const std::map<std::string, std::vector<double>> voltage_presets = {
+      {"Default",     {1.2,  2.5}},
+    };
+    inline static const std::map<std::string, std::vector<double>> current_presets = {
+      // name         IDD0 IDD2N IDD3N IDD4R IDD4W IDD5B  IPP0 IPP2N IPP3N IPP4R IPP4W IPP5B
+      {"Default",     {28,17,21,80,90,65, 3,3,3,3,3,40}},
+    };
+
     inline static const std::map<std::string, Organization> org_presets = {
       //   name     density   DQ    Ch Pch  Bg Ba   Ro     Co
       // JEDEC JESD235: HBM2 = 16 banks/channel (2 pseudo-ch x 4 BG x 2 banks).

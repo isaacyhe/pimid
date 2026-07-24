@@ -437,12 +437,26 @@ simulation:
 power:
   enabled: true
   report_detail: standard
+  tech_node_nm: 22          # process node for ALL power domains (host + device)
+  # device_tech_node_nm: 22 # optional device-only override
+  # host_tech_node_nm: 22   # optional host-only override
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `power.enabled` | bool | `true` | Enable McPAT power analysis. CLI `--power`/`--no-power` overrides. |
 | `power.report_detail` | string | `"standard"` | Report level: `summary` (one line), `standard` (component breakdown), `verbose` (+ per-component area, XML dump). |
+| `power.tech_node_nm` | int | device node (`22`) | Process (technology) node in nm applied to **all** power domains. Sets both the device and host node in one place (uniform iso-process study). |
+| `power.device_tech_node_nm` | int | `22` | Device-only process node override. Leaves the host node untouched. |
+| `power.host_tech_node_nm` | int | inherits device | Host-only process node override. When unset, the host **inherits the device node** (uniform process); the legacy hardcoded 7nm host default is removed. |
+
+**Process-node resolution.** The device node defaults to 22nm (unchanged; device
+power flows are bit-identical at default). The host node, when not given its own
+value, inherits the device node so a single `power.tech_node_nm` yields a uniform
+iso-process study. A per-node YAML `tech_node_nm` under `system.hosts[]` /
+`system.devices[]` still wins over these `power.*` knobs. McPAT/CACTI clamp any
+resolved node to a >=22nm floor (the linked CACTI does not model below 22nm);
+sub-22nm McPAT-only scaling and per-tech node scaling remain future work.
 
 ### McPAT Overrides
 

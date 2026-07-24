@@ -71,7 +71,7 @@ txt(76.5,84.30,"Device Simulation Engine",fs=13.5,bold=True,color=GRN)
 cxd=[62.6,71.9,81.2,90.5]
 for cx in cxd: box(cx-3.8,79.64,7.6,3.0,"PE",fc=C_PE,fs=10.5,bold=True)
 txt(76.5,77.74,"pe_type:  ooo / in-order / simple / alu / null",fs=9.0,it=True,color=GRN)
-txt(76.5,76.04,"placement:  subarray ▸ bank ▸ bank-group ▸ chip ▸ rank ▸ logic-die",fs=8.2,bold=True,color=GRN)
+txt(76.5,76.04,"placement:  subarray ▸ bank ▸ bank-group ▸ chip ▸ rank ▸ channel ▸ logic-die",fs=7.6,bold=True,color=GRN)
 box(59.5,66.84,17,7.5,fc=C_SUBD,lw=1.4)
 txt(68.0,72.39,"Address Translation",fs=9.4,bold=True); txt(68.0,70.59,"TLB + page table",fs=8.0,it=True,color=GRN); txt(68.0,68.79,"unified / discrete",fs=8.0,it=True,color=GRN)
 box(77.5,66.84,16.5,7.5,fc=C_SUBD,lw=1.4)
@@ -88,7 +88,7 @@ arrow(43.0,75.16,57.0,75.16,color=BLU,lw=2.4,mut=15)
 txt(gx,76.56,"host → device",fs=8.0,it=True,color=BLU)
 arrow(57.0,71.46,43.0,71.46,color=BLU,lw=2.4,mut=15)
 txt(gx,72.86,"device → host",fs=8.0,it=True,color=BLU)
-txt(gx,67.9,"H/D transfers are charged on\nlink + memory models\n(PCIe · CXL · interposer)",fs=7.2,color=ORG,bold=True)
+txt(gx,67.9,"H/D transfers are charged on\nlink + memory models\n(PCIe · CXL · NVLink-class · interposer)",fs=7.2,color=ORG,bold=True)
 
 # arrows to modeling infrastructure
 arrow(23.5,64.2,23.5,62.8,color=EDGE,lw=1.8,mut=9)
@@ -105,7 +105,7 @@ plugs=[
  ("NVM","NVSim"),
  ("Compute","ZSim / QEMU"),
  ("Network","GARNET"),
- ("Power & Area","McPAT"),
+ ("Power & Area","McPAT + memory models"),
 ]
 pcx=[14.17,28.5,42.83,57.17,71.5,85.83]; pw=13.5; pcy=50.44
 for cx,(name,tool) in zip(pcx,plugs):

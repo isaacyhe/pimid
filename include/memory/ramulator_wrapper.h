@@ -62,6 +62,24 @@ public:
     double getLeakagePower() const;
     double getTotalEnergy() const;
 
+    // 1.9.10: PER-ACCESS energy accessors + JEDEC-IDD background/refresh.
+    // Unlike getReadEnergy()/getWriteEnergy() (which return a cumulative
+    // total_reads_ * per-access and were the source of the 0.000 nJ bug when
+    // queried on an unfed oracle), these return the *intensive* per-64B-access
+    // dynamic energy and per-device standby/refresh power, independent of how
+    // many accesses the wrapper has seen. Sourced from the in-tree DRAM-arch
+    // bank energy (array) + a per-tech JEDEC IDD/VDD table (interface, background).
+    // Override the IDD-derived array energy with a fixed pJ/byte (0 = use IDD default).
+    void setBankEnergyOverridePJPerByte(double v) { energy_bank_override_pJ_per_byte_ = v; }
+    double getArrayReadEnergyNJ() const;     // array rd (act+col, amortized) per 64B
+    double getArrayWriteEnergyNJ() const;    // array wr per 64B
+    double getInterfaceEnergyNJ() const;     // off-chip I/O per 64B (host-side term)
+    double getTerminationEnergyNJ() const;   // ODT/termination per 64B (DDR-class; HBM=0)
+    // Override termination energy (pJ/bit; <0 = model default, 0 = force no termination).
+    void setTerminationOverridePJPerBit(double v) { energy_term_override_pJ_per_bit_ = v; }
+    double getBackgroundPowerMW() const;     // per-device active standby + refresh
+    double getRefreshPowerMW() const;        // per-device refresh component only
+
     // Configuration queries
     uint64_t getCapacity() const { return capacity_; }
     uint64_t getBandwidth() const { return bandwidth_; }
@@ -181,6 +199,8 @@ private:
     mutable double cached_write_energy_;
     mutable double cached_leakage_power_;
     mutable Cycle last_energy_update_;
+    double energy_bank_override_pJ_per_byte_ = 0.0;  // 0 = IDD default; >0 = user override
+    double energy_term_override_pJ_per_bit_ = -1.0;  // <0 = model default; >=0 = user override
 
     // Cycle counter
     Cycle current_cycle_;

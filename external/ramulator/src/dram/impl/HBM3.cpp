@@ -7,6 +7,17 @@ class HBM3 : public IDRAM, public Implementation {
   RAMULATOR_REGISTER_IMPLEMENTATION(IDRAM, HBM3, "HBM3", "HBM3 Device Model")
 
   public:
+  /* PIMID 1.9.10: datasheet IDD/VDD presets (JESD238 HBM3) -- relocated energy layer.
+     Intensive per-access model lives in dram/pimid_energy.h (active source); these
+     mirror it in upstream convention for Ramulator2's command-driven power path. */
+    inline static const std::map<std::string, std::vector<double>> voltage_presets = {
+      {"Default",     {1.1,  1.8}},
+    };
+    inline static const std::map<std::string, std::vector<double>> current_presets = {
+      // name         IDD0 IDD2N IDD3N IDD4R IDD4W IDD5B  IPP0 IPP2N IPP3N IPP4R IPP4W IPP5B
+      {"Default",     {30,18,22,90,100,70, 3,3,3,3,3,40}},
+    };
+
     inline static const std::map<std::string, Organization> org_presets = {
       //   name     density   DQ    Ch Pch  Bg Ba   Ro     Co
       {"HBM3_2Gb",   {2<<10,  128,  {1, 2,  4,  4, 1<<13, 1<<6}}},

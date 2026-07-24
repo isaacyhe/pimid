@@ -7,6 +7,17 @@ class DDR3 : public IDRAM, public Implementation {
   RAMULATOR_REGISTER_IMPLEMENTATION(IDRAM, DDR3, "DDR3", "DDR3 Device Model")
 
   public:
+  /* PIMID 1.9.10: datasheet IDD/VDD presets (Micron 4Gb DDR3L-1600 (no VPP)) -- relocated energy layer.
+     Intensive per-access model lives in dram/pimid_energy.h (active source); these
+     mirror it in upstream convention for Ramulator2's command-driven power path. */
+    inline static const std::map<std::string, std::vector<double>> voltage_presets = {
+      {"Default",     {1.35,  0.0}},
+    };
+    inline static const std::map<std::string, std::vector<double>> current_presets = {
+      // name         IDD0 IDD2N IDD3N IDD4R IDD4W IDD5B  IPP0 IPP2N IPP3N IPP4R IPP4W IPP5B
+      {"Default",     {60,32,45,175,180,210, 3,3,3,3,3,60}},
+    };
+
     inline static const std::map<std::string, Organization> org_presets = {
       //   name         density  DQ   Ch Ra Ba   Ro     Co
       {"DDR3_1Gb_x4",   {1<<10,  4,  {1, 1, 8, 1<<14, 1<<11}}},

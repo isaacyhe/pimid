@@ -1,4 +1,4 @@
-# Changelog / defect ledger -- 1.8.0 -> 1.9.9
+# Changelog / defect ledger -- 1.8.0 -> 1.9.11
 
 Release + defect ledger for the co-sim MPI window, the measured-feedback MPI
 pricing model, and the OMP critical-path metric. One entry per release; each
@@ -6,6 +6,54 @@ gives the defect fixed, a one-line root cause, and a data-impact note (which
 sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
+
+## 1.9.11 -- docs-only
+
+Documentation for the 1.9.10 energy-model overhaul (this entry, the yaml
+reference knob ladder, and the energy-model notes below). No source change;
+no data impact.
+
+## 1.9.10 -- energy-model overhaul: system-scope integration fix + tool-measured memory energy
+
+Eight commits; device-scope TIMING is bit-invariant (same-node A/B gate on the
+release binary: 137,094,689 vs 137,091,032 cycles, delta 0.003%, both rc=0).
+
+- **Defect #16 -- system-scope power integration.** `runPerNodePowerAnalysis`
+  priced every node over the first host core's contention-EXCLUDED unhalted
+  cycles while feeding full aggregate access counts, producing nonphysical
+  system powers (379.8 W bfs baselines; kW-class co-sim host nodes; below-idle
+  cells). Fix: each node is priced over true wall-clock time in its own clock
+  domain (host wall = max(unhalted + contention) across host cores; device
+  wall = max device cycles). Device-scope `runPowerAnalysis` is a different
+  function and is unaffected.
+- **Configurable process node.** `power.tech_node_nm` (+ `device_`/`host_`
+  variants); the host now inherits the device node. Finding: the old hardcoded
+  7 nm host literal never reached McPAT (a `max(22, n)` clamp), so all landed
+  data was already effectively 22 nm; the change is forward-looking, not
+  retroactive.
+- **Ramulator2 energy layer, tool-measured.** Root cause of the 0.000-nJ
+  energy reports: a never-fed counter behind a cycle-0 guard, plus "INFERRED"
+  placeholder `bank_energy_pJ` constants. The energy layer now lives inside
+  Ramulator2 (`external/ramulator/src/dram/pimid_energy.h`): JEDEC IDD/VDD
+  per-command energies with first-class `current_presets` for all seven DRAM
+  standards (DDR3/LPDDR5/GDDR6/HBM2/HBM3 added; the DDR4-class reuse fallback
+  is retired), background/refresh power from standby currents, and per-scheme
+  termination/ODT (SSTL/POD/LVSTL): DDR3 17.6 / DDR4 9.4 / DDR5 5.25 /
+  GDDR6 2.6 / LPDDR5 0 / HBM 0 pJ/bit. The wrapper is a thin reader; the
+  relocation was verified value-invariant to the pre-migration table.
+- **Off-chip channel, die-boundary split.** CPU-side McPAT MC/PHY (~9 pJ/bit
+  at 22 nm) + DRAM-side I/O (0.76) + termination (5.25) = ~15 pJ/bit for DDR5,
+  inside the published 15-22 pJ/bit full-channel band; HBM carries no
+  termination (interposer), a physics-derived asymmetry.
+- **Known boundary.** The device H-tree fabric is priced as a McPAT bus-mode
+  wire/repeater datapath (7.3 mW for a 16-PE tree) in the analysis layer that
+  produced the published dataset; the binary's own per-node NoC printout still
+  uses router-mode pricing, and a runtime `power.noc_model` knob is roadmap
+  work, not shipped in this release.
+- **Data impact.** Timing: none (gate above). System-scope powers/energies
+  produced before 1.9.10 are nonphysical and were re-derived; device-scope
+  energies were re-derived onto the measured per-command constants. The
+  release's knobs are documented in `docs/yaml_reference.md`.
 
 ## 1.9.9 -- docs-only
 

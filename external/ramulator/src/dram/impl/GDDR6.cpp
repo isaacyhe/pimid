@@ -7,6 +7,17 @@ class GDDR6 : public IDRAM, public Implementation {
   RAMULATOR_REGISTER_IMPLEMENTATION(IDRAM, GDDR6, "GDDR6", "GDDR6 Device Model")
 
   public:
+  /* PIMID 1.9.10: datasheet IDD/VDD presets (Micron 8Gb GDDR6-14000 (no VPP)) -- relocated energy layer.
+     Intensive per-access model lives in dram/pimid_energy.h (active source); these
+     mirror it in upstream convention for Ramulator2's command-driven power path. */
+    inline static const std::map<std::string, std::vector<double>> voltage_presets = {
+      {"Default",     {1.35,  0.0}},
+    };
+    inline static const std::map<std::string, std::vector<double>> current_presets = {
+      // name         IDD0 IDD2N IDD3N IDD4R IDD4W IDD5B  IPP0 IPP2N IPP3N IPP4R IPP4W IPP5B
+      {"Default",     {70,45,60,210,230,180, 3,3,3,3,3,48}},
+    };
+
     inline static const std::map<std::string, Organization> org_presets = { //Table 19 for more info
       //    name         density   DQ   Ch Bg Ba   Ro     Co
       {"GDDR6_8Gb_x8",   {8<<10,    8,  {2, 4, 4, 1<<14, 1<<11}}},

@@ -1057,7 +1057,11 @@ std::string McPATWrapper::generateXMLConfig() const {
     // L3 cache (shared) — skip if ALU-only or no L3
     if (has_l3) {
         xml << "    <component id=\"system.L3\" name=\"L3\">\n";
-        xml << "      <param name=\"L3_config\" value=\"" << (config_.l3_size_bytes/(1024*1024))
+        // 1.9.10 fix: McPAT/CACTI cache_config field 1 is capacity in BYTES (as L2
+        // above correctly emits). This path emitted MEGABYTES, so a 32MB LLC became a
+        // "32-byte" array and CACTI's ArrayST::error_checking() rejected the geometry
+        // (the standalone-L3 failure that forced host LLC to be literature-anchored).
+        xml << "      <param name=\"L3_config\" value=\"" << config_.l3_size_bytes
             << ",64,16,16,16,23,64,1\"/>\n";
         xml << "      <param name=\"clockrate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
         xml << "      <param name=\"ports\" value=\"1,1,1\"/>\n";

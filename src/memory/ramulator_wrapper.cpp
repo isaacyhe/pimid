@@ -11,6 +11,7 @@
 #include "base/request.h"
 #include "memory_system/memory_system.h"
 #include "base/factory.h"
+#include "dram/pimid_energy.h"   // 1.9.10: Ramulator2-resident intensive energy layer
 
 namespace pimid {
 
@@ -435,9 +436,48 @@ Cycle RamulatorWrapper::getAverageLatency() const {
     return static_cast<Cycle>(avg_latency);
 }
 
+// ---------------------------------------------------------------------------
+// 1.9.10: JEDEC IDD/VDD table + intensive per-access / background accessors.
+//
+// Root cause of the historical "0.000 nJ/access" in the power report:
+//   (1) getReadEnergy()/getWriteEnergy() return total_reads_ * per-access, and
+//       runPowerAnalysis queried them on a FRESH standalone oracle that never
+//       processes accesses (total_reads_ == 0) while treating the result as a
+//       per-access value; and
+//   (2) updateEnergyMetrics() early-returns when current_cycle_==last_energy_update_
+//       which is 0==0 on that oracle, so nothing is ever computed.
+// The DRAM-arch presets DO carry non-zero bank energy (DDR5 1.6, HBM3 0.8
+// pJ/byte), so the array term always existed -- it was just never surfaced as an
+// intensive quantity. The accessors below fix that and add IDD-based interface
+// (off-chip I/O) and background+refresh power, so a run yields real numbers.
+// 1.9.10: the intensive DRAM energy physics has been RELOCATED into Ramulator2
+// (external/ramulator/src/dram/pimid_energy.h). These accessors are now thin
+// readers -- they forward the wrapper's own timing getters + the user override
+// knobs into the Ramulator2-resident model. main.cpp is untouched (same API).
+double RamulatorWrapper::getArrayReadEnergyNJ() const {
+    return Ramulator::pimid_energy::arrayReadNJ(
+        dram_type_, getTRC(), getTRAS(), getTBurst(), energy_bank_override_pJ_per_byte_);
+}
+double RamulatorWrapper::getArrayWriteEnergyNJ() const {
+    return Ramulator::pimid_energy::arrayWriteNJ(
+        dram_type_, getTRC(), getTRAS(), getTBurst(), energy_bank_override_pJ_per_byte_);
+}
+double RamulatorWrapper::getInterfaceEnergyNJ() const {
+    return Ramulator::pimid_energy::interfaceNJ(dram_type_, getTBurst());
+}
+double RamulatorWrapper::getTerminationEnergyNJ() const {
+    return Ramulator::pimid_energy::terminationNJ(dram_type_, energy_term_override_pJ_per_bit_);
+}
+double RamulatorWrapper::getRefreshPowerMW() const {
+    return Ramulator::pimid_energy::refreshMW(dram_type_);
+}
+double RamulatorWrapper::getBackgroundPowerMW() const {
+    return Ramulator::pimid_energy::backgroundMW(dram_type_);
+}
+
 void RamulatorWrapper::updateEnergyMetrics() const {
-    if (current_cycle_ == last_energy_update_) {
-        return;  // Already updated this cycle
+    if (current_cycle_ == last_energy_update_ && last_energy_update_ != 0) {
+        return;  // Already updated this cycle (do NOT skip the initial cycle-0 pass)
     }
 
     // Energy per memory access from DRAM architecture and literature
