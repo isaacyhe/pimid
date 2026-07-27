@@ -61,6 +61,7 @@ void CACTIWrapper::initialize() {
     runCACTI();
     initialized_ = true;
 
+    if (config_.quiet) return;
     std::cout << "[CACTIWrapper] Initialized with:" << std::endl;
     std::cout << "  Capacity: " << (config_.capacity_bytes / 1024) << " KB" << std::endl;
     std::cout << "  Line Size: " << config_.line_size << " bytes" << std::endl;
@@ -315,7 +316,7 @@ double CACTIWrapper::getCycleTime() const {
 
 double CACTIWrapper::getArea() const {
     if (!valid_ || !cacti_result_) return 0.0;
-    return cacti_result_->area;  // in mm^2
+    return cacti_result_->area / 1e6;  // CACTI native um^2 -> mm^2
 }
 
 double CACTIWrapper::getDynamicReadEnergy() const {
@@ -365,12 +366,12 @@ double CACTIWrapper::getGateLeakagePower() const {
 
 double CACTIWrapper::getCacheHeight() const {
     if (!valid_ || !cacti_result_) return 0.0;
-    return cacti_result_->cache_ht;  // in mm
+    return cacti_result_->cache_ht / 1e3;  // CACTI native um -> mm
 }
 
 double CACTIWrapper::getCacheWidth() const {
     if (!valid_ || !cacti_result_) return 0.0;
-    return cacti_result_->cache_len;  // in mm
+    return cacti_result_->cache_len / 1e3;  // CACTI native um -> mm
 }
 
 double CACTIWrapper::getAreaEfficiency() const {
@@ -534,8 +535,8 @@ double CACTIWrapper::getColumnLeakage() const {
 
 double CACTIWrapper::getSubarrayArea() const {
     if (!valid_ || !cacti_result_ || !cacti_result_->data_array2) return 0.0;
-    // Subarray area in mm^2
-    return cacti_result_->data_array2->area_subarray;
+    // CACTI native um^2 -> mm^2
+    return cacti_result_->data_array2->area_subarray / 1e6;
 }
 
 double CACTIWrapper::getCellArea() const {
@@ -546,7 +547,7 @@ double CACTIWrapper::getCellArea() const {
     uint32_t rows = getSubarrayRows();
     uint32_t cols = getSubarrayCols();
     if (rows > 0 && cols > 0) {
-        return (subarray_area / (rows * cols)) * 1e6;  // Convert mm^2 to um^2
+        return subarray_area / (rows * cols);  // CACTI cell dims are um -> already um^2
     }
     return 0.0;
 }

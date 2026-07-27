@@ -965,9 +965,12 @@ protected:
             result = curLatency_;
         }
 
-        if (req.type == GETS || req.type == GETX) {
+        // Cacheless PEs issue stores as GETX and never emit a PUTX writeback,
+        // so at this interface GETX IS the memory write. PUTS (clean wback)
+        // is not a real access and counts as neither.
+        if (req.type == GETS) {
             profReads_.inc();
-        } else {
+        } else if (req.type != PUTS) {
             profWrites_.inc();
         }
 

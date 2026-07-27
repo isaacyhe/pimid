@@ -163,6 +163,7 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
             cfg.nvm_type = pimid::NVSimWrapper::NVMType::STTRAM;
             cfg.capacity_bytes = nvm_cap;
             cfg.process_node_nm = 22;
+            cfg.word_width_bits = 512;  // one full 64 B line per access, matching the CACTI/SRAM path
             pimid::NVSimWrapper wrapper(cfg);
             wrapper.initialize();
             latency_ns = wrapper.getReadLatency() * 1e9;
@@ -172,6 +173,7 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
             cfg.nvm_type = pimid::NVSimWrapper::NVMType::PCRAM;
             cfg.capacity_bytes = nvm_cap;
             cfg.process_node_nm = 22;
+            cfg.word_width_bits = 512;  // one full 64 B line per access, matching the CACTI/SRAM path
             pimid::NVSimWrapper wrapper(cfg);
             wrapper.initialize();
             latency_ns = wrapper.getReadLatency() * 1e9;
@@ -181,6 +183,7 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
             cfg.nvm_type = pimid::NVSimWrapper::NVMType::RERAM;
             cfg.capacity_bytes = nvm_cap;
             cfg.process_node_nm = 22;
+            cfg.word_width_bits = 512;  // one full 64 B line per access, matching the CACTI/SRAM path
             pimid::NVSimWrapper wrapper(cfg);
             wrapper.initialize();
             latency_ns = wrapper.getReadLatency() * 1e9;
@@ -246,6 +249,7 @@ static int getCacheLatencyCycles(int size_kb, int ways, int line_size,
     cfg.is_cache = true;
     cfg.tech_node_nm = cacti_tech;
     cfg.output_width_bits = line_size * 8;
+    cfg.quiet = true;  // latency-only query: energies are not consumed
     try {
         pimid::CACTIWrapper wrapper(cfg);
         wrapper.initialize();
@@ -614,10 +618,14 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
                 else if (key == "mGETXIM") out.l3_mGETXIM += val;
             }
 
-            // Memory controller scope (host MC uses rd/wr, PE-MC uses localAcc/remoteAcc)
+            // Memory controller scope. Both the host MC and the PE-MC export
+            // rd/wr counters; localAcc/remoteAcc are a LOCALITY split of the
+            // same accesses (every access is also rd or wr) and must not be
+            // added on top -- that double-counted reads and priced remote
+            // accesses as writes.
             if (scope == Scope::MEM) {
-                if (key == "rd" || key == "localAcc") out.mem_rd += val;
-                else if (key == "wr" || key == "remoteAcc") out.mem_wr += val;
+                if (key == "rd") out.mem_rd += val;
+                else if (key == "wr") out.mem_wr += val;
             }
         }
     }
@@ -3987,7 +3995,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             // NVSim off the multi-minute 16MB-array characterization.
             pimid::NVSimWrapper::NVMConfig nvm_cfg;
             nvm_cfg.capacity_bytes = 64 * 1024;  // one bank
-            nvm_cfg.word_width_bits = 64;
+            nvm_cfg.word_width_bits = config.cache_line_size * 8;  // one full line per access (64 B = 512 b), matching the CACTI/SRAM path
             nvm_cfg.process_node_nm = std::max(22, config.tech_node_nm);
             if (config.memory_tech == "STT_MRAM")
                 nvm_cfg.nvm_type = pimid::NVSimWrapper::NVMType::STTRAM;

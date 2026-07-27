@@ -4,7 +4,8 @@
 
 Several PIMID backends produce their numbers by running a **slow, deterministic
 design-space search**. NVSim characterization is the canonical example: given a
-memory type, capacity, and process node, it searches cell/array organizations to
+memory type, capacity, process node, and per-access word width, it searches
+cell/array organizations to
 report read/write latency, energy, leakage, and area. The search can take on the
 order of seconds per point and always returns the same answer for the same
 inputs.

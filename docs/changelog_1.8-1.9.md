@@ -1,4 +1,4 @@
-# Changelog / defect ledger -- 1.8.0 -> 1.9.11
+# Changelog / defect ledger -- 1.8.0 -> 1.9.15
 
 Release + defect ledger for the co-sim MPI window, the measured-feedback MPI
 pricing model, and the OMP critical-path metric. One entry per release; each
@@ -6,6 +6,72 @@ gives the defect fixed, a one-line root cause, and a data-impact note (which
 sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
+
+## 1.9.15 -- docs-only
+
+Documentation for 1.9.12 through 1.9.14 (the entries below, plus the memory
+and power notes they touch). No source change; no data impact.
+
+## 1.9.14 -- CACTI area units and quiet latency-only queries
+
+Reporting-only; no model consumes either value, and every consumer found by
+inspection is a print statement. No data impact.
+
+- **Area units.** CACTI returns areas in um^2 and cache height/width in um;
+  the wrapper forwarded them unchanged while labelling them mm^2 and mm, so
+  every reported area was inflated by 10^6 (a 64 KB SRAM bank printed as
+  6.8e4 mm^2 instead of 0.068 mm^2). Converted in `getArea`,
+  `getCacheHeight`, `getCacheWidth`, `getSubarrayArea`, `getCellArea`.
+  Access and cycle times were already correct (CACTI returns seconds; the
+  wrapper treats them as seconds).
+- **Quiet flag.** The cache-latency helper instantiates CACTI purely for an
+  access time, but the shared initializer printed a full banner including
+  energies that path never consumes, so logs carried a placeholder-looking
+  2 MB / 1 nJ block beside the real per-technology numbers. `SRAMConfig::quiet`
+  suppresses the banner for latency-only queries.
+
+## 1.9.13 -- device write accounting: GETX is a write at cacheless PEs
+
+- **Defect #17 -- device stores counted as reads.** The PE memory interface
+  classified accesses by coherence request type, counting GETX as a read.
+  Correct for a cached requester (the store's memory write appears later as a
+  PUTX writeback) but wrong for cacheless device PEs, whose stores arrive as
+  GETX with no writeback to follow: every device write was recorded as a read
+  and the write counter stayed zero. GETX now increments the write counter at
+  that interface; PUTS (clean writeback) remains a non-access.
+- **Locality counters folded into read/write totals.** The stats aggregator
+  added `localAcc`/`remoteAcc` into `mem_rd`/`mem_wr`. Those are a
+  where-split of the same accesses, not a read/write split, so each access
+  was charged once as a read and once as a write. The aggregator now uses
+  only the true rd/wr counters.
+- **Data impact.** Device-scope energy for all generations before 1.9.13:
+  read/write mix mispriced (all-reads at the interface, plus the
+  double-charge). Timing unaffected. The error is first-order where write
+  energy dwarfs read energy -- at the swept 64 KB bank a PCM write costs
+  51.9 nJ per 64 B line against pJ-scale reads -- and second-order on DRAM,
+  whose read and write burst energies are comparable. Validated by
+  measurement: with the fix, total accesses (rd+wr) reproduce the pre-fix
+  totals to 0.0004%, i.e. the same traffic correctly labelled, and recovered
+  write fractions match kernel semantics (STREAM triad worker PEs at exactly
+  1/3).
+
+## 1.9.12 -- NVM per-access width fix + NVSim cache-key hardening
+
+- **Defect #17a -- per-access width.** NVM characterizations were requested
+  with `word_width_bits` left at a single 64-bit word while accesses are
+  full 64 B lines, undercharging NVM array energy by about 8x and shifting
+  modelled latencies (PCM read 1.127 -> 2.832 ns at the swept bank). The
+  power path now sets `word_width_bits = cache_line_size * 8` and the three
+  timing sites request 512 b, matching the CACTI/SRAM path.
+- **Cache-key hardening.** The NVSim characterization cache keyed on
+  (type, capacity, process node) without the word width, so pre-fix and
+  post-fix entries could alias; the key and the on-disk filename now include
+  it (`..._w512.xml`), and capacities print in KB.
+- **Data impact.** All NVM (STT-MRAM/PCM/ReRAM) device energies before
+  1.9.12 are invalid; corrected per-64 B constants at the swept 64 KB bank
+  are STT-MRAM 0.122/0.520, ReRAM 0.080/0.428, and PCM 0.0037/51.85 nJ
+  (read/write). Cycle counts shift by a few percent where array timing
+  matters and are unchanged where the network dominates.
 
 ## 1.9.11 -- docs-only
 

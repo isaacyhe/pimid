@@ -148,7 +148,7 @@ void NVSimWrapper::initialize() {
         initialized_ = true;
 
         std::cout << "[NVSimWrapper] Initialized with:" << std::endl;
-        std::cout << "  Capacity: " << (config_.capacity_bytes / (1024*1024)) << " MB" << std::endl;
+        std::cout << "  Capacity: " << (config_.capacity_bytes / 1024) << " KB" << std::endl;
         std::cout << "  Word Width: " << config_.word_width_bits << " bits" << std::endl;
         std::cout << "  Technology: " << config_.process_node_nm << " nm" << std::endl;
 
@@ -324,11 +324,12 @@ void NVSimWrapper::loadCellParameters() {
 // simulation, which build the same config twice.
 namespace {
     struct NVMCacheKey {
-        int nvm_type; uint64_t capacity_bytes; int process_node_nm;
+        int nvm_type; uint64_t capacity_bytes; int process_node_nm; uint32_t word_width_bits;
         bool operator<(const NVMCacheKey& o) const {
             if (nvm_type != o.nvm_type) return nvm_type < o.nvm_type;
             if (capacity_bytes != o.capacity_bytes) return capacity_bytes < o.capacity_bytes;
-            return process_node_nm < o.process_node_nm;
+            if (process_node_nm != o.process_node_nm) return process_node_nm < o.process_node_nm;
+            return word_width_bits < o.word_width_bits;
         }
     };
     struct NVMCacheVal {
@@ -351,7 +352,8 @@ namespace {
     static std::string nvsimCachePath(const NVMCacheKey& k) {
         std::ostringstream os;
         os << nvsimCacheDir() << "/nvm_t" << k.nvm_type
-           << "_c" << k.capacity_bytes << "_n" << k.process_node_nm << ".xml";
+           << "_c" << k.capacity_bytes << "_n" << k.process_node_nm
+           << "_w" << k.word_width_bits << ".xml";
         return os.str();
     }
     // Minimal scalar XML reader (looks for <field>value</field>). Returns true on
@@ -408,7 +410,7 @@ namespace {
 void NVSimWrapper::runNVSim() {
     // Cache short-circuit: if this exact (type, capacity, node) was characterized
     // before, reuse the scalar outputs and skip the expensive design-space search.
-    NVMCacheKey key{ (int)config_.nvm_type, config_.capacity_bytes, config_.process_node_nm };
+    NVMCacheKey key{ (int)config_.nvm_type, config_.capacity_bytes, config_.process_node_nm, config_.word_width_bits };
     // Reads (both the in-memory map and the on-disk XML) are skipped unless the
     // warehouse mode permits reading — OFF/WO must truly recompute.
     if (pimid::cache::readEnabled()) {
@@ -922,7 +924,7 @@ void NVSimWrapper::printDetailedResults() const {
 
     std::cout << "\n=== NVSim Results ===" << std::endl;
     std::cout << "Configuration:" << std::endl;
-    std::cout << "  Capacity: " << (config_.capacity_bytes / (1024*1024)) << " MB" << std::endl;
+    std::cout << "  Capacity: " << (config_.capacity_bytes / 1024) << " KB" << std::endl;
     std::cout << "  Word Width: " << config_.word_width_bits << " bits" << std::endl;
     std::cout << "  Technology: " << config_.process_node_nm << " nm" << std::endl;
 

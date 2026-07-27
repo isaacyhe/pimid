@@ -88,7 +88,7 @@ arrow(43.0,75.16,57.0,75.16,color=BLU,lw=2.4,mut=15)
 txt(gx,76.56,"host → device",fs=8.0,it=True,color=BLU)
 arrow(57.0,71.46,43.0,71.46,color=BLU,lw=2.4,mut=15)
 txt(gx,72.86,"device → host",fs=8.0,it=True,color=BLU)
-txt(gx,67.9,"H/D transfers are charged on\nlink + memory models\n(PCIe · CXL · NVLink-class · interposer)",fs=7.2,color=ORG,bold=True)
+txt(gx,67.9,"H/D transfers are charged on\nlink + memory models\n(PCIe · CXL ·\nNVLink-class · interposer)",fs=6.4,color=ORG,bold=True)
 
 # arrows to modeling infrastructure
 arrow(23.5,64.2,23.5,62.8,color=EDGE,lw=1.8,mut=9)

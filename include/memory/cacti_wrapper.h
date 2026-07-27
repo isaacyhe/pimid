@@ -58,6 +58,10 @@ public:
         bool specific_tag;           // Use specific tag width
         uint32_t tag_width_bits;     // Tag width if specific_tag is true
 
+        // Suppress the init banner (for latency-only queries whose energy
+        // numbers are never consumed and would only mislead in logs)
+        bool quiet = false;
+
         // Optimization objectives (0=weight, 1=deviate, 2=ED, 3=ED2)
         int obj_func_delay;
         int obj_func_dynamic_power;
