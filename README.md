@@ -4,7 +4,8 @@
 
 [![License](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
-[![Version](https://img.shields.io/badge/version-1.9.11-green.svg)]()
+[![Version](https://img.shields.io/badge/version-1.9.15-green.svg)]()
+[![arXiv](https://img.shields.io/badge/arXiv-2607.24196-b31b1b.svg)](https://arxiv.org/abs/2607.24196)
 
 PIMID is a cycle-accurate simulator for Processing-in-Memory (PIM)
 architectures. Workloads execute under QEMU user-mode emulation; a TCG plugin
@@ -111,6 +112,46 @@ noc: { model: detailed }      # default; 'analytical' for fast sweeps
 | [docs/cache_warehouse.md](docs/cache_warehouse.md) | characterization cache internals |
 | [docs/external.md](docs/external.md) | vendored external simulators |
 | [docs/external_models.md](docs/external_models.md) | plugging in your own models |
+
+## Citation
+
+If you use PIMID in your research, please cite our paper:
+
+> Yuan He, Masaaki Kondo, Galen M. Shipman, Jered B. Dominguez-Trujillo,
+> Shigeki Tomishima, and Kazi Asifuzzaman. *PIMID: A Full-System Simulator with
+> Intricacy and Diversity for Processing-in-Memory*. arXiv:2607.24196 [cs.AR],
+> 2026. <https://arxiv.org/abs/2607.24196>
+
+```bibtex
+@misc{pimid2026,
+  title         = {{PIMID}: A Full-System Simulator with Intricacy and Diversity
+                   for Processing-in-Memory},
+  author        = {He, Yuan and Kondo, Masaaki and Shipman, Galen M. and
+                   Dominguez-Trujillo, Jered B. and Tomishima, Shigeki and
+                   Asifuzzaman, Kazi},
+  year          = {2026},
+  eprint        = {2607.24196},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.AR},
+  url           = {https://arxiv.org/abs/2607.24196}
+}
+```
+
+### Upstream tools
+
+PIMID composes several established simulators, each vendored under
+[`external/`](external/). If your work depends on a specific component, please
+also cite its paper:
+
+| Component | Role in PIMID | Paper | Upstream |
+|---|---|---|---|
+| Ramulator 2.0 | DRAM timing and energy | [Luo et al., IEEE CAL 2024](https://doi.org/10.1109/LCA.2023.3333759) | [CMU-SAFARI/ramulator2](https://github.com/CMU-SAFARI/ramulator2) |
+| CACTI 7 | SRAM arrays, cache timing/area | [Balasubramonian et al., ACM TACO 2017](https://doi.org/10.1145/3085572) | [HewlettPackard/cacti](https://github.com/HewlettPackard/cacti) |
+| NVSim | STT-MRAM, PCM, ReRAM arrays | [Dong et al., IEEE TCAD 2012](https://doi.org/10.1109/TCAD.2012.2185930) | [SEAL-UCSB/NVSim](https://github.com/SEAL-UCSB/NVSim) |
+| Garnet | cycle-accurate in-memory network | [Agarwal et al., ISPASS 2009](https://doi.org/10.1109/ISPASS.2009.4919636) | [gem5/gem5](https://github.com/gem5/gem5) |
+| McPAT | power and area | [Li et al., MICRO 2009](https://doi.org/10.1145/1669112.1669172) | [HewlettPackard/mcpat](https://github.com/HewlettPackard/mcpat) |
+| ZSim | microarchitectural core models | [Sanchez and Kozyrakis, ISCA 2013](https://doi.org/10.1145/2485922.2485963) | [s5z/zsim](https://github.com/s5z/zsim) |
+| QEMU | user-mode execution and TCG plugins | [Bellard, USENIX ATC 2005](https://www.usenix.org/legacy/publications/library/proceedings/usenix05/tech/freenix/bellard.html) | [qemu-project/qemu](https://gitlab.com/qemu-project/qemu) |
 
 ## License
 
