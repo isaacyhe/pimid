@@ -65,10 +65,14 @@ uint64_t procMask;
 Core* cores[MAX_THREADS];
 
 /* 1.9.0 thread-MPI epoch cut: per-core ROI state (0=ACTIVE, 1=QUIESCENT parked in
- * MPI, 2=EXITED). Marked at DETERMINISTIC sim events (roi_end / thread-fini / MPI
- * comm brackets), NOT by a wall-dependent advancement heuristic. Read by
+ * MPI, 2=EXITED, 3=VACATED by a co-sim migration). Marked at DETERMINISTIC sim
+ * events (roi_end / thread-fini / MPI comm brackets / host-device migration),
+ * NOT by a wall-dependent advancement heuristic. Read by
  * EndOfPhaseActions to build the consistent cut = min roiRel over ACTIVE cores.
- * Static zero-init => all ACTIVE at start. */
+ * Static zero-init => all ACTIVE at start.
+ * QUIESCENT and VACATED are re-armed to ACTIVE when the core runs again (MPI
+ * wait resumed / a thread attaches); EXITED is sticky, since a finished ROI
+ * never resumes. */
 static std::atomic<uint32_t> g_coreRoiState[MAX_THREADS];
 InstrFuncPtrs fPtrs[MAX_THREADS] ATTR_LINE_ALIGNED;
 
@@ -150,6 +154,35 @@ static std::atomic<uint64_t> g_brDynCount{0};
 static uint32_t vcpuToTid[MAX_VCPUS];
 static uint32_t nextTid = 0;
 static std::mutex tidMutex;
+
+/* 1.9.20 (defect #15): deterministic device-PE homes.
+ *
+ * The PE index -> Garnet node map is fixed at init (mems[i] carries mcId_ = i;
+ * PEMemoryInterface computes srcNode = mcId_ % numNodes). The thread -> core map
+ * was NOT: Scheduler::schedThread first tries the last-used context if it is
+ * still IDLE, else takes freeList.front(), and the free list is ordered by the
+ * wall-clock sequence in which cores were released. Ranks cross that path on
+ * every host->device migration, so each run drew a different rank -> PE
+ * permutation. Same work, different placement => different hop distances =>
+ * different latencies (measured: 1.31% sd / 2.85% range on device cycles, n=5).
+ *
+ * The key MUST be vcpu_index, not tid: tid is handed out as nextTid++ on first
+ * callback, i.e. in arrival order, so it is raced itself and pinning by it would
+ * only relabel the same nondeterminism. vcpu_index is QEMU's cpu index, fixed by
+ * guest thread-creation order.
+ *
+ * Giving a rank a single-core affinity mask leaves schedThread's selection
+ * algorithm untouched -- it simply has no other candidate to race for. */
+static uint32_t tidToVcpu[MAX_THREADS];
+static g_vector<uint32_t> device_core_list;   // device cids, ascending
+static g_vector<uint32_t> device_home_owner;  // device_core_list idx -> owning vcpu
+static g_vector<g_vector<bool>> device_home_mask;  // per-tid single-core mask
+static bool g_pin_device_homes = true;        // PIMID_NO_PE_PIN=1 disables
+static bool g_pin_fallback_warned = false;
+/* Ranks migrate concurrently, so the claim below must be atomic: two ranks
+ * racing the same free slot would both read it unowned and both pin to it,
+ * which is exactly the collision the guard exists to prevent. */
+static std::mutex pinMutex;
 
 /* Plugin state */
 static qemu_plugin_id_t pluginId;
@@ -531,6 +564,14 @@ static inline void clearCid(uint32_t tid) {
 static inline void setCid(uint32_t tid, uint32_t cid) {
     cids[tid] = cid;
     cores[tid] = zinfo->cores[cid];
+    // A core marked VACATED by an earlier migration is running again: re-arm it
+    // ACTIVE so it re-enters the consistent cut. Only VACATED is lifted here --
+    // EXITED (finished ROI) must stay exempt even though its thread keeps
+    // executing post-ROI code, and QUIESCENT is lifted by the MPI resume path.
+    if (cid < MAX_THREADS) {
+        uint32_t vacated = 3;
+        g_coreRoiState[cid].compare_exchange_strong(vacated, 0);
+    }
 }
 
 uint32_t getCid(uint32_t tid) {
@@ -613,6 +654,7 @@ void EndOfPhaseActions() {
         // roiRel-phase bucket is <= cut are final and get folded (foldByCut). No
         // blocking spin -> deadlock-free.
         uint64_t cut = ~0ull;
+        int dbgCutCore = -1, dbgActive = 0;
         for (uint32_t c = 0; c < zinfo->numCores && c < MAX_THREADS; c++) {
             Core* co = zinfo->cores[c];
             if (!co) continue;
@@ -621,7 +663,18 @@ void EndOfPhaseActions() {
             uint64_t cyc  = co->getCycles();
             uint64_t rr   = (cyc > base) ? cyc - base : 0;
             if (rr == 0) continue;       // baselined but no ROI traffic yet
-            if (rr < cut) cut = rr;
+            if (rr < cut) { cut = rr; dbgCutCore = (int)c; }
+            dbgActive++;
+        }
+        {   // PIMID_FOLD_DEBUG=1: which core pins the cut, and is it advancing?
+            static const bool foldDbg = (getenv("PIMID_FOLD_DEBUG") != nullptr);
+            static uint64_t dbgCalls = 0; static uint64_t lastCut = 0; static int lastCore = -1;
+            if (foldDbg && ((dbgCalls++ % 100) == 0)) {
+                info("[CutDbg] phase=%lu cut=%lu pinnedBy=core%d active=%d cutAdvance=%ld",
+                     (unsigned long)zinfo->numPhases, (unsigned long)cut, dbgCutCore,
+                     dbgActive, (long)((cut == ~0ull || lastCut == 0) ? 0 : (int64_t)cut - (int64_t)lastCut));
+                lastCut = (cut == ~0ull) ? lastCut : cut; lastCore = dbgCutCore;
+            }
         }
         zinfo->garnetNetwork->foldByCut(cut, zinfo->phaseLength);
     }
@@ -732,6 +785,7 @@ static void dumpTerminationStats() {
 
 void SimEnd() {
     dumpApproxProfile();
+    if (zinfo && zinfo->garnetNetwork) zinfo->garnetNetwork->dumpInjectionCensus();
     if (g_ooo_present) {
         uint64_t mispred = 0;
         for (uint32_t c = 0; c < zinfo->numCores; c++)
@@ -804,12 +858,55 @@ static void SimThreadFini(uint32_t tid) {
  * Deferred thread initialization — called on first execution callback.
  * Uses the thread's domain to select the appropriate core-type mask.
  */
+/* 1.9.20: the device-side mask for this thread -- a single-PE home mask when
+ * pinning is on and this rank can own a home outright, else the full device
+ * mask (old behaviour). Ownership is permanent for the life of the run: a rank
+ * that migrates back to the host and returns later reclaims the same PE, so the
+ * placement is stable end-to-end and not just per-migration. */
+static const g_vector<bool>& deviceMaskFor(uint32_t tid) {
+    if (!g_pin_device_homes || !g_mpi_thread_mode) return device_mask;
+    if (tid >= MAX_THREADS || device_core_list.empty()) return device_mask;
+
+    uint32_t vcpu = tidToVcpu[tid];
+    if (vcpu == UNINITIALIZED_CID) return device_mask;
+
+    std::lock_guard<std::mutex> lock(pinMutex);
+    uint32_t idx = vcpu % (uint32_t)device_core_list.size();
+    /* Collision guard: a non-bijective vcpu set (more device threads than PEs,
+     * or non-contiguous vcpu indices aliasing under the modulo) would pin two
+     * ranks to one PE, and two ranks that must run concurrently -- across an MPI
+     * barrier, say -- would then deadlock against each other. Fall back to the
+     * unpinned mask for the loser rather than risk that; the run stays correct
+     * and merely keeps the old nondeterminism. */
+    if (device_home_owner[idx] != UNINITIALIZED_CID &&
+        device_home_owner[idx] != vcpu) {
+        if (!g_pin_fallback_warned) {
+            g_pin_fallback_warned = true;
+            warn("[ZSim] 1.9.20 PE pinning: vcpu %u collides with vcpu %u on "
+                 "device PE %u (%lu PEs); falling back to the unpinned device "
+                 "mask for colliding ranks -- run-to-run placement will NOT be "
+                 "deterministic. Set PIMID_NO_PE_PIN=1 to disable pinning.",
+                 vcpu, device_home_owner[idx], device_core_list[idx],
+                 (unsigned long)device_core_list.size());
+        }
+        return device_mask;
+    }
+    device_home_owner[idx] = vcpu;
+
+    g_vector<bool>& m = device_home_mask[tid];
+    if (m.size() != zinfo->numCores) m.resize(zinfo->numCores, false);
+    for (uint32_t i = 0; i < zinfo->numCores; i++) m[i] = false;
+    m[device_core_list[idx]] = true;
+    return m;
+}
+
 static void ensureThreadInit(uint32_t tid) {
     if (thread_initialized[tid]) return;
     thread_initialized[tid] = true;
 
     const g_vector<bool>& mask =
-        (thread_domain[tid].load() == DOMAIN_DEVICE) ? device_mask : host_mask;
+        (thread_domain[tid].load() == DOMAIN_DEVICE) ? deviceMaskFor(tid)
+                                                     : host_mask;
 
     info("Thread %d starting (domain=%s)", tid,
          thread_domain[tid].load() == DOMAIN_DEVICE ? "DEVICE" : "HOST");
@@ -928,6 +1025,9 @@ static uint32_t getOrAssignTid(unsigned int vcpu_index) {
     if (vcpu_index < MAX_VCPUS) {
         vcpuToTid[vcpu_index] = tid;
     }
+    /* Remember the stable identity behind this (raced) tid so the device-home
+     * assignment below can key on vcpu_index instead. */
+    if (tid < MAX_THREADS) tidToVcpu[tid] = vcpu_index;
     return tid;
 }
 
@@ -1032,6 +1132,19 @@ static void detachThreadForMigration(uint32_t tid, int domain) {
     if (thread_initialized[tid]) {
         uint32_t cid = cids[tid];
         if (cid != INVALID_CID && cid != UNINITIALIZED_CID) {
+            // The core being vacated keeps its cycle count but will never
+            // advance again: no thread runs on it after this migration, so it
+            // injects nothing further and its roiRel is final. Mark it EXITED
+            // so it drops out of the consistent cut. Without this, a host core
+            // that did ROI work before its rank migrated to the device stays
+            // ACTIVE at a frozen roiRel and pins the cut forever: no record
+            // bucket can then satisfy "whole bucket below the cut", folding
+            // stops entirely, and the pending set grows without bound (observed
+            // at 64M records and climbing, with the cut unchanged across 71k
+            // phases). Set at the migration itself, a deterministic simulation
+            // event, not by a wall-dependent advancement test.
+            if (g_mpi_thread_mode && cid < MAX_THREADS)
+                g_coreRoiState[cid].store(3, std::memory_order_release);
             zinfo->sched->leave(procIdx, tid, cid);
         }
         zinfo->sched->finish(procIdx, tid);
@@ -2892,6 +3005,8 @@ int qemu_plugin_install(qemu_plugin_id_t id,
         vcpu_is_internal[i] = false;
         in_zsim[i] = false;
     }
+    /* 1.9.20: no tid has a known stable identity until getOrAssignTid records it */
+    for (uint32_t i = 0; i < MAX_THREADS; i++) tidToVcpu[i] = UNINITIALIZED_CID;
     for (uint32_t i = 0; i < MAX_THREADS; i++) {
         cids[i] = UNINITIALIZED_CID;
     }
@@ -2997,6 +3112,26 @@ int qemu_plugin_install(qemu_plugin_id_t id,
             /* OoO, Simple, Timing — valid host cores */
             host_mask[i] = true;
         }
+    }
+
+    /* 1.9.20: ascending list of device PEs + per-PE ownership, for the
+     * deterministic rank->PE homes assigned in deviceMaskFor(). */
+    device_core_list.clear();
+    for (uint32_t i = 0; i < zinfo->numCores; i++) {
+        if (device_mask[i]) device_core_list.push_back(i);
+    }
+    device_home_owner.assign(device_core_list.size(), UNINITIALIZED_CID);
+    device_home_mask.resize(MAX_THREADS);
+    if (getenv("PIMID_NO_PE_PIN") && atoi(getenv("PIMID_NO_PE_PIN")) != 0) {
+        g_pin_device_homes = false;
+        info("[ZSim] 1.9.20 PE pinning DISABLED via PIMID_NO_PE_PIN "
+             "(rank->PE placement reverts to scheduler order, i.e. run-to-run "
+             "nondeterministic)");
+    } else if (!device_core_list.empty()) {
+        info("[ZSim] 1.9.20 PE pinning active: %lu device PEs, rank->PE home = "
+             "vcpu_index %% %lu (deterministic placement)",
+             (unsigned long)device_core_list.size(),
+             (unsigned long)device_core_list.size());
     }
 
     bool has_device = false;

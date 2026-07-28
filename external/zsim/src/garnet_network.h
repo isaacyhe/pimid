@@ -620,7 +620,18 @@ private:
     // the single-threaded barrier fold (foldCompletePhases), never by racing access
     // threads -- so a phase's whole record set is replayed exactly once, together,
     // giving a deterministic per-epoch sample.
-    std::vector<BatchAccess> threadPending_;
+    // Kept ALREADY BUCKETED by roiRel-phase. A fold then touches only the
+    // leading buckets (those wholly below the cut) and never walks or copies
+    // the retained ones: the retained set is the roiRel spread across ranks,
+    // which is a workload property and stays large (order 1e6 records for
+    // rendezvous-heavy message-passing kernels), so re-scanning it every phase
+    // made each barrier callback cost O(backlog) instead of O(new + folded).
+    std::map<uint64_t, std::vector<BatchAccess>> pendingByPhase_;
+
+    // PIMID_INJ_DUMP census: per-source totals, accumulated under batchLock_ so
+    // the sums are order-independent and comparable across runs.
+    struct InjCensus { uint64_t n = 0, dstSum = 0, cycSum = 0; };
+    std::vector<InjCensus> injCensus_ = std::vector<InjCensus>(1024);
 
 public:
 
@@ -653,7 +664,40 @@ public:
     void recordBatchAccess(uint32_t src, uint32_t dst, uint64_t cycle) {
         futex_lock(&batchLock_);
         phaseBatch_.push_back({src, dst, cycle});
+        // PIMID_INJ_DUMP=<path>: order-independent census of everything injected,
+        // to separate "the runs execute different accesses" from "the runs bin the
+        // same accesses into different phases". Per source node: count, and sums
+        // of dst and cycle. Two runs with identical censuses but divergent
+        // per-phase membership are a BINNING problem (the phase a record lands in
+        // depends on when a thread happened to record it); differing censuses mean
+        // the simulated execution itself diverged.
+        static const bool injDbg = (getenv("PIMID_INJ_DUMP") != nullptr);
+        if (injDbg && src < injCensus_.size()) {
+            injCensus_[src].n++;
+            injCensus_[src].dstSum += dst;
+            injCensus_[src].cycSum += cycle;
+        }
         futex_unlock(&batchLock_);
+    }
+
+    /** Write the injection census (PIMID_INJ_DUMP). Called at teardown. */
+    void dumpInjectionCensus() {
+        const char* p = getenv("PIMID_INJ_DUMP");
+        if (!p || !p[0]) return;
+        FILE* f = fopen(p, "w");
+        if (!f) return;
+        uint64_t tn = 0, td = 0, tc = 0;
+        for (size_t s = 0; s < injCensus_.size(); s++) {
+            if (!injCensus_[s].n) continue;
+            fprintf(f, "src=%zu n=%lu dstSum=%lu cycSum=%lu\n", s,
+                    (unsigned long)injCensus_[s].n,
+                    (unsigned long)injCensus_[s].dstSum,
+                    (unsigned long)injCensus_[s].cycSum);
+            tn += injCensus_[s].n; td += injCensus_[s].dstSum; tc += injCensus_[s].cycSum;
+        }
+        fprintf(f, "TOTAL n=%lu dstSum=%lu cycSum=%lu\n",
+                (unsigned long)tn, (unsigned long)td, (unsigned long)tc);
+        fclose(f);
     }
 
     /** Returns the smoothed average one-way latency from last Garnet batch.
@@ -680,24 +724,43 @@ public:
      */
     void foldByCut(uint64_t cut, uint32_t pl) {
         futex_lock(&batchLock_);
-        for (auto& a : phaseBatch_) threadPending_.push_back(a);
-        phaseBatch_.clear();
-        std::map<uint64_t, std::vector<BatchAccess>> buckets;
-        std::vector<BatchAccess> keep;
-        keep.reserve(threadPending_.size());
-        for (auto& a : threadPending_) {
-            // Fold a record ONLY when its WHOLE roiRel-phase bucket is below the cut
-            // (cut >= (p+1)*pl): every active core has passed the bucket, so no more
-            // records will land in it. Folding at roiRel <= cut alone would fold a
-            // bucket PARTIALLY when the cut lands mid-bucket, splitting a phase's
-            // records across two fold-barriers -> each partial replay measures a
-            // different contention -> nondeterminism (the phase-3 first-divergence).
+        size_t dbgIn = phaseBatch_.size();
+        for (auto& a : phaseBatch_) {
             uint64_t p = (pl > 0) ? a.cycle / pl : 0;
-            if ((p + 1) * (uint64_t)pl <= cut) buckets[p].push_back(a);
-            else                               keep.push_back(a);
+            pendingByPhase_[p].push_back(a);
         }
-        threadPending_.swap(keep);
+        phaseBatch_.clear();
+        // PIMID_FOLD_DEBUG=1: per-fold trace of the consistent cut and the pending
+        // backlog, to detect a pinned cut (backlog grows without bound => each fold
+        // becomes O(backlog) and the run degrades quadratically).
+        static const bool foldDbg = (getenv("PIMID_FOLD_DEBUG") != nullptr);
+        static uint64_t foldCalls = 0;
+        bool dbgNow = foldDbg && ((foldCalls++ % 100) == 0);
+        // Fold a bucket ONLY when its WHOLE roiRel-phase is below the cut
+        // (cut >= (p+1)*pl): every active core has passed it, so no more records
+        // will land in it. Folding at roiRel <= cut alone would fold a bucket
+        // PARTIALLY when the cut lands mid-bucket, splitting a phase's records
+        // across two fold-barriers -> each partial replay measures a different
+        // contention -> nondeterminism (the phase-3 first-divergence).
+        // (p+1)*pl increases with p, so the foldable buckets are exactly the
+        // leading ones: stop at the first bucket that is not yet final.
+        std::map<uint64_t, std::vector<BatchAccess>> buckets;
+        while (!pendingByPhase_.empty()) {
+            auto it = pendingByPhase_.begin();
+            if ((it->first + 1) * (uint64_t)pl > cut) break;
+            buckets.emplace(it->first, std::move(it->second));
+            pendingByPhase_.erase(it);
+        }
+        size_t dbgPend = 0, dbgBuckets = buckets.size();
         futex_unlock(&batchLock_);
+        if (dbgNow) {
+            for (auto& kv : pendingByPhase_) dbgPend += kv.second.size();
+            uint64_t oldestKept = pendingByPhase_.empty()
+                                ? 0ull : pendingByPhase_.begin()->second.front().cycle;
+            info("[FoldDbg] cut=%lu in=%zu pending=%zu keptBuckets=%zu foldedBuckets=%zu oldestKept=%lu",
+                 cut, dbgIn, dbgPend, pendingByPhase_.size(), dbgBuckets,
+                 (unsigned long)oldestKept);
+        }
         for (auto& kv : buckets)
             runBatchDrain_(std::move(kv.second), kv.first);
     }

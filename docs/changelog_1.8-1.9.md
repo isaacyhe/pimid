@@ -1,4 +1,4 @@
-# Changelog / defect ledger -- 1.8.0 -> 1.9.15
+# Changelog / defect ledger -- 1.8.0 -> 1.9.20
 
 Release + defect ledger for the co-sim MPI window, the measured-feedback MPI
 pricing model, and the OMP critical-path metric. One entry per release; each
@@ -6,6 +6,116 @@ gives the defect fixed, a one-line root cause, and a data-impact note (which
 sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
+
+## 1.9.20 -- deterministic rank-to-PE placement under thread-MPI (defect #15, partial)
+
+Defect: which device PE a thread-MPI rank landed on was decided by a race, so
+two runs of the same cell placed the same work on different PEs.
+
+Root cause. Half the mapping was already deterministic: PE index to Garnet node
+is fixed at init (`mems[i]` carries `mcId_ = i`; `PEMemoryInterface` computes
+`srcNode = mcId_ % numNodes`). The thread-to-core half was not.
+`Scheduler::schedThread` first re-takes the thread's last context if it is still
+IDLE -- a race against whoever else wants it -- and otherwise takes
+`freeList.front()`, where the free list is ordered by the wall-clock sequence in
+which cores were released. Ranks cross that path on every host-to-device
+migration, so each run drew a different rank-to-PE permutation. Same work,
+different placement, hence different hop distances and different latencies.
+
+Fix: each rank now gets a single-PE affinity mask (its "home"), so
+`schedThread` has no other candidate to race for; its selection algorithm is
+untouched. The key is `vcpu_index`, NOT `tid`: `tid` is handed out `nextTid++`
+on first callback, i.e. in arrival order, so it is raced itself and pinning by
+it would only have relabelled the same nondeterminism. Homes are permanent for
+the run, so a rank that returns to the host and migrates back reclaims the same
+PE. A collision guard falls back to the old unpinned mask if a non-bijective
+vcpu set would put two ranks on one PE, which would otherwise deadlock them
+against each other across a barrier. `PIMID_NO_PE_PIN=1` disables the whole
+thing. Non-MPI (OpenMP, device-only) paths are untouched.
+
+Validated -- placement determinism: PASS. Two co-sim runs on different node
+types now put the heavy rank on `src=0` with every PE in the same slot; before
+the fix the heavy PE moved from 4 to 10 between the same two runs.
+
+Validated -- run-to-run cycle spread: NO IMPROVEMENT. This is a negative
+result and it is stated as one. Paired arms in one job on one node, device
+scope, HBM3 detailed stencil_2d 256, differing only by `PIMID_NO_PE_PIN`:
+
+| arm | n | mean | sd | range |
+|---|---|---|---|---|
+| pinned | 5 | 6,625,884 | 40,739 (0.61%) | 1.35% |
+| unpinned | 5 | 6,639,982 | 34,677 (0.52%) | 1.37% |
+
+The unpinned arm is if anything tighter; the variance ratio is 0.72 where
+F(4,4) needs ~6.4 for p=0.05. The co-sim BFS cell agrees: n=5 after the fix
+gives sd 1.16% / range 2.47% against the 1.9.19 baseline of 1.31% / 2.85%,
+a variance ratio of 1.27. The placement race was real, but it was not what
+drives the cycle variance.
+
+What defect #15 actually is, restated from the same 10 runs:
+
+| quantity | n | sd | range |
+|---|---|---|---|
+| one rank's own cycles | 10 | 0.14% | 0.34% |
+| max over 16 ranks (reported) | 10 | 0.55% | 1.37% |
+
+A single rank simulates very nearly reproducibly. The reported device-cycle
+figure is a max over 16 ranks -- an order statistic that amplifies small
+per-rank jitter, and whose critical rank alternates (rank 0 was slowest in 3 of
+10 runs, and 0.72-1.35% off the slowest in the other 7). The residual therefore
+lives in the cross-rank critical path, not in any rank's own simulation. It is
+not a data-dependence artifact either: stencil_2d is a regular kernel and
+behaves like BFS here. Compare 1.6.3, where the weave quantum was concluded to
+be PDES-fundamental.
+
+Defect #15 REMAINS OPEN. This release removes one confirmed source without
+closing it.
+
+Data impact: pinning changes placement relative to the previous raced
+assignment, so 1.9.20 device and co-sim results are NOT bit-comparable with
+earlier generations. The change is within the run-to-run spread above, but it
+is a real change of placement, not noise.
+
+Also in this release, diagnostics only, default off: `PIMID_INJ_DUMP=<path>`
+writes a per-source injection census (count, destination sum, cycle sum) at
+SimEnd. This is what identified the permutation above and is the regression
+test for it.
+
+## 1.9.19 -- docs-only: how 1.9.17 and 1.9.18 were validated
+
+Bit-identical timing was the intended acceptance test for both, and it could
+not be run: the message-passing co-simulation path is not reproducible run to
+run (defect #15, open). Five repeats of the UNCHANGED binary on one cell
+(HBM3, message-passing BFS) span 2.85% of device cycles, sd 1.31%. An earlier
+two-run estimate of 0.28% was too small a sample to see this.
+
+The changes were therefore validated against that noise: five repeats per
+binary, balanced across two node types so machine effects fall on both arms.
+
+| build | n | mean device cycles | sd | range |
+|---|---|---|---|---|
+| before | 5 | 296,996,464 | 3,894,508 (1.31%) | 2.85% |
+| after  | 5 | 295,577,143 | 2,887,953 (0.98%) | 2.40% |
+
+The means differ by -0.48%, which is 0.42 sd, and the ranges overlap almost
+entirely (before 293.25M-301.73M, after 293.60M-300.68M). No evidence the
+changes move results. Flush cycles were bit-identical across all ten runs and
+host cycles varied by ~40 cycles (0.005%) equally in both arms, so the
+deterministic parts of the accounting are untouched.
+
+What is established directly rather than statistically: the hang is gone. With
+the fix the cut advances ~1M per fold instead of freezing, folding proceeds,
+and the pending set stays near 1.1M records instead of passing 64M.
+
+State the claim as "indistinguishable from baseline within the tool's measured
+reproducibility", NOT as "verified identical". It cannot be verified identical
+until #15 is fixed.
+
+Follow-up, same instrumentation: two runs of one binary dumping per-fold
+membership checksums (`PIMID_DET_EPOCH_DUMP`) diverge in MEMBERSHIP on 100% of
+shared phases, starting at phase 0, and in MEASUREMENT on 0% -- there is no
+phase where the same record set yields a different latency. The Garnet timing
+model is deterministic; what varies is which records reach it.
 
 ## 1.9.15 -- docs-only
 
