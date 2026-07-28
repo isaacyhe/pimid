@@ -153,20 +153,11 @@ also cite its paper:
 | ZSim | microarchitectural core models | [Sanchez and Kozyrakis, ISCA 2013](https://doi.org/10.1145/2485922.2485963) | [s5z/zsim](https://github.com/s5z/zsim) |
 | QEMU | user-mode execution and TCG plugins | [Bellard, USENIX ATC 2005](https://www.usenix.org/legacy/publications/library/proceedings/usenix05/tech/freenix/bellard.html) | [qemu-project/qemu](https://gitlab.com/qemu-project/qemu) |
 
-**These are not stock copies.** Every component above is modified, in places
-substantially: defect fixes, new models, and calibration against vendor and
-JEDEC source data. Ramulator 2.0 carries a new per-command energy layer built
-from per-technology IDD/VDD presets (stock has no usable energy constants for
-most of these standards); NVSim and CACTI have per-access width and unit
-corrections; Garnet is extended with per-technology DRAM tree fabrics and a
-deterministic replay path for message-passing runs; McPAT is driven in bus mode
-for in-memory datapaths; ZSim is heavily modified throughout (PE core models,
-thread-level MPI, device memory interfaces). Numbers reported by PIMID
-therefore need not match what a stock build of the same tool would produce, and
-a discrepancy is more likely ours than theirs. The per-release defect ledger in
-[docs/changelog_1.8-1.9.md](docs/changelog_1.8-1.9.md) records what changed and
-which results each change invalidates or corrects; per-component notes are in
-[docs/external.md](docs/external.md).
+**These are not stock copies.** Each carries our defect fixes, added models, and
+calibration against vendor and JEDEC source data, so PIMID's numbers need not
+match a stock build of the same tool. See
+[docs/changelog_1.8-1.9.md](docs/changelog_1.8-1.9.md) and
+[docs/external.md](docs/external.md) for what changed.
 
 ## License
 
