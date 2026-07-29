@@ -1,4 +1,4 @@
-# Changelog / defect ledger -- 1.8.0 -> 1.9.23
+# Changelog / defect ledger -- 1.8.0 -> 1.9.24
 
 Release + defect ledger for the co-sim MPI window, the measured-feedback MPI
 pricing model, and the OMP critical-path metric. One entry per release; each
@@ -6,6 +6,57 @@ gives the defect fixed, a one-line root cause, and a data-impact note (which
 sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
+
+## 1.9.24 -- NoC power was never measured: the stats parser matched the wrong keys
+
+Defect: every NoC power figure the simulator has ever reported was priced from
+zero network activity, in BOTH device scope and co-simulation.
+
+Root cause, one line. The Garnet statistics writer emits DOTTED keys
+("garnet.total_packets = N"), while the reader compared against bare names
+("total_packets"). No comparison ever matched, so every field kept its zero
+default. The file was found, opened and read to completion without error, and
+yielded nothing -- a silent failure with no warning anywhere. Both power paths
+call the same parser, so device-scope sweeps and co-simulation cells were
+equally affected.
+
+Consequences that follow from that, each of which had looked like its own
+defect:
+
+- Co-simulation fell back to a placeholder NoC activity level, since the
+  measured stats it tried to use always parsed as empty. The placeholder was
+  not a lazy default; it was covering for a parser that could not return
+  anything else.
+- Device scope built its NoC levels from measured traffic as designed, but the
+  measurement handed to it was always zero, so the levels carried no activity.
+
+Fixed by stripping the dotted prefix before matching, tolerating any prefix
+rather than only "garnet.".
+
+Three further corrections in the same area, all of the form "use the
+measurement that was already on disk":
+
+- NoC access counts now come from the recorded HOP count rather than the
+  end-to-end packet count. McPAT's NoC access statistic counts router
+  traversals, so a packet crossing several routers is several accesses;
+  counting packets understated activity by the average hop count.
+- Flit width now comes from the recorded value instead of a literal.
+- The network clock now comes from the recorded value instead of the PE clock,
+  which is a different quantity.
+
+Co-simulation additionally now sources its NoC levels through the same builder
+the device path uses, instead of emitting a fixed two-entry placeholder. When
+usable statistics are genuinely absent it still falls back, but now says so
+explicitly rather than reporting a placeholder figure as if measured.
+
+Data impact: every NoC power figure changes, in device scope and
+co-simulation alike, because the term was previously priced from zero activity.
+Reported totals rise accordingly. This does NOT affect timing -- the parser
+feeds the power model only -- so cycle counts are unchanged. Results are not
+comparable with earlier generations for power or energy.
+
+Version note: 1.9.22 was planned for this work but never released; 1.9.23
+shipped first as a revert, so this lands as 1.9.24 and 1.9.22 is skipped.
 
 ## 1.9.23 -- revert 1.9.21 (its device-scope regression outweighed its host fix)
 

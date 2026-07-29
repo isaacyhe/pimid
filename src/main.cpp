@@ -3333,6 +3333,17 @@ static GarnetParsedStats parseGarnetStatsFile(const std::string& path) {
         // Trim whitespace
         while (!key.empty() && std::isspace(key.back())) key.pop_back();
         while (!val.empty() && std::isspace(val.front())) val.erase(val.begin());
+        /* 1.9.22: the writer emits DOTTED keys ("garnet.total_packets = N"),
+         * while the comparisons below use bare names. Without stripping the
+         * prefix every field silently kept its zero default: the file parsed
+         * without error and yielded nothing, so co-sim NoC power fell back to
+         * the placeholder duty cycle even though a full measurement was on
+         * disk. Strip a leading "garnet." (and tolerate any other prefix). */
+        {
+            auto dot = key.rfind('.');
+            if (dot != std::string::npos) key = key.substr(dot + 1);
+            while (!key.empty() && std::isspace(key.front())) key.erase(key.begin());
+        }
 
         try {
             if (key == "total_packets") stats.total_packets = std::stoull(val);
@@ -3437,7 +3448,14 @@ static std::vector<pimid::McPATWrapper::NoCLevelConfig> buildNoCLevelsForMcPAT(
         int num_active = 7 - pe_level;
         if (num_active < 1) num_active = 1;
 
-        uint64_t garnet_packets = garnet.total_packets;
+        /* 1.9.22: McPAT's NoC `total_accesses` counts ROUTER TRAVERSALS, not
+         * end-to-end packets -- a packet crossing N routers is N accesses. Using
+         * total_packets undercounted the activity by the average hop count
+         * (measured 161,802 hops for 79,496 packets on a co-sim HBM3 cell, i.e.
+         * 2.04x). Prefer the measured hop count and fall back to packets only if
+         * hops were not recorded. */
+        uint64_t garnet_packets = (garnet.total_hops > 0)
+                                ? garnet.total_hops : garnet.total_packets;
 
         for (int lvl = pe_level; lvl < 7; lvl++) {
             NoCLevel nc;
@@ -3479,8 +3497,15 @@ static std::vector<pimid::McPATWrapper::NoCLevelConfig> buildNoCLevelsForMcPAT(
 
             nc.input_ports = (nc.type == 0) ? nodes : 5;
             nc.output_ports = (nc.type == 0) ? nodes : 5;
-            nc.flit_bits = 128;
-            nc.clock_mhz = config.frequency_mhz;
+            /* 1.9.22: take the flit width and the network clock from the MEASURED
+             * Garnet stats rather than a literal and the PE frequency. The run
+             * writes both to garnet_stats.txt; hardcoding 128 silently ignored a
+             * reconfigured flit size, and config.frequency_mhz is the PE clock,
+             * not the network's. */
+            nc.flit_bits = (garnet.flit_size_bits > 0)
+                         ? static_cast<int>(garnet.flit_size_bits) : 128;
+            nc.clock_mhz = (garnet.clock_mhz > 0.0)
+                         ? garnet.clock_mhz : config.frequency_mhz;
 
             // Distribute Garnet accesses: lower levels see more traffic
             // Simple model: level i gets fraction proportional to 1/(i+1 - pe_level)
@@ -4287,12 +4312,47 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
             // Avoid McPAT's homogeneous_NoCs=1 code path (number_of_NoCs == 1),
             // which CACTI 6.5-P routes through a configuration that crashes on
             // "Must have at least one port" regardless of the per-bank ports
-            // emitted in the XML. The non-cosim runPowerAnalysis path emits N
-            // NoC levels for the hierarchy; per-node analysis lacks that
-            // detail today, so unconditionally emit a minimal two-entry layout
-            // (PE/core-side + MC-side) so McPAT picks the heterogeneous path.
-            // Applied to both host and device nodes — both XMLs would default
-            // to number_of_NoCs=1 without this and hit the same CACTI assert.
+            // emitted in the XML. So we must always emit >= 2 NoC levels.
+            //
+            // 1.9.22: for DEVICE nodes, source those levels from the MEASURED
+            // Garnet traffic the run already wrote to garnet_stats.txt, via the
+            // same buildNoCLevelsForMcPAT() the device-scope path uses. Before
+            // this, per-node (co-sim) analysis emitted a placeholder pair with
+            // total_accesses = 0 and a hardcoded duty_cycle = 0.1, so every
+            // co-sim NoC was priced off a guess while a full measurement
+            // (packets, hops, buffer reads/writes, crossbar and link
+            // traversals, router count) sat unread on disk. Device-scope runs
+            // were already correct; only the co-sim path was not.
+            bool noc_from_measurement = false;
+            if (node.role == UnifiedConfig::SystemNode::DEVICE) {
+                std::string gpath = output_dir + "/garnet_stats.txt";
+                GarnetParsedStats g = parseGarnetStatsFile(gpath);
+                if (g.total_packets > 0) {
+                    uint64_t dev_cycles = (zsim_stats.dev_wall_cycles > 0)
+                                        ? zsim_stats.dev_wall_cycles
+                                        : (g.total_cycles > 0 ? g.total_cycles : total_cycles);
+                    auto measured = buildNoCLevelsForMcPAT(config, g, dev_cycles, overrides);
+                    if (measured.size() >= 2) {
+                        mcpat.setNoCLevels(measured);
+                        noc_from_measurement = true;
+                        std::cout << "  [NoC] " << node.name << ": priced from measured Garnet"
+                                  << " (" << measured.size() << " levels, "
+                                  << g.total_packets << " packets, "
+                                  << g.total_hops << " hops)" << std::endl;
+                    }
+                }
+                if (!noc_from_measurement) {
+                    std::cout << "  [NoC] " << node.name
+                              << ": WARNING no usable Garnet stats -- falling back to the"
+                                 " placeholder duty cycle (NoC power is NOT measured)."
+                              << " path=" << gpath
+                              << " exists=" << (access(gpath.c_str(), R_OK) == 0 ? "yes" : "no")
+                              << " packets=" << g.total_packets
+                              << " hops=" << g.total_hops
+                              << std::endl;
+                }
+            }
+            if (!noc_from_measurement)
             {
                 using NoCLevel = pimid::McPATWrapper::NoCLevelConfig;
                 std::vector<NoCLevel> two_levels;
