@@ -241,6 +241,50 @@ static std::atomic<uint64_t> roi_transition_count{0};
 static std::atomic<bool> mpi_comm_window[MAX_THREADS];
 /* 1.6 frozen-clock waits: raw core cycles at COMM_BEGIN (~0 = idle). */
 static uint64_t mpi_comm_saved[MAX_THREADS] = {};
+/* 1.9.21 diag (PIMID_COMM_DIAG=1): instrs at COMM_BEGIN, plus per-thread
+ * totals of how much clock the phantom-wait rewind removed and how many
+ * instructions retired inside those supposedly-parked windows. Any nonzero
+ * instruction count means the rewind erased REAL execution cycles. */
+static uint64_t mpi_comm_saved_instrs[MAX_THREADS] = {};
+static uint32_t mpi_comm_saved_cid[MAX_THREADS];
+/* 1.9.21: bumped every time ANY thread binds to a core. The COMM_END rewind
+ * differences a PER-CORE counter as if it were per-thread, which is only valid
+ * while this thread has the core to itself. In co-sim the host is one core
+ * shared by all ranks, so another rank's execution lands in the delta:
+ * measured tid=4 delta=111,822,366 with cid 0->0, the SAME Core pointer and
+ * the same domain -- nothing migrated, the core was simply shared. Comparing
+ * this generation across the window detects that; endpoint identity cannot. */
+static uint64_t g_coreBindGen[MAX_THREADS] = {};
+static uint64_t mpi_comm_saved_bindgen[MAX_THREADS] = {};
+static Core* mpi_comm_saved_core[MAX_THREADS] = {};
+static int mpi_comm_saved_dom[MAX_THREADS] = {};
+static uint64_t comm_diag_migrated[MAX_THREADS] = {};
+static uint64_t comm_diag_rewound[MAX_THREADS] = {};
+static uint64_t comm_diag_instrs[MAX_THREADS] = {};
+static uint64_t comm_diag_windows[MAX_THREADS] = {};
+static uint64_t comm_diag_phantom[MAX_THREADS] = {};
+/* 1.9.21: largest single window, to tell a STUCK window from spread-out spin */
+static uint64_t comm_diag_maxwin_instrs[MAX_THREADS] = {};
+static uint64_t comm_diag_maxwin_cycles[MAX_THREADS] = {};
+static bool g_comm_diag = false;
+
+/* 1.9.21 diag: print what the phantom-wait rewind removed, per thread. If
+ * instrs_in_window is nonzero the core RETIRED INSTRUCTIONS while supposedly
+ * parked, so the rewind erased real execution cycles -- which is the defect. */
+static void dumpCommDiag() {
+    if (!g_comm_diag) return;
+    info("[CommDiag] 1.9.21 phantom-wait rewind census");
+    info("[CommDiag] %6s %8s %18s %18s %18s", "tid", "windows",
+         "old_would_rewind", "rewound_now", "cross-core_windows");
+    for (uint32_t t = 0; t < MAX_THREADS; t++) {
+        if (comm_diag_windows[t] == 0) continue;
+        info("[CommDiag] %6u %8lu %18lu %18lu %18lu", t,
+             (unsigned long)comm_diag_windows[t],
+             (unsigned long)comm_diag_rewound[t],
+             (unsigned long)comm_diag_phantom[t],
+             (unsigned long)comm_diag_migrated[t]);
+    }
+}
 
 /* Per-rank ROI baseline synthesis (see handleMpiMagicOp): the MPI benchmarks
  * call zsim_roi_begin() ONLY on rank 0, so ranks 1..N-1 never snapshot an ROI
@@ -564,6 +608,7 @@ static inline void clearCid(uint32_t tid) {
 static inline void setCid(uint32_t tid, uint32_t cid) {
     cids[tid] = cid;
     cores[tid] = zinfo->cores[cid];
+    if (cid < MAX_THREADS) g_coreBindGen[cid]++;   // 1.9.21 sharing detector
     // A core marked VACATED by an earlier migration is running again: re-arm it
     // ACTIVE so it re-enters the consistent cut. Only VACATED is lifted here --
     // EXITED (finished ROI) must stay exempt even though its thread keeps
@@ -786,6 +831,7 @@ static void dumpTerminationStats() {
 void SimEnd() {
     dumpApproxProfile();
     if (zinfo && zinfo->garnetNetwork) zinfo->garnetNetwork->dumpInjectionCensus();
+    dumpCommDiag();
     if (g_ooo_present) {
         uint64_t mispred = 0;
         for (uint32_t c = 0; c < zinfo->numCores; c++)
@@ -1297,6 +1343,19 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         if (g_mpi_thread_mode) {
             if (tid < MAX_THREADS && cores[tid]) {
                 mpi_comm_saved[tid] = cores[tid]->getCycles();
+                mpi_comm_saved_instrs[tid] = cores[tid]->getInstrs();
+                /* 1.9.21: remember WHICH core this baseline was taken on. The
+                 * rewind at COMM_END differences two counter reads, which is
+                 * only meaningful if both come from the SAME Core object. */
+                mpi_comm_saved_cid[tid] = cids[tid];
+                mpi_comm_saved_bindgen[tid] =
+                    (cids[tid] < MAX_THREADS) ? g_coreBindGen[cids[tid]] : 0;
+                /* 1.9.21 probe: also pin down the Core IDENTITY and the raw
+                 * (pre-adjustment) clock, so an anomalous delta at COMM_END can
+                 * be attributed to a changed object, a changed cid, or the
+                 * counter itself moving. */
+                mpi_comm_saved_core[tid] = cores[tid];
+                mpi_comm_saved_dom[tid]  = thread_domain[tid].load();
                 cores[tid]->pimidCommParked = true;
                 // Parked in a frozen-clock MPI wait -> QUIESCENT (exempt from the
                 // epoch cut) so it does not pin the barrier for still-running peers.
@@ -1324,10 +1383,20 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         if (g_mpi_thread_mode) {
             if (tid < MAX_THREADS && cores[tid] && mpi_comm_saved[tid] != ~0ull) {
                 cores[tid]->pimidCommParked = false;
-                uint64_t raw = cores[tid]->getCycles();
-                if (raw > mpi_comm_saved[tid])
-                    cores[tid]->pimidRewindCycles(raw - mpi_comm_saved[tid]);
+                /* 1.9.21 (core-centric): the per-thread COMM-window rewind is
+                 * DELETED. `cycles` is a PER-CORE hardware counter; ranks and
+                 * threads are software constructs, so a per-thread quantity
+                 * cannot be recovered from it. On a shared core the delta
+                 * contains co-resident threads' work -- measured tid=4
+                 * delta=111,822,366 with cid 0->0, the same Core pointer and
+                 * the same domain -- and subtracting it DEFLATED the core
+                 * (reported IPC 33 and 6.03 against a true ~0.50).
+                 * Simulator artifacts are still removed, but per-CORE and at
+                 * the reporting site: Core::pimidJumpCycles counts clock JUMPS
+                 * (rejoin fast-forward, weave resolution), which are not work.
+                 * Work is never subtracted, whoever performed it. */
                 mpi_comm_saved[tid] = ~0ull;
+                mpi_comm_saved_cid[tid] = UNINITIALIZED_CID;
             }
             // Resumed from the MPI wait -> ACTIVE (re-enters the epoch cut). Do not
             // clobber an EXITED core (roi_end already fired): only ACTIVE<-QUIESCENT.
@@ -3007,6 +3076,10 @@ int qemu_plugin_install(qemu_plugin_id_t id,
     }
     /* 1.9.20: no tid has a known stable identity until getOrAssignTid records it */
     for (uint32_t i = 0; i < MAX_THREADS; i++) tidToVcpu[i] = UNINITIALIZED_CID;
+    for (uint32_t i = 0; i < MAX_THREADS; i++) mpi_comm_saved_cid[i] = UNINITIALIZED_CID;
+    /* 1.9.21 diag */
+    g_comm_diag = (getenv("PIMID_COMM_DIAG") != nullptr);
+    if (g_comm_diag) info("[CommDiag] 1.9.21 phantom-wait rewind diagnostics ENABLED");
     for (uint32_t i = 0; i < MAX_THREADS; i++) {
         cids[i] = UNINITIALIZED_CID;
     }

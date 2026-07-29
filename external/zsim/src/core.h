@@ -110,6 +110,21 @@ class Core : public GlobAlloc {
          * nondeterminism signature). */
         volatile bool pimidCommParked = false;
 
+        /* 1.9.21 (core-centric accounting): cycles this core's clock was JUMPED
+         * rather than advanced by simulating work -- the parked-rejoin
+         * fast-forward and the cSimStart/cSimEnd weave resolutions. Those are
+         * simulator artifacts, not execution, and are the ONLY thing subtracted
+         * from the reported cycle count.
+         *
+         * `cycles` is a PER-CORE counter. Ranks/threads are software constructs,
+         * so no per-thread quantity can be recovered from it: under
+         * oversubscription (co-sim runs 16 ranks on one host core) the counter
+         * legitimately aggregates every thread that ran there. Subtracting a
+         * co-resident thread's work DEFLATES the core, which produced the
+         * impossible IPC 33 / 6.03 readings. Under undersubscription an idle
+         * core simply never advances, so it contributes nothing. */
+        uint64_t pimidJumpCycles = 0;
+
         virtual void initStats(AggregateStat* parentStat) = 0;
         virtual void contextSwitch(int32_t gid) = 0; //gid == -1 means descheduled, otherwise this is the new gid
 

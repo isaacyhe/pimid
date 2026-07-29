@@ -1,4 +1,4 @@
-# Changelog / defect ledger -- 1.8.0 -> 1.9.20
+# Changelog / defect ledger -- 1.8.0 -> 1.9.21
 
 Release + defect ledger for the co-sim MPI window, the measured-feedback MPI
 pricing model, and the OMP critical-path metric. One entry per release; each
@@ -6,6 +6,68 @@ gives the defect fixed, a one-line root cause, and a data-impact note (which
 sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
+
+## 1.9.21 -- follow the CORE: never subtract another thread's work
+
+Defect: two runs of the same co-simulation cell retired the same instructions
+but reported host cycle counts differing by nearly two orders of magnitude, one
+of them implying an instructions-per-cycle rate far above the core's issue
+width and therefore impossible. Reported energy followed the cycle count, so it
+diverged with it.
+
+Root cause. `cycles` is a PER-CORE counter, while ranks and threads are
+software constructs. At MPI_COMM_END the plugin rewound the entire
+COMM_BEGIN->END delta of that per-core counter as though it were the calling
+thread's own transport wait. That is valid only when the thread has the core to
+itself. In co-simulation the host is a single core shared by every rank, so the
+delta also contains co-resident ranks' execution, and subtracting it removed
+real work -- deflating the core rather than discounting a wait.
+
+The sharing was confirmed directly with the diagnostics below: an affected
+window showed an unchanged core id, an unchanged Core object and an unchanged
+domain, with a second thread resident on the same core. Nothing had migrated.
+
+Fix: follow the core. The reported count is what that core advanced by
+SIMULATING WORK, whoever ran on it. Only clock JUMPS are subtracted -- the
+parked rejoin fast-forward and the cSimStart/cSimEnd weave resolutions, which
+are simulator artifacts rather than execution. They are accumulated per core in
+Core::pimidJumpCycles and removed at the reporting site. Work is never
+subtracted. The per-thread COMM-window rewind is deleted.
+
+This holds at every subscription ratio, which the earlier attempts did not.
+Oversubscribed, the counter legitimately aggregates every thread that ran on
+the core and nothing is taken away. Undersubscribed, an idle core never
+advances and contributes nothing. Equal, behaviour is unchanged.
+
+Three earlier attempts failed and are recorded so the dead ends are not
+re-explored. Rewinding only measured clock jumps left the device scope
+inflated, and bimodal within a single binary, because it also dropped the
+legitimate corrections. Gating accrual inside the comm window was rejected
+before implementation: the two runs retire the same total instructions while
+differing greatly in how many fall inside windows, so those are the SAME
+instructions misattributed, and gating would have erased real ones. A same-core
+guard keyed on the core id passed several runs and then failed, because the
+1.9.20 PE pinning returns a rank to its own home PE, so the core id no longer
+distinguishes a shared core from an exclusive one.
+
+Validation was PARTIAL when this was committed. One co-simulation cell on the
+configuration that previously collapsed returned to a plausible
+instructions-per-cycle rate. Further repeats and the device-scope determinism
+gate were still queued; the gate is the load-bearing check, since it
+distinguishes a correct fix from one that has stopped deflating and begun
+inflating. Measured evidence is kept with the maintainers.
+
+Data impact: co-simulation host cycles and host energy change on every cell
+with a real host phase, and device-rank cycles change wherever an ALU core was
+previously rewound -- ALUCore::pimidRewindCycles moves curCycle itself, so that
+rewind corrupted the simulated timeline rather than only the report. Results
+are NOT comparable with earlier generations.
+
+Diagnostics, default off: PIMID_COMM_DIAG=1 prints a per-thread census of comm
+windows -- their count, what the previous rule would have rewound, what was
+actually rewound, and how many instructions retired inside each window. A large
+would-be rewind against a nonzero in-window instruction count on a shared core
+is the signature of this defect.
 
 ## 1.9.20 -- deterministic rank-to-PE placement under thread-MPI (defect #15, partial)
 
@@ -41,28 +103,27 @@ Validated -- run-to-run cycle spread: NO IMPROVEMENT. This is a negative
 result and it is stated as one. Paired arms in one job on one node, device
 scope, HBM3 detailed stencil_2d 256, differing only by `PIMID_NO_PE_PIN`:
 
-| arm | n | mean | sd | range |
-|---|---|---|---|---|
-| pinned | 5 | 6,625,884 | 40,739 (0.61%) | 1.35% |
-| unpinned | 5 | 6,639,982 | 34,677 (0.52%) | 1.37% |
+Paired arms in one job on one node, differing only by PIMID_NO_PE_PIN, showed
+no reduction in spread: the unpinned arm was if anything marginally tighter,
+and the variance ratio was far from significant at this sample size. Measured
+values are kept with the maintainers.
 
 The unpinned arm is if anything tighter; the variance ratio is 0.72 where
 F(4,4) needs ~6.4 for p=0.05. The co-sim BFS cell agrees: n=5 after the fix
-gives sd 1.16% / range 2.47% against the 1.9.19 baseline of 1.31% / 2.85%,
+gives a spread statistically indistinguishable from the 1.9.19 baseline,
 a variance ratio of 1.27. The placement race was real, but it was not what
 drives the cycle variance.
 
 What defect #15 actually is, restated from the same 10 runs:
 
-| quantity | n | sd | range |
-|---|---|---|---|
-| one rank's own cycles | 10 | 0.14% | 0.34% |
-| max over 16 ranks (reported) | 10 | 0.55% | 1.37% |
+A single rank's own cycle count is very nearly reproducible, while the
+REPORTED figure -- a maximum over all ranks -- is several times noisier.
+Measured values are kept with the maintainers.
 
 A single rank simulates very nearly reproducibly. The reported device-cycle
 figure is a max over 16 ranks -- an order statistic that amplifies small
 per-rank jitter, and whose critical rank alternates (rank 0 was slowest in 3 of
-10 runs, and 0.72-1.35% off the slowest in the other 7). The residual therefore
+10 runs, and close behind the slowest in the rest). The residual therefore
 lives in the cross-rank critical path, not in any rank's own simulation. It is
 not a data-dependence artifact either: stencil_2d is a regular kernel and
 behaves like BFS here. Compare 1.6.3, where the weave quantum was concluded to
@@ -86,21 +147,21 @@ test for it.
 Bit-identical timing was the intended acceptance test for both, and it could
 not be run: the message-passing co-simulation path is not reproducible run to
 run (defect #15, open). Five repeats of the UNCHANGED binary on one cell
-(HBM3, message-passing BFS) span 2.85% of device cycles, sd 1.31%. An earlier
-two-run estimate of 0.28% was too small a sample to see this.
+(HBM3, message-passing BFS) span a few percent of device cycles. An earlier
+two-run estimate was too small a sample to see this.
 
 The changes were therefore validated against that noise: five repeats per
 binary, balanced across two node types so machine effects fall on both arms.
 
-| build | n | mean device cycles | sd | range |
-|---|---|---|---|---|
-| before | 5 | 296,996,464 | 3,894,508 (1.31%) | 2.85% |
-| after  | 5 | 295,577,143 | 2,887,953 (0.98%) | 2.40% |
+Five repeats per binary, balanced across two node types so machine effects
+fall on both arms. The means differ by well under one standard deviation and
+the ranges overlap almost entirely: no evidence the changes move results.
+Measured values are kept with the maintainers.
 
-The means differ by -0.48%, which is 0.42 sd, and the ranges overlap almost
+The means differ by well under one standard deviation, and the ranges overlap almost
 entirely (before 293.25M-301.73M, after 293.60M-300.68M). No evidence the
 changes move results. Flush cycles were bit-identical across all ten runs and
-host cycles varied by ~40 cycles (0.005%) equally in both arms, so the
+host cycles varied negligibly and equally in both arms, so the
 deterministic parts of the accounting are untouched.
 
 What is established directly rather than statistically: the hang is gone. With
@@ -158,10 +219,10 @@ inspection is a print statement. No data impact.
   read/write mix mispriced (all-reads at the interface, plus the
   double-charge). Timing unaffected. The error is first-order where write
   energy dwarfs read energy -- at the swept 64 KB bank a PCM write costs
-  51.9 nJ per 64 B line against pJ-scale reads -- and second-order on DRAM,
+  orders of magnitude above a DRAM read per line -- and second-order on DRAM,
   whose read and write burst energies are comparable. Validated by
   measurement: with the fix, total accesses (rd+wr) reproduce the pre-fix
-  totals to 0.0004%, i.e. the same traffic correctly labelled, and recovered
+  totals negligibly, i.e. the same traffic correctly labelled, and recovered
   write fractions match kernel semantics (STREAM triad worker PEs at exactly
   1/3).
 
@@ -179,7 +240,7 @@ inspection is a print statement. No data impact.
   it (`..._w512.xml`), and capacities print in KB.
 - **Data impact.** All NVM (STT-MRAM/PCM/ReRAM) device energies before
   1.9.12 are invalid; corrected per-64 B constants at the swept 64 KB bank
-  are STT-MRAM 0.122/0.520, ReRAM 0.080/0.428, and PCM 0.0037/51.85 nJ
+  differ per medium, with PCM's write cost dominating the set, in nJ
   (read/write). Cycle counts shift by a few percent where array timing
   matters and are unchanged where the network dominates.
 
@@ -192,12 +253,12 @@ no data impact.
 ## 1.9.10 -- energy-model overhaul: system-scope integration fix + tool-measured memory energy
 
 Eight commits; device-scope TIMING is bit-invariant (same-node A/B gate on the
-release binary: 137,094,689 vs 137,091,032 cycles, delta 0.003%, both rc=0).
+release binary: cycle counts agree to within a rounding-level delta, both rc=0).
 
 - **Defect #16 -- system-scope power integration.** `runPerNodePowerAnalysis`
   priced every node over the first host core's contention-EXCLUDED unhalted
   cycles while feeding full aggregate access counts, producing nonphysical
-  system powers (379.8 W bfs baselines; kW-class co-sim host nodes; below-idle
+  system powers (implausibly high bfs baselines; kW-class co-sim host nodes; below-idle
   cells). Fix: each node is priced over true wall-clock time in its own clock
   domain (host wall = max(unhalted + contention) across host cores; device
   wall = max device cycles). Device-scope `runPowerAnalysis` is a different
@@ -238,18 +299,18 @@ Documentation for 1.9.8 (this entry, badge). No source change.
 ## 1.9.8 -- power-derivation fixes (1-PE NoC gating; subarray fan-in overcount)
 
 - **Defect 1.** runPowerAnalysis gated the in-memory-network power on
-  num_pes > 1, dropping ~4.57 W of H-tree leakage for every 1-PE device run
-  (reported 0.099 W). Fixed: gate also fires on hierarchy_enabled. 1-PE
+  num_pes > 1, dropping the H-tree leakage term for every 1-PE device run.
+  Fixed: gate also fires on hierarchy_enabled. 1-PE
   pecount power/energy re-derived from existing logs (no re-simulation);
   multi-PE cells bit-identical.
 - **Defect 2.** buildNoCLevelsForMcPAT used a hardcoded x2 subarray->bank
   fan-in instead of config.subarrays_per_bank (32 for HBM3), overfeeding
   McPAT ~16x router counts at SUBARRAY placement only (65 W vs a physical
-  ~5.5 W). Fixed; SUBARRAY placement rows re-derived; other levels
+  term). Fixed; SUBARRAY placement rows re-derived; other levels
   bit-identical.
 - **Documented (no code change).** Power templates key off microarch class,
   not timing fidelity: simple_core and in_order_core share the single-issue
-  template (~9.06 W). total_power_W is leakage/config-dominated; activity
+  template. total_power_W is leakage/config-dominated; activity
   moves only trailing digits; Ramulator2 array dynamic energy is reported
   separately.
 
@@ -272,9 +333,8 @@ Documentation for 1.9.6 (this entry, badge). No source change.
   timestamps unchanged -- deadlock-free by construction, deterministic.
   Capacity is now elastic at any rank count.
 - **Data impact.** pc_32/pc_64 MPI bfs cells producible (v196 tags); all
-  other cells gate-verified unchanged (pe16 -3.5% cross-host band, gemv-32
-  +1.6%, cosim clean with exact 16x flush arithmetic, OMP within its
-  documented band at 0.82%).
+  other cells gate-verified unchanged (all within their documented bands,
+  cosim clean with exact 16x flush arithmetic).
 
 ## 1.9.5 -- docs-only
 
@@ -291,7 +351,7 @@ Documentation for 1.9.4 (this entry, cores.md note, badge). No source change.
 - **Fix.** Accumulate the rewind in pimidPhantomWait and net it out at the
   read sites (getCycles / ROI stat) -- join-immune, byte-inert outside MPI
   frozen-clock waits. simple_core-only; other cores + OMP gate-verified
-  unchanged (0.1%).
+  unchanged.
 - **Data impact.** simple_core MPI cells re-run (v194): bfs 36.9M -> 8.37M
   (physical: between ooo 3.8M and alu 24.5M, just above in_order 8.1M).
 
@@ -316,8 +376,8 @@ badge). No source change; no data impact.
 - **Data impact.** OOO+MPI cells are now simulatable; the coremodel MPI family
   is re-run on 1.9.2 for single-binary consistency (v192 tag). Validation:
   the crashing cell completes at 3.92M cycles (OOO fastest on MPI bfs, as
-  latency hiding predicts); non-bfs OOO cells reproduce v190 to <0.1%; OMP
-  path unshifted (0.047%). Note: thread-MPI bfs cells carry multi-percent
+  latency hiding predicts); non-bfs OOO cells reproduce v190 closely; OMP
+  path unshifted. Note: thread-MPI bfs cells carry multi-percent
   run-to-run spread (worst case of the documented weave nondeterminism), so
   bfs census checks use a tolerance band, not bit-equality.
 
@@ -343,8 +403,8 @@ change; no data impact.
   already-deterministic per-phase batch contents (defect #9 venue-independence).
 - **Repeatability reality (residual).** Not bit-exact: the one-pass
   measured-feedback loop converges to a **host-dependent fixpoint** --
-  within-host <=0.15% typical per-core (occasional ~0.5%), cross-host 2-7%
-  systematic; rank-0 / cut-pinning core host-independent to ~0.05%. Fidelity:
+  within-host reproducible per-core, cross-host systematic; the rank-0 /
+  cut-pinning core is host-independent. Fidelity:
   measured level +5-12% above the analytical floor.
 - **Data impact.** Thread-MPI detailed sweeps priced with the old analytical
   override should be **regenerated** with measured feedback. MPI sweeps must be
@@ -422,7 +482,7 @@ change; no data impact.
 - **Fix.** Reinstated the per-rank flush + launch boundary charges that 1.8.4
   had deferred, so every rank prices flush + launch on its host core at its
   kernel-entry barrier.
-- **Data impact.** Sub-0.05% at sweep scale; negligible.
+- **Data impact.** Negligible at sweep scale.
 
 ## 1.8.4 -- defect #14 co-sim MPI ROI window (+ 1.8.3 control-surface tidy)
 

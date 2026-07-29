@@ -91,7 +91,11 @@ void OOOCore::initStats(AggregateStat* parentStat) {
     // ROI duration metrics.
     auto x = [this]() {
         uint64_t c = cRec.getUnhaltedCycles(curCycle);
-        c = (c > pimidPhantomWait) ? (c - pimidPhantomWait) : 0;   // 1.6.1 wall-free
+        /* 1.9.21 core-centric: subtract only simulator clock JUMPS. Work is
+         * never subtracted, whoever ran it. pimidPhantomWait is retained for
+         * legacy paths that still set it and is normally zero now. */
+        uint64_t artifact = pimidPhantomWait + pimidJumpCycles;
+        c = (c > artifact) ? (c - artifact) : 0;
         return (c > roiBaseCycle) ? (c - roiBaseCycle) : 0;
     };
     LambdaStat<decltype(x)>* cyclesStat = new LambdaStat<decltype(x)>(x);
@@ -572,8 +576,12 @@ void OOOCore::join() {
         // (retiring the in-flight uops) before jumping, and is byte-identical
         // to the old raw jump when the window is genuinely empty (occupancy==0).
         // Draining is bounded by the 1024-cycle window horizon, not the delta.
-        if (pimidCommParked) insWindow.longAdvance(curCycle, targetCycle);
-        else advance(targetCycle);
+        if (pimidCommParked) {
+            pimidJumpCycles += targetCycle - curCycle;   // 1.9.21: parked rejoin jump
+            insWindow.longAdvance(curCycle, targetCycle);
+        } else {
+            advance(targetCycle);                        // accumulates it itself
+        }
     }
     phaseEndCycle = zinfo->globPhaseCycles + zinfo->phaseLength;
     // assert(targetCycle <= phaseEndCycle);
@@ -599,6 +607,9 @@ void OOOCore::cSimEnd() {
 
 void OOOCore::advance(uint64_t targetCycle) {
     assert(targetCycle > curCycle);
+    // 1.9.21: a JUMP, not simulated work -- recorded so the reported cycle
+    // count can exclude it (see Core::pimidJumpCycles).
+    pimidJumpCycles += targetCycle - curCycle;
     decodeCycle += targetCycle - curCycle;
     insWindow.longAdvance(curCycle, targetCycle);
     curCycleRFReads = 0;
