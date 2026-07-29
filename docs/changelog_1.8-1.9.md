@@ -1,4 +1,4 @@
-# Changelog / defect ledger -- 1.8.0 -> 1.9.21
+# Changelog / defect ledger -- 1.8.0 -> 1.9.23
 
 Release + defect ledger for the co-sim MPI window, the measured-feedback MPI
 pricing model, and the OMP critical-path metric. One entry per release; each
@@ -6,6 +6,48 @@ gives the defect fixed, a one-line root cause, and a data-impact note (which
 sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
+
+## 1.9.23 -- revert 1.9.21 (its device-scope regression outweighed its host fix)
+
+1.9.21 changed how a rank's transport wait is accounted for. It fixed a real
+defect on the co-simulation host, where a single core is shared by every rank
+and the previous rule discounted co-resident ranks' execution along with the
+wait. It also introduced a worse defect on the device.
+
+The wait correction is a PAIR. Waking a parked rank, the simulator does not set
+its clock to when its message or barrier released it -- it snaps the clock to
+the global phase clock, wherever the simulation as a whole has reached. That
+value depends on how far every other simulator thread progressed meanwhile, so
+it imports the running machine into the simulated timeline. The correction
+reverts that snap and then charges the real wait, computed from arrival times.
+1.9.21 removed the revert and left the charge, so the snap survived AND the
+computed wait was added on top. Device-scope cycles inflated by roughly a
+factor of three, consistently, across a ten-run gate.
+
+An intermediate attempt restored the revert but applied it only where a core
+was provably the rank's alone, detecting shared use with a per-core bind
+counter. That counter incremented on every bind, including a rank rebinding to
+its own core after a barrier, so each rank tripped its own guard and the revert
+was skipped almost everywhere. The device-scope figure did not recover.
+
+This release reverts 1.9.21 in full. The accounting sources are restored
+byte-for-byte to their 1.9.20 state, and the device-scope determinism gate
+returns to its pre-1.9.21 values across all ten runs.
+
+The host-side defect that 1.9.21 set out to fix is therefore STILL PRESENT: on
+a shared host core the wait correction discounts other ranks' execution, and a
+co-simulation cell with a substantial host phase can report an implausibly high
+instructions-per-cycle rate. That is a known open defect, tracked with the
+maintainers, and it is the lesser of the two problems -- it affects the host
+phase of co-simulation cells, whereas the regression affected every
+device-scope result.
+
+The durable fix is not another guard on the difference. It is to set the clock
+to the computed wake-up time directly, rather than correcting a snap after the
+fact: an absolute write cannot discount another rank's work, because it is not
+a subtraction, and it makes the shared-versus-exclusive distinction irrelevant.
+That requires rebasing the core's pending weave state, since the simulator's
+clock is monotonic, and is scoped as its own release.
 
 ## 1.9.21 -- follow the CORE: never subtract another thread's work
 
