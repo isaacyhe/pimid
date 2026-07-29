@@ -1,4 +1,4 @@
-# Changelog / defect ledger -- 1.8.0 -> 1.9.24
+# Changelog / defect ledger -- 1.8.0 -> 1.9.26
 
 Release + defect ledger for the co-sim MPI window, the measured-feedback MPI
 pricing model, and the OMP critical-path metric. One entry per release; each
@@ -6,6 +6,86 @@ gives the defect fixed, a one-line root cause, and a data-impact note (which
 sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
+
+## 1.9.26 -- revert the wake-up snap only where the core is the rank's alone
+
+Restores the transport-wait correction that 1.9.23 removed, this time gated so
+it cannot consume another rank's execution. It closes the host-side defect
+1.9.21 attempted, without the device-scope regression that forced that release
+to be reverted.
+
+Background. Waking a parked rank, the simulator does not set its clock to when
+its message or barrier released it: it snaps the clock to the global phase
+clock, wherever the simulation as a whole has reached. That value depends on
+how far every other simulator thread progressed while this one was parked, so
+it imports the running machine into the simulated timeline. The correction is a
+PAIR -- revert the snap, then charge the real wait computed from arrival times.
+Both halves are required; 1.9.21 removed the first and inflated every
+device-scope result.
+
+The revert measures the snap as "clock now minus clock when I blocked". That is
+this rank's snap only if the core was ITS ALONE for the whole window. On a
+device PE it is, one rank per PE since 1.9.20. On the co-simulation host core,
+shared by every rank, other ranks ran on the same clock meanwhile, so the
+difference is the snap PLUS their execution -- and reverting it destroys that
+work, which is the host-side collapse.
+
+So the revert now requires exclusive ownership: the same core throughout, and
+no bind by a DIFFERENT thread in between. The second condition is what the
+previous attempt got wrong. It counted every bind to a core, but a rank parks
+at a barrier and rebinds to its OWN core on waking, which bumped the count and
+made every rank appear to share. Tracking the core's current owner and counting
+only foreign binds distinguishes "another thread was here" from "I came back".
+
+Validated on BOTH gates together, which is the pairing 1.9.21 failed and the
+two attempts after it could not achieve:
+
+- device scope: the determinism gate returns to its pre-1.9.21 values across
+  all five pinned runs and all five unpinned control runs;
+- co-simulation: the oversubscribed host configuration reports a plausible
+  instructions-per-cycle rate on two independent node types, where before it
+  reported an impossible one.
+
+Measured evidence is kept with the maintainers.
+
+Data impact: co-simulation host cycles and host energy change on cells with a
+substantial host phase, since the wait correction now applies there correctly
+rather than discounting co-resident ranks. Device-scope results are unchanged
+from 1.9.23, by construction and by gate.
+
+The durable fix remains to set the clock to the computed wake-up time directly
+rather than correcting a snap after the fact. An absolute write cannot consume
+another rank's work because it is not a subtraction, and it makes the
+shared-versus-exclusive distinction irrelevant. That requires rebasing the
+core's pending weave state and is scoped separately.
+
+## 1.9.25 -- stop fabricating host NoC activity
+
+The per-node power path gave every node's network a hardcoded duty cycle with
+no traffic behind it. For a device node 1.9.24 replaced that with measured
+Garnet activity. For a HOST node there is nothing to replace it with, and the
+placeholder was left billing a fixed fraction of peak to a fabric that may not
+exist at all: the co-simulation host is single-core by default, where the
+on-die network is degenerate (core to caches to memory controller is direct),
+yet it was priced as if partially busy.
+
+PIMID does not model a host-side interconnect. The device statistics describe
+the in-memory network and pricing a host socket from them would be worse than a
+placeholder, so there is no measurement to substitute. The honest treatment is
+zero activity: the two-level structure is still emitted, because McPAT's
+homogeneous-NoC path crashes CACTI below two levels, so the entry now carries
+its leakage and nothing else.
+
+Where a host fabric WOULD carry traffic -- a multi-core host -- the run now says
+plainly that the interconnect is not modelled and its activity is not measured,
+rather than reporting an invented figure. A single-core host reports that its
+fabric is degenerate and priced at zero.
+
+This continues the theme of 1.9.24: a plausible-looking number with nothing
+behind it is worse than an explicit gap, because it cannot be audited.
+
+Data impact: host NoC power changes on every system-scope cell. The term was
+small, so totals move little, but it is no longer fabricated.
 
 ## 1.9.24 -- NoC power was never measured: the stats parser matched the wrong keys
 

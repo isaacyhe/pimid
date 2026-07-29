@@ -4364,7 +4364,21 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 pe_lvl.clock_mhz = mcfg.has_noc ? mcfg.noc_clock_mhz
                                                : node.frequency_mhz;
                 pe_lvl.chip_coverage = 0.5;
-                pe_lvl.duty_cycle = 0.1;
+                /* 1.9.25: do NOT fabricate activity. The previous hardcoded
+                 * duty cycle charged a fixed fraction of peak to a fabric that
+                 * may not exist at all -- a 1-core host has no meaningful
+                 * on-die network (the crossbar is degenerate; core -> caches ->
+                 * MC is direct), yet it was billed as if 10% busy.
+                 *
+                 * PIMID does not simulate a host-side interconnect, so there is
+                 * no measurement to substitute: garnet_stats.txt describes the
+                 * DEVICE's in-memory network, and pricing the host from it
+                 * would be worse than a placeholder. The honest treatment is
+                 * zero activity -- the structure is still emitted because
+                 * McPAT's homogeneous-NoC path crashes CACTI below two levels,
+                 * so the entry carries its leakage and nothing else -- and to
+                 * SAY SO when a fabric that would carry traffic is unpriced. */
+                pe_lvl.duty_cycle = 0.0;
                 pe_lvl.total_accesses = 0;
                 two_levels.push_back(pe_lvl);
                 NoCLevel mc_lvl = pe_lvl;
@@ -4373,6 +4387,20 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 mc_lvl.chip_coverage = 0.1;
                 two_levels.push_back(mc_lvl);
                 mcpat.setNoCLevels(two_levels);
+                if (node.role == UnifiedConfig::SystemNode::HOST) {
+                    if (node.num_cores > 1) {
+                        std::cout << "  [NoC] " << node.name
+                                  << ": WARNING host has " << node.num_cores
+                                  << " cores but PIMID does not model a host-side"
+                                     " interconnect -- its NoC carries leakage only,"
+                                     " activity is NOT measured" << std::endl;
+                    } else {
+                        std::cout << "  [NoC] " << node.name
+                                  << ": single-core host -- on-die fabric is"
+                                     " degenerate, priced at zero activity"
+                                  << std::endl;
+                    }
+                }
             }
 
             mcpat.initialize();

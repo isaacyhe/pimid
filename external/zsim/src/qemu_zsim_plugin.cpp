@@ -152,6 +152,12 @@ static std::atomic<uint64_t> g_brDynCount{0};
 /* Per-vcpu → ZSim THREADID mapping */
 #define MAX_VCPUS 256
 static uint32_t vcpuToTid[MAX_VCPUS];
+/* 1.9.26: detect whether ANOTHER thread used this core during a comm window.
+ * A plain bind COUNT is wrong: a rank parks at a barrier and rebinds to its OWN
+ * core on wake, which bumps the count and makes every rank look like it shares.
+ * Track the current owner instead and count only binds by a DIFFERENT thread. */
+static uint32_t g_coreOwner[MAX_THREADS];
+static uint64_t g_coreForeignBinds[MAX_THREADS] = {};
 static uint32_t nextTid = 0;
 static std::mutex tidMutex;
 
@@ -241,6 +247,8 @@ static std::atomic<uint64_t> roi_transition_count{0};
 static std::atomic<bool> mpi_comm_window[MAX_THREADS];
 /* 1.6 frozen-clock waits: raw core cycles at COMM_BEGIN (~0 = idle). */
 static uint64_t mpi_comm_saved[MAX_THREADS] = {};
+static uint32_t mpi_comm_saved_cid[MAX_THREADS];
+static uint64_t mpi_comm_saved_fb[MAX_THREADS] = {};
 
 /* Per-rank ROI baseline synthesis (see handleMpiMagicOp): the MPI benchmarks
  * call zsim_roi_begin() ONLY on rank 0, so ranks 1..N-1 never snapshot an ROI
@@ -564,6 +572,10 @@ static inline void clearCid(uint32_t tid) {
 static inline void setCid(uint32_t tid, uint32_t cid) {
     cids[tid] = cid;
     cores[tid] = zinfo->cores[cid];
+    if (cid < MAX_THREADS && g_coreOwner[cid] != tid) {
+        g_coreForeignBinds[cid]++;      // 1.9.26: a DIFFERENT thread took this core
+        g_coreOwner[cid] = tid;
+    }
     // A core marked VACATED by an earlier migration is running again: re-arm it
     // ACTIVE so it re-enters the consistent cut. Only VACATED is lifted here --
     // EXITED (finished ROI) must stay exempt even though its thread keeps
@@ -1297,6 +1309,9 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         if (g_mpi_thread_mode) {
             if (tid < MAX_THREADS && cores[tid]) {
                 mpi_comm_saved[tid] = cores[tid]->getCycles();
+                mpi_comm_saved_cid[tid] = cids[tid];
+                mpi_comm_saved_fb[tid] =
+                    (cids[tid] < MAX_THREADS) ? g_coreForeignBinds[cids[tid]] : 0;
                 cores[tid]->pimidCommParked = true;
                 // Parked in a frozen-clock MPI wait -> QUIESCENT (exempt from the
                 // epoch cut) so it does not pin the barrier for still-running peers.
@@ -1324,8 +1339,18 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         if (g_mpi_thread_mode) {
             if (tid < MAX_THREADS && cores[tid] && mpi_comm_saved[tid] != ~0ull) {
                 cores[tid]->pimidCommParked = false;
+                /* 1.9.26: the revert measures the snap as "clock now minus
+                 * clock when I blocked", which is only THIS rank's snap if the
+                 * core was its alone. On a device PE it is (1:1 after 1.9.20).
+                 * On the shared co-sim host core, other ranks ran on the same
+                 * clock meanwhile, so the difference is snap PLUS their work and
+                 * reverting it destroys that work. Require exclusive ownership:
+                 * same core, and no bind by a different thread in between. */
                 uint64_t raw = cores[tid]->getCycles();
-                if (raw > mpi_comm_saved[tid])
+                bool sameCid = (mpi_comm_saved_cid[tid] == cids[tid]);
+                bool exclusive = sameCid && cids[tid] < MAX_THREADS &&
+                                 g_coreForeignBinds[cids[tid]] == mpi_comm_saved_fb[tid];
+                if (exclusive && raw > mpi_comm_saved[tid])
                     cores[tid]->pimidRewindCycles(raw - mpi_comm_saved[tid]);
                 mpi_comm_saved[tid] = ~0ull;
             }
