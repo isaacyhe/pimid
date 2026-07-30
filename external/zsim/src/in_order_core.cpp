@@ -116,11 +116,14 @@ void InOrderCore::initStats(AggregateStat* parentStat) {
     coreStat->append(instrsStat);
 
     // In-order pipeline diagnostics (analogous to the OOO core).
-    ProxyStat* uopsStat = new ProxyStat();
-    uopsStat->init("uops", "Retired micro-ops", &uops);
+    /* 1.9.33: ROI-windowed, matching instrs above. */
+    auto zu = [this]() -> uint64_t { return uops - roiBaseUops; };
+    LambdaStat<decltype(zu)>* uopsStat = new LambdaStat<decltype(zu)>(zu);
+    uopsStat->init("uops", "Retired micro-ops");
     coreStat->append(uopsStat);
-    ProxyStat* bblsStat = new ProxyStat();
-    bblsStat->init("bbls", "Basic blocks", &bbls);
+    auto zb = [this]() -> uint64_t { return bbls - roiBaseBbls; };
+    LambdaStat<decltype(zb)>* bblsStat = new LambdaStat<decltype(zb)>(zb);
+    bblsStat->init("bbls", "Basic blocks");
     coreStat->append(bblsStat);
     ProxyStat* decodedBblsStat = new ProxyStat();
     decodedBblsStat->init("decodedBbls", "BBLs run through the decoded in-order scoreboard", &decodedBbls);
@@ -146,11 +149,13 @@ void InOrderCore::initStats(AggregateStat* parentStat) {
     ProxyStat* repDrainedStoresStat = new ProxyStat();
     repDrainedStoresStat->init("repDrainedStores", "Expected rep-string stores drained (block-copy model)", &repDrainedStores);
     coreStat->append(repDrainedStoresStat);
-    ProxyStat* branchesStat = new ProxyStat();
-    branchesStat->init("branches", "Resolved conditional branches fed to the predictor", &branches);
+    auto zbr = [this]() -> uint64_t { return branches - roiBaseBranches; };
+    LambdaStat<decltype(zbr)>* branchesStat = new LambdaStat<decltype(zbr)>(zbr);
+    branchesStat->init("branches", "Resolved conditional branches fed to the predictor");
     coreStat->append(branchesStat);
-    ProxyStat* mispredBranchesStat = new ProxyStat();
-    mispredBranchesStat->init("mispredBranches", "Mispredicted branches", &mispredBranches);
+    auto zm = [this]() -> uint64_t { return mispredBranches - roiBaseMispred; };
+    LambdaStat<decltype(zm)>* mispredBranchesStat = new LambdaStat<decltype(zm)>(zm);
+    mispredBranchesStat->init("mispredBranches", "Mispredicted branches");
     coreStat->append(mispredBranchesStat);
     ProxyStat* mispredStallCyclesStat = new ProxyStat();
     mispredStallCyclesStat->init("mispredStallCycles", "Cycles charged for mispredict flush/refill bubbles", &mispredStallCycles);

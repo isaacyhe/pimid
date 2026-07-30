@@ -72,7 +72,7 @@ OOOCore::OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name) : Core(_
     curCycleIssuedUops = 0;
     branchPc = 0;
 
-    instrs = uops = bbls = approxInstrs = mispredBranches = 0;
+    instrs = uops = bbls = approxInstrs = branches = mispredBranches = 0;
     decodedBbls = syntheticBbls = memMismatchLoads = memMismatchStores = 0;
     repDrainedLoads = repDrainedStores = 0;
     oooDebug = (getenv("PIMID_OOO_DEBUG") != nullptr);
@@ -104,14 +104,23 @@ void OOOCore::initStats(AggregateStat* parentStat) {
     auto z = [this]() -> uint64_t { return instrs - roiBaseInstrs; };
     LambdaStat<decltype(z)>* instrsStat = new LambdaStat<decltype(z)>(z);
     instrsStat->init("instrs", "Simulated instructions");
-    ProxyStat* uopsStat = new ProxyStat();
-    uopsStat->init("uops", "Retired micro-ops", &uops);
-    ProxyStat* bblsStat = new ProxyStat();
-    bblsStat->init("bbls", "Basic blocks", &bbls);
+    /* 1.9.33: ROI-windowed, matching instrs above. These were raw whole-run
+     * ProxyStats while instrs was windowed, so any mix derived from their
+     * ratio divided an ROI numerator by a whole-run denominator. */
+    auto zu = [this]() -> uint64_t { return uops - roiBaseUops; };
+    LambdaStat<decltype(zu)>* uopsStat = new LambdaStat<decltype(zu)>(zu);
+    uopsStat->init("uops", "Retired micro-ops");
+    auto zb = [this]() -> uint64_t { return bbls - roiBaseBbls; };
+    LambdaStat<decltype(zb)>* bblsStat = new LambdaStat<decltype(zb)>(zb);
+    bblsStat->init("bbls", "Basic blocks");
+    auto zbr = [this]() -> uint64_t { return branches - roiBaseBranches; };
+    LambdaStat<decltype(zbr)>* branchesStat = new LambdaStat<decltype(zbr)>(zbr);
+    branchesStat->init("branches", "Resolved branches fed to the predictor");
     ProxyStat* approxInstrsStat = new ProxyStat();
     approxInstrsStat->init("approxInstrs", "Instrs with approx uop decoding", &approxInstrs);
-    ProxyStat* mispredBranchesStat = new ProxyStat();
-    mispredBranchesStat->init("mispredBranches", "Mispredicted branches", &mispredBranches);
+    auto zm = [this]() -> uint64_t { return mispredBranches - roiBaseMispred; };
+    LambdaStat<decltype(zm)>* mispredBranchesStat = new LambdaStat<decltype(zm)>(zm);
+    mispredBranchesStat->init("mispredBranches", "Mispredicted branches");
     ProxyStat* decodedBblsStat = new ProxyStat();
     decodedBblsStat->init("decodedBbls", "BBLs run through the decoded dataflow OOO path", &decodedBbls);
     ProxyStat* syntheticBblsStat = new ProxyStat();
@@ -139,6 +148,11 @@ void OOOCore::initStats(AggregateStat* parentStat) {
     coreStat->append(uopsStat);
     coreStat->append(bblsStat);
     coreStat->append(approxInstrsStat);
+    coreStat->append(branchesStat);   // 1.9.33
+    auto zsi = [this]() -> uint64_t { return syntheticInstrs - roiBaseSyntheticInstrs; };
+    LambdaStat<decltype(zsi)>* synInstrsStat = new LambdaStat<decltype(zsi)>(zsi);
+    synInstrsStat->init("syntheticInstrs", "Of instrs, injected timing charges (not executed code)");
+    coreStat->append(synInstrsStat);
     coreStat->append(mispredBranchesStat);
     coreStat->append(decodedBblsStat);
     coreStat->append(syntheticBblsStat);
@@ -440,6 +454,7 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
         // Applying it implements the stated 1-CPI + memory-latency model.
         curCycle = lastCommitCycle;
         syntheticBbls++;
+        syntheticInstrs += bblInstrs;   // 1.9.33: these are injected CYCLES, not instructions
     }
 
     instrs += bblInstrs;
@@ -478,6 +493,11 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
     uint32_t lineSize = 1 << lineBits;
 
     // Simulate branch prediction
+    /* 1.9.33: count the branch itself, not only the misses. branchPc != 0 is
+     * exactly the core's own test for "this BBL ended in a branch", so this
+     * adds a measured total without touching the predictor call or its
+     * ordering -- predict() is still invoked identically. */
+    if (branchPc) branches++;
     if (branchPc && !branchPred.predict(branchPc, branchTaken)) {
         mispredBranches++;
 

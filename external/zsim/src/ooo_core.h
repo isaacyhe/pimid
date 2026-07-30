@@ -472,7 +472,15 @@ class OOOCore : public Core {
         uint64_t decodeCycle;
         CycleQueue<28> uopQueue;  // models issue queue
 
-        uint64_t instrs, uops, bbls, approxInstrs, mispredBranches;
+        /* 1.9.33: `branches` added. The OOO core ran a predictor but only ever
+         * counted its MISSES, so no total branch count existed and the power
+         * model was left inferring one from the basic-block count. That proxy
+         * assumes a BBL is a multi-instruction block ending in a control
+         * transfer; on this QEMU-fed decode path a BBL averages ~1.09
+         * instructions, so the proxy reported nearly every instruction as a
+         * branch. The predictor already knows when it is looking at a branch --
+         * count it. The in-order core has reported this all along. */
+        uint64_t instrs, uops, bbls, approxInstrs, branches, mispredBranches;
 
         // QEMU-decoded OOO path instrumentation (option B). decodedBbls counts
         // BBLs that ran the real dataflow pipeline (decoded DynUops present);
@@ -480,6 +488,26 @@ class OOOCore : public Core {
         // vs runtime load/store count divergences handled by the tolerant
         // drain. These prove the OOO improvement is decode-driven, not constant.
         uint64_t decodedBbls = 0, syntheticBbls = 0;
+        /* 1.9.33: instructions attributable to SYNTHETIC timing-injection BBLs.
+         *
+         * The plugin charges coherence flush, kernel-launch and barrier latency
+         * by manufacturing a BblInfo whose `instrs` field carries a CYCLE COUNT
+         * (createSimpleBblInfo(cycles, ...)), because the 1-CPI fallback advances
+         * curCycle by bblInstrs. Those cycles then land in `instrs` and are
+         * indistinguishable from executed instructions.
+         *
+         * It is not a rounding error. In a co-simulation ROI the host executes
+         * NO real code -- it prepared its data before roi_begin and then waits
+         * for the device -- so all 32 of its ROI BBLs were synthetic and its
+         * reported instrs of 781,398 was entirely injected cycles, about 24,400
+         * per charge. The power model consumed that as an instruction count.
+         *
+         * Tracked separately rather than removed from `instrs`, because `instrs`
+         * also feeds the reported IPC and the cycle-based gates; changing its
+         * meaning would move published numbers. The power path subtracts this to
+         * recover the real count; the stats keep their existing definition. */
+        uint64_t syntheticInstrs = 0;
+        uint64_t roiBaseSyntheticInstrs = 0;
         uint64_t memMismatchLoads = 0, memMismatchStores = 0;
         // Expected rep-string (movs/stos) accesses drained through the
         // block-copy cost model (DynBbl.repInstrs > 0) -- NOT divergences.
@@ -503,6 +531,18 @@ class OOOCore : public Core {
         // metric (cRec.getUnhaltedCycles(curCycle)). 0 until roi_begin fires.
         uint64_t roiBaseInstrs = 0;
         uint64_t roiBaseCycle  = 0;
+        /* 1.9.33: the ACTIVITY counters need the same ROI baseline that instrs
+         * and cycles already had. Before this they were reported as raw
+         * whole-run totals while instrs was reported ROI-windowed, so any ratio
+         * taken between them divided a region-of-interest numerator by a
+         * whole-run denominator. That is what made the measured instruction mix
+         * nonsensical -- on one co-simulation dump, instrs 52,093 against bbls
+         * 649,332 and uops 4,247,062, implying more basic blocks than
+         * instructions. Same base, same window, or the ratio means nothing. */
+        uint64_t roiBaseUops     = 0;
+        uint64_t roiBaseBbls     = 0;
+        uint64_t roiBaseBranches = 0;
+        uint64_t roiBaseMispred  = 0;
 
 #ifdef OOO_STALL_STATS
         Counter profFetchStalls, profDecodeStalls, profIssueStalls;
@@ -559,7 +599,13 @@ class OOOCore : public Core {
         void cSimEnd() override;
 
         // Snapshot current counters as the ROI baseline (called on roi_begin).
-        void markRoiBegin() override { roiBaseInstrs = instrs; roiBaseCycle = getCycles(); }  // adjusted clock: pre-ROI phantom excluded
+        void markRoiBegin() override {
+            roiBaseInstrs = instrs; roiBaseCycle = getCycles();  // adjusted clock: pre-ROI phantom excluded
+            // 1.9.33: rebase the activity counters on the same window as instrs.
+            roiBaseUops = uops; roiBaseBbls = bbls;
+            roiBaseBranches = branches; roiBaseMispred = mispredBranches;
+            roiBaseSyntheticInstrs = syntheticInstrs;  // 1.9.33
+        }
 
     private:
         inline void load(Address addr);

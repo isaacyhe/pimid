@@ -172,6 +172,14 @@ class InOrderCore : public Core {
         // ONLY the region of interest. roiBaseCycle snapshots the unhalted-cycle
         // metric (cRec.getUnhaltedCycles(curCycle)). 0 until roi_begin fires.
         uint64_t roiBaseInstrs = 0;
+        /* 1.9.33: activity counters share the ROI baseline with instrs. See the
+         * matching note in ooo_core.h -- reporting an ROI-windowed instruction
+         * count next to whole-run activity totals made every derived ratio
+         * meaningless. */
+        uint64_t roiBaseUops     = 0;
+        uint64_t roiBaseBbls     = 0;
+        uint64_t roiBaseBranches = 0;
+        uint64_t roiBaseMispred  = 0;
         uint64_t roiBaseCycle  = 0;
 
     public:
@@ -204,7 +212,11 @@ class InOrderCore : public Core {
         InstrFuncPtrs GetFuncPtrs();
 
         // Snapshot current counters as the ROI baseline (called on roi_begin).
-        void markRoiBegin() override { roiBaseInstrs = instrs; roiBaseCycle = getCycles(); }  // adjusted clock: pre-ROI phantom excluded
+        void markRoiBegin() override {
+            roiBaseInstrs = instrs; roiBaseCycle = getCycles();  // adjusted clock: pre-ROI phantom excluded
+            roiBaseUops = uops; roiBaseBbls = bbls;              // 1.9.33
+            roiBaseBranches = branches; roiBaseMispred = mispredBranches;
+        }
 
         // Virtual type check for use without RTTI (Pin 4.x requires -fno-rtti)
         InOrderCore* asInOrderCore() override { return this; }

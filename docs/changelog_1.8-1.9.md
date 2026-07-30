@@ -7,6 +7,142 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.9.29 -- the power model was fed counts that were absent, misattributed, or on the wrong base
+
+1.9.28 corrected the instruction count that reaches the power model and left everything
+else it consumes untouched. That was not a complete fix; it was one of several, and
+stopping there made another of them worse. This release finishes the work and withdraws
+a claim 1.9.28 should not have made.
+
+### Counters that were never read
+
+The configuration writer names each node's caches after the node, so a host's first-level
+data cache is emitted under a node-prefixed name and its per-core instances likewise. The
+statistics reader matched scope headers against the bare names only, which a prefixed name
+never satisfies. No cache scope was ever entered in system scope, every cache counter
+parsed as zero, and all cache dynamic power in every co-simulation cell was priced at zero
+activity. The device-scope writer emits bare names, so that path parsed correctly and the
+defect stayed invisible there.
+
+The same failure appeared a second time, on the memory side. The device processing-element
+memory interface registers under one name and the reader tested for a different one that
+nothing emits. In device scope those interfaces are the only memory group present, so read
+and write counts parsed as zero and the memory-array energy report showed no dynamic
+energy at all -- while the same dump carried the full read and write traffic in the groups
+the reader had skipped. Published memory energy was not affected: the analysis path reads
+the raw counters out of the log rather than trusting that line.
+
+Both are the shape of the interconnect key mismatch fixed in 1.9.24: a name that changed
+on one side of an interface and not the other, producing zeros that read as an idle
+component rather than as an error. Three instances in one release train is a pattern, and
+a name-contract check between the emitters and the reader is recorded for 1.16.
+
+### Counts that were apportioned rather than measured
+
+Everything the model consumes except the instruction count was still divided between nodes
+in proportion to their CORE COUNTS: cache accesses at every level, memory-controller
+accesses, and the activity counters 1.9.28 had just begun to read. That is not an
+attribution. It is an assumption that every core in the system performed identical work,
+which is precisely false for a host driving a device.
+
+The reader now learns each node's name from the core-group headers it already parses,
+strips that prefix before matching a cache scope, and accumulates every counter into the
+owning node's own set as well as the all-nodes total the device-scope path uses. Each node
+is priced from its own set; where a node reports no counters the previous behaviour is
+kept, so nothing regresses.
+
+Two consequences are worth stating separately. The device is no longer charged for the
+host's memory traffic -- under the old split a many-element device beside a single-core
+host received most of the host's controller accesses, while its own memory is priced by
+the memory model, so it paid for its own memory through one model and most of the host's
+through another. And the host node in the device-scope reporting path is no longer
+fabricated: that block runs whenever the scope is system, which is exactly when measured
+host counters exist, and it derived all of its inputs from fixed divisors of the DEVICE's
+instruction count. A comment promised they would be overridden by real statistics when
+available; no such override existed.
+
+### A base mismatch, and a claim withdrawn
+
+1.9.28 said it had replaced an invented instruction mix -- fixed shares integer,
+floating-point and branch -- with measured counters. It did replace it. What it replaced
+it with was worse, and the release note describing it as an improvement was wrong.
+
+The activity counters and the instruction count were not on the same base. The instruction
+count was reported through the region-of-interest window; micro-ops, basic blocks and
+mispredicted branches were reported as raw whole-run totals. Every ratio formed between
+them divided a region-of-interest numerator by a whole-run denominator, which is why some
+dumps reported more basic blocks than instructions -- an impossibility that should have
+been caught before the counters were used.
+
+Two further problems sat on top. The out-of-order core ran a branch predictor but exported
+only its misses, never a branch total, so the mix was built from the basic-block count on
+the reasoning that a block terminates at a control transfer. That holds for a real
+multi-instruction block; on this decode path a block averages close to a single
+instruction, so the block count is nearly the instruction count and the resulting mix
+described almost every instruction as a branch -- in device scope it saturated, leaving no
+integer and no floating-point operations at all. Separately, the plugin charges coherence
+flush, kernel launch and barrier latency by manufacturing basic blocks whose instruction
+field carries a CYCLE COUNT, and those cycles land in the instruction count
+indistinguishably from executed code.
+
+Fixed by putting the activity counters on the same window as the instruction count in both
+core models; by giving the out-of-order core the branch counter it lacked, incremented
+where the core already tests for a branch so the predictor call and its ordering are
+untouched; and by tracking the injected timing charges separately so the power path can
+subtract them. The reported instruction count keeps its existing definition, because it
+also feeds the reported instructions-per-cycle and the cycle-based gates, and changing its
+meaning would move published numbers.
+
+After the fix the branch rate and micro-ops per instruction are both physical, on
+out-of-order and in-order processing elements alike. In co-simulation the host is shown to
+execute essentially nothing during the offload window, nearly all of its former
+instruction count having been injected timing charges. That is architecturally correct --
+the host prepares its data before the region begins and then waits while the device
+computes -- and it had previously been described to the power model as executing that
+entire count.
+
+Where the counters cannot be reconciled the measured set is refused rather than repaired.
+It is used only when the branch count does not exceed the instruction count and the
+micro-op count is not below it; otherwise the documented fractions are used and the output
+names the offending values. No scale factor was introduced to force agreement, because a
+factor chosen to make a ratio look right is the class of invented constant this train
+exists to remove.
+
+### What this does not establish
+
+The inputs are now measured rather than absent, misattributed, or drawn from a different
+window. That is a correction of inputs, not a validation of the model. McPAT remains
+analytical and unvalidated against silicon here, and the absolute figures should not be
+read as verified. Several specific errors are gone; the confidence interval around the
+result is not thereby known.
+
+### Data impact
+
+All system-scope power and energy from every generation before 1.9.29. Cache dynamic power
+was zero and is now non-zero. Host and device shares of the core, cache and controller
+terms all change. Device-scope memory dynamic energy was reported as absent and is now
+measured. Core power from 1.9.28 onward additionally carried the degenerate mix described
+above and is superseded by this release.
+
+Timing is unaffected on every path. The statistics are read from the output file after the
+simulated process exits, so nothing here can feed back into the simulation, and the core
+changes add counters without altering the predictor call or any scheduling decision. This
+was verified by repeated measurement against the previous release rather than by argument
+alone.
+
+### Still open, recorded rather than fixed here
+
+The controller for every non-DRAM technology is parameterised as though it drove an early
+DDR generation, so the emerging-memory technologies share one interface description that
+describes none of them (1.9.30). The host's own memory-array energy is not modelled
+anywhere: its controller is priced and the memory behind it is not (1.9.31). An ALU
+processing element is priced as a complete in-order core, including an instruction fetch
+unit, branch predictor, caches and a floating-point unit it does not have (1.9.32). Area
+reports zero in both scopes, root-caused to a stale null guard left behind when the power
+computation became subprocess-isolated (1.11). And the reported instruction count for a
+co-simulation host remains contaminated by injected timing charges; only the power path is
+corrected.
+
 ## 1.9.28 -- core power was priced on activity that was absent, invented, and misattributed
 
 The concern that opened this item was that host per-core dynamic power looked

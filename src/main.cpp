@@ -387,19 +387,69 @@ struct ZSimParsedOutput {
     // path (runPowerAnalysis) keeps using `cycles`, so its values are unchanged.
     uint64_t host_wall_cycles = 0;
     uint64_t dev_wall_cycles = 0;
-    /* 1.9.28: per-group instruction totals. `instrs` above is the FIRST core's
-     * count; the per-node power path was splitting that single number across
-     * nodes by CORE-COUNT proportion, so a 1-core host beside a 16-PE device
-     * was credited with 1/17 of its own work while the device was credited
-     * with work it never executed. Each node needs its own measured total. */
-    uint64_t host_instrs = 0;
-    uint64_t dev_instrs = 0;
+    /* 1.9.29: per-node measured counters. Everything below this comment that is
+     * NOT inside `host`/`dev` is an ALL-NODES total, kept for the device-SCOPE
+     * path (runPowerAnalysis), which simulates one node and is correct as-is.
+     *
+     * The system-scope path must NOT use those totals. Before 1.9.29 it split
+     * every one of them across nodes by CORE-COUNT proportion
+     * (node.num_cores / sum(num_cores)), so on a 1-core host beside a 16-PE
+     * device the host was credited with 1/17 of its own work and the device
+     * with work it never executed. 1.9.28 fixed that for the instruction count
+     * alone and left the rest split, which made the host internally
+     * inconsistent: node_instrs was its own 77.5M while uops was 85.9M*0.06 =
+     * 5.2M -- fewer uops than instructions, and a 0.4% branch rate. Each node
+     * needs its OWN measured counters, so they live here as a set. */
+    struct GroupCounters {
+        uint64_t instrs = 0;
+        /* 1.9.33: of `instrs`, the portion that is injected timing charges
+         * (coherence flush, kernel launch, barrier latency) rather than executed
+         * code -- the plugin manufactures those BBLs with the CYCLE COUNT in the
+         * instrs field. In a co-simulation ROI the host executes no real code at
+         * all, so this can be the WHOLE of its reported instruction count. */
+        uint64_t syntheticInstrs = 0;
+        // Core activity. zsim reports these per core; the power model used to
+        // build McPAT's instruction mix from fixed fractions (70% int / 10% fp
+        // / 10% branch / 1% mispredict) applied identically to every workload.
+        uint64_t uops = 0;              // retired micro-ops (OOO path)
+        uint64_t bbls = 0;              // basic blocks -- each ends in a control
+                                        // transfer, so a MEASURED branch proxy
+        uint64_t branches = 0;          // conditional branches resolved
+        uint64_t mispredBranches = 0;   // of those, mispredicted
+        uint64_t indirBranches = 0;     // indirect jmp/call resolutions
+        uint64_t rasReturns = 0;        // returns resolved against the RAS
+
+        uint64_t l1i_fhGETS = 0, l1i_hGETS = 0, l1i_mGETS = 0;
+        uint64_t l1d_fhGETS = 0, l1d_hGETS = 0, l1d_mGETS = 0;
+        uint64_t l1d_fhGETX = 0, l1d_hGETX = 0, l1d_mGETXIM = 0;
+        uint64_t l2_hGETS = 0, l2_mGETS = 0, l2_hGETX = 0, l2_mGETXIM = 0;
+        uint64_t l3_hGETS = 0, l3_mGETS = 0, l3_hGETX = 0, l3_mGETXIM = 0;
+        uint64_t mem_rd = 0, mem_wr = 0;
+
+        uint64_t l1i_total_reads() const { return l1i_fhGETS + l1i_hGETS + l1i_mGETS; }
+        uint64_t l1d_total_reads() const { return l1d_fhGETS + l1d_hGETS + l1d_mGETS; }
+        uint64_t l1d_total_writes() const { return l1d_fhGETX + l1d_hGETX + l1d_mGETXIM; }
+        uint64_t l2_total_reads() const { return l2_hGETS + l2_mGETS; }
+        uint64_t l2_total_writes() const { return l2_hGETX + l2_mGETXIM; }
+        uint64_t l3_total_reads() const { return l3_hGETS + l3_mGETS; }
+        uint64_t l3_total_writes() const { return l3_hGETX + l3_mGETXIM; }
+        // True when this group carried any measured work at all. A node with no
+        // activity must fall back rather than be priced at zero.
+        bool has_activity() const { return real_instrs() > 0 || uops > 0; }
+        /* Executed instructions, with injected timing charges removed. */
+        uint64_t real_instrs() const {
+            return (instrs > syntheticInstrs) ? (instrs - syntheticInstrs) : 0;
+        }
+    };
+    GroupCounters host;
+    GroupCounters dev;
     /* 1.9.28 measured core activity. The power model previously built McPAT's
      * instruction mix from fixed fractions of the instruction count (70% int,
      * 10% fp, 10% branch) for every workload, so per-core dynamic power was
      * driven by a constant rather than by what the program executed. zsim
      * already reports these; they were simply never parsed. Zero means the
      * counter was absent, and the caller falls back to the old fractions. */
+    uint64_t syntheticInstrs = 0;   // 1.9.33: injected timing charges inside instrs
     uint64_t uops = 0;              // retired micro-ops (OOO path)
     uint64_t bbls = 0;              // basic blocks -- each ends in a control transfer,
                                     // so this is a MEASURED branch-count proxy
@@ -485,6 +535,21 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
     CoreGroup core_group = CoreGroup::NONE;
     uint64_t cur_core_cycles = 0;  // last "cycles:" seen in the current core block
 
+    /* 1.9.29: which node owns the cache scope we are inside. Caches sit in their
+     * own top-level groups, not nested under the core group, so `core_group`
+     * cannot answer this -- it needs its own tracker. */
+    CoreGroup cache_group = CoreGroup::NONE;
+
+    /* 1.9.29: learn the node names instead of hardcoding them. The config writer
+     * emits core groups as "<node.name>_cores" for the host and "<node.name>_pes"
+     * for a device (see the system-scope cfg writer), and caches as
+     * "<node.name>_l1d" / "_l1i" / "_l2" / "_l3". Those cache groups appear AFTER
+     * the core groups in the dump, so by the time a cache header is read the
+     * names are known and the cache can be attributed to the right node without
+     * assuming any particular name. */
+    std::string host_node_name;
+    std::string dev_node_name;
+
     auto extractScalarValue = [](const std::string& line) -> uint64_t {
         // Format: " statname: value # description"
         auto colon = line.find(':');
@@ -549,32 +614,122 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
         // These are NOT cache scopes; core scalars are read at ROOT scope, so we only
         // tag which group's cores we are currently traversing.
         if (is_aggregate) {
-            if (key.substr(0, 10) == "host_cores") { core_group = CoreGroup::HOST; }
-            else if (key.substr(0, 10) == "device_pes") { core_group = CoreGroup::DEVICE; }
+            /* 1.9.29: match the "<name>_cores" / "<name>_pes" convention rather
+             * than the literal names, and record the node name so the cache
+             * groups below can be attributed to the same node. Headers appear
+             * both bare ("host_cores") and per-instance ("host_cores-0"), so
+             * compare against the part before any "-N" suffix. */
+            std::string base = key.substr(0, key.find('-'));
+            auto endsWith = [](const std::string& s, const std::string& suf) {
+                return s.size() > suf.size() &&
+                       s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+            };
+            if (endsWith(base, "_cores")) {
+                core_group = CoreGroup::HOST;
+                host_node_name = base.substr(0, base.size() - 6);
+            } else if (endsWith(base, "_pes")) {
+                core_group = CoreGroup::DEVICE;
+                dev_node_name = base.substr(0, base.size() - 4);
+            } else if (key.substr(0, 10) == "host_cores") {
+                core_group = CoreGroup::HOST;
+                host_node_name = "host";
+            } else if (key.substr(0, 10) == "device_pes") {
+                core_group = CoreGroup::DEVICE;
+                dev_node_name = "device";
+            }
         }
 
         // Scope detection: match "l1d-N:", "l1i-N:", "l2-N:", "mem-N:" aggregate headers
         if (is_aggregate) {
-            if (key.substr(0, 4) == "l1d-" || key.substr(0, 4) == "l1d_") {
+            /* 1.9.29: strip an optional "<node>_" prefix before matching, and
+             * remember which node it named.
+             *
+             * The system-scope config writer emits caches as "<node.name>_l1d",
+             * so a co-sim dump carries "host_l1d-0" and friends. The pre-1.9.29
+             * matcher tested the RAW key against "l1d-"/"l1i-"/"l2-"/"l3-",
+             * which a prefixed name never satisfies -- so in system scope no
+             * cache scope was ever entered, every cache counter parsed as zero,
+             * and all cache dynamic power was priced at zero activity. The
+             * device-scope writer emits bare "l1d", which is why that path was
+             * unaffected and the defect stayed invisible. Same failure mode as
+             * the 1.9.24 Garnet key-prefix mismatch. */
+            std::string ck = key;
+            std::string node_prefix;
+            {
+                size_t us = ck.rfind('_');
+                if (us != std::string::npos && us + 1 < ck.size()) {
+                    std::string tail = ck.substr(us + 1);
+                    if (tail.compare(0, 3, "l1d") == 0 || tail.compare(0, 3, "l1i") == 0 ||
+                        tail.compare(0, 2, "l2") == 0  || tail.compare(0, 2, "l3") == 0) {
+                        node_prefix = ck.substr(0, us);
+                        ck = tail;
+                    }
+                }
+            }
+            // Attribute by the learned node names; an unprefixed cache (the
+            // device-scope single-node dump) stays ungrouped and feeds only the
+            // all-nodes totals, exactly as before.
+            CoreGroup cg = CoreGroup::NONE;
+            if (!node_prefix.empty()) {
+                if (!host_node_name.empty() && node_prefix == host_node_name) cg = CoreGroup::HOST;
+                else if (!dev_node_name.empty() && node_prefix == dev_node_name) cg = CoreGroup::DEVICE;
+                else if (node_prefix == "host") cg = CoreGroup::HOST;
+                else cg = CoreGroup::DEVICE;
+            }
+            auto isScope = [&ck](const char* n, size_t len) {
+                // matches "l1d", "l1d-0", "l1d_0"
+                if (ck.compare(0, len, n) != 0) return false;
+                return ck.size() == len || ck[len] == '-' || ck[len] == '_';
+            };
+            if (isScope("l1d", 3)) {
                 scope = Scope::L1D;
                 scope_indent = indent;
+                cache_group = cg;
                 continue;
-            } else if (key.substr(0, 4) == "l1i-" || key.substr(0, 4) == "l1i_") {
+            } else if (isScope("l1i", 3)) {
                 scope = Scope::L1I;
                 scope_indent = indent;
+                cache_group = cg;
                 continue;
-            } else if (key.substr(0, 3) == "l2-" || key.substr(0, 3) == "l2_") {
+            } else if (isScope("l2", 2)) {
                 scope = Scope::L2;
                 scope_indent = indent;
+                cache_group = cg;
                 continue;
-            } else if (key.substr(0, 3) == "l3-" || key.substr(0, 3) == "l3_") {
+            } else if (isScope("l3", 2)) {
                 scope = Scope::L3;
                 scope_indent = indent;
+                cache_group = cg;
                 continue;
             } else if (key.substr(0, 4) == "mem-" || key.substr(0, 4) == "mem_"
-                       || key.substr(0, 6) == "pe-mc-") {
+                       || key.substr(0, 6) == "pe-mc-" || key.substr(0, 6) == "pe-mi-") {
                 scope = Scope::MEM;
                 scope_indent = indent;
+                /* 1.9.29: accept "pe-mi-" -- the name the simulator actually emits.
+                 *
+                 * The device PE-side controller is registered as "pe-mi-<N>"
+                 * ("PE memory interface", external/zsim/src/init.cpp), but this
+                 * matcher only ever tested for "pe-mc-", which nothing emits. In
+                 * DEVICE scope the PE-MIs are the ONLY memory group in the dump,
+                 * so mem_rd/mem_wr parsed as zero and the simulator's own DRAM
+                 * energy report printed "Total dynamic: 0.0 mJ" on every fig2 and
+                 * fig3 cell -- while the same log carried 7.4M reads and 744M
+                 * writes in its pe-mi-N groups. The published DRAM energy was not
+                 * affected: the analysis scripts grep the raw rd:/wr: lines out of
+                 * the log rather than trusting this value.
+                 *
+                 * Third instance of one interface naming a thing differently on
+                 * each side (1.9.24 Garnet dotted keys, 1.9.29 node-prefixed cache
+                 * groups, this). A name-contract check between the emitters and
+                 * this reader belongs in 1.16 (#96).
+                 *
+                 * Attribution: the host controller is "mem-N"; the device PE-side
+                 * interface is "pe-mi-N"/"pe-mc-N". In CO-SIM the PE-MIs are not
+                 * registered at all (init.cpp clears them, leaving the host's
+                 * "mem-N"), so this correctly charges co-sim "mem-N" to the host. */
+                bool device_mi = (key.substr(0, 6) == "pe-mc-" ||
+                                  key.substr(0, 6) == "pe-mi-");
+                cache_group = device_mi ? CoreGroup::DEVICE : CoreGroup::HOST;
                 continue;
             }
         }
@@ -583,21 +738,41 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
         if (!is_aggregate) {
             uint64_t val = extractScalarValue(line);
 
+            /* 1.9.29: the group whose counters this line belongs to, or null when
+             * the dump is a single-node (device-scope) one, where only the
+             * all-nodes totals are used. */
+            ZSimParsedOutput::GroupCounters* grp =
+                (core_group == CoreGroup::HOST)   ? &out.host :
+                (core_group == CoreGroup::DEVICE) ? &out.dev  : nullptr;
+            ZSimParsedOutput::GroupCounters* cgrp =
+                (cache_group == CoreGroup::HOST)   ? &out.host :
+                (cache_group == CoreGroup::DEVICE) ? &out.dev  : nullptr;
+
             // Top-level stats
             if (scope == Scope::NONE || scope == Scope::ROOT) {
                 if (key == "cycles" && out.cycles == 0) out.cycles = val;
                 else if (key == "instrs" && out.instrs == 0) out.instrs = val;
                 /* 1.9.28: accumulate per group as well as the legacy first-core value */
                 if (key == "instrs") {
-                    if (core_group == CoreGroup::HOST) out.host_instrs += val;
-                    else if (core_group == CoreGroup::DEVICE) out.dev_instrs += val;
+                    if (grp) grp->instrs += val;
                 }
-                /* 1.9.28: accumulate measured activity across cores. */
-                else if (key == "uops") out.uops += val;
-                else if (key == "bbls") out.bbls += val;
-                else if (key == "mispredBranches") out.mispredBranches += val;
-                else if (key == "indirBranches") out.indirBranches += val;
-                else if (key == "rasReturns") out.rasReturns += val;
+                /* 1.9.28: accumulate measured activity across cores.
+                 * 1.9.29: and per node -- the all-nodes totals below cannot be
+                 * split by core-count proportion without making each node's mix
+                 * inconsistent with its own instruction count. */
+                else if (key == "syntheticInstrs") {
+                    out.syntheticInstrs += val; if (grp) grp->syntheticInstrs += val;
+                }
+                else if (key == "uops") { out.uops += val; if (grp) grp->uops += val; }
+                else if (key == "bbls") { out.bbls += val; if (grp) grp->bbls += val; }
+                else if (key == "branches") { out.branches += val; if (grp) grp->branches += val; }
+                else if (key == "mispredBranches") {
+                    out.mispredBranches += val; if (grp) grp->mispredBranches += val;
+                } else if (key == "indirBranches") {
+                    out.indirBranches += val; if (grp) grp->indirBranches += val;
+                } else if (key == "rasReturns") {
+                    out.rasReturns += val; if (grp) grp->rasReturns += val;
+                }
 
                 // 1.9.10: contention-inclusive per-group wall-clock cycles.
                 if (key == "cycles") {
@@ -614,39 +789,44 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
                 }
             }
 
+            /* Each cache/MC counter feeds BOTH the all-nodes total (used by the
+             * device-scope path) and the owning node's own set (1.9.29, used by
+             * the system-scope path). `cgrp` is null for an unprefixed cache, so
+             * a single-node dump behaves exactly as it did before. */
+
             // L1D scope
             if (scope == Scope::L1D) {
-                if (key == "fhGETS") out.l1d_fhGETS += val;
-                else if (key == "hGETS") out.l1d_hGETS += val;
-                else if (key == "mGETS") out.l1d_mGETS += val;
-                else if (key == "fhGETX") out.l1d_fhGETX += val;
-                else if (key == "hGETX") out.l1d_hGETX += val;
-                else if (key == "mGETXIM") out.l1d_mGETXIM += val;
+                if (key == "fhGETS") { out.l1d_fhGETS += val; if (cgrp) cgrp->l1d_fhGETS += val; }
+                else if (key == "hGETS") { out.l1d_hGETS += val; if (cgrp) cgrp->l1d_hGETS += val; }
+                else if (key == "mGETS") { out.l1d_mGETS += val; if (cgrp) cgrp->l1d_mGETS += val; }
+                else if (key == "fhGETX") { out.l1d_fhGETX += val; if (cgrp) cgrp->l1d_fhGETX += val; }
+                else if (key == "hGETX") { out.l1d_hGETX += val; if (cgrp) cgrp->l1d_hGETX += val; }
+                else if (key == "mGETXIM") { out.l1d_mGETXIM += val; if (cgrp) cgrp->l1d_mGETXIM += val; }
             }
 
             // L1I scope
             if (scope == Scope::L1I) {
-                if (key == "fhGETS") out.l1i_fhGETS += val;
-                else if (key == "hGETS") out.l1i_hGETS += val;
-                else if (key == "mGETS") out.l1i_mGETS += val;
+                if (key == "fhGETS") { out.l1i_fhGETS += val; if (cgrp) cgrp->l1i_fhGETS += val; }
+                else if (key == "hGETS") { out.l1i_hGETS += val; if (cgrp) cgrp->l1i_hGETS += val; }
+                else if (key == "mGETS") { out.l1i_mGETS += val; if (cgrp) cgrp->l1i_mGETS += val; }
             }
 
             // L2 scope
             if (scope == Scope::L2) {
-                if (key == "hGETS") out.l2_hGETS += val;
-                else if (key == "mGETS") out.l2_mGETS += val;
-                else if (key == "hGETX") out.l2_hGETX += val;
-                else if (key == "mGETXIM") out.l2_mGETXIM += val;
+                if (key == "hGETS") { out.l2_hGETS += val; if (cgrp) cgrp->l2_hGETS += val; }
+                else if (key == "mGETS") { out.l2_mGETS += val; if (cgrp) cgrp->l2_mGETS += val; }
+                else if (key == "hGETX") { out.l2_hGETX += val; if (cgrp) cgrp->l2_hGETX += val; }
+                else if (key == "mGETXIM") { out.l2_mGETXIM += val; if (cgrp) cgrp->l2_mGETXIM += val; }
                 else if (key == "PUTS") out.l2_PUTS += val;
                 else if (key == "PUTX") out.l2_PUTX += val;
             }
 
             // L3 scope
             if (scope == Scope::L3) {
-                if (key == "hGETS") out.l3_hGETS += val;
-                else if (key == "mGETS") out.l3_mGETS += val;
-                else if (key == "hGETX") out.l3_hGETX += val;
-                else if (key == "mGETXIM") out.l3_mGETXIM += val;
+                if (key == "hGETS") { out.l3_hGETS += val; if (cgrp) cgrp->l3_hGETS += val; }
+                else if (key == "mGETS") { out.l3_mGETS += val; if (cgrp) cgrp->l3_mGETS += val; }
+                else if (key == "hGETX") { out.l3_hGETX += val; if (cgrp) cgrp->l3_hGETX += val; }
+                else if (key == "mGETXIM") { out.l3_mGETXIM += val; if (cgrp) cgrp->l3_mGETXIM += val; }
             }
 
             // Memory controller scope. Both the host MC and the PE-MC export
@@ -655,8 +835,8 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
             // added on top -- that double-counted reads and priced remote
             // accesses as writes.
             if (scope == Scope::MEM) {
-                if (key == "rd") out.mem_rd += val;
-                else if (key == "wr") out.mem_wr += val;
+                if (key == "rd") { out.mem_rd += val; if (cgrp) cgrp->mem_rd += val; }
+                else if (key == "wr") { out.mem_wr += val; if (cgrp) cgrp->mem_wr += val; }
             }
         }
     }
@@ -3718,7 +3898,25 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     if (cycles == 0) cycles = 1;
     mcpat.setTotalCycles(cycles);
     mcpat.setBusyCycles(cycles);
+    /* 1.9.33: subtract injected timing charges -- see the parser note. */
+    if (zsim_stats.syntheticInstrs > 0 && instrs > zsim_stats.syntheticInstrs)
+        instrs -= zsim_stats.syntheticInstrs;
     mcpat.setTotalInstructions(instrs);
+    /* 1.9.29: measured instruction mix on the DEVICE-SCOPE path too.
+     *
+     * 1.9.28 wired the measured micro-op, basic-block and mispredict counters
+     * into the system-scope paths and left this one supplying only the count,
+     * so the mix here was still the invented 70% integer / 10% floating-point
+     * / 10% branch / 1% mispredict applied identically to every workload. This
+     * is the path behind the device-only sweeps, so that assumed mix reached
+     * far more cells than the co-simulation one did.
+     *
+     * The all-nodes totals ARE this node's totals here: device scope simulates
+     * a single node. Zero counters (an ALU processing element reports no
+     * micro-ops) fall back to the fractions inside the wrapper, which is the
+     * honest choice when the core model genuinely does not track them. */
+    mcpat.setMeasuredCoreActivity(zsim_stats.uops, zsim_stats.branches,
+                                  zsim_stats.mispredBranches);
 
     // Split cache stats from ZSim
     mcpat.setL1IAccesses(zsim_stats.l1i_total_reads(), zsim_stats.l1i_mGETS);
@@ -3878,17 +4076,54 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         host_mcpat.setDeviceProfile(McPAT::DeviceProfile::HOST_OOO);
         host_mcpat.initialize();
 
-        // Use actual ZSim stats when available (from host ZSim run), else estimate
-        host_mcpat.setTotalCycles(cycles);
-        host_mcpat.setBusyCycles(cycles / 10);  // host mostly waiting
-        host_mcpat.setTotalInstructions(instrs / 10);
-
-        // Minimal host cache activity (will be overridden by real stats when available)
-        host_mcpat.setL1IAccesses(instrs / 10, instrs / 100);
-        host_mcpat.setL1DAccesses(instrs / 20, instrs / 40, instrs / 200, instrs / 400);
-        host_mcpat.setL2Accesses(instrs / 200, instrs / 400, instrs / 2000, instrs / 4000);
-        host_mcpat.setL3Accesses(instrs / 2000, instrs / 4000, instrs / 20000, instrs / 40000);
-        host_mcpat.setMemControllerAccesses(instrs / 20000, instrs / 40000);
+        /* 1.9.29: price the host from ITS OWN measured counters.
+         *
+         * This block is reached whenever scope == "system", i.e. exactly when a
+         * co-simulation dump DOES carry measured host stats -- and it ignored
+         * them, deriving all nine inputs from fixed divisors of the DEVICE's
+         * instruction count: busy = cycles/10 ("host mostly waiting"),
+         * instructions = instrs/10, L1I = instrs/10, L1D = instrs/20, L2 =
+         * instrs/200, L3 = instrs/2000, MC = instrs/20000. None of those ratios
+         * was measured, and the comment "will be overridden by real stats when
+         * available" described an override that did not exist. The estimate is
+         * kept only for the case where no host counters were parsed, and it now
+         * says so in the output rather than presenting itself as measurement. */
+        const auto& hgrp = zsim_stats.host;
+        const bool host_measured = hgrp.has_activity();
+        if (host_measured) {
+            uint64_t host_cycles = (zsim_stats.host_wall_cycles > 0)
+                                 ? zsim_stats.host_wall_cycles : cycles;
+            host_mcpat.setTotalCycles(host_cycles);
+            host_mcpat.setBusyCycles(host_cycles);
+            host_mcpat.setTotalInstructions(hgrp.real_instrs());   // 1.9.33
+            host_mcpat.setL1IAccesses(hgrp.l1i_total_reads(), hgrp.l1i_mGETS);
+            host_mcpat.setL1DAccesses(hgrp.l1d_total_reads(), hgrp.l1d_total_writes(),
+                                      hgrp.l1d_mGETS, hgrp.l1d_mGETXIM);
+            host_mcpat.setL2Accesses(hgrp.l2_total_reads(), hgrp.l2_total_writes(),
+                                     hgrp.l2_mGETS, hgrp.l2_mGETXIM);
+            host_mcpat.setL3Accesses(hgrp.l3_total_reads(), hgrp.l3_total_writes(),
+                                     hgrp.l3_mGETS, hgrp.l3_mGETXIM);
+            host_mcpat.setMemControllerAccesses(hgrp.mem_rd, hgrp.mem_wr);
+            host_mcpat.setMeasuredCoreActivity(hgrp.uops, hgrp.branches,
+                                               hgrp.mispredBranches);
+            std::cout << "  [Activity] host: measured -- instrs=" << hgrp.instrs
+                      << " cycles=" << host_cycles
+                      << " uops=" << hgrp.uops
+                      << " l1d=" << (hgrp.l1d_total_reads() + hgrp.l1d_total_writes())
+                      << " mem=" << (hgrp.mem_rd + hgrp.mem_wr) << std::endl;
+        } else {
+            host_mcpat.setTotalCycles(cycles);
+            host_mcpat.setBusyCycles(cycles / 10);
+            host_mcpat.setTotalInstructions(instrs / 10);
+            host_mcpat.setL1IAccesses(instrs / 10, instrs / 100);
+            host_mcpat.setL1DAccesses(instrs / 20, instrs / 40, instrs / 200, instrs / 400);
+            host_mcpat.setL2Accesses(instrs / 200, instrs / 400, instrs / 2000, instrs / 4000);
+            host_mcpat.setL3Accesses(instrs / 2000, instrs / 4000, instrs / 20000, instrs / 40000);
+            host_mcpat.setMemControllerAccesses(instrs / 20000, instrs / 40000);
+            std::cout << "  [Activity] host: NOT MEASURED -- fixed ratios of the "
+                         "device instruction count (estimate, not a measurement)"
+                      << std::endl;
+        }
         host_mcpat.setMCTechParams(getMCTechParamsForMcPAT(config.host_memory_tech, 1));
 
         // PCIe for host-device transfers (configurable via power.pcie YAML)
@@ -4456,18 +4691,32 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
             } else {
                 node_cycles = static_cast<uint64_t>(total_cycles * core_frac);
             }
-            /* 1.9.28: use THIS node's measured instruction count. The old
-             * core-fraction split of a single core's total misattributed work
-             * between host and device (see the parser note). Fall back to the
-             * legacy split only if the grouped totals are unavailable. */
-            uint64_t node_instrs;
-            {
-                uint64_t grouped = (node.role == UnifiedConfig::SystemNode::HOST)
-                                 ? zsim_stats.host_instrs : zsim_stats.dev_instrs;
-                node_instrs = (grouped > 0)
-                            ? grouped
-                            : static_cast<uint64_t>(total_instrs * core_frac);
-            }
+            /* 1.9.29: feed McPAT THIS node's own measured counters.
+             *
+             * Everything below used to be the all-nodes total scaled by
+             * `core_frac` (this node's core count over the system's). That is
+             * not an attribution -- it is an assumption that every core in the
+             * system did identical work, which is exactly false for a co-sim
+             * host driving a device. 1.9.28 replaced the split for the
+             * instruction count alone and left the rest, which made each node
+             * internally inconsistent (host: 77.5M instrs against 5.2M uops).
+             *
+             * `grp` is the node's measured set. It is null, or empty, when the
+             * dump carries no per-node breakdown (a single-node run, or an old
+             * stats file); in that case fall back to the previous core_frac
+             * behaviour so nothing regresses. */
+            const ZSimParsedOutput::GroupCounters* grp =
+                (node.role == UnifiedConfig::SystemNode::HOST) ? &zsim_stats.host
+                                                               : &zsim_stats.dev;
+            const bool have_grp = grp->has_activity();
+            // Scale factor for the fallback path only.
+            const double fb = core_frac;
+
+            /* 1.9.33: executed instructions only. grp->instrs still carries the
+             * injected timing charges the plugin encodes in that field. */
+            uint64_t node_instrs = have_grp
+                                 ? grp->real_instrs()
+                                 : static_cast<uint64_t>(total_instrs * fb);
             if (node_cycles == 0) node_cycles = 1;
             if (node_instrs == 0) node_instrs = 1;
 
@@ -4481,42 +4730,65 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
              * (co-simulation) cell, which is why per-core dynamic looked
              * implausibly low. The device-scope path always supplied it. */
             mcpat.setTotalInstructions(node_instrs);
-            mcpat.setTotalInstructions(node_instrs);
 
-            // Distribute cache stats proportionally
-            mcpat.setL1IAccesses(
-                static_cast<uint64_t>(zsim_stats.l1i_total_reads() * core_frac),
-                static_cast<uint64_t>(zsim_stats.l1i_mGETS * core_frac));
-            mcpat.setL1DAccesses(
-                static_cast<uint64_t>(zsim_stats.l1d_total_reads() * core_frac),
-                static_cast<uint64_t>(zsim_stats.l1d_total_writes() * core_frac),
-                static_cast<uint64_t>(zsim_stats.l1d_mGETS * core_frac),
-                static_cast<uint64_t>(zsim_stats.l1d_mGETXIM * core_frac));
-            mcpat.setL2Accesses(
-                static_cast<uint64_t>(zsim_stats.l2_total_reads() * core_frac),
-                static_cast<uint64_t>(zsim_stats.l2_total_writes() * core_frac),
-                static_cast<uint64_t>(zsim_stats.l2_mGETS * core_frac),
-                static_cast<uint64_t>(zsim_stats.l2_mGETXIM * core_frac));
-            mcpat.setL3Accesses(
-                static_cast<uint64_t>(zsim_stats.l3_total_reads() * core_frac),
-                static_cast<uint64_t>(zsim_stats.l3_total_writes() * core_frac),
-                static_cast<uint64_t>(zsim_stats.l3_mGETS * core_frac),
-                static_cast<uint64_t>(zsim_stats.l3_mGETXIM * core_frac));
-
-            mcpat.setMemControllerAccesses(
-                static_cast<uint64_t>(zsim_stats.mem_rd * core_frac),
-                static_cast<uint64_t>(zsim_stats.mem_wr * core_frac));
-            /* 1.9.28: measured core activity instead of fixed instruction-mix
-             * fractions. Zero counters fall back to the previous behaviour. */
-            mcpat.setMeasuredCoreActivity(
-                static_cast<uint64_t>(zsim_stats.uops * core_frac),
-                static_cast<uint64_t>(zsim_stats.bbls * core_frac),
-                static_cast<uint64_t>(zsim_stats.mispredBranches * core_frac));
+            /* Cache accesses. Before 1.9.29 these ALSO parsed as zero in system
+             * scope -- the cache stat groups are named "<node>_l1d" and the
+             * parser matched bare "l1d-", so no cache scope was ever entered
+             * and all cache dynamic power was priced at zero activity. Both the
+             * parse and the attribution are fixed; see the parser note. */
+            if (have_grp) {
+                mcpat.setL1IAccesses(grp->l1i_total_reads(), grp->l1i_mGETS);
+                mcpat.setL1DAccesses(grp->l1d_total_reads(), grp->l1d_total_writes(),
+                                     grp->l1d_mGETS, grp->l1d_mGETXIM);
+                mcpat.setL2Accesses(grp->l2_total_reads(), grp->l2_total_writes(),
+                                    grp->l2_mGETS, grp->l2_mGETXIM);
+                mcpat.setL3Accesses(grp->l3_total_reads(), grp->l3_total_writes(),
+                                    grp->l3_mGETS, grp->l3_mGETXIM);
+                mcpat.setMemControllerAccesses(grp->mem_rd, grp->mem_wr);
+                /* 1.9.28: measured core activity instead of fixed instruction-mix
+                 * fractions. 1.9.29: this node's own, so the mix is consistent
+                 * with the instruction count it describes. */
+                mcpat.setMeasuredCoreActivity(grp->uops, grp->branches,
+                                              grp->mispredBranches);
+            } else {
+                mcpat.setL1IAccesses(
+                    static_cast<uint64_t>(zsim_stats.l1i_total_reads() * fb),
+                    static_cast<uint64_t>(zsim_stats.l1i_mGETS * fb));
+                mcpat.setL1DAccesses(
+                    static_cast<uint64_t>(zsim_stats.l1d_total_reads() * fb),
+                    static_cast<uint64_t>(zsim_stats.l1d_total_writes() * fb),
+                    static_cast<uint64_t>(zsim_stats.l1d_mGETS * fb),
+                    static_cast<uint64_t>(zsim_stats.l1d_mGETXIM * fb));
+                mcpat.setL2Accesses(
+                    static_cast<uint64_t>(zsim_stats.l2_total_reads() * fb),
+                    static_cast<uint64_t>(zsim_stats.l2_total_writes() * fb),
+                    static_cast<uint64_t>(zsim_stats.l2_mGETS * fb),
+                    static_cast<uint64_t>(zsim_stats.l2_mGETXIM * fb));
+                mcpat.setL3Accesses(
+                    static_cast<uint64_t>(zsim_stats.l3_total_reads() * fb),
+                    static_cast<uint64_t>(zsim_stats.l3_total_writes() * fb),
+                    static_cast<uint64_t>(zsim_stats.l3_mGETS * fb),
+                    static_cast<uint64_t>(zsim_stats.l3_mGETXIM * fb));
+                mcpat.setMemControllerAccesses(
+                    static_cast<uint64_t>(zsim_stats.mem_rd * fb),
+                    static_cast<uint64_t>(zsim_stats.mem_wr * fb));
+                mcpat.setMeasuredCoreActivity(
+                    static_cast<uint64_t>(zsim_stats.uops * fb),
+                    static_cast<uint64_t>(zsim_stats.branches * fb),
+                    static_cast<uint64_t>(zsim_stats.mispredBranches * fb));
+            }
             std::cout << "  [Activity] " << node.name
                       << ": instrs=" << node_instrs
+                      << " (synth=" << (have_grp ? grp->syntheticInstrs : 0) << ")"
                       << " cycles=" << node_cycles
-                      << (zsim_stats.bbls > 0 ? "  (measured mix)"
-                                              : "  (fixed mix -- counters absent)")
+                      << " uops=" << (have_grp ? grp->uops : 0)
+                      << " l1d=" << (have_grp ? grp->l1d_total_reads() +
+                                                grp->l1d_total_writes() : 0)
+                      << " l2=" << (have_grp ? grp->l2_total_reads() +
+                                               grp->l2_total_writes() : 0)
+                      << " mem=" << (have_grp ? grp->mem_rd + grp->mem_wr : 0)
+                      << (have_grp ? "  (measured, per-node)"
+                                   : "  (core-fraction fallback -- no per-node counters)")
                       << std::endl;
             mcpat.setMCTechParams(getMCTechParamsForMcPAT(node.memory_tech, 1));
 

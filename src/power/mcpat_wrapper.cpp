@@ -966,16 +966,61 @@ std::string McPATWrapper::generateXMLConfig() const {
             : 0.0;
 
         xml << "      <stat name=\"total_instructions\" value=\"" << inst_per_core << "\"/>\n";
-        /* 1.9.28: prefer MEASURED activity. Branch count comes from the basic
-         * block count -- a BBL terminates at a control transfer, so it is a
-         * measured proxy rather than a fixed share of the instruction stream.
+        /* 1.9.28: prefer MEASURED activity.
+         *
+         * 1.9.33: the branch count is now the simulator's OWN branch counter,
+         * not the basic-block count. 1.9.28 used bbls on the reasoning that a
+         * BBL terminates at a control transfer -- true for a real
+         * multi-instruction basic block, but on this QEMU-fed decode path a BBL
+         * averages ~1.09 instructions, so bbls ~= instrs and the "measured"
+         * branch rate came out at 91.5%. The in-order core always exported a
+         * real `branches` counter; the OOO core ran a predictor but exported
+         * only its MISSES, so 1.9.33 added the total there too. Both cores now
+         * report it, and both report it ROI-windowed like instrs.
          * The integer/floating split is still an assumption (zsim does not
          * classify retired ops), but it is now applied to the NON-branch
          * remainder instead of to the whole stream, so a branch-heavy workload
-         * is no longer forced to the same mix as a floating-point one. */
-        uint64_t br_per_core = (meas_branches_ > 0)
+         * is no longer forced to the same mix as a floating-point one.
+         *
+         * 1.9.29 CORRECTION -- 1.9.28 SHIPPED THIS WITHOUT CHECKING THE BASES.
+         * The activity counters and the instruction count are NOT on the same
+         * base. Measured on a co-simulation dump: instrs 52,093 against uops
+         * 4,247,062, bbls 649,332 and branches 580,744 -- every activity counter
+         * is 10-80x the instruction count it is supposed to be a fraction of.
+         * The consequence was a degenerate mix: the co-simulation host was
+         * described to the power model as 91.5% branches, and the device-scope
+         * path (added in 1.9.29) hit the clamp below and was described as 100%
+         * branches with zero integer and zero floating-point operations. That is
+         * worse than the fixed fractions it replaced -- 1.9.28 exchanged an
+         * invented-but-plausible mix for a measured-but-impossible one, and the
+         * A/B did not catch it because a degenerate mix barely moves the total.
+         *
+         * WHY THIS IS A GATE AND NOT A CORRECTION: the reason instrs sits on a
+         * different base is not yet understood, and scaling it by a factor
+         * chosen to make the ratio look right would be exactly the class of
+         * invented constant this release train exists to remove. So the measured
+         * set is used ONLY when it is self-consistent, and otherwise the
+         * documented fractions are used and the output says so. */
+        const bool meas_self_consistent =
+            (meas_branches_ > 0) &&
+            /* branches cannot exceed instructions retired */
+            (meas_branches_ / std::max(1, config_.num_cores) <= inst_per_core) &&
+            /* every instruction decodes to at least one micro-op */
+            (meas_uops_ == 0 ||
+             meas_uops_ / std::max(1, config_.num_cores) >= inst_per_core);
+
+        uint64_t br_per_core = meas_self_consistent
             ? meas_branches_ / std::max(1, config_.num_cores)
             : inst_per_core * 10 / 100;
+        if (!meas_self_consistent && meas_branches_ > 0 && !warned_mix_) {
+            warned_mix_ = true;
+            std::cout << "  [Activity] WARNING: measured instruction mix rejected as "
+                         "inconsistent (instrs/core=" << inst_per_core
+                      << " branches/core=" << (meas_branches_ / std::max(1, config_.num_cores))
+                      << " uops/core=" << (meas_uops_ / std::max(1, config_.num_cores))
+                      << "); using documented fractions instead. The counters are "
+                         "on different bases -- see mcpat_wrapper.cpp." << std::endl;
+        }
         if (br_per_core > inst_per_core) br_per_core = inst_per_core;
         uint64_t nonbr = inst_per_core - br_per_core;
         uint64_t int_per_core = nonbr * 875 / 1000;   // 87.5% of non-branch
@@ -986,7 +1031,10 @@ std::string McPATWrapper::generateXMLConfig() const {
         /* 1.9.28: measured, not a fixed 1%. Mispredicts drive pipeline-flush
          * energy, and their rate varies enormously by workload -- a regular
          * stencil and an irregular graph traversal are not the same machine. */
-        uint64_t mispred_per_core = (meas_mispred_ > 0)
+        /* 1.9.29: gated on the same self-consistency test. A mispredict count
+         * taken from a different base than the branch count it is a subset of
+         * would report a mispredict RATE that is meaningless. */
+        uint64_t mispred_per_core = (meas_mispred_ > 0 && meas_self_consistent)
             ? meas_mispred_ / std::max(1, config_.num_cores)
             : inst_per_core * 1 / 100;
         if (mispred_per_core > br_per_core) mispred_per_core = br_per_core;

@@ -320,6 +320,11 @@ private:
     uint64_t meas_uops_ = 0;         // 1.9.28: 0 => fall back to fractions
     uint64_t meas_branches_ = 0;
     uint64_t meas_mispred_ = 0;
+    /* 1.9.29: the measured counters are used only when self-consistent against
+     * the instruction count (see the mix construction in the XML writer). This
+     * latches the one-time warning when they are not, so a sweep does not emit
+     * the same line for every node of every cell. */
+    mutable bool warned_mix_ = false;
 
     // Split cache stats
     uint64_t l1i_reads_;
