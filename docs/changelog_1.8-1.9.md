@@ -7,6 +7,49 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.9.34 -- interconnect distances were measured between the wrong nodes
+
+The custom-topology hop count walked a router adjacency using endpoint
+identifiers. Those are two different numbering spaces, and nothing translated
+between them, because the topology reader discarded the lines that carry the
+mapping.
+
+The topology file describes three things: how many routers exist, how many
+endpoints exist, and two kinds of link -- internal links between routers, and
+external links attaching an endpoint to the router it hangs off. The reader
+consumed the counts and the internal links and ignored the external ones. No
+endpoint-to-router mapping therefore existed anywhere in the simulator, and the
+shortest-path search was handed endpoint identifiers to index a structure keyed
+by router identifier.
+
+The bounds check in front of that search could not have caught it, and this is
+the part worth recording. In a sparse tree the endpoints are FEWER than the
+routers, so every endpoint identifier satisfies a test written to reject values
+too large for the router array. The guard passed, the search ran between two
+unrelated routers, and it returned a plausible distance rather than falling back
+to the safe default. A limit that fires only when the wrong identifier space
+happens to be the larger one is not a check.
+
+Fixed by keeping the external links as an endpoint-to-router map and translating
+both arguments before the search. Identifiers with no mapping still fall back.
+
+Measured on a device-scope cell: packet count and device read count are
+IDENTICAL either side of the change, and only the distance credited to each
+packet moves. That is the signature the fix should have -- the traffic is the
+same traffic, previously walked along the wrong paths. Total hops rise by about
+a third, and average hops per packet go from roughly three to roughly four,
+which is the physically sensible figure for a tree of this depth; three was too
+short for the hierarchy actually built. Interconnect power rises with it, so the
+fabric had been under-charged.
+
+### Data impact
+
+Interconnect power and energy wherever the custom topology is used, which is
+every technology that builds the placement-driven tree. Hop counts feed the power
+model directly, and they were wrong in the optimistic direction. Timing is
+unaffected and was verified so: hop counts are a statistics and power quantity,
+not a scheduling input, and the packet and access counts are unchanged.
+
 ## 1.9.33 -- results that were discarded, never emitted, or guessed at
 
 Eight defects, all of one family. In each case the simulator either had the answer

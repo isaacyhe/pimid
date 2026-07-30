@@ -207,6 +207,7 @@ private:
 
     // ── Custom topology adjacency list (for BFS hop counts) ──
     std::vector<std::vector<uint32_t>> customAdj_;
+    std::vector<uint32_t> epToRouter_;  // 1.9.36: endpoint id -> attached router id
     uint32_t customRouterCount_ = 0;
 
     // ── Statistics ───────────────────────────────────────────
@@ -1571,6 +1572,24 @@ private:
 
     // Custom: BFS shortest path on adjacency list
     uint32_t getCustomHops(uint32_t src, uint32_t dst) const {
+        /* 1.9.36: src and dst arrive as ENDPOINT ids, but customAdj_ is indexed
+         * by ROUTER id and holds only router-to-router links. Translating was
+         * impossible until now because the topology parser discarded the "ext"
+         * lines that carry the attachment; it keeps them as epToRouter_.
+         *
+         * The absence of that translation was not caught by the bounds guard
+         * below, and could not have been: in the sparse tree the endpoints are
+         * FEWER than the routers (for the swept 16-PE HBM3 case, 49 against
+         * 51), so every endpoint id satisfies "< customAdj_.size()" and the
+         * search ran happily between two unrelated routers, returning a
+         * plausible wrong hop count rather than falling back. Hop counts feed
+         * the interconnect power model, so the error was silent in exactly the
+         * way the rest of this release train has been. */
+        uint32_t s = (src < epToRouter_.size() && epToRouter_[src] != UINT32_MAX)
+                   ? epToRouter_[src] : src;
+        uint32_t d = (dst < epToRouter_.size() && epToRouter_[dst] != UINT32_MAX)
+                   ? epToRouter_[dst] : dst;
+        src = s; dst = d;
         if (customAdj_.empty() || src >= customAdj_.size() || dst >= customAdj_.size()) {
             return 1;  // fallback
         }
@@ -1625,6 +1644,16 @@ private:
                 if (s < customAdj_.size() && d < customAdj_.size()) {
                     customAdj_[s].push_back(d);
                 }
+            } else if (token == "ext") {
+                /* 1.9.36: endpoint-to-router attachment, "ext <endpoint>
+                 * <router> <lat> <width>". These lines were READ AND DISCARDED,
+                 * so no endpoint->router mapping existed and getCustomHops()
+                 * below indexed endpoint ids straight into the ROUTER adjacency
+                 * -- see the note there. */
+                uint32_t ep, rt;
+                iss >> ep >> rt;
+                if (epToRouter_.size() <= ep) epToRouter_.resize(ep + 1, UINT32_MAX);
+                epToRouter_[ep] = rt;
             }
         }
     }
