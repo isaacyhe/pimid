@@ -17,7 +17,11 @@ namespace pimid {
 /**
  * Wrapper class that adapts NVSim to PIMID's memory model interface
  * Provides area, timing, and power modeling for Non-Volatile Memory
- * Supports: STT-RAM, PCM, ReRAM, FBDRAM, NAND Flash
+ * Supports (reachable from a PIMID config): STT-RAM, PCM, ReRAM.
+ * FBDRAM, SLCNAND and MLCNAND exist in NVMType below and in NVSim, but NO
+ * config string routes to them -- they are deliberately not exposed (user
+ * decision 2026-07-30: keep to the technologies already supported). Do not
+ * cite this header as evidence that NAND or floating-body DRAM is modelled.
  */
 class NVSimWrapper {
 public:

@@ -715,7 +715,7 @@ double McPATWrapper::getNoCPower() const {
 }
 
 double McPATWrapper::getComponentArea(ComponentType component) const {
-    if (mcpat_processor_) {
+    if (power_computed_) {   // 1.9.34: see getTotalArea()
         switch (component) {
             case ComponentType::CORE:
                 return mcpat_core_area_mm2_;
@@ -737,7 +737,19 @@ double McPATWrapper::getComponentArea(ComponentType component) const {
 }
 
 double McPATWrapper::getTotalArea() const {
-    if (mcpat_processor_) {
+    /* 1.9.34: gate on power_computed_, not on the Processor object.
+     *
+     * computePower() became fork()-isolated to survive a co-simulation crash.
+     * mcpat_processor_ is only ever assigned inside runMcPAT(), i.e. only in the
+     * CHILD; the child extracts the areas and ships them back through the result
+     * blob, and the parent caches them into mcpat_*_area_mm2_. But these two
+     * accessors kept testing the Processor pointer, which in the parent is
+     * permanently null -- so the areas were transported correctly and then
+     * discarded, and every reported area was 0.00 mm^2 in BOTH scopes. Every
+     * other cached field (system_power_, peak_power_, component_power_) is read
+     * without such a guard, which is exactly why power survived and only area
+     * was lost. */
+    if (power_computed_) {
         return mcpat_total_area_mm2_;
     }
     return 0.0;

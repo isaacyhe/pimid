@@ -1548,7 +1548,38 @@ static void InitSystem(Config& config) {
     AggregateStat* memStat = new AggregateStat(true);
     memStat->init("mem", "Memory controller stats");
     for (auto mem : mems) mem->initStats(memStat);
+    /* 1.9.35: in co-simulation the PE memory interfaces were CONSTRUCTED and
+     * then dropped from `mems` (see the cosimMode branch above, which clears the
+     * vector so the host's own controllers can occupy it). They survived only in
+     * rawMIs, for wiring. This registration loop therefore never saw them, so a
+     * co-simulation stats dump carried NO device-side memory group at all: the
+     * counters existed, were incremented on the live path, and were never
+     * emitted. The power model consequently priced the device at zero
+     * memory-controller activity while charging the host's controller for
+     * traffic that was partly the device's.
+     *
+     * GUARDED ON cosimMode. rawMIs is populated unconditionally above, and
+     * OUTSIDE co-simulation the very same objects are still in `mems` -- only
+     * the co-sim branch clears that vector. Registering both lists there calls
+     * initStats() twice on one object, which trips the "name already set"
+     * assertion in stats.h and takes the run down with it. Only co-simulation
+     * has PE-MIs that `mems` no longer holds. */
     zinfo->rootStat->append(memStat);
+    /* The PE-MIs need their OWN aggregate, not `mem`. The HDF5 backend requires
+     * a "regular" aggregate -- every child the same type -- and `mem` already
+     * holds the host's MemoryController stats, whose shape differs from a
+     * PEMemoryInterface's. Appending both panics at hdf5_stats.cpp:139. A
+     * separate group also reads better: host controllers under `mem`, device
+     * interfaces under `pe_mem`. The text reader matches on the child names
+     * ("pe-mi-<N>"), so it is unaffected by the parent group's name. */
+    if (cosimMode && !rawMIs.empty()) {
+        AggregateStat* peMemStat = new AggregateStat(true);
+        peMemStat->init("pe_mem", "Device PE memory interface stats");
+        for (auto mi : rawMIs) {
+            if (mi) mi->initStats(peMemStat);
+        }
+        zinfo->rootStat->append(peMemStat);
+    }
 
     //Odds and ends: BuildCacheGroup new'd the cache groups, we need to delete them
     for (pair<string, CacheGroup*> kv : cMap) delete kv.second;

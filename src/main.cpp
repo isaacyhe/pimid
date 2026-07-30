@@ -435,7 +435,19 @@ struct ZSimParsedOutput {
         uint64_t l3_total_writes() const { return l3_hGETX + l3_mGETXIM; }
         // True when this group carried any measured work at all. A node with no
         // activity must fall back rather than be priced at zero.
-        bool has_activity() const { return real_instrs() > 0 || uops > 0; }
+        /* 1.9.35: "was this node OBSERVED", not "did it do work".
+         *
+         * These must not be conflated. A co-simulation host executes no real
+         * code during the offload window -- it prepared its data beforehand and
+         * is now waiting -- so its measured activity is legitimately ZERO. The
+         * previous test (real_instrs() > 0 || uops > 0) read that as "no
+         * measurements available" and fell back to the core-fraction guess,
+         * which then INVENTED tens of thousands of instructions for a core that
+         * provably executed none. A node proven idle must be priced as idle.
+         * The fallback exists for a dump with no per-node breakdown at all --
+         * an older stats file -- and that is what `seen` distinguishes. */
+        bool seen = false;
+        bool has_activity() const { return seen; }
         /* Executed instructions, with injected timing charges removed. */
         uint64_t real_instrs() const {
             return (instrs > syntheticInstrs) ? (instrs - syntheticInstrs) : 0;
@@ -754,7 +766,7 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
                 else if (key == "instrs" && out.instrs == 0) out.instrs = val;
                 /* 1.9.28: accumulate per group as well as the legacy first-core value */
                 if (key == "instrs") {
-                    if (grp) grp->instrs += val;
+                    if (grp) { grp->instrs += val; grp->seen = true; }
                 }
                 /* 1.9.28: accumulate measured activity across cores.
                  * 1.9.29: and per node -- the all-nodes totals below cannot be
@@ -777,6 +789,7 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
                 // 1.9.10: contention-inclusive per-group wall-clock cycles.
                 if (key == "cycles") {
                     cur_core_cycles = val;
+                    if (grp) grp->seen = true;   // 1.9.35: observed, even if idle
                     if (core_group == CoreGroup::HOST)
                         out.host_wall_cycles = std::max(out.host_wall_cycles, val);
                     else if (core_group == CoreGroup::DEVICE)
@@ -1483,6 +1496,36 @@ static std::string canonicalMemTech(std::string t) {
     if (t == "STTMRAM" || t == "STT-MRAM" || t == "MRAM") return "STT_MRAM";
     if (t == "RESISTIVE" || t == "MEMRISTOR") return "RERAM";
     if (t == "PCRAM" || t == "3DXPOINT") return "PCM";
+    /* 1.9.35: an unrecognised technology used to pass straight through here and
+     * then be classified by EXCLUSION downstream -- is_dram_tech is written as
+     * !(SRAM || STT_MRAM || PCM || RERAM) at three sites -- so any string that
+     * is not one of those four became "DRAM" and was priced with Ramulator2's
+     * JEDEC tables. A typo, or a technology we do not support such as NAND,
+     * silently produced plausible DDR-shaped energy for a part that is not DRAM.
+     *
+     * Defect #8 was this same failure for a CASE mismatch (mixed-case ReRAM fell
+     * through to generic DRAM); it was fixed by adding the uppercase transform
+     * above without closing the structure that allowed it. This closes it.
+     *
+     * Validating HERE rather than rewriting the three downstream tests is the
+     * smaller and safer change: every one of them is correct for canonical
+     * input, and this is the single point every technology string passes
+     * through. Nothing that is currently valid changes classification. */
+    static const std::set<std::string> kSupported = {
+        // DRAM, priced by Ramulator2
+        "DDR3", "DDR4", "DDR5", "LPDDR5", "GDDR6", "HBM2", "HBM3", "DRAM",
+        // non-DRAM, priced by NVSim/CACTI
+        "SRAM", "STT_MRAM", "PCM", "RERAM"
+    };
+    if (!kSupported.count(t)) {
+        std::cerr << "[config] FATAL: unsupported memory technology '" << t
+                  << "'. Supported: DDR3 DDR4 DDR5 LPDDR5 GDDR6 HBM2 HBM3 DRAM "
+                     "SRAM STT_MRAM PCM RERAM (aliases: MRAM/STTMRAM -> STT_MRAM, "
+                     "PCRAM/3DXPOINT -> PCM, MEMRISTOR/RESISTIVE -> RERAM). "
+                     "An unknown value would otherwise be classified as DRAM by "
+                     "exclusion and priced with JEDEC DRAM tables." << std::endl;
+        std::exit(2);
+    }
     return t;
 }
 
@@ -3597,6 +3640,36 @@ static double getDRAMDieDensity(const std::string& tech) {
 /**
  * Map memory technology to McPAT MC parameters.
  */
+/* 1.9.35: clamp a requested technology node to the model floor, LOUDLY.
+ *
+ * The linked CACTI/McPAT models do not go below 22 nm, and the code enforced
+ * that with a bare std::max(22, requested). A configuration asking for 14, 7 or
+ * 5 nm was therefore silently raised to 22 and the run reported 22 nm area,
+ * power and cache latency with no indication anywhere that the requested node
+ * had been ignored. A study sweeping technology nodes below the floor would
+ * have produced identical numbers at every point and read as "technology does
+ * not matter here".
+ *
+ * Silently substituting a value the caller did not ask for is the failure mode
+ * this release train has now hit nine times (a name that did not match, a table
+ * with no entry for the case, a list cleared before use). The substitution is
+ * still made -- there is no model to fall back to -- but it is now stated. */
+static int clampTechNodeNm(int requested_nm, const char* site) {
+    static bool warned = false;
+    if (requested_nm > 0 && requested_nm < 22) {
+        if (!warned) {
+            warned = true;
+            std::cout << "  [tech] WARNING: " << requested_nm << " nm was requested but the "
+                         "linked CACTI/McPAT models stop at 22 nm. Using 22 nm. Reported "
+                         "area, power and cache latency are 22 nm values, NOT "
+                      << requested_nm << " nm values. (first at: " << site << ")"
+                      << std::endl;
+        }
+        return 22;
+    }
+    return (requested_nm > 0) ? requested_nm : 22;
+}
+
 static pimid::McPATWrapper::MCTechParams getMCTechParamsForMcPAT(
     const std::string& tech, int num_mcs)
 {
@@ -4068,7 +4141,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         {
             int host_tn = (config.host_tech_node_nm >= 0)
                 ? config.host_tech_node_nm : config.tech_node_nm;
-            host_cfg.tech_node_nm = std::max(22, host_tn);
+            host_cfg.tech_node_nm = clampTechNodeNm(host_tn, "host node");
         }
         host_cfg.temperature_k = 350;
 
@@ -4207,7 +4280,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                 dram_cfg.line_size = 64;
                 dram_cfg.associativity = 1;
                 dram_cfg.banks = std::max(1u, total_banks);
-                dram_cfg.tech_node_nm = std::max(22, config.tech_node_nm);
+                dram_cfg.tech_node_nm = clampTechNodeNm(config.tech_node_nm, "DRAM array");
                 dram_cfg.is_cache = false;
                 dram_cfg.is_main_memory = true;
                 dram_cfg.cell_type = pimid::CACTIWrapper::COMM_DRAM;
@@ -4251,7 +4324,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             sram_cfg.line_size = config.cache_line_size;
             sram_cfg.associativity = 1;
             sram_cfg.banks = 1;
-            sram_cfg.tech_node_nm = std::max(22, config.tech_node_nm);
+            sram_cfg.tech_node_nm = clampTechNodeNm(config.tech_node_nm, "SRAM array");
             sram_cfg.is_cache = false;  // RAM mode
             sram_cfg.read_write_ports = config.ports_per_bank;
 
@@ -4287,7 +4360,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             pimid::NVSimWrapper::NVMConfig nvm_cfg;
             nvm_cfg.capacity_bytes = 64 * 1024;  // one bank
             nvm_cfg.word_width_bits = config.cache_line_size * 8;  // one full line per access (64 B = 512 b), matching the CACTI/SRAM path
-            nvm_cfg.process_node_nm = std::max(22, config.tech_node_nm);
+            nvm_cfg.process_node_nm = clampTechNodeNm(config.tech_node_nm, "NVM array");
             if (config.memory_tech == "STT_MRAM")
                 nvm_cfg.nvm_type = pimid::NVSimWrapper::NVMType::STTRAM;
             else if (config.memory_tech == "PCM")
@@ -4500,7 +4573,7 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
         McPAT::SystemConfig mcfg;
         mcfg.num_cores = node.num_cores;
         mcfg.core_clock_mhz = node.frequency_mhz;
-        mcfg.tech_node_nm = std::max(22, node.tech_node_nm);
+        mcfg.tech_node_nm = clampTechNodeNm(node.tech_node_nm, "system node");
         mcfg.temperature_k = 350;
 
         McPAT::DeviceProfile profile;
@@ -7035,6 +7108,19 @@ int main(int argc, char** argv) {
                     config.pe_mc_enabled = true;
                     auto mc = yaml_cfg["pim"]["mc"];
                     config.pe_mc_type = mc["type"].as<std::string>(config.pe_mc_type);
+                    /* 1.9.35: the key reads as a choice but there is exactly one
+                     * implementation. The old SimplePEMemoryController and
+                     * MD1PEMemoryController were merged, and M/D/1 queuing is
+                     * always active, so any value here yields the same model.
+                     * Say so rather than letting a config claim a mode it did
+                     * not get. */
+                    if (config.pe_mc_type != "simple" && !config.pe_mc_type.empty()) {
+                        std::cout << "  [config] WARNING: pim.mc.type = '"
+                                  << config.pe_mc_type << "' is accepted but has no "
+                                     "separate implementation; the PE memory interface "
+                                     "always uses the merged coverage-routing + "
+                                     "hierarchy-traversal + M/D/1 model." << std::endl;
+                    }
                     if (mc["pes_per_mc"]) {
                         config.pes_per_mc = mc["pes_per_mc"].as<int>();
                         config.pes_per_mc_user_set = true;

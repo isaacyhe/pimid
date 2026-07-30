@@ -7,6 +7,130 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.9.33 -- results that were discarded, never emitted, or guessed at
+
+Eight defects, all of one family. In each case the simulator either had the answer
+and threw it away, or did not have it and supplied something plausible instead of
+saying so. None of them announced itself; every one produced a number that looked
+like a measurement.
+
+### Area was computed, transported, and then discarded
+
+Every reported area was zero, in both scopes, for as long as the artifact tree
+records. Not a units error -- that was a different defect, fixed earlier, and the
+conversion here is correct. The power computation is run in a forked child for
+crash isolation. The child computes the areas and returns them through the result
+blob; the parent caches them. But the two accessors still tested the child's
+processor object, which in the parent is permanently null, so they returned zero
+and the cached values were never read. Every other cached field is read without
+that guard, which is exactly why power survived and only area was lost. Both
+accessors now test whether the computation completed.
+
+The number this reveals is NOT yet trustworthy, and is documented as such: it is
+far larger than the modelled part can plausibly be, for reasons already recorded
+as separate defects -- an ALU processing element is priced as a complete in-order
+core, and the interconnect is priced over the full organisational tree rather than
+the sparse one actually simulated. Area is therefore useful right now as a
+DIAGNOSTIC for those two, and must not be quoted as a result until they are fixed.
+What the fix does establish is that the machinery is sound: area scales with the
+square of the technology node, as it must.
+
+### The device's memory interfaces were never emitted
+
+In co-simulation the processing-element memory interfaces are constructed, wired,
+and incremented on the live path -- and then dropped from the list that the sole
+statistics-registration loop walks, because that list is cleared so the host's own
+controllers can occupy it. They survived only in a side vector kept for wiring. No
+device-side memory group therefore appeared in a co-simulation dump at all. The
+power model priced the device at zero memory-controller activity while charging
+the host's controller for traffic that was partly the device's.
+
+They are now registered from that side vector, in their own aggregate: the
+statistics backend requires an aggregate whose children are all the same type, and
+the host's controllers already occupy the existing one. This is the largest
+numerical correction in the release by a wide margin -- the device's controller
+traffic had been priced at nothing.
+
+Note that an earlier release fixed only the READER half of this same problem,
+teaching the parser the name the emitter actually uses. Both halves were needed
+and only one had landed.
+
+### A node that did nothing was treated as a node we knew nothing about
+
+The per-node power path fell back to a core-count-proportional guess whenever a
+node reported no activity. But "this node performed no work" and "we have no
+measurements for this node" are different statements, and only the second warrants
+a guess. A co-simulation host executes no code during the offload window -- it
+prepared its data beforehand and is waiting -- so its measured activity is
+legitimately zero, and the fallback then invented instructions for a core that
+provably executed none. The test now asks whether the node was OBSERVED, not
+whether it was busy. The fallback remains for what it was meant for: a statistics
+file with no per-node breakdown at all.
+
+### Substitutions that were made silently
+
+Three more of the same shape, each now stated rather than assumed.
+
+A requested technology node below the floor of the linked models was raised to the
+floor without comment, so a study sweeping finer nodes would have received
+identical numbers at every point and read as "technology does not matter here".
+The substitution is still made -- there is no model to fall back to -- but it now
+names the value that was ignored. Note the floor applies to the consumers of those
+models: logic, static memory, non-volatile arrays, caches, the interconnect and the
+memory controller. Array energy for dynamic memory is keyed on the technology name
+through its own per-standard tables and does not read the node at all, which is
+correct: those generations are not named in logic-process terms.
+
+A destination-set entry beyond the addressable limit was DROPPED in silence, which
+would simulate a fabric quietly missing those endpoints. It now refuses.
+
+A configuration key that reads as a choice of memory-controller model accepted any
+value while exactly one implementation exists, the alternatives having been merged
+some releases ago. It now says the value had no effect.
+
+### A technology we do not support would have been priced as one we do
+
+The classification of a memory technology into "dynamic memory, priced by the
+per-command model" or "everything else, priced by the cell-level model" was written
+by EXCLUSION at three sites: anything that was not one of four named non-dynamic
+technologies became dynamic memory. Any unrecognised string -- a typo, or a
+technology deliberately not supported -- therefore passed through and was priced
+with dynamic-memory command tables. A fourth site used the opposite, inclusive
+form, so one string could be classified differently at different points in a single
+run.
+
+An earlier defect was this same failure for a letter-case mismatch, and was closed
+by normalising case without removing the exclusion logic that permitted it. The
+normaliser -- the single point every technology string passes through -- now
+validates against the supported set and refuses an unknown one, naming what is
+accepted. The three exclusion tests are left alone deliberately: each is correct
+for canonical input, and validating at the entry changes no existing
+classification.
+
+Relatedly, a wrapper header advertised support for three technologies that no
+configuration string can reach. The claim is corrected; those remain deliberately
+unexposed.
+
+### What this does not establish
+
+Two of these corrections make a previously invisible quantity visible, and
+visibility is not accuracy. The area figure in particular is now reportable and
+still wrong, for causes recorded elsewhere. The device memory term is newly priced
+rather than newly verified.
+
+### Data impact
+
+Device-side memory-controller power and energy in every co-simulation cell, which
+had been zero -- the largest change here, and it moves system totals materially
+rather than marginally. Host and device shares shift with it. Any node that
+legitimately idled was previously credited with invented activity and is now priced
+as idle. Reported area changes from zero to a number in both scopes. Timing is
+unaffected: the statistics are read after the simulated process exits, and the
+statistics-registration change adds a group without altering any scheduling
+decision. Configurations naming an unsupported technology now fail where they
+previously produced dynamic-memory numbers; no supported technology changes
+classification.
+
 ## 1.9.29 -- the power model was fed counts that were absent, misattributed, or on the wrong base
 
 1.9.28 corrected the instruction count that reaches the power model and left everything

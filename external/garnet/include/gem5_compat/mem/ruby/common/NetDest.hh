@@ -6,6 +6,8 @@
 #ifndef __GARNET_COMPAT_MEM_RUBY_COMMON_NETDEST_HH__
 #define __GARNET_COMPAT_MEM_RUBY_COMMON_NETDEST_HH__
 
+#include <cstdio>
+#include <cstdlib>
 #include <bitset>
 #include <iostream>
 #include <set>
@@ -38,8 +40,23 @@ public:
 
     // Add a node to the destination set
     void add(NodeID node) {
-        if (node < MAX_NODES)
-            nodes_.set(node);
+        /* 1.9.35: a node above the cap used to be DROPPED in silence -- no
+         * error, no warning, and a destination set that quietly omits part of
+         * the network. The fabric would then be simulated as if those endpoints
+         * did not exist. MAX_NODES is 1024 while the simulator's thread cap is
+         * larger, and the sparse tree already materialises roughly two
+         * endpoints per processing element, so a large-enough configuration
+         * reaches this silently. Refuse instead of pretending. */
+        if (node >= MAX_NODES) {
+            fprintf(stderr,
+                    "[NetDest] FATAL: node id %u exceeds MAX_NODES (%u). The "
+                    "destination set cannot represent it, and silently dropping "
+                    "it would simulate a network missing these endpoints. "
+                    "Raise MAX_NODES or reduce the endpoint count.\n",
+                    (unsigned)node, (unsigned)MAX_NODES);
+            abort();
+        }
+        nodes_.set(node);
     }
 
     void add(MachineID id) {
