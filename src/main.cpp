@@ -7049,7 +7049,16 @@ int main(int argc, char** argv) {
                     else if (config.pe_type == "InOrder" || config.pe_type == "in-order" ||
                              config.pe_type == "in_order")
                         config.pe_type = "in_order_core";
-                    else if (config.pe_type == "ALU" || config.pe_type == "alu")
+                    /* 1.9.36: compute_unit is the element's name; the former
+                     * spellings remain accepted. NOTE this block duplicates
+                     * normalizeCoreType() used by the system-node path -- two
+                     * normalisers for one job, which is why adding a spelling in
+                     * one place left the other rejecting it. Collapsing them onto
+                     * the single function belongs in the configuration tidy-up
+                     * (1.15); until then BOTH must be updated together. */
+                    else if (config.pe_type == "compute_unit" ||
+                             config.pe_type == "ComputeUnit" ||
+                             config.pe_type == "cu")
                         config.pe_type = "alu_core";
                     else if (config.pe_type == "Simple" || config.pe_type == "simple")
                         config.pe_type = "simple_core";
@@ -7061,7 +7070,8 @@ int main(int argc, char** argv) {
                         config.pe_type != "in_order_core" && config.pe_type != "ooo_core" &&
                         config.pe_type != "null_core") {
                         std::cerr << "Error: unknown pim.pe.type '" << config.pe_type
-                                  << "'. Valid: alu_core | simple_core | in_order_core"
+                                  << "'. Valid: compute_unit (alias alu_core)"
+                                  << " | simple_core | in_order_core"
                                   << " | ooo_core | null_core" << std::endl;
                         return 1;
                     }
@@ -7736,7 +7746,27 @@ int main(int argc, char** argv) {
                         return "ooo_core";
                     if (ct == "InOrder" || ct == "in-order" || ct == "in_order")
                         return "in_order_core";
-                    if (ct == "ALU" || ct == "alu") return "alu_core";
+                    /* 1.9.36: the element is a COMPUTE UNIT, not an "ALU core".
+                     * "ALU" was already inaccurate -- three of the five kernels
+                     * are FP32 (stream_triad, gemv and stencil_2d carry float;
+                     * histogram and bfs carry int), so it has always needed a
+                     * floating-point unit. "Compute unit" is also the PIM
+                     * literature's term: Samsung's in-bank engine is a
+                     * programmable computing unit.
+                     * Normalised HERE, at the single entry point every core-type
+                     * string passes through, so the ~20 internal comparisons keep
+                     * working unchanged -- the same discipline as canonicalMemTech.
+                     * The former spellings stay accepted: the entire sweep corpus
+                     * names alu_core, and an unrecognised type must not silently
+                     * become a different core model. */
+                    if (ct == "compute_unit" || ct == "ComputeUnit" ||
+                        ct == "compute_unit_pe" || ct == "cu")
+                        return "alu_core";
+                    /* 1.9.36: bare "alu"/"ALU" retired -- no configuration in the
+                     * corpus used it (0 files, against 3100 naming alu_core), so
+                     * removing it costs nothing and narrows the surface. alu_core
+                     * STAYS: it names the entire sweep corpus and dropping it
+                     * would invalidate every cell ever run. */
                     if (ct == "Simple" || ct == "simple") return "simple_core";
                     if (ct == "Null" || ct == "null") return "null_core";
                     // STRICT: anything else must already be a canonical name.
@@ -7749,7 +7779,8 @@ int main(int argc, char** argv) {
                         return ct;
                     std::cerr << "ERROR: unknown core type '" << ct << "' in "
                               << "system.hosts[].core_type / devices[].pe_type.\n"
-                              << "Valid: ooo_core, in_order_core, simple_core, "
+                              << "Valid: compute_unit (alias alu_core), "
+                              << "ooo_core, in_order_core, simple_core, "
                               << "alu_core, null_core.\n";
                     exit(1);
                 };

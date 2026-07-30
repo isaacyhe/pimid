@@ -7,6 +7,76 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.9.36 -- the processing element is a compute unit, and its power is a curve fit
+
+Naming, a parametric description, and a measurement that says why the description
+is not yet enough.
+
+### The element is a compute unit
+
+"ALU core" was already inaccurate. Three of the five kernels carry
+single-precision floating point and two carry integers, so the element has always
+needed a floating-point unit. "Compute unit" is also the vocabulary of the field:
+the in-bank engine of a shipped stacked-memory part is a programmable computing
+unit. Naming the model after what silicon calls it makes it legible to that
+reader.
+
+The distinction that matters is that a compute unit is a DATAPATH, not a
+processor: a register file, arithmetic units, a result bus and an instruction
+store, with no speculation, no dynamic scheduling and no caches. The power tool
+offers exactly two core models, out-of-order and in-order, and BOTH describe
+processors. That is why no core model fits this element.
+
+The former spelling remains a supported alias, not a deprecation: it names the
+entire configuration corpus, and dropping it would invalidate every cell ever
+run. The bare short form is retired, having been used by nothing.
+
+Adding the new spelling exposed a defect in passing: core-type normalisation
+exists TWICE, once for device nodes and once for the processing-element section,
+and neither calls the other. Adding a spelling to one left the other rejecting
+it. Both are updated and the duplication is marked for the configuration
+tidy-up; until then they must move together.
+
+### The description is now parametric
+
+The generator branched only on whether the profile was out-of-order, so a compute
+unit and an in-order core produced BYTE-IDENTICAL input and the element was
+charged for a branch predictor, caches, address translation and a scheduler it
+does not have. The description is now its own, and parametric: the register file
+scales with lane count, floating-point issue follows whether the element has a
+floating-point unit, and the load/store path is request issue without queues or
+caches.
+
+### And a measurement that says this is not the lever
+
+Reporting the tool's intra-core split required transporting it out of the
+subprocess the power computation runs in, whose output is deliberately discarded.
+With that in place the split is measurable for the first time, and it says
+something uncomfortable: the modelled blocks are UNDER ONE PERCENT of element
+core power, at every profile. The remainder is the tool's "undifferentiated core"
+term -- a regression on pipeline depth, fitted to commercial parts three
+technology generations older, whose in-order branch DECREASES with depth and
+reaches zero at a depth shallower than a modern core. A short datapath pipeline is
+therefore evaluated off the low end of that fit, where it is largest.
+
+Declaring an element simpler makes it cost more. That is the opposite of the
+intent, and it is why sizing the structures correctly changed nothing measurable:
+the parametric description above demonstrates its own insufficiency. Confirmed by
+experiment, not argued -- a fourfold reduction in register file and buffers moved
+no reported figure.
+
+The consequence is a method result rather than a number: an element's power
+cannot be corrected by describing the element better, because the dominant term
+does not read the description. It has to be composed from the tool's primitives,
+which carry no undifferentiated term. Recorded rather than hidden, and the
+reported split now states its own denominators so the share cannot be misread as
+a removable fraction.
+
+### Data impact
+
+None. The naming is an alias, the parametric description moved no reported
+figure, and the split is diagnostic output that nothing consumes.
+
 ## 1.9.35 -- a control that could never be set, and a dimension counted twice
 
 Two faults in the in-memory hierarchy description, neither of which changes any

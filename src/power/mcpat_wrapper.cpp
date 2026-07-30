@@ -393,6 +393,16 @@ struct ResultBlob {
     double mc_area_mm2;
     double total_area_mm2;
     int num_noc_levels;          // entries that follow, can be 0
+    /* 1.9.36: per-core intra-core split (dynamic+leakage, watts, ONE core).
+     * Needed because a processing element declared as an ALU is emitted with
+     * byte-identical input to an in-order core, so it is charged for an
+     * instruction fetch unit, address translation, a load/store unit, a
+     * scheduler and a floating-point unit it does not have. Replacing that with
+     * a real ALU model cannot be VALIDATED without first knowing how much of the
+     * present figure belongs to the parts being removed. Only the child holds
+     * the model object, and its standard output is sent to the null device on
+     * purpose, so the split has to travel back the same way the areas do. */
+    double core_ifu_w, core_lsu_w, core_mmu_w, core_exu_w, core_pipe_w, core_undiff_w;
     // After this struct, num_noc_levels * sizeof(PowerMetrics) bytes follow.
 };
 constexpr McPATWrapper::ComponentType kComponentOrder[ResultBlob::kNumComponents] = {
@@ -464,6 +474,20 @@ void McPATWrapper::computePower() {
             blob.mc_area_mm2     = mcpat_mc_area_mm2_;
             blob.total_area_mm2  = mcpat_total_area_mm2_;
             blob.num_noc_levels  = static_cast<int>(noc_level_power_.size());
+            blob.core_ifu_w = blob.core_lsu_w = blob.core_mmu_w = 0.0;
+            blob.core_exu_w = blob.core_pipe_w = blob.core_undiff_w = 0.0;
+            if (!mcpat_processor_->cores.empty()) {
+                const Core& c0 = *mcpat_processor_->cores[0];
+                auto w = [](const Component* p) -> double {
+                    return p ? (p->rt_power.readOp.dynamic + p->rt_power.readOp.leakage) : 0.0;
+                };
+                blob.core_ifu_w    = w(c0.ifu);
+                blob.core_lsu_w    = w(c0.lsu);
+                blob.core_mmu_w    = w(c0.mmu);
+                blob.core_exu_w    = w(c0.exu);
+                blob.core_pipe_w   = w(c0.corepipe);
+                blob.core_undiff_w = w(c0.undiffCore);
+            }
 
             std::fwrite(&blob, sizeof(blob), 1, f);
             if (blob.num_noc_levels > 0) {
@@ -533,6 +557,56 @@ void McPATWrapper::computePower() {
     mcpat_l3_area_mm2_    = blob.l3_area_mm2;
     mcpat_noc_area_mm2_   = blob.noc_area_mm2;
     mcpat_mc_area_mm2_    = blob.mc_area_mm2;
+    core_ifu_w_    = blob.core_ifu_w;      // 1.9.36
+    core_lsu_w_    = blob.core_lsu_w;
+    core_mmu_w_    = blob.core_mmu_w;
+    core_exu_w_    = blob.core_exu_w;
+    core_pipe_w_   = blob.core_pipe_w;
+    core_undiff_w_ = blob.core_undiff_w;
+    /* 1.9.36: report the split for a device profile. An ALU datapath has a
+     * register file, an arithmetic unit and a result bus -- roughly the
+     * execution unit alone. Everything else listed here is charged to it today
+     * because the generator emits identical input for an ALU and an in-order
+     * core. The percentage is what an ALU model has to remove, and is the
+     * yardstick that model will be validated against. */
+    if (device_profile_ != DeviceProfile::HOST_OOO) {
+        double tot = core_ifu_w_ + core_lsu_w_ + core_mmu_w_
+                   + core_exu_w_ + core_pipe_w_ + core_undiff_w_;
+        double absent = core_ifu_w_ + core_lsu_w_ + core_mmu_w_;
+        if (tot > 0.0) {
+            std::cout << "  [CoreBreakdown] per core, "
+                      << (device_profile_ == DeviceProfile::DEVICE_ALU
+                              ? "DEVICE_ALU" : "DEVICE_INORDER")
+                      << ": ifu=" << core_ifu_w_ << "W lsu=" << core_lsu_w_
+                      << "W mmu=" << core_mmu_w_ << "W exu=" << core_exu_w_
+                      << "W pipe=" << core_pipe_w_ << "W undiff=" << core_undiff_w_
+                      << "W" << std::endl;
+            /* Report the pieces, NOT a single removable percentage.
+             *
+             * Two McPAT conventions make a naive share misleading, and both were
+             * verified in core.cc rather than assumed:
+             *   - corepipe is APPORTIONED into ifu/lsu/exu/mmu/rnu (:3959-4023),
+             *     so it reads zero afterwards and its cost is already inside
+             *     those four. An ALU processing element still HAS a pipeline, so
+             *     that share is not removable.
+             *   - undiffCore is added straight to the CORE total (:4028) and to
+             *     no sub-block, so the blocks do not sum to the core.
+             * Consequently ifu+lsu+mmu is an upper bound on what could be
+             * removed, and a loose one: instruction supply and address
+             * generation are genuinely needed and sit inside it. */
+            double core_tot = component_power_.count(ComponentType::CORE)
+                ? component_power_[ComponentType::CORE].total_power : 0.0;
+            std::cout << "  [CoreBreakdown] blocks sum=" << tot << "W";
+            if (core_tot > 0.0) std::cout << "  core total=" << core_tot << "W"
+                                          << " (undiffCore is in the core total, not in any block)";
+            std::cout << std::endl;
+            std::cout << "  [CoreBreakdown] ifu+lsu+mmu = " << absent << "W = "
+                      << (100.0 * absent / tot) << "% of the block sum -- an UPPER BOUND on what an "
+                         "ALU model removes, not the error: it includes apportioned pipeline power, "
+                         "and instruction supply and address generation are still required."
+                      << std::endl;
+        }
+    }
     mcpat_total_area_mm2_ = blob.total_area_mm2;
 
     noc_level_power_.clear();
@@ -867,6 +941,31 @@ std::string McPATWrapper::generateXMLConfig() const {
 
     // Device profile settings
     bool is_ooo = (device_profile_ == DeviceProfile::HOST_OOO);
+    /* 1.9.36: DEVICE_ALU is no longer emitted as an in-order core.
+     *
+     * McPAT offers exactly two core models, OOO and Inorder
+     * (basic_components.h:88), and both describe a PROCESSOR -- fetch, decode,
+     * control. A processing element here is a DATAPATH. Until now the generator
+     * branched only on is_ooo, so an ALU element and an in-order core produced
+     * BYTE-IDENTICAL input and the element was charged for a branch predictor,
+     * caches, address translation and a scheduler it does not have.
+     *
+     * This does not invent a third McPAT core type -- it cannot -- but it stops
+     * describing the element as something it is not, and makes the description
+     * parametric from pe_lanes / pe_element_bits / pe_has_fp / pe_imem_bytes.
+     *
+     * WHAT THIS DOES NOT FIX, and it is the larger term: McPAT's undifferentiated
+     * core is a regression on pipeline depth fitted to 90 nm commercial parts
+     * (logic.cc:752+; the in-order branch -2.19*log(d)+6.55 crosses zero at 19.9
+     * stages). It accounted for roughly 99% of measured element core power at
+     * every profile, because a shallow datapath pipeline is evaluated off the
+     * low end of that fit where it is largest. Sizing the structures correctly
+     * addresses the other ~1%. Removing the lump needs the element composed from
+     * McPAT primitives (ArrayST, FunctionalUnit, interconnect), which inherit no
+     * undifferentiated term. Recorded in the release notes rather than hidden. */
+    const bool is_alu = (device_profile_ == DeviceProfile::DEVICE_ALU);
+    const int  lanes  = (config_.pe_lanes > 0) ? config_.pe_lanes : 1;
+
     int machine_type = is_ooo ? 0 : 1;
     int x86 = is_ooo ? 1 : 0;
     int rob_size = is_ooo ? 192 : 0;
@@ -887,6 +986,20 @@ std::string McPATWrapper::generateXMLConfig() const {
     int fp_issue_width = is_ooo ? 2 : 0;
     int store_buffer = is_ooo ? 32 : 4;
     int load_buffer = is_ooo ? 32 : 4;
+    if (is_alu) {
+        /* A datapath: a register file, arithmetic units, a result bus and an
+         * instruction store. No speculation, no dynamic scheduling, no caches.
+         * Register file scales with lanes -- for a wide element the file and the
+         * result bus dominate, which is why real parts share one compute unit
+         * between banks rather than widening indefinitely. */
+        phy_regs_irf   = 8 * lanes;
+        phy_regs_frf   = config_.pe_has_fp ? (8 * lanes) : 1;  // 0 aborts CACTI
+        issue_width    = lanes;
+        fp_issue_width = config_.pe_has_fp ? lanes : 0;
+        store_buffer   = 1;      // request issue only; no queueing, no cache
+        load_buffer    = 1;
+        lsu_order      = "inorder";
+    }
 
     xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
     xml << "<component id=\"root\" name=\"root\">\n";

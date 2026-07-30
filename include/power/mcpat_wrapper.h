@@ -143,6 +143,18 @@ public:
         int num_cores;
         double core_clock_mhz;
         int pipeline_depth;
+        /* 1.9.36: parametric datapath description, used when the profile is
+         * DEVICE_ALU. McPAT has only two core models -- OOO and Inorder
+         * (basic_components.h:88) -- and NEITHER describes a processing element
+         * that is a datapath rather than a processor. These parameters let the
+         * generated description say what the element actually is instead of
+         * borrowing an in-order core wholesale. */
+        int  pe_lanes;         // 1 = scalar; W = W-wide SIMD
+        int  pe_element_bits;  // 32: the kernels are float/int 32-bit
+        bool pe_has_fp;        // three of five kernels are FP32, so normally true
+        int  pe_imem_bytes;    // instruction store: ~128 B command file .. 24 KB
+                               // spans command-driven to fully programmable, and
+                               // gates which kernels can run at all
         int issue_width;
         int num_alus;
         int num_muls;
@@ -188,6 +200,10 @@ public:
             : num_cores(4)
             , core_clock_mhz(2000.0)
             , pipeline_depth(14)
+            , pe_lanes(1)
+            , pe_element_bits(32)
+            , pe_has_fp(true)
+            , pe_imem_bytes(4096)
             , issue_width(4)
             , num_alus(3)
             , num_muls(1)
@@ -325,6 +341,19 @@ private:
      * latches the one-time warning when they are not, so a sweep does not emit
      * the same line for every node of every cell. */
     mutable bool warned_mix_ = false;
+    /* 1.9.36: per-core intra-core power split, transported from the forked child
+     * (which alone holds the model object). Diagnostic only -- nothing consumes
+     * these -- but they are what makes the ALU-versus-core error MEASURABLE
+     * before an ALU model replaces it. */
+    double core_ifu_w_ = 0.0, core_lsu_w_ = 0.0, core_mmu_w_ = 0.0;
+    double core_exu_w_ = 0.0, core_pipe_w_ = 0.0, core_undiff_w_ = 0.0;
+  public:
+    struct CoreBreakdown { double ifu, lsu, mmu, exu, corepipe, undiff; };
+    CoreBreakdown getCoreBreakdown() const {
+        return { core_ifu_w_, core_lsu_w_, core_mmu_w_,
+                 core_exu_w_, core_pipe_w_, core_undiff_w_ };
+    }
+  private:
 
     // Split cache stats
     uint64_t l1i_reads_;
