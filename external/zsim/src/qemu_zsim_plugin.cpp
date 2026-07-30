@@ -327,6 +327,7 @@ static inline void snapshotRoiBaseCyc() {
  * too far into the future". Caching the last valid device baseline keeps roiRel
  * consistent across transient cid-invalid windows. */
 static uint64_t g_rankRoiBaseCache[MAX_THREADS] = {0};
+
 static inline uint64_t roiRelCycles(uint32_t tid) {
     uint64_t now = cores[tid] ? cores[tid]->getCycles() : 0;
     uint64_t base;
@@ -349,6 +350,32 @@ static inline uint64_t roiRelCycles(uint32_t tid) {
 /* Co-simulation: per-thread domain tracking and core-type masks */
 enum SimDomain { DOMAIN_HOST = 0, DOMAIN_DEVICE = 1 };
 static std::atomic<int> thread_domain[MAX_THREADS];    // default HOST
+
+/* 1.9.27: the clock rate (MHz) of the core this thread is running on. Cycle
+ * counts are only comparable between ranks whose clocks tick at the same rate,
+ * so a timestamp published for another rank must carry its rate. In a coupled
+ * system-scope run zinfo->freqMHz is max(all node freqs) -- the HOST clock --
+ * while the device carries its own; a rank on a device PE must therefore not be
+ * stamped with the global value. */
+static inline uint32_t coreFreqMHzFor(uint32_t tid) {
+    bool onDevice = (tid < MAX_THREADS &&
+                     thread_domain[tid].load() == DOMAIN_DEVICE);
+    if (onDevice && zinfo->hierarchy.nocBandwidthFreqMHz > 0)
+        return zinfo->hierarchy.nocBandwidthFreqMHz;
+    return zinfo->freqMHz;
+}
+
+/* Convert a cycle count from a source clock domain into this core's domain.
+ * Same rate (or unknown source) is an exact no-op, which is every configuration
+ * where host and device clocks coincide -- so this cannot move existing
+ * results. */
+static inline uint64_t cyclesFromDomain(uint64_t cycles, uint32_t srcFreqMHz,
+                                        uint32_t dstFreqMHz) {
+    if (srcFreqMHz == 0 || dstFreqMHz == 0 || srcFreqMHz == dstFreqMHz)
+        return cycles;
+    return (uint64_t)((double)cycles * (double)dstFreqMHz / (double)srcFreqMHz);
+}
+
 static bool thread_initialized[MAX_THREADS];            // false until ensureThreadInit
 
 /* Thread-based MPI rank emulation active in THIS process (the only
@@ -1581,7 +1608,13 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
                                     * cycle-accurate (detailed) Garnet, 0 for the
                                     * analytical/simple model -> contention is
                                     * applied ONLY when this is 1 (SEND) */
-        uint32_t _pad;
+        /* 1.9.27: clock domain of sim_now, in MHz (former padding word, so the
+         * layout is unchanged and the guest struct still matches). Ranks
+         * exchange timestamps as CYCLE counts, which are comparable only if
+         * both clocks tick at the same rate; carrying the rate lets the
+         * consumer convert. 0 = unknown -> assume same domain (prior
+         * behaviour). */
+        uint32_t sim_now_freq_mhz;
     };
     MpiParamsBlock* gp = (MpiParamsBlock*)zinfo->mpiParamsAddr[tid];
     MpiParamsBlock params;
@@ -1620,10 +1653,13 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
      * assess deliberately rather than flipped on inside a targeted fix. */
     if (op == ZSIM_MAGIC_OP_MPI_TIME) {
         gp->sim_now = roiRelCycles(tid);
+        gp->sim_now_freq_mhz = coreFreqMHzFor(tid);
         return;
     }
     if (op == ZSIM_MAGIC_OP_MPI_ADVANCE) {
-        uint64_t target = params.sim_send_time;
+        uint64_t target = cyclesFromDomain(params.sim_send_time,
+                                           params.sim_now_freq_mhz,
+                                           coreFreqMHzFor(tid));
         uint64_t cur = roiRelCycles(tid);
         Core* cc = cores[tid];
         if (cc && target > cur) {
@@ -1674,6 +1710,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
      * + latency) resolves deterministically and floor-free across ranks. */
     if (!isRecv) {
         gp->sim_now = roiRelCycles(tid);
+        gp->sim_now_freq_mhz = coreFreqMHzFor(tid);
         gp->noc_detailed =
             (zinfo->garnetNetwork && zinfo->garnetNetwork->isCycleAccurate())
                 ? 1u : 0u;
@@ -1811,8 +1848,11 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         /* Phase-2: the receiver's rendezvous arrival includes the cross-rank
          * contention wait stamped by the sender:
          *   arrival = send_time + contend_wait + hierLat + nocLat            */
+        uint64_t sendStamp = cyclesFromDomain(params.sim_send_time,
+                                              params.sim_now_freq_mhz,
+                                              coreFreqMHzFor(tid));
         uint64_t arrival = (params.sim_send_time > 0)
-                               ? (params.sim_send_time + params.sim_contend_wait
+                               ? (sendStamp + params.sim_contend_wait
                                   + (uint64_t)totalLat)
                                : (curCyc + (uint64_t)totalLat);
         uint64_t delta = (arrival > curCyc) ? (arrival - curCyc) : 0;

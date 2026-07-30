@@ -85,7 +85,11 @@ struct __attribute__((aligned(64))) PimidMpiParams {
      * plugin). Cross-rank contention is applied ONLY when this is 1, so the
      * analytical model -- the single intentional approximation -- skips it. */
     uint32_t noc_detailed;
-    uint32_t _pad;
+    /* 1.9.27: clock domain of sim_now, in MHz. Ranks exchange timestamps as
+     * CYCLE counts, comparable only if both clocks tick at the same rate;
+     * carrying the rate lets the consumer convert. Uses the former padding
+     * word, so the layout is unchanged. 0 = unknown -> same-domain. */
+    uint32_t sim_now_freq_mhz;
 };
 
 static thread_local PimidMpiParams tl_mpi_params;

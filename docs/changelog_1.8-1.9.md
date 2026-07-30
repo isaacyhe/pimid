@@ -1,4 +1,4 @@
-# Changelog / defect ledger -- 1.8.0 -> 1.9.26
+# Changelog / defect ledger -- 1.8.0 -> 1.9.27
 
 Release + defect ledger for the co-sim MPI window, the measured-feedback MPI
 pricing model, and the OMP critical-path metric. One entry per release; each
@@ -6,6 +6,47 @@ gives the defect fixed, a one-line root cause, and a data-impact note (which
 sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
+
+## 1.9.27 -- cycle timestamps exchanged between ranks now carry their clock domain
+
+Defect: ranks exchange rendezvous timestamps as raw CYCLE counts, and the
+receiver differenced a sender's stamp against its own clock with no conversion.
+A cycle is not a unit of time; it is a unit of a particular core's time. The
+subtraction is therefore valid only when both cores' clocks tick at the same
+rate -- a property of the configuration file, not of the code. Where the rates
+differ the computed wait is wrong by exactly their ratio, and nothing detects
+it: the arithmetic succeeds and produces a plausible number.
+
+This was correct for the configurations we happen to run rather than correct by
+construction, which is the same failure shape as the NoC statistics parser
+earlier in this train: a value that looks right until the assumption behind it
+stops holding.
+
+When it can fire today: ranks normally migrate between the host and the device
+together, so they share a clock domain and the arithmetic happens to be sound.
+The exception is the migration window, where one rank can already be on a device
+processing element while another is still on the host. Those two domains
+genuinely differ.
+
+Fix: the published timestamp now carries the clock rate it was taken at, and
+both consumers -- the rendezvous advance and the receive-side arrival
+computation -- convert the sender's stamp into the local domain before
+differencing. The rate is written into the padding word that already existed in
+the parameter block shared between the guest transport and the plugin, so the
+structure's size and field offsets are unchanged and the two definitions stay in
+agreement. A missing or equal rate converts to the identity, so the previous
+behaviour is preserved exactly wherever the assumption held.
+
+Validated as INERT, which is the appropriate test for a change that should only
+engage in configurations we do not currently run: the device-scope determinism
+gate reproduces its 1.9.26 values across all five pinned and all five unpinned
+control runs, and the co-simulation cell reproduces its 1.9.26 cycle count
+exactly, not merely closely. Any movement would have indicated the conversion
+engaging where it should not.
+
+Data impact: none for configurations whose host and device clocks coincide,
+which is all present ones. Configurations with differing clock rates were
+previously computing rendezvous waits incorrectly and will change.
 
 ## 1.9.26 -- revert the wake-up snap only where the core is the rank's alone
 
