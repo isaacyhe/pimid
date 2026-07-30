@@ -576,7 +576,9 @@ void McPATWrapper::computePower() {
         if (tot > 0.0) {
             std::cout << "  [CoreBreakdown] per core, "
                       << (device_profile_ == DeviceProfile::DEVICE_ALU
-                              ? "DEVICE_ALU" : "DEVICE_INORDER")
+                              ? "DEVICE_ALU"
+                          : (device_profile_ == DeviceProfile::DEVICE_OOO)
+                              ? "DEVICE_OOO" : "DEVICE_INORDER")
                       << ": ifu=" << core_ifu_w_ << "W lsu=" << core_lsu_w_
                       << "W mmu=" << core_mmu_w_ << "W exu=" << core_exu_w_
                       << "W pipe=" << core_pipe_w_ << "W undiff=" << core_undiff_w_
@@ -940,7 +942,17 @@ std::string McPATWrapper::generateXMLConfig() const {
     }
 
     // Device profile settings
-    bool is_ooo = (device_profile_ == DeviceProfile::HOST_OOO);
+    /* 1.9.37: an out-of-order PROCESSING ELEMENT is out-of-order too.
+     * is_ooo gates every speculative structure in the generated description --
+     * machine type, reorder buffer, instruction window, renaming, physical
+     * register count, load/store ordering, FP issue width, and the reorder and
+     * rename activity statistics. Testing only for the host profile meant a
+     * device element declared out-of-order was described with NO reorder
+     * buffer, NO instruction window and NO renaming, while the timing model
+     * simulated all of it. Two halves of one model describing different
+     * machines -- the recurring failure of this release train. */
+    bool is_ooo = (device_profile_ == DeviceProfile::HOST_OOO ||
+                   device_profile_ == DeviceProfile::DEVICE_OOO);
     /* 1.9.36: DEVICE_ALU is no longer emitted as an in-order core.
      *
      * McPAT offers exactly two core models, OOO and Inorder

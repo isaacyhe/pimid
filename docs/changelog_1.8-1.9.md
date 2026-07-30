@@ -7,6 +7,34 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.9.37 -- an out-of-order element was described as in-order
+
+The device-scope power path chose between exactly two descriptions: compute unit,
+or in-order. A processing element declared out-of-order fell to the second.
+
+That single choice gates every speculative structure in the generated
+description -- machine type, reorder buffer, instruction window, register
+renaming, physical register count, load/store ordering, floating-point issue
+width, and the reorder and rename activity statistics. An out-of-order element
+was therefore described with no reorder buffer, no instruction window and no
+renaming, while the timing model simulated all of it.
+
+The per-node path used by co-simulation already selected an out-of-order
+description correctly. Only the device-scope path did not, which is why the
+defect appeared on device-scope cells and not on co-simulation ones -- and why it
+survived: the two paths disagreed and nothing compared them.
+
+Fixed by giving the element its own out-of-order description rather than
+borrowing the host's, so the profile name no longer misstates what is being
+priced.
+
+### Data impact
+
+Device-scope cells configured with out-of-order elements. The direction is
+upward: those cells were previously charged for none of the speculative
+machinery they were simulated as executing, so they were under-priced. In-order
+and compute-unit cells are unchanged, verified against the preceding release.
+
 ## 1.9.36 -- the processing element is a compute unit, and its power is a curve fit
 
 Naming, a parametric description, and a measurement that says why the description

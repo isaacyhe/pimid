@@ -110,7 +110,8 @@ public:
      */
     enum class DeviceProfile {
         DEVICE_INORDER,  // machine_type=1, in-order PIM PE (default)
-        DEVICE_ALU,      // machine_type=1, no caches
+        DEVICE_ALU,      // machine_type=1, compute-unit datapath
+        DEVICE_OOO,      // machine_type=0, out-of-order PIM PE
         HOST_OOO         // machine_type=0, x86 OOO host core
     };
 

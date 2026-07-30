@@ -3979,9 +3979,18 @@ static void runPowerAnalysis(const UnifiedConfig& config,
 
     McPAT mcpat(mcfg);
 
-    // Device profile
+    /* Device profile.
+     * 1.9.37: the out-of-order case was MISSING here. This path had only
+     * "compute unit or in-order", so an element declared ooo_core was described
+     * as in-order -- no reorder buffer, no instruction window, no renaming --
+     * while zsim simulated a real out-of-order core. The per-node path
+     * (runPerNodePowerAnalysis) already selected an out-of-order profile
+     * correctly; only this device-scope path did not, which is why the defect
+     * showed on device-scope cells and not on co-simulation ones. */
     if (alu_only)
         mcpat.setDeviceProfile(McPAT::DeviceProfile::DEVICE_ALU);
+    else if (config.pe_type == "ooo_core")
+        mcpat.setDeviceProfile(McPAT::DeviceProfile::DEVICE_OOO);
     else
         mcpat.setDeviceProfile(McPAT::DeviceProfile::DEVICE_INORDER);
 
