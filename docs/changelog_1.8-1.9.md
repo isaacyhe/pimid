@@ -7,6 +7,61 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.9.35 -- a control that could never be set, and a dimension counted twice
+
+Two faults in the in-memory hierarchy description, neither of which changes any
+result today and both of which would have, silently, the moment the tree grew.
+
+### A control wired end to end with no way to reach it
+
+The number of ranks per channel is declared in the configuration structure,
+written into the generated simulator configuration, and read by the execution
+plugin, the trace driver and the analytical hierarchy model. It has no key in any
+configuration file. It could therefore never hold anything but its default of
+one, so the rank tier of every tree ever built has been a router with exactly one
+child -- a pass-through latency hop -- while the surrounding code reads as though
+multiple ranks were supported.
+
+The plumbing was complete except for its first link. That link is now in place.
+The default is unchanged, so no existing configuration moves.
+
+### The channel dimension booked twice
+
+For stacked memory the chips-per-rank figure is set to the number of channels in
+the stack, as its own comment says. The channel count is ALSO supplied separately,
+as the fanout at the root of the tree and as the concurrency multiplier on link
+widths. The same physical dimension therefore appears in two places.
+
+Nothing multiplies them today. The rank tier is degenerate, and the organisation
+size is computed without a channel factor, so every processing element resolves
+to the first channel of the first rank and the duplication cancels. It stops
+cancelling the instant either tier is given real fanout, and the result would be
+a silent eight- or sixteen-fold inflation of the tree -- in the direction that
+makes the fabric look larger and costlier than it is.
+
+Rather than restructure the tree, which belongs with the interconnect fidelity
+work, the combination is refused: asking for more than one rank per channel on a
+stacked technology now fails, naming the inflation factor and what would have to
+change first. A latent contradiction that cancels by accident is not a safe thing
+to leave for a later reader to rediscover.
+
+### A comment that described something the code does not build
+
+The generated topology was documented as encoding parallel channel subtrees. It
+does not. With the rank count fixed at one and no channel factor in the
+organisation size, both the channel and the rank routers have a single child. The
+channel count is used only as the root fanout in the abstract-endpoint test and as
+the link-width multiplier. The comment is corrected, because a false description
+is what would let the duplication above read as deliberate.
+
+### Data impact
+
+None. Verified: with a technology and configuration unchanged, hop counts and
+reported power are identical either side of this release, measured against a
+reference rebuilt from the immediately preceding release including its execution
+plugin. The new control defaults to the value that was previously hard-wired, and
+the refusal fires only on a combination that was never expressible before.
+
 ## 1.9.34 -- interconnect distances were measured between the wrong nodes
 
 The custom-topology hop count walked a router adjacency using endpoint

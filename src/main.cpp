@@ -1880,6 +1880,28 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
     // chips_per_rank = channels per stack (HBM2 8, HBM3 16).
     else if (tech == "HBM2") { banks_per_bg = 2; bg_per_chip = 8; chips_per_rank = 8; }
     else if (tech == "HBM3")     { banks_per_bg = 4; bg_per_chip = 8; chips_per_rank = 16; }
+    /* 1.9.35: the two lines above BOOK THE CHANNEL DIMENSION TWICE for HBM.
+     * chips_per_rank is set to the channel count per stack, as the comment above
+     * says, while the channel count is ALSO supplied separately as the tree's
+     * root fanout and as the link-width concurrency multiplier. Nothing today
+     * multiplies the two, because the rank tier is degenerate and the
+     * organisation size is computed without a channel factor -- so every
+     * processing element decomposes to channel 0, rank 0 and the duplication
+     * cancels. It stops cancelling the moment either tier is given real fanout,
+     * and the error would then be a silent eight- or sixteen-fold inflation of
+     * the HBM tree, in the direction that makes the fabric look larger and more
+     * expensive than it is. Refuse that combination rather than discover it in a
+     * result. */
+    if ((tech == "HBM2" || tech == "HBM3") && config.hierarchy_ranks_per_channel > 1) {
+        std::cerr << "[config] FATAL: " << tech << " folds the channel count into "
+                     "chips_per_rank, and memory.ranks_per_channel > 1 would then "
+                     "count the channel dimension twice -- an "
+                  << chips_per_rank << "x inflation of the in-memory tree. "
+                     "Give the channel tier real fanout first (see the NoC "
+                     "tree-fidelity work) or leave ranks_per_channel at 1."
+                  << std::endl;
+        std::exit(2);
+    }
     else if (tech == "SRAM" || tech == "STT_MRAM" || tech == "PCM" || tech == "RERAM") {
         banks_per_bg = config.num_banks; bg_per_chip = 1; chips_per_rank = 1;
     }
@@ -2333,8 +2355,15 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
             //    channel concurrency). For the cycle-accurate (detailed) Garnet
             //    on a real DRAM tech we emit a TREE topology
             //    file that encodes the tech's DRAM hierarchy with per-layer link
-            //    latency, per-link width (bandwidth via occupancy), and N parallel
-            //    channel subtrees, then point Garnet at it via CUSTOM. This
+            //    latency and per-link width (bandwidth via occupancy), then point
+            //    Garnet at it via CUSTOM. NOTE (1.9.35): this comment used to
+            //    claim "N parallel channel subtrees". It does not build them.
+            //    ranks_per_channel is 1 unless configured and the organisation
+            //    size carries no channel factor, so every processing element
+            //    decomposes to channel 0, rank 0 and BOTH the channel and rank
+            //    routers have exactly one child -- pure pass-through latency
+            //    hops. N is used only as the root fanout in the abstract-endpoint
+            //    test and as the link-width concurrency multiplier. This
             //    SUPERSEDES the scalar noc_garnet_link_latency above for detailed
             //    DRAM (that value is kept as the linkLatency fallback / inherited
             //    default for any link that omits per-link fields, and still drives
@@ -7463,6 +7492,20 @@ int main(int argc, char** argv) {
                 }
 
                 config.num_banks = yaml_cfg["memory"]["banks"].as<int>(config.num_banks);
+                /* 1.9.35: ranks_per_channel was plumbed END TO END -- declared
+                 * here, emitted into the zsim configuration, and read by the
+                 * plugin, the trace driver and the analytical hierarchy model --
+                 * with NO configuration key anywhere. It could therefore never
+                 * be anything but its default of 1, so the rank tier of the tree
+                 * was a pass-through hop for every run ever made, while the code
+                 * read as though multi-rank were supported. Completing the
+                 * plumbing costs one line; the default is unchanged, so no
+                 * existing configuration moves. */
+                if (yaml_cfg["memory"]["ranks_per_channel"]) {
+                    config.hierarchy_ranks_per_channel =
+                        yaml_cfg["memory"]["ranks_per_channel"].as<int>(
+                            config.hierarchy_ranks_per_channel);
+                }
                 // subarray geometry: optional height (rows) and/or an explicit
                 // count. If the count is set it wins; otherwise the per-tech
                 // default (or the given height) derives it in the org block.
