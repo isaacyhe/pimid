@@ -1,4 +1,4 @@
-# Changelog / defect ledger -- 1.8.0 -> 1.9.27
+# Changelog / defect ledger -- 1.8.0 -> 1.9.28
 
 Release + defect ledger for the co-sim MPI window, the measured-feedback MPI
 pricing model, and the OMP critical-path metric. One entry per release; each
@@ -6,6 +6,60 @@ gives the defect fixed, a one-line root cause, and a data-impact note (which
 sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
+
+## 1.9.28 -- core power was priced on activity that was absent, invented, and misattributed
+
+The concern that opened this item was that host per-core dynamic power looked
+implausibly low for an out-of-order core at the configured clock. It was.
+Three separate defects fed the core power model, each independently sufficient
+to produce the symptom.
+
+FIRST, the instruction count never arrived. The system-scope (co-simulation)
+power path computed a per-node instruction total and then never passed it to
+McPAT -- it supplied cycles and busy-cycles only. The count therefore kept its
+constructor value of zero, and every core activity statistic in the generated
+input was zero: integer, floating-point, branch, committed, and reorder-buffer
+reads alike. Core dynamic power was approximately zero BY CONSTRUCTION in every
+co-simulation cell. The device-scope path always supplied it.
+
+SECOND, the instruction mix was invented. The activity statistics were built
+from fixed fractions of the instruction count -- a fixed share integer, a fixed
+share floating-point, a fixed share branch, and a fixed mispredict rate --
+applied identically to every workload. A stencil, a graph traversal and a
+matrix-vector product were all described to the power model as the same
+instruction stream. The simulator measures micro-ops, basic blocks and
+mispredicted branches, and none of it was being read.
+
+THIRD, and the largest, work was misattributed between nodes. The per-node path
+took a SINGLE core's instruction count and divided it across nodes in
+proportion to their CORE COUNTS. With a single-core host beside a many-PE
+device, the host was credited with a small fraction of its own work while the
+device was credited with a large multiple of work it never performed. The
+parser already separated host from device cores for cycle counts; it simply did
+not do so for instructions.
+
+Fixed by supplying the count, by reading the measured activity the simulator
+already reports (branch counts derived from basic blocks, since a block
+terminates at a control transfer, and mispredictions measured rather than
+assumed), and by giving each node its own measured instruction total. The
+integer/floating split remains an assumption, since retired operations are not
+classified, but it now applies to the non-branch remainder rather than to the
+whole stream.
+
+Verified on a co-simulation cell: each node is now priced on the instruction
+count it actually executed, the host's rising and the device's falling to their
+measured values, and reported dynamic power rises accordingly.
+
+What this does NOT establish: that the resulting absolute figures are right.
+The inputs are now measured rather than absent or invented, which removes three
+specific errors; the underlying power model remains analytical and its output
+has not been validated against silicon. Treat the improvement as a correction
+of inputs, not as a validation of the model.
+
+Data impact: all core power and energy figures change in system scope. Host
+figures rise substantially, device figures fall, and the split between them
+changes. Device-scope runs are unaffected by the attribution defect but do gain
+the measured instruction mix. Not comparable with earlier generations.
 
 ## 1.9.27 -- cycle timestamps exchanged between ranks now carry their clock domain
 

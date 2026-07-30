@@ -387,6 +387,26 @@ struct ZSimParsedOutput {
     // path (runPowerAnalysis) keeps using `cycles`, so its values are unchanged.
     uint64_t host_wall_cycles = 0;
     uint64_t dev_wall_cycles = 0;
+    /* 1.9.28: per-group instruction totals. `instrs` above is the FIRST core's
+     * count; the per-node power path was splitting that single number across
+     * nodes by CORE-COUNT proportion, so a 1-core host beside a 16-PE device
+     * was credited with 1/17 of its own work while the device was credited
+     * with work it never executed. Each node needs its own measured total. */
+    uint64_t host_instrs = 0;
+    uint64_t dev_instrs = 0;
+    /* 1.9.28 measured core activity. The power model previously built McPAT's
+     * instruction mix from fixed fractions of the instruction count (70% int,
+     * 10% fp, 10% branch) for every workload, so per-core dynamic power was
+     * driven by a constant rather than by what the program executed. zsim
+     * already reports these; they were simply never parsed. Zero means the
+     * counter was absent, and the caller falls back to the old fractions. */
+    uint64_t uops = 0;              // retired micro-ops (OOO path)
+    uint64_t bbls = 0;              // basic blocks -- each ends in a control transfer,
+                                    // so this is a MEASURED branch-count proxy
+    uint64_t branches = 0;          // conditional branches resolved
+    uint64_t mispredBranches = 0;   // of those, mispredicted
+    uint64_t indirBranches = 0;     // indirect jmp/call resolutions
+    uint64_t rasReturns = 0;        // returns resolved against the RAS
 
     // L1I: fhGETS (filtered hits), hGETS (hits), mGETS (misses) — accumulated across all instances
     uint64_t l1i_fhGETS = 0;
@@ -567,6 +587,17 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
             if (scope == Scope::NONE || scope == Scope::ROOT) {
                 if (key == "cycles" && out.cycles == 0) out.cycles = val;
                 else if (key == "instrs" && out.instrs == 0) out.instrs = val;
+                /* 1.9.28: accumulate per group as well as the legacy first-core value */
+                if (key == "instrs") {
+                    if (core_group == CoreGroup::HOST) out.host_instrs += val;
+                    else if (core_group == CoreGroup::DEVICE) out.dev_instrs += val;
+                }
+                /* 1.9.28: accumulate measured activity across cores. */
+                else if (key == "uops") out.uops += val;
+                else if (key == "bbls") out.bbls += val;
+                else if (key == "mispredBranches") out.mispredBranches += val;
+                else if (key == "indirBranches") out.indirBranches += val;
+                else if (key == "rasReturns") out.rasReturns += val;
 
                 // 1.9.10: contention-inclusive per-group wall-clock cycles.
                 if (key == "cycles") {
@@ -4425,12 +4456,31 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
             } else {
                 node_cycles = static_cast<uint64_t>(total_cycles * core_frac);
             }
-            uint64_t node_instrs = static_cast<uint64_t>(total_instrs * core_frac);
+            /* 1.9.28: use THIS node's measured instruction count. The old
+             * core-fraction split of a single core's total misattributed work
+             * between host and device (see the parser note). Fall back to the
+             * legacy split only if the grouped totals are unavailable. */
+            uint64_t node_instrs;
+            {
+                uint64_t grouped = (node.role == UnifiedConfig::SystemNode::HOST)
+                                 ? zsim_stats.host_instrs : zsim_stats.dev_instrs;
+                node_instrs = (grouped > 0)
+                            ? grouped
+                            : static_cast<uint64_t>(total_instrs * core_frac);
+            }
             if (node_cycles == 0) node_cycles = 1;
             if (node_instrs == 0) node_instrs = 1;
 
             mcpat.setTotalCycles(node_cycles);
             mcpat.setBusyCycles(node_cycles);
+            /* 1.9.28: node_instrs was computed and then never handed to McPAT,
+             * so total_instructions_ kept its constructor value of zero and
+             * EVERY core activity stat in the generated XML was zero --
+             * int/fp/branch/committed counts and ROB reads alike. Core dynamic
+             * power was therefore ~0 by construction in every system-scope
+             * (co-simulation) cell, which is why per-core dynamic looked
+             * implausibly low. The device-scope path always supplied it. */
+            mcpat.setTotalInstructions(node_instrs);
             mcpat.setTotalInstructions(node_instrs);
 
             // Distribute cache stats proportionally
@@ -4456,6 +4506,18 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
             mcpat.setMemControllerAccesses(
                 static_cast<uint64_t>(zsim_stats.mem_rd * core_frac),
                 static_cast<uint64_t>(zsim_stats.mem_wr * core_frac));
+            /* 1.9.28: measured core activity instead of fixed instruction-mix
+             * fractions. Zero counters fall back to the previous behaviour. */
+            mcpat.setMeasuredCoreActivity(
+                static_cast<uint64_t>(zsim_stats.uops * core_frac),
+                static_cast<uint64_t>(zsim_stats.bbls * core_frac),
+                static_cast<uint64_t>(zsim_stats.mispredBranches * core_frac));
+            std::cout << "  [Activity] " << node.name
+                      << ": instrs=" << node_instrs
+                      << " cycles=" << node_cycles
+                      << (zsim_stats.bbls > 0 ? "  (measured mix)"
+                                              : "  (fixed mix -- counters absent)")
+                      << std::endl;
             mcpat.setMCTechParams(getMCTechParamsForMcPAT(node.memory_tech, 1));
 
             mcpat.computePower();

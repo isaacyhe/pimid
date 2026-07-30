@@ -229,6 +229,14 @@ public:
     // Set runtime statistics (needed for dynamic power calculation)
     void setTotalCycles(uint64_t cycles);
     void setBusyCycles(uint64_t cycles);
+    /* 1.9.28: MEASURED core activity. Without it the XML is built from fixed
+     * fractions of the instruction count (70% int / 10% fp / 10% branch) for
+     * every workload, so dynamic power is driven by a constant rather than by
+     * what the program executed. Pass 0 for an unavailable counter and that
+     * term falls back to the previous fraction. */
+    void setMeasuredCoreActivity(uint64_t uops, uint64_t branches,
+                                 uint64_t mispredicted);
+
     void setTotalInstructions(uint64_t instructions);
 
     // Split cache stat setters — use actual ZSim counters, not combined reads/writes
@@ -309,6 +317,9 @@ private:
     uint64_t total_cycles_;
     uint64_t busy_cycles_;
     uint64_t total_instructions_;
+    uint64_t meas_uops_ = 0;         // 1.9.28: 0 => fall back to fractions
+    uint64_t meas_branches_ = 0;
+    uint64_t meas_mispred_ = 0;
 
     // Split cache stats
     uint64_t l1i_reads_;

@@ -144,6 +144,13 @@ void McPATWrapper::setBusyCycles(uint64_t cycles) {
 
 void McPATWrapper::setTotalInstructions(uint64_t instructions) {
     total_instructions_ = instructions;
+}
+
+void McPATWrapper::setMeasuredCoreActivity(uint64_t uops, uint64_t branches,
+                                           uint64_t mispredicted) {
+    meas_uops_ = uops;
+    meas_branches_ = branches;
+    meas_mispred_ = mispredicted;
     power_computed_ = false;
 }
 
@@ -959,15 +966,36 @@ std::string McPATWrapper::generateXMLConfig() const {
             : 0.0;
 
         xml << "      <stat name=\"total_instructions\" value=\"" << inst_per_core << "\"/>\n";
-        xml << "      <stat name=\"int_instructions\" value=\"" << (inst_per_core * 70 / 100) << "\"/>\n";
-        xml << "      <stat name=\"fp_instructions\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
-        xml << "      <stat name=\"branch_instructions\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
-        xml << "      <stat name=\"branch_mispredictions\" value=\"" << (inst_per_core * 1 / 100) << "\"/>\n";
+        /* 1.9.28: prefer MEASURED activity. Branch count comes from the basic
+         * block count -- a BBL terminates at a control transfer, so it is a
+         * measured proxy rather than a fixed share of the instruction stream.
+         * The integer/floating split is still an assumption (zsim does not
+         * classify retired ops), but it is now applied to the NON-branch
+         * remainder instead of to the whole stream, so a branch-heavy workload
+         * is no longer forced to the same mix as a floating-point one. */
+        uint64_t br_per_core = (meas_branches_ > 0)
+            ? meas_branches_ / std::max(1, config_.num_cores)
+            : inst_per_core * 10 / 100;
+        if (br_per_core > inst_per_core) br_per_core = inst_per_core;
+        uint64_t nonbr = inst_per_core - br_per_core;
+        uint64_t int_per_core = nonbr * 875 / 1000;   // 87.5% of non-branch
+        uint64_t fp_per_core  = nonbr - int_per_core;
+        xml << "      <stat name=\"int_instructions\" value=\"" << int_per_core << "\"/>\n";
+        xml << "      <stat name=\"fp_instructions\" value=\"" << fp_per_core << "\"/>\n";
+        xml << "      <stat name=\"branch_instructions\" value=\"" << br_per_core << "\"/>\n";
+        /* 1.9.28: measured, not a fixed 1%. Mispredicts drive pipeline-flush
+         * energy, and their rate varies enormously by workload -- a regular
+         * stencil and an irregular graph traversal are not the same machine. */
+        uint64_t mispred_per_core = (meas_mispred_ > 0)
+            ? meas_mispred_ / std::max(1, config_.num_cores)
+            : inst_per_core * 1 / 100;
+        if (mispred_per_core > br_per_core) mispred_per_core = br_per_core;
+        xml << "      <stat name=\"branch_mispredictions\" value=\"" << mispred_per_core << "\"/>\n";
         xml << "      <stat name=\"load_instructions\" value=\"" << (inst_per_core * 20 / 100) << "\"/>\n";
         xml << "      <stat name=\"store_instructions\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
         xml << "      <stat name=\"committed_instructions\" value=\"" << inst_per_core << "\"/>\n";
-        xml << "      <stat name=\"committed_int_instructions\" value=\"" << (inst_per_core * 70 / 100) << "\"/>\n";
-        xml << "      <stat name=\"committed_fp_instructions\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        xml << "      <stat name=\"committed_int_instructions\" value=\"" << int_per_core << "\"/>\n";
+        xml << "      <stat name=\"committed_fp_instructions\" value=\"" << fp_per_core << "\"/>\n";
         xml << "      <stat name=\"pipeline_duty_cycle\" value=\"" << pipeline_duty_cycle << "\"/>\n";
         xml << "      <stat name=\"total_cycles\" value=\"" << total_cycles_ << "\"/>\n";
         xml << "      <stat name=\"idle_cycles\" value=\"" << (total_cycles_ - busy_cycles_) << "\"/>\n";
