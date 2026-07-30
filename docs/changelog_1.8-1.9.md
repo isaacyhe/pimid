@@ -7,6 +7,39 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.9.38 -- one out-of-order model, not two
+
+The previous release added a separate out-of-order description for processing
+elements, distinct from the host's. This withdraws it.
+
+An out-of-order processing element is hypothetical. No shipping in-memory part
+has one: the commercial near-bank processor is deliberately in-order with many
+hardware threads, using thread-level parallelism rather than speculation to hide
+latency, and the in-bank engine of the stacked-memory part is command-driven wide
+arithmetic. There is therefore no silicon against which a distinct device variant
+could be calibrated, and separating the two bought a name without a difference --
+every speculative parameter still came from the same characterised-core
+constants.
+
+For a hypothetical machine, describing it as a well-characterised out-of-order
+core is the most defensible reference available, and inventing separate device
+parameters would introduce exactly the kind of unanchored constant this release
+train exists to remove.
+
+One inaccuracy is recorded rather than papered over: the surviving description
+carries an instruction-set decode flag appropriate to the host, which a
+processing element would not have. It is left in place because correcting it
+alone would not make the rest of the description any more applicable, and noted
+so the next reader does not mistake it for a considered choice.
+
+### Data impact
+
+None beyond the preceding release. Verified: an out-of-order device cell is
+unchanged from that release, and in-order and compute-unit cells are unchanged
+from before it. Note also that only two configurations in the corpus name an
+out-of-order processing element at all, so the preceding release's change reaches
+two exploration cells rather than any swept figure.
+
 ## 1.9.37 -- an out-of-order element was described as in-order
 
 The device-scope power path chose between exactly two descriptions: compute unit,

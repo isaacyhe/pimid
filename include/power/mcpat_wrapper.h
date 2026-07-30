@@ -111,8 +111,18 @@ public:
     enum class DeviceProfile {
         DEVICE_INORDER,  // machine_type=1, in-order PIM PE (default)
         DEVICE_ALU,      // machine_type=1, compute-unit datapath
-        DEVICE_OOO,      // machine_type=0, out-of-order PIM PE
-        HOST_OOO         // machine_type=0, x86 OOO host core
+        /* 1.9.37: ONE out-of-order model, host and device alike. A separate
+         * device variant was briefly added and then withdrawn: an out-of-order
+         * PROCESSING ELEMENT is hypothetical -- no shipping in-memory part has
+         * one (UPMEM's element is deliberately in-order with many threads to
+         * hide latency; the stacked-memory in-bank engine is command-driven
+         * SIMD) -- so there is no silicon to calibrate a distinct device variant
+         * against, and splitting the enum bought a name without a difference.
+         * The out-of-order description remains characterised-core-shaped, which
+         * for a hypothetical machine is the most defensible reference available.
+         * Note it therefore carries an x86 decode flag; that is a known
+         * inaccuracy for a device element, recorded rather than papered over. */
+        OOO              // machine_type=0, out-of-order core (host or device)
     };
 
     /**

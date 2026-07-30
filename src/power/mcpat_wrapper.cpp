@@ -88,7 +88,7 @@ void McPATWrapper::initialize() {
         std::cout << "  L2: " << (config_.l2_size_bytes/1024) << " KB" << std::endl;
         std::cout << "  L3: " << (config_.l3_size_bytes/(1024*1024)) << " MB" << std::endl;
         std::cout << "  Technology: " << config_.tech_node_nm << " nm" << std::endl;
-        if (device_profile_ == DeviceProfile::HOST_OOO)
+        if (device_profile_ == DeviceProfile::OOO)
             std::cout << "  Profile: HOST_OoO (x86 out-of-order)" << std::endl;
         else if (device_profile_ == DeviceProfile::DEVICE_ALU)
             std::cout << "  Profile: DEVICE_ALU (no caches)" << std::endl;
@@ -569,7 +569,7 @@ void McPATWrapper::computePower() {
      * because the generator emits identical input for an ALU and an in-order
      * core. The percentage is what an ALU model has to remove, and is the
      * yardstick that model will be validated against. */
-    if (device_profile_ != DeviceProfile::HOST_OOO) {
+    if (device_profile_ != DeviceProfile::OOO) {
         double tot = core_ifu_w_ + core_lsu_w_ + core_mmu_w_
                    + core_exu_w_ + core_pipe_w_ + core_undiff_w_;
         double absent = core_ifu_w_ + core_lsu_w_ + core_mmu_w_;
@@ -577,8 +577,8 @@ void McPATWrapper::computePower() {
             std::cout << "  [CoreBreakdown] per core, "
                       << (device_profile_ == DeviceProfile::DEVICE_ALU
                               ? "DEVICE_ALU"
-                          : (device_profile_ == DeviceProfile::DEVICE_OOO)
-                              ? "DEVICE_OOO" : "DEVICE_INORDER")
+                          : (device_profile_ == DeviceProfile::OOO)
+                              ? "OOO" : "DEVICE_INORDER")
                       << ": ifu=" << core_ifu_w_ << "W lsu=" << core_lsu_w_
                       << "W mmu=" << core_mmu_w_ << "W exu=" << core_exu_w_
                       << "W pipe=" << core_pipe_w_ << "W undiff=" << core_undiff_w_
@@ -951,8 +951,7 @@ std::string McPATWrapper::generateXMLConfig() const {
      * buffer, NO instruction window and NO renaming, while the timing model
      * simulated all of it. Two halves of one model describing different
      * machines -- the recurring failure of this release train. */
-    bool is_ooo = (device_profile_ == DeviceProfile::HOST_OOO ||
-                   device_profile_ == DeviceProfile::DEVICE_OOO);
+    bool is_ooo = (device_profile_ == DeviceProfile::OOO);
     /* 1.9.36: DEVICE_ALU is no longer emitted as an in-order core.
      *
      * McPAT offers exactly two core models, OOO and Inorder

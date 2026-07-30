@@ -3990,7 +3990,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     if (alu_only)
         mcpat.setDeviceProfile(McPAT::DeviceProfile::DEVICE_ALU);
     else if (config.pe_type == "ooo_core")
-        mcpat.setDeviceProfile(McPAT::DeviceProfile::DEVICE_OOO);
+        mcpat.setDeviceProfile(McPAT::DeviceProfile::OOO);
     else
         mcpat.setDeviceProfile(McPAT::DeviceProfile::DEVICE_INORDER);
 
@@ -4184,7 +4184,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         host_cfg.temperature_k = 350;
 
         McPAT host_mcpat(host_cfg);
-        host_mcpat.setDeviceProfile(McPAT::DeviceProfile::HOST_OOO);
+        host_mcpat.setDeviceProfile(McPAT::DeviceProfile::OOO);
         host_mcpat.initialize();
 
         /* 1.9.29: price the host from ITS OWN measured counters.
@@ -4629,7 +4629,7 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
         if (effective_type == "ooo_core") {
             mcfg.pipeline_depth = 19; mcfg.issue_width = 4;
             mcfg.num_alus = 4; mcfg.num_muls = 2; mcfg.num_fpus = 2;
-            profile = McPAT::DeviceProfile::HOST_OOO;
+            profile = McPAT::DeviceProfile::OOO;
             result.core_desc = "OOO";
         } else if (effective_type == "alu_core") {
             mcfg.pipeline_depth = 5; mcfg.issue_width = 1;
