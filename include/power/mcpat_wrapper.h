@@ -171,6 +171,22 @@ public:
         int num_muls;
         int num_fpus;
 
+        /* 1.9.32: reference class. McPAT prices a die against one of two
+         * measured populations. The default one is server processors -- the
+         * undifferentiated-core term is a curve fitted to Niagara, Niagara2,
+         * Merom, Penryn, Prescott and Opteron die photographs, the functional
+         * units carry desktop areas, and the wires are top-level global. The
+         * other is embedded parts, calibrated to ARM and to Sandia's
+         * parametrized processor study.
+         *
+         * A processing element sitting on a memory die is not a fragment of an
+         * Opteron. This flag selects the embedded population for device scope
+         * and leaves host scope on the server one, which is what the host
+         * actually is. It was never emitted before, so every element in every
+         * sweep was priced as server silicon by omission rather than by
+         * choice. */
+        bool device_scope;
+
         // Cache parameters
         uint64_t l1i_size_bytes;
         uint64_t l1d_size_bytes;
@@ -219,6 +235,7 @@ public:
             , num_alus(3)
             , num_muls(1)
             , num_fpus(1)
+            , device_scope(false)
             , l1i_size_bytes(32 * 1024)
             , l1d_size_bytes(32 * 1024)
             , l2_size_bytes(256 * 1024)

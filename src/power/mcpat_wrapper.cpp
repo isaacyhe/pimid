@@ -997,6 +997,9 @@ std::string McPATWrapper::generateXMLConfig() const {
     int fp_issue_width = is_ooo ? 2 : 0;
     int store_buffer = is_ooo ? 32 : 4;
     int load_buffer = is_ooo ? 32 : 4;
+    int num_alus = config_.num_alus;
+    int num_muls = config_.num_muls;
+    int num_fpus = config_.num_fpus;
     if (is_alu) {
         /* A datapath: a register file, arithmetic units, a result bus and an
          * instruction store. No speculation, no dynamic scheduling, no caches.
@@ -1010,6 +1013,26 @@ std::string McPATWrapper::generateXMLConfig() const {
         store_buffer   = 1;      // request issue only; no queueing, no cache
         load_buffer    = 1;
         lsu_order      = "inorder";
+        /* 1.9.32: arithmetic composed from the datapath instead of inherited.
+         * The element previously declared one integer ALU, no multiplier and NO
+         * FLOATING-POINT UNIT AT ALL -- while the timing model ran stream_triad,
+         * gemv and stencil_2d on it, every one of them FP32. The two halves were
+         * describing different machines again: the timing side retired
+         * single-cycle floating-point operations on hardware the power side said
+         * did not exist, so their energy was never charged.
+         *
+         * One of each unit per lane is what makes a lane a lane: a lane that
+         * cannot multiply or cannot do floating point stalls on the kernels we
+         * run, and the timing model charges no such stall. The multiplier is not
+         * optional for the same reason -- gemv and stencil are multiply-
+         * accumulate in their inner loop.
+         *
+         * pe_has_fp exists because an integer-only element is a real design
+         * point (histogram and bfs are INT32 throughout); it is a configuration
+         * choice, not a default. */
+        num_alus = lanes;
+        num_muls = lanes;
+        num_fpus = config_.pe_has_fp ? lanes : 0;
     }
 
     xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
@@ -1038,8 +1061,45 @@ std::string McPATWrapper::generateXMLConfig() const {
     xml << "    <param name=\"interconnect_projection_type\" value=\"" << config_.interconnect_projection_type << "\"/>\n";
     xml << "    <param name=\"device_type\" value=\"" << config_.device_type << "\"/>\n";
     xml << "    <param name=\"longer_channel_device\" value=\"" << config_.longer_channel_device << "\"/>\n";
+    /* 1.9.32: reference class, emitted explicitly instead of inherited.
+     * McPAT defaults Embedded to false, i.e. "this die belongs to the server
+     * population". Nothing ever overrode it, so a processing element was priced
+     * against Niagara/Merom/Opteron die measurements: a five-stage element drew
+     * an undifferentiated-core term of about three square millimetres at the
+     * fit's 90 nm base, which is larger than everything the description
+     * actually names by orders of magnitude and which supplied nearly all of
+     * the element's power -- all of it leakage, since that term has no dynamic
+     * component at all.
+     *
+     * Device scope now selects the embedded population. That is not a discount
+     * applied to make a number smaller; it is the other of the two populations
+     * McPAT was calibrated against, and it is the one a memory-die element
+     * belongs to. It changes three things together, which is why it has to be
+     * one flag rather than three edits: the undifferentiated term switches to
+     * Sandia's parametrized-processor fit, the functional units switch to ARM
+     * areas and per-access energies, and the wires switch from top-level global
+     * to the local/semi-global stack an on-die element would actually use.
+     *
+     * Host scope stays on the server population, because the host is a server
+     * part. */
+    xml << "    <param name=\"Embedded\" value=\"" << (config_.device_scope ? 1 : 0) << "\"/>\n";
+    /* Only ever read inside the embedded undifferentiated-core term, where it
+     * decides whether that term exists at all. Kept at 1 so the element still
+     * carries clocking and control overhead; 0 would zero it, which is a
+     * cheaper answer than the truth. */
+    xml << "    <param name=\"opt_clockrate\" value=\"1\"/>\n";
     xml << "    <param name=\"power_gating\" value=\"0\"/>\n";
-    xml << "    <param name=\"machine_bits\" value=\"64\"/>\n";
+    /* 1.9.32: datapath width. McPAT reads machine_bits ONLY to size the
+     * datapath -- the integer and floating-point register widths, the load/store
+     * queue entries, and the integer, multiply and floating-point bypass buses.
+     * It has nothing to do with the address widths, which are emitted
+     * separately below.
+     *
+     * A 64 was emitted for every scope, so a 32-bit processing element carried
+     * 64-bit registers and 64-bit result buses. Device scope now states the
+     * element's own width; host scope stays 64, which the host is. */
+    xml << "    <param name=\"machine_bits\" value=\""
+        << (config_.device_scope ? config_.pe_element_bits : 64) << "\"/>\n";
     xml << "    <param name=\"virtual_address_width\" value=\"48\"/>\n";
     xml << "    <param name=\"physical_address_width\" value=\"48\"/>\n";
     xml << "    <param name=\"virtual_memory_page_size\" value=\"4096\"/>\n";
@@ -1074,9 +1134,9 @@ std::string McPATWrapper::generateXMLConfig() const {
         xml << "      <param name=\"pipelines_per_core\" value=\"1,1\"/>\n";
         xml << "      <param name=\"pipeline_depth\" value=\"" << pipeline_depth << ","
             << pipeline_depth << "\"/>\n";
-        xml << "      <param name=\"ALU_per_core\" value=\"" << config_.num_alus << "\"/>\n";
-        xml << "      <param name=\"MUL_per_core\" value=\"" << config_.num_muls << "\"/>\n";
-        xml << "      <param name=\"FPU_per_core\" value=\"" << config_.num_fpus << "\"/>\n";
+        xml << "      <param name=\"ALU_per_core\" value=\"" << num_alus << "\"/>\n";
+        xml << "      <param name=\"MUL_per_core\" value=\"" << num_muls << "\"/>\n";
+        xml << "      <param name=\"FPU_per_core\" value=\"" << num_fpus << "\"/>\n";
         xml << "      <param name=\"instruction_buffer_size\" value=\"32\"/>\n";
         xml << "      <param name=\"decoded_stream_buffer_size\" value=\"16\"/>\n";
         xml << "      <param name=\"instruction_window_scheme\" value=\"0\"/>\n";
@@ -1208,6 +1268,51 @@ std::string McPATWrapper::generateXMLConfig() const {
         xml << "      <stat name=\"cdb_alu_accesses\" value=\"" << inst_per_core << "\"/>\n";
         xml << "      <stat name=\"cdb_mul_accesses\" value=\"" << (inst_per_core * 5 / 100) << "\"/>\n";
         xml << "      <stat name=\"cdb_fpu_accesses\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+
+        if (alu_only) {
+            /* 1.9.32: the element's instruction store, stated instead of
+             * inherited. McPAT builds an instruction-fetch unit for every core
+             * unconditionally, and this path emitted no icache parameters at
+             * all -- so the store was constructed from ParseXML's initialize(),
+             * which fills the whole config vector with the literal value 1. The
+             * element's instruction supply was therefore a ONE-BYTE, one-line,
+             * one-way cache: not a modelling choice, an uninitialised default
+             * that nothing had ever looked at.
+             *
+             * What a processing element really has is a resident instruction
+             * memory, sized by pe_imem_bytes -- roughly a hundred bytes for a
+             * command-driven in-bank engine, kilobytes for a programmable
+             * near-bank one. That size is the interesting design axis: it
+             * decides which kernels can run on the element at all.
+             *
+             * Direct-mapped, one instruction word per line, and ZERO misses:
+             * the program is resident, so there is no refill path to charge.
+             *
+             * RESIDUAL, named rather than hidden: this is still McPAT's cache
+             * constructor, so the store carries a tag array and one-entry miss,
+             * fill and prefetch structures that a scratchpad does not have.
+             * That overstates the instruction store by the tag overhead. Fixing
+             * it needs a pure-RAM instruction store inside McPAT's fetch unit,
+             * which is the remaining half of this item. */
+            int imem_bytes = config_.pe_imem_bytes;
+            if (imem_bytes < 64) {
+                std::cerr << "[power] WARNING: pe_imem_bytes=" << imem_bytes
+                          << " is below the smallest array the model can build; "
+                          << "using 64 bytes. An element this small is command-"
+                          << "driven and should be described as such, not as a "
+                          << "degenerate instruction memory.\n";
+                imem_bytes = 64;
+            }
+            uint64_t ifetch_per_core = inst_per_core;
+            xml << "      <component id=\"system.core" << i << ".icache\" name=\"icache\">\n";
+            xml << "        <param name=\"icache_config\" value=\"" << imem_bytes
+                << ",8,1,1,1,1,64,0\"/>\n";
+            xml << "        <param name=\"buffer_sizes\" value=\"1,1,1,0\"/>\n";
+            xml << "        <stat name=\"read_accesses\" value=\"" << ifetch_per_core << "\"/>\n";
+            xml << "        <stat name=\"read_misses\" value=\"0\"/>\n";
+            xml << "        <stat name=\"conflicts\" value=\"0\"/>\n";
+            xml << "      </component>\n";
+        }
 
         if (!alu_only) {
             // L1 icache — use actual per-core stats

@@ -941,6 +941,24 @@ struct UnifiedConfig {
     std::string placement_level;
     int num_pes;
 
+    /* 1.9.32: the compute unit's datapath, as configuration rather than as a
+     * constant buried in the power model. These four say what the element IS:
+     * how many values it operates on at once, how wide each one is, whether it
+     * can do floating point, and how much program it can hold. The power and
+     * area models read them directly -- before this they existed in the power
+     * configuration but nothing ever set them, so every element was described
+     * with the same fixed defaults regardless of what the timing model ran.
+     *
+     * Defaults: a scalar 32-bit element with floating point, because three of
+     * the five kernels (stream_triad, gemv, stencil_2d) are FP32 and the other
+     * two (histogram, bfs) are INT32 -- so an element that cannot do FP32
+     * cannot run most of the suite. 4 KB of instruction memory sits between a
+     * command-driven in-bank engine and a fully programmable near-bank one. */
+    int  pe_lanes = 1;
+    int  pe_element_bits = 32;
+    bool pe_has_fp = true;
+    int  pe_imem_bytes = 4096;
+
     // Simulator parallelism (YAML: simulation.parallel, default true). ONE knob for
     // both OMP and MPI paths: true = parallelize the simulation whenever it
     // is safe to do so, false = force a serial simulation. OpenMP is exact at
@@ -3908,6 +3926,14 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     mcfg.core_clock_mhz = config.frequency_mhz;
     mcfg.tech_node_nm = config.tech_node_nm;
     mcfg.temperature_k = 350;
+    /* 1.9.32: this is the memory die, not the host processor. See
+     * SystemConfig::device_scope -- it selects which of McPAT's two calibrated
+     * die populations the element is priced against. */
+    mcfg.device_scope = true;
+    mcfg.pe_lanes       = config.pe_lanes;
+    mcfg.pe_element_bits= config.pe_element_bits;
+    mcfg.pe_has_fp      = config.pe_has_fp;
+    mcfg.pe_imem_bytes  = config.pe_imem_bytes;
 
     // Derive McPAT architecture from pe_type
     if (config.pe_type == "ooo_core") {
@@ -4166,6 +4192,8 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         host_cfg.num_alus = 4;
         host_cfg.num_muls = 2;
         host_cfg.num_fpus = 2;
+        // 1.9.32: the host IS a server part -- stated, not left to the default.
+        host_cfg.device_scope = false;
         host_cfg.l1i_size_bytes = config.host_l1i_kb * 1024;
         host_cfg.l1d_size_bytes = config.host_l1d_kb * 1024;
         host_cfg.l2_size_bytes = config.host_l2_kb * 1024;
@@ -4643,6 +4671,14 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
             profile = McPAT::DeviceProfile::DEVICE_INORDER;
             result.core_desc = (effective_type == "in_order_core") ? "InOrder" : "Simple";
         }
+
+        /* 1.9.32: reference class follows the node's role -- a device node
+         * sits on the memory die, a host node is a server part. */
+        mcfg.device_scope   = (node.role == UnifiedConfig::SystemNode::DEVICE);
+        mcfg.pe_lanes       = config.pe_lanes;
+        mcfg.pe_element_bits= config.pe_element_bits;
+        mcfg.pe_has_fp      = config.pe_has_fp;
+        mcfg.pe_imem_bytes  = config.pe_imem_bytes;
 
         // Apply overrides
         mcfg.pipeline_depth = ov_get_int("pipeline_depth", mcfg.pipeline_depth);
@@ -7087,6 +7123,31 @@ int main(int argc, char** argv) {
                     // PE frequency (alternative to system.frequency_mhz)
                     if (yaml_cfg["pim"]["pe"]["frequency_mhz"])
                         config.frequency_mhz = yaml_cfg["pim"]["pe"]["frequency_mhz"].as<int>();
+
+                    /* 1.9.32: the compute unit's datapath. Every configuration
+                     * written before this release omits all four and gets the
+                     * documented defaults, so no existing config changes
+                     * meaning. */
+                    config.pe_lanes = yaml_cfg["pim"]["pe"]["lanes"].as<int>(config.pe_lanes);
+                    config.pe_element_bits =
+                        yaml_cfg["pim"]["pe"]["element_bits"].as<int>(config.pe_element_bits);
+                    config.pe_has_fp = yaml_cfg["pim"]["pe"]["floating_point"].as<bool>(config.pe_has_fp);
+                    config.pe_imem_bytes =
+                        yaml_cfg["pim"]["pe"]["imem_bytes"].as<int>(config.pe_imem_bytes);
+                    if (config.pe_lanes < 1) {
+                        std::cerr << "Error: pim.pe.lanes must be at least 1 (got "
+                                  << config.pe_lanes << ").\n";
+                        return 1;
+                    }
+                    if (config.pe_element_bits != 32 && config.pe_element_bits != 64) {
+                        /* Only 32 and 64 are honest today: the register file and
+                         * the functional units are the only places the width is
+                         * read, and the kernels are all 32-bit. Refuse the rest
+                         * rather than accept a number that changes nothing. */
+                        std::cerr << "Error: pim.pe.element_bits must be 32 or 64 (got "
+                                  << config.pe_element_bits << ").\n";
+                        return 1;
+                    }
                     // ALU scaling factors
                     config.alu_compute_factor = yaml_cfg["pim"]["pe"]["compute_factor"].as<double>(config.alu_compute_factor);
                     config.alu_access_factor = yaml_cfg["pim"]["pe"]["access_factor"].as<double>(config.alu_access_factor);
@@ -8358,6 +8419,8 @@ int main(int argc, char** argv) {
                 mcfg.tech_node_nm = config.tech_node_nm;
                 mcfg.temperature_k = 350;
                 mcfg.has_noc = true;
+                // 1.9.32: a synthetic probe of the IN-MEMORY network.
+                mcfg.device_scope = true;
 
                 // Map topology to McPAT type
                 int mcpat_noc_type = (topo_str == "BUS") ? 0 : 1;

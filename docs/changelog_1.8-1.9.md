@@ -7,6 +7,108 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.9.39 -- the processing element is composed, not borrowed
+
+The element's power and area came from a description of a server processor with
+some fields turned down. This replaces that description with one built from what
+the element actually is. Four faults, each independently validated.
+
+### The reference class
+
+McPAT prices a die against one of two measured populations. The default is
+server processors: the undifferentiated-core term is a curve fitted to
+Niagara, Niagara2, Merom, Penryn, Prescott and Opteron die photographs, the
+functional units carry desktop areas and energies, and the wires are top-level
+global. The other population is embedded parts, calibrated against ARM designs
+and Sandia's parametrized-processor study.
+
+The flag selecting between them was never emitted, so it took its default. Every
+processing element in every sweep was priced as a fragment of a server die -- by
+omission, not by choice. The undifferentiated term alone, evaluated for a short
+element pipeline, exceeded everything the description actually named by orders of
+magnitude, and it carried most of the element's power. All of it leakage: that
+term has no dynamic component at all, which is why it never appeared in any
+activity-driven breakdown.
+
+Device scope now selects the embedded population; host scope stays on the server
+one, because the host is a server part. This is not a discount applied to make a
+number smaller. It is the other of the two populations the tool was calibrated
+against, and it is the one a memory-die element belongs to.
+
+Note what this does NOT claim. Nothing here says in-memory logic is cheap. The
+literature is consistent that logic built in a memory process is slower and
+larger than the same logic in a logic process, and that penalty is a separate
+item, still open. This release removes a term that was wrong; it does not add the
+one that is missing.
+
+### An element that runs floating-point kernels had no floating-point unit
+
+The compute unit declared one integer unit, no multiplier, and no
+floating-point unit -- while the timing model ran three of the five kernels on
+it, every one of them single-precision floating point. The two halves described
+different machines: the timing side retired floating-point operations in single
+cycles on hardware the power side said did not exist, so their energy was never
+charged.
+
+The arithmetic is now composed from the datapath: one of each unit per lane,
+because a lane that cannot multiply or cannot do floating point stalls on the
+kernels we run and the timing model charges no such stall. An integer-only
+element remains available as a configuration choice, since two of the kernels are
+integer throughout -- but it is now a choice, not a silent default.
+
+### The instruction store was an uninitialised default
+
+McPAT builds an instruction-fetch unit for every core unconditionally. The
+element path emitted no parameters for it, so the store was constructed from the
+parser's initialisation routine, which fills the entire configuration vector with
+the literal value one. The element's instruction supply was a one-byte, one-line,
+one-way cache. Nobody had ever looked at it.
+
+It is now an explicitly sized resident instruction memory, direct-mapped, with no
+misses -- the program is resident, so there is no refill path to charge. The size
+is a configuration knob, because it is the axis that decides which kernels an
+element can run at all: a command-driven in-bank engine and a programmable
+near-bank one differ mostly here.
+
+RESIDUAL, named rather than hidden: the store is still built by the cache
+constructor, so it carries a tag array and single-entry miss, fill and prefetch
+structures a scratchpad would not have. That overstates it. Removing them needs a
+pure-RAM instruction store inside the fetch unit, which is the remaining half of
+this item and is tracked as such.
+
+### Datapath width
+
+The width parameter, which the tool reads only to size register files, queue
+entries and result buses, was emitted as sixty-four for every scope. A 32-bit
+element therefore carried 64-bit registers and 64-bit result buses. Device scope
+now states the element's own width.
+
+### Configuration
+
+Four knobs describe the element: lanes, element width, floating point, and
+instruction-memory size. They existed in the power configuration but nothing ever
+set them, so every element was described identically regardless of what was
+simulated. They are now read from the configuration file, validated, and refused
+when given a value the model would not honour. Every configuration written before
+this release omits all four and receives the documented defaults, so no existing
+configuration changes meaning.
+
+### Data impact
+
+Every device-scope and co-simulation cell moves. Element power and element area
+both fall substantially at all three profiles -- compute unit, in-order and
+out-of-order -- and the reduction is larger in area than in power. Direction and
+cause are the same in each case: the undifferentiated server-die term is gone.
+
+Host-side results are UNCHANGED, bit-identical in dynamic power, leakage and
+area, which is the check that matters most here: the reference class follows the
+scope and does not leak across it.
+
+Validated separately: the reference class, the functional-unit composition, the
+instruction store, the datapath width, that each new knob reaches the model and
+changes the result, that an invalid value is refused rather than accepted, and
+that the host half of a co-simulation does not move.
+
 ## 1.9.38 -- one out-of-order model, not two
 
 The previous release added a separate out-of-order description for processing
