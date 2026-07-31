@@ -75,6 +75,37 @@ A co-sim system has **two fabrics joined by one bridge**:
   exchange data over a shared-memory mailbox (no external mpirun). Each rank
   simulates its own network instance.
 
+## Reproducibility
+
+**Given a deterministic instruction stream, the simulator is exact.** Repeated
+runs of a single-threaded workload produce bit-identical results — cycles and
+access counts, every digit.
+
+**A parallel workload does not repeat.** Its threads are real threads inside the
+emulator, the host kernel decides how they interleave, and the emulator reflects
+that faithfully. A parallel program on real hardware does not repeat its
+interleaving either, so this is the workload's property rather than a defect in
+the simulator. Total work stays stable across runs; simulated time moves.
+
+The size of that movement is not a constant. It depends on the workload, the
+machine, and how loaded the machine is — measurements of the same configuration
+on one node have ranged from a fraction of a percent to several percent depending
+on what else was running. Quote it as a measured bound for the specific study,
+not as a property of the simulator.
+
+Two things follow:
+
+- **Differences smaller than the run-to-run variation are not findings.** Measure
+  the variation for the configuration in question before claiming an effect near
+  its size.
+- **Regressions can be gated exactly.** Run the single-threaded build and require
+  bit-identical output. That is a far sharper check than judging a parallel run
+  through its own noise, and it costs one run.
+
+The settings below reduce this variation substantially — they stop the parallel
+runtime resizing its team and stop its threads spinning at barriers — but they
+cannot remove it, because its source is the workload.
+
 ## Guest OpenMP runtime settings
 
 PIMID sets four environment variables in the guest before launching a workload.

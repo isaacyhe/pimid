@@ -5,7 +5,7 @@ system scope, for hosts (`hosts[].core_type`) and devices (`devices[].pe_type`).
 
 | Value | ZSim engine | What it models |
 |---|---|---|
-| `alu_core` | ALU | Stripped-down PIM PE: 1 ALU, no caches. Behavior shaped by scaling factors (below). The default device PE. |
+| `compute_unit` | ALU | A datapath, not a processor: a register file, arithmetic units, a result bus and a resident instruction store, with no caches and no speculation. Sized by `pim.pe.lanes` / `operand_width` / `floating_point` / `imem_bytes` and shaped by the scaling factors below. The default device element. Alias: `alu_core` (which the entire existing sweep corpus names, so it is permanent). |
 | `simple_core` | Simple | Coarse functional core: IPC = 1 plus serial memory latency. Fast, approximate. Aliases: `Simple`, `simple`. |
 | `in_order_core` | InOrder | Decode-driven in-order pipeline: real RAW-dependency stalls, functional-unit latencies, and dual-issue in program order (no reordering), plus the cross-PE memory-contention weave (`CoreRecorder`). Aliases: `InOrder`, `in-order`, `in_order`. |
 | `ooo_core` | Out-of-order | Out-of-order superscalar (Westmere-class: 128-entry ROB, 4-issue). Aliases: `OOO`, `OoO`, `ooo`, `out-of-order`. |
@@ -13,9 +13,28 @@ system scope, for hosts (`hosts[].core_type`) and devices (`devices[].pe_type`).
 
 Any other value is rejected with an error listing the valid names.
 
-## ALU core scaling factors
+## What every model shares, and what none of them are
 
-`alu_core` accepts design-point knobs for processing-using-memory (PUM) and
+All five consume the SAME host instruction stream: the emulator executes the real
+guest binary and reports retired instruction counts and load/store addresses.
+There is no processing-element instruction set anywhere in the simulator.
+
+The compute unit does not decode at all. It charges every instruction the same
+scaled cost, so it models no instruction set and cannot distinguish a
+floating-point operation from an integer one. What it does model — and what its
+knobs describe — is the cost of an operation and the cost of reaching data: the
+memory-interface path, locality, and the in-memory network. Use it for
+memory-bound kernels, which is what it is for.
+
+That boundary is deliberate and worth stating in any write-up: the memory side of
+an element is modelled in detail, the compute side crudely. Processing in memory
+exists for memory-bound work, so the well-modelled half is the half that
+dominates — but results about compute-bound kernels on these elements do not
+follow from this simulator.
+
+## Compute unit scaling factors
+
+`compute_unit` accepts design-point knobs for processing-using-memory (PUM) and
 processing-near-memory (PNM) sweeps:
 
 ```yaml

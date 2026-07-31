@@ -802,7 +802,7 @@ system:
 
 | Value | ZSim Core | Description |
 |-------|-----------|-------------|
-| `alu_core` | ALU | Minimal PIM ALU (no caches). Aliases: `ALU`, `alu`. |
+| `compute_unit` | ALU | A datapath rather than a processor: register file, arithmetic units, result bus and a resident instruction store; no caches, no speculation. Sized by `lanes` / `operand_width` / `floating_point` / `imem_bytes`. Aliases: `alu_core` (names the entire existing sweep corpus, so it is permanent), `ComputeUnit`, `cu`, `compute_unit_pe`. Bare `alu` and `ALU` were RETIRED and are now rejected. |
 | `simple_core` | Simple | Coarse functional: IPC = 1 + serial memory latency, with caches. Aliases: `Simple`, `simple`. |
 | `in_order_core` | InOrder | Decode-driven in-order pipeline: real RAW/port stalls, dual-issue (default 2), mispredict bubbles, contention-aware two-phase bound/weave. Aliases: `InOrder`, `in-order`, `in_order`. |
 | `ooo_core` | Out-of-order | Decode-driven out-of-order superscalar (128-entry ROB, 4-wide, BTB+RAS branch prediction). Aliases: `OOO`, `OoO`, `ooo`, `out-of-order`. |

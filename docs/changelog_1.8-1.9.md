@@ -7,6 +7,64 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.9.44 -- documentation for the whole train
+
+One pass over the documentation for everything the preceding fifteen releases
+changed, rather than an edit per release.
+
+### The power and area reference was twelve lines
+
+It named the tools and stopped. It is now an account of what is priced, by what,
+and -- the part that was missing entirely -- **what is assumed rather than
+measured**. The instruction mix is a fixed ratio because nothing counts
+floating-point or multiply instructions; per-access interface energy is an
+inherited constant; power gating has no temporal weighting of its own. Those
+belong beside the results, not in a reader's inference.
+
+It also records the reference class and what that choice does NOT claim. Pricing
+an element against embedded parts rather than server processors is not an
+assertion that in-memory logic is cheap. The opposite penalty -- logic in a memory
+process being slower and larger -- is a real and still-missing term, and the
+document says so rather than letting the change read as a discount.
+
+And the memory rule: there is one memory, and it is charged once.
+
+### What the element is, and is not
+
+The core-model reference described the element as a minimal arithmetic unit
+shaped by scaling factors. It is now described as what it became: a datapath with
+a register file, arithmetic units, a result bus and a resident instruction store,
+sized by its own parameters.
+
+More useful to a reader: every core model consumes the same host instruction
+stream, and the element does not decode. It models no instruction set and cannot
+tell a floating-point operation from an integer one. What it does model is the
+cost of an operation and the cost of reaching data. The memory side of an element
+is modelled in detail and the compute side crudely -- which is defensible, since
+processing in memory exists for memory-bound work, but it means conclusions about
+compute-bound kernels do not follow from this simulator. That belongs in the
+documentation and in any write-up.
+
+### Reproducibility
+
+Given a deterministic instruction stream the simulator is exact. A parallel
+workload does not repeat, because the host schedules its threads and the emulator
+reflects that faithfully -- the variation is the workload's. Its size is not a
+constant and must be measured per study rather than quoted as a property of the
+tool. Two consequences are stated: differences smaller than the variation are not
+findings, and a regression can be gated bit-exact against a single-threaded run.
+
+### A documented alias that no longer exists
+
+The configuration reference listed two spellings of the element type as valid
+that had been retired and are now rejected. A reader following the documentation
+would have hit an error. Corrected, with the canonical name leading and the
+retired ones named as retired.
+
+### Data impact
+
+None. Documentation only.
+
 ## 1.9.43 -- a summary line that had not moved with the rest
 
 The instruction counter includes injected timing charges: when a core runs
