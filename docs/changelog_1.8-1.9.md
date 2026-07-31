@@ -7,6 +7,38 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.9.43 -- a summary line that had not moved with the rest
+
+The instruction counter includes injected timing charges: when a core runs
+without decoded micro-operations it advances itself by adding per-block charges
+that are counted as instructions but are not code that ran. Every consumer moved
+onto the corrected count in an earlier release -- the power model at both of its
+call sites, and the per-node activity report. One printed summary line did not,
+and still reported the raw total.
+
+For a host that offloads its work and then waits, that raw total is almost
+entirely injected charges, so the summary could claim hundreds of thousands of
+instructions where a handful executed.
+
+The line now reports executed instructions and names what it excluded. The
+whole-run accessor that returns that figure did not exist -- only the per-group
+one did -- which is how a single consumer came to compute the answer differently
+from every other. It exists now, so the two cannot drift apart again.
+
+### Data impact
+
+None. Nothing downstream reads that line; it is printed, not consumed. Verified:
+power and area unchanged.
+
+Verified also that the change is reached: the first attempt at checking it ran a
+configuration whose execution never touches that line, which proved nothing. The
+second used one that does.
+
+On the configurations we run today the printed figure is unchanged, because the
+element model that reaches this summary never takes the synthetic path and its
+injected count is zero. The correction matters for configurations where it is
+not.
+
 ## 1.9.42 -- the memory was not being charged at all in a co-simulation
 
 A co-simulated system reported no memory array energy. Not for the host, and not

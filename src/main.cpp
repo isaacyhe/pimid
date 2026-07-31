@@ -462,6 +462,15 @@ struct ZSimParsedOutput {
      * already reports these; they were simply never parsed. Zero means the
      * counter was absent, and the caller falls back to the old fractions. */
     uint64_t syntheticInstrs = 0;   // 1.9.33: injected timing charges inside instrs
+    /* 1.9.43: the same accessor GroupCounters has, at the whole-run level. It was
+     * missing here, so the one consumer that reads the whole-run counters -- the
+     * co-simulation summary line -- had nothing to call and printed the raw
+     * total, while every other consumer used the group-level accessor and got the
+     * corrected one. Two ways to ask the same question, one of which did not
+     * exist, is how that line drifted. */
+    uint64_t real_instrs() const {
+        return (instrs > syntheticInstrs) ? (instrs - syntheticInstrs) : 0;
+    }
     uint64_t uops = 0;              // retired micro-ops (OOO path)
     uint64_t bbls = 0;              // basic blocks -- each ends in a control transfer,
                                     // so this is a MEASURED branch-count proxy
@@ -9846,8 +9855,29 @@ int main(int argc, char** argv) {
                         }
                         std::cout << "Total:  " << tot << " cycles (max: " << mx
                                   << ")" << std::endl;
-                        std::cout << "        " << exec_zsim_stats.instrs
-                                  << " instructions" << std::endl;
+                        /* 1.9.43: report EXECUTED instructions, not the raw
+                         * counter. `instrs` includes injected timing charges --
+                         * the synthetic per-basic-block advances the core adds
+                         * when running without decoded micro-ops (ooo_core.cpp:
+                         * syntheticInstrs and instrs are both incremented on
+                         * that path). Those are CYCLES expressed as an
+                         * instruction count, not code that ran.
+                         *
+                         * Every other consumer has been on the corrected basis
+                         * since 1.9.29 -- the power model at both call sites, and
+                         * the per-node activity line. This one printed line was
+                         * never moved with them, so a co-simulated host that
+                         * executed a handful of instructions and then waited
+                         * through the offload was summarised as having executed
+                         * hundreds of thousands.
+                         *
+                         * Nothing downstream reads this line, so correcting it
+                         * moves no computed value -- it stops the summary
+                         * contradicting the numbers printed beside it. */
+                        std::cout << "        " << exec_zsim_stats.real_instrs()
+                                  << " instructions executed"
+                                  << " (" << exec_zsim_stats.syntheticInstrs
+                                  << " injected timing charges excluded)" << std::endl;
                     }
 
                     // 1.8.8: OpenMP critical-path cycle summary. zsim.out holds one
