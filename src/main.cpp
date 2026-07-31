@@ -1818,6 +1818,46 @@ static bool dramHTreeBuilder(const std::string& tech,
         config.hierarchy_bg_per_chip, config.hierarchy_chips_per_rank,
         config.hierarchy_ranks_per_channel, layer_w, layer_lat);
 
+    /* 1.10: the tree must cover the memory exactly. Every PE-level organisation
+     * is either hosted by a PE or sits behind exactly one abstract endpoint, so
+     * the covered total must equal the organisation count the configuration
+     * describes. This is the invariant that makes an abstract endpoint concrete:
+     * before coverage was recorded there was nothing to check, and the power
+     * model -- unable to ask the tree what it covered -- derived its own node
+     * counts from organisation fan-out instead, which is how it came to price a
+     * network that does not exist.
+     *
+     * A mismatch means the tree does not describe the configured memory. That is
+     * not something to warn about and continue from: every downstream access
+     * cost and every energy figure is computed against this structure. */
+    {
+        long covered = tree.coveredOrgs();
+        /* Check against the count the REST OF THE SYSTEM uses -- the one the
+         * PE-to-organisation mapping and the power model are both derived from --
+         * not against a second computation of my own. A self-consistent tree that
+         * disagrees with the configuration is exactly the failure this release
+         * exists to remove, and comparing the tree only against itself would not
+         * have seen it. (It did not: a first version of this gate recomputed the
+         * total independently, agreed with itself, and hid a 16x channel
+         * double-count on every HBM cell.) */
+        long expected = (long)config.total_mem_orgs;
+        if (covered != expected) {
+            std::cerr << "[htree] FATAL: the placement tree does not cover the "
+                      << "configured memory. It accounts for " << covered
+                      << " organisations at the placement level; the memory has "
+                      << expected << ". Every access cost and every energy figure "
+                      << "is computed against this tree, so a gap is not a "
+                      << "reporting problem -- it means some memory is priced by "
+                      << "nothing or by something twice.\n";
+            std::exit(2);
+        }
+        std::cout << "[htree] " << tree.numRouters << " routers, "
+                  << tree.totalEndpoints() << " endpoints ("
+                  << tree.numPEs << " PE + " << tree.numAbstract
+                  << " aggregated), covering " << covered
+                  << " organisations at level " << pe_level << std::endl;
+    }
+
     std::ofstream f(outPath);
     if (!f.is_open()) return false;
     f << "# Auto-generated SPARSE placement-driven DRAM H-tree (regenerated per sim).\n";
@@ -9216,7 +9256,27 @@ int main(int argc, char** argv) {
                     // and the sim livelocks (OMP-detailed) or reports wrong cycles
                     // (other OMP modes, from oversubscription). Cap to num_pes +
                     // passive waits. overwrite=0 so explicit workload_env wins.
-                    if (config.workload_type == "openmp") {
+                    /* 1.9.41: NOT gated on the declaration any more. The settings below are
+                     * OpenMP-runtime hygiene: without them libgomp sizes its team from
+                     * omp_get_num_procs(), which under qemu-user is the HOST core count, and
+                     * leaves threads ACTIVELY spinning at the barrier. The comment above has
+                     * described the consequence ("reports wrong cycles") since this code was
+                     * written -- but the guard let it happen to any workload that did not
+                     * DECLARE itself openmp, and workload_type defaults to "serial".
+                     *
+                     * That is how the reference benchmark reached this path: it runs an
+                     * OpenMP binary and never sets workload.type, so it took the branch the
+                     * comment warns about. Team size from the host machine explains why two
+                     * nodes disagreed; active spin-waiting explains why repeats on ONE node
+                     * disagreed, since the simulator charges cycles for the spinning and the
+                     * spinning depends on real scheduling.
+                     *
+                     * These are inert for a genuinely serial binary -- a program with no
+                     * OpenMP runtime never reads them -- and essential for one that turns out
+                     * not to be. So they are applied unconditionally: correctness must not
+                     * depend on the user having declared the workload accurately. Explicit
+                     * workload.env still wins (overwrite=0 below). */
+                    if (true) {
                         // Host baseline runs OMP threads across host cores, not device PEs.
                         bool host_baseline = (getenv("PIMID_COSIM_NO_OFFLOAD") != nullptr)
                                              && (config.scope == "system");
@@ -9595,7 +9655,27 @@ int main(int argc, char** argv) {
                     // and the sim livelocks (OMP-detailed) or reports wrong cycles
                     // (other OMP modes, from oversubscription). Cap to num_pes +
                     // passive waits. overwrite=0 so explicit workload_env wins.
-                    if (config.workload_type == "openmp") {
+                    /* 1.9.41: NOT gated on the declaration any more. The settings below are
+                     * OpenMP-runtime hygiene: without them libgomp sizes its team from
+                     * omp_get_num_procs(), which under qemu-user is the HOST core count, and
+                     * leaves threads ACTIVELY spinning at the barrier. The comment above has
+                     * described the consequence ("reports wrong cycles") since this code was
+                     * written -- but the guard let it happen to any workload that did not
+                     * DECLARE itself openmp, and workload_type defaults to "serial".
+                     *
+                     * That is how the reference benchmark reached this path: it runs an
+                     * OpenMP binary and never sets workload.type, so it took the branch the
+                     * comment warns about. Team size from the host machine explains why two
+                     * nodes disagreed; active spin-waiting explains why repeats on ONE node
+                     * disagreed, since the simulator charges cycles for the spinning and the
+                     * spinning depends on real scheduling.
+                     *
+                     * These are inert for a genuinely serial binary -- a program with no
+                     * OpenMP runtime never reads them -- and essential for one that turns out
+                     * not to be. So they are applied unconditionally: correctness must not
+                     * depend on the user having declared the workload accurately. Explicit
+                     * workload.env still wins (overwrite=0 below). */
+                    if (true) {
                         // Host baseline runs OMP threads across host cores, not device PEs.
                         bool host_baseline = (getenv("PIMID_COSIM_NO_OFFLOAD") != nullptr)
                                              && (config.scope == "system");
@@ -9720,7 +9800,27 @@ int main(int argc, char** argv) {
                     // so downstream OMP sweeps can grep a robust critical-path value
                     // instead of head -1. Purely additive: the per-PE zsim.out lines,
                     // out.cycles, and power analysis are untouched (bit-identical).
-                    if (config.workload_type == "openmp") {
+                    /* 1.9.41: NOT gated on the declaration any more. The settings below are
+                     * OpenMP-runtime hygiene: without them libgomp sizes its team from
+                     * omp_get_num_procs(), which under qemu-user is the HOST core count, and
+                     * leaves threads ACTIVELY spinning at the barrier. The comment above has
+                     * described the consequence ("reports wrong cycles") since this code was
+                     * written -- but the guard let it happen to any workload that did not
+                     * DECLARE itself openmp, and workload_type defaults to "serial".
+                     *
+                     * That is how the reference benchmark reached this path: it runs an
+                     * OpenMP binary and never sets workload.type, so it took the branch the
+                     * comment warns about. Team size from the host machine explains why two
+                     * nodes disagreed; active spin-waiting explains why repeats on ONE node
+                     * disagreed, since the simulator charges cycles for the spinning and the
+                     * spinning depends on real scheduling.
+                     *
+                     * These are inert for a genuinely serial binary -- a program with no
+                     * OpenMP runtime never reads them -- and essential for one that turns out
+                     * not to be. So they are applied unconditionally: correctness must not
+                     * depend on the user having declared the workload accurately. Explicit
+                     * workload.env still wins (overwrite=0 below). */
+                    if (true) {
                         std::ifstream sf(stats_path);
                         std::string ln;
                         std::vector<uint64_t> peCycles;
@@ -9911,7 +10011,27 @@ int main(int argc, char** argv) {
                         // below: without it libgomp oversubscribes the device PEs
                         // (HOST core count under qemu-user) and the coupled co-sim
                         // livelocks. Cap to the largest compute-device PE count.
-                        if (config.workload_type == "openmp") {
+                        /* 1.9.41: NOT gated on the declaration any more. The settings below are
+                     * OpenMP-runtime hygiene: without them libgomp sizes its team from
+                     * omp_get_num_procs(), which under qemu-user is the HOST core count, and
+                     * leaves threads ACTIVELY spinning at the barrier. The comment above has
+                     * described the consequence ("reports wrong cycles") since this code was
+                     * written -- but the guard let it happen to any workload that did not
+                     * DECLARE itself openmp, and workload_type defaults to "serial".
+                     *
+                     * That is how the reference benchmark reached this path: it runs an
+                     * OpenMP binary and never sets workload.type, so it took the branch the
+                     * comment warns about. Team size from the host machine explains why two
+                     * nodes disagreed; active spin-waiting explains why repeats on ONE node
+                     * disagreed, since the simulator charges cycles for the spinning and the
+                     * spinning depends on real scheduling.
+                     *
+                     * These are inert for a genuinely serial binary -- a program with no
+                     * OpenMP runtime never reads them -- and essential for one that turns out
+                     * not to be. So they are applied unconditionally: correctness must not
+                     * depend on the user having declared the workload accurately. Explicit
+                     * workload.env still wins (overwrite=0 below). */
+                    if (true) {
                             int omp_threads = 0;
                             for (const auto& n : config.system_nodes) {
                                 if (n.role == UnifiedConfig::SystemNode::DEVICE &&
@@ -10012,7 +10132,27 @@ int main(int argc, char** argv) {
                     // respawn). Cap to the largest compute-device PE count.
                     // overwrite=0 so an explicit workload_env entry (applied just
                     // below) still wins.
-                    if (config.workload_type == "openmp") {
+                    /* 1.9.41: NOT gated on the declaration any more. The settings below are
+                     * OpenMP-runtime hygiene: without them libgomp sizes its team from
+                     * omp_get_num_procs(), which under qemu-user is the HOST core count, and
+                     * leaves threads ACTIVELY spinning at the barrier. The comment above has
+                     * described the consequence ("reports wrong cycles") since this code was
+                     * written -- but the guard let it happen to any workload that did not
+                     * DECLARE itself openmp, and workload_type defaults to "serial".
+                     *
+                     * That is how the reference benchmark reached this path: it runs an
+                     * OpenMP binary and never sets workload.type, so it took the branch the
+                     * comment warns about. Team size from the host machine explains why two
+                     * nodes disagreed; active spin-waiting explains why repeats on ONE node
+                     * disagreed, since the simulator charges cycles for the spinning and the
+                     * spinning depends on real scheduling.
+                     *
+                     * These are inert for a genuinely serial binary -- a program with no
+                     * OpenMP runtime never reads them -- and essential for one that turns out
+                     * not to be. So they are applied unconditionally: correctness must not
+                     * depend on the user having declared the workload accurately. Explicit
+                     * workload.env still wins (overwrite=0 below). */
+                    if (true) {
                         int omp_threads = 0;
                         for (const auto& n : config.system_nodes) {
                             if (n.role == UnifiedConfig::SystemNode::DEVICE &&

@@ -74,3 +74,36 @@ A co-sim system has **two fabrics joined by one bridge**:
 - **MPI**: PIMID forks N QEMU children with `libpimid_mpi.so` preloaded; ranks
   exchange data over a shared-memory mailbox (no external mpirun). Each rank
   simulates its own network instance.
+
+## Guest OpenMP runtime settings
+
+PIMID sets four environment variables in the guest before launching a workload.
+They are applied to EVERY workload, not only ones declared `openmp`, because
+their absence changes results and a workload's declared type is not a reliable
+guide to whether it uses OpenMP -- the reference kernels include OpenMP binaries
+that no configuration declares. They are inert for a program with no OpenMP
+runtime, so applying them unconditionally costs nothing.
+
+| variable | value | why |
+|---|---|---|
+| `OMP_NUM_THREADS` | PE count | Without it libgomp sizes its team from `omp_get_num_procs()`, which under user-mode emulation reports the **host machine's** core count. The team would then depend on which machine the job landed on. |
+| `OMP_DYNAMIC` | `FALSE` | Permits the runtime to resize the team at run time. With it enabled the team, and therefore the work each thread does, can differ between runs of the same binary. |
+| `OMP_WAIT_POLICY` | `PASSIVE` | Threads sleep at a barrier instead of spinning. A spinning thread executes instructions, and the simulator charges cycles for them -- so the reported time would include spinning whose duration the host kernel decides. |
+| `GOMP_SPINCOUNT` | `0` | Removes the residual spin before a thread sleeps, for the same reason. |
+
+An explicit `workload.env` entry overrides any of them; PIMID sets them without
+overwrite so a deliberate choice always wins.
+
+**These settings change results.** Enabling them on a configuration that
+previously ran without moved reported cycles by several percent and memory reads
+by a fraction of a percent -- the latter because a dynamically-resized team does
+a different amount of work per thread. They also reduce run-to-run variation
+substantially. Numbers produced before and after this change are therefore not
+comparable, and a run's provenance should record which behaviour applied.
+
+**What they do not fix.** A multi-threaded guest still interleaves differently
+between runs, because the host kernel schedules those threads and the emulator
+faithfully reflects that. Residual run-to-run variation in reported cycles is
+expected; total work is stable. Treat differences smaller than the variation as
+noise rather than as findings.
+

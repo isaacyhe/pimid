@@ -7,6 +7,78 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.9.41 -- the simulator is deterministic; the workload is not
+
+An investigation that ended somewhere other than where it started.
+
+Repeated runs of one configuration, same binary, disagreed on simulated cycles by
+a few percent, and two machines disagreed by considerably more. Total work was
+stable throughout -- memory read counts agreed to a fraction of a percent, and
+every leakage figure was identical to the digit. So the simulator was performing
+the same operations and assigning them different times.
+
+### What it turned out to be
+
+Not the simulator. Running the same configuration against the SERIAL build of the
+same kernel produces bit-identical results -- cycles and reads, every digit,
+across repeated runs. Given a deterministic instruction stream the simulator is
+exact.
+
+The variation comes from the workload. The parallel build runs many threads, the
+host kernel decides how they interleave, and the emulator reflects that
+faithfully. A real parallel program on real hardware does not repeat its
+interleaving either. This is therefore a property to state and bound, not a fault
+to repair, and the earlier characterisation of it as a simulator defect was
+wrong.
+
+Three explanations were eliminated on the way, recorded so they are not
+re-investigated: the emulator's host-derived default thread count is never
+reached, because the count is set explicitly from the simulated element count;
+the simulator was ALREADY running single-threaded in every measurement taken, so
+its own threading was never a candidate; and the guest's thread count comes from
+the program itself, not from the machine.
+
+### What is fixed
+
+Four settings that control the guest's parallel runtime were applied only to
+workloads that DECLARED themselves parallel. The declaration defaults to serial,
+and the reference kernels include parallel binaries that no configuration
+declares -- so those workloads took the path the code's own comment had warned
+about for as long as it existed.
+
+Without those settings the runtime sizes its thread team from the host machine's
+processor count, which under user-mode emulation is the count of the machine the
+job happened to land on; it may resize that team mid-run; and its threads spin at
+barriers rather than sleeping, so the simulator charges cycles for spinning whose
+duration the host kernel decides.
+
+They are now applied to every workload. They are inert for a program with no
+parallel runtime, and they are necessary for one that has it, so correctness
+should not depend on the user having declared the workload accurately. An
+explicit environment entry in the configuration still overrides them.
+
+Documented in the architecture reference -- what each setting prevents, that they
+change results, and what they do not fix.
+
+### Data impact
+
+This one MOVES RESULTS. Enabling the settings on a configuration that previously
+ran without them changed reported cycles by several percent and memory reads by a
+fraction of a percent -- the reads because a runtime free to resize its team
+distributes work differently. Numbers produced before and after are not
+comparable, and every device-scope cell would need re-simulation to be brought
+onto the new basis.
+
+Run-to-run variation on parallel workloads fell by roughly a factor of five. It
+does not fall to zero and cannot: the remaining variation is the workload's own,
+as the serial comparison shows.
+
+### A check that now exists
+
+Any regression can be validated against the serial build and required to be
+bit-exact. Every gate run before this one judged its result through noise that
+did not need to be there.
+
 ## 1.9.40 -- the two halves must agree about what the element is
 
 The previous release gave the processing element a datapath description. This
