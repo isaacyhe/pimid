@@ -1098,8 +1098,23 @@ std::string McPATWrapper::generateXMLConfig() const {
      * A 64 was emitted for every scope, so a 32-bit processing element carried
      * 64-bit registers and 64-bit result buses. Device scope now states the
      * element's own width; host scope stays 64, which the host is. */
-    xml << "    <param name=\"machine_bits\" value=\""
-        << (config_.device_scope ? config_.pe_element_bits : 64) << "\"/>\n";
+    int machine_bits = config_.device_scope ? config_.pe_element_bits : 64;
+    /* McPAT quantises the datapath to 32-bit granularity (it computes
+     * ceil(bits/32)*32 internally), so a narrower element -- an 8- or 16-bit
+     * bit-serial datapath, which is a real in-memory design point the TIMING
+     * model already supports via operand_width -- is priced as 32-bit. Say so
+     * once rather than let the two halves quietly disagree about how wide the
+     * element is; refusing would remove a capability the timing side has. */
+    if (config_.device_scope && machine_bits < 32 && !warned_narrow_datapath_) {
+        warned_narrow_datapath_ = true;
+        std::cerr << "[power] WARNING: operand_width=" << machine_bits
+                  << " is narrower than the power model's 32-bit granularity; "
+                  << "the datapath is priced as 32-bit while the timing model "
+                  << "charges " << machine_bits << " bits. Register files, "
+                  << "queues and result buses are therefore OVERSTATED for this "
+                  << "element.\n";
+    }
+    xml << "    <param name=\"machine_bits\" value=\"" << machine_bits << "\"/>\n";
     xml << "    <param name=\"virtual_address_width\" value=\"48\"/>\n";
     xml << "    <param name=\"physical_address_width\" value=\"48\"/>\n";
     xml << "    <param name=\"virtual_memory_page_size\" value=\"4096\"/>\n";

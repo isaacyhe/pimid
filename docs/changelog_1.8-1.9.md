@@ -7,6 +7,76 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.9.40 -- the two halves must agree about what the element is
+
+The previous release gave the processing element a datapath description. This
+makes that description agree with the one the timing model already had, and
+where the two cannot yet agree, says so out loud instead of leaving it to be
+discovered.
+
+### One width, one name
+
+The element's datapath width already existed. The timing model has read it for
+many releases, as the operand width, to charge a bit-serial datapath a step per
+bit. The previous release gave the power model a SECOND field for the same
+physical quantity and parsed it separately -- so asking for a wider element would
+have produced a wide datapath in timing and a narrow one in power, silently.
+
+That is precisely the fault this release train exists to remove, and it was
+introduced by the release that removed several instances of it. The second name
+is withdrawn; the power model now reads the field the timing model reads.
+Configurations naming the withdrawn spelling are refused with a message pointing
+at the surviving one, rather than having it ignored.
+
+The width is also validated now. It was previously read only by the bit-serial
+cycle charge, which clamps it upward, so a nonsensical value was merely inert; it
+now sizes register files and result buses, where the same value would abort the
+array model.
+
+### Saying so when the halves cannot agree
+
+Three cases remain where the two halves describe different machines and cannot
+yet be reconciled. Each is now stated at the point of use rather than left
+silent, because silence is how every defect in this train survived.
+
+A datapath narrower than the power model's granularity. The power model works in
+32-bit steps, so an 8- or 16-bit element -- a real in-memory design point the
+timing model already supports -- is priced as 32-bit. Refusing it would remove a
+capability the timing side has, so it warns and names what is overstated.
+
+Lanes without matching throughput. Declaring lanes widens the arithmetic, the
+register file and the result bus in the power model, but the timing model
+expresses width through its throughput divider. Declaring one without the other
+gives an element that pays for many lanes and runs like one. That is a legitimate
+thing to model on purpose, so it warns rather than refuses.
+
+An element declared without floating point. This removes the unit from the power
+description only. The timing model never sees an opcode, so it will not charge
+the software emulation a real part lacking that unit would need -- meaning the
+element would run floating-point kernels at full speed with nothing to run them
+on. Honest for an integer kernel, not for a floating-point one, and the model
+cannot tell which is coming. It warns, and the underlying gap is tracked.
+
+### Documentation
+
+The three parameters added in the previous release were shipped undocumented.
+They are documented now, together with a correction: the width parameter's entry
+said it was ignored in the non-bit-serial case, which was true until the previous
+release and is no longer.
+
+The configuration reference also now states plainly what the compute unit is.
+Every element model consumes the same host instruction stream; the compute unit
+does not decode, so it models no instruction set and cannot distinguish a
+floating-point operation from an integer one. What it does model is the cost of
+an operation and the cost of reaching data. That belongs in the documentation
+rather than in the reader's inference.
+
+### Data impact
+
+None. No default changes, no existing configuration changes meaning, and the
+warnings do not alter any computed value. Verified: a default configuration is
+bit-identical to the previous release and emits none of the new warnings.
+
 ## 1.9.39 -- the processing element is composed, not borrowed
 
 The element's power and area came from a description of a server processor with

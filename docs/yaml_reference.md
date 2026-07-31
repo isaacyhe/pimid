@@ -104,10 +104,22 @@ pim:
 | `pim.pe.throughput_factor` | double | `1.0` | Parallelism divider on instruction count. |
 | `pim.pe.bit_serial` | bool | `false` | Datapath model. `false` = bit-parallel (operand width has no cycle cost). `true` = bit-serial PUM (compute cost proportional to `operand_width`). |
 | `pim.pe.issue_width` | int | `2` | In-order core issue width (uops issued per cycle, program order). Valid 1-6 (clamped to the 6-port FU model; out-of-range falls back to 2); practical range 1-4 -- real in-order cores are 2-3 wide, and beyond 4 the ports and RAW chains bind first. Applies to `in_order_core` only; env `PIMID_INORDER_WIDTH` overrides YAML. |
-| `pim.pe.operand_width` | int | `32` | Operand width in bits. With `bit_serial: true`, compute cost scales linearly with width (a W-bit op = W bit-steps). Ignored when `bit_serial: false`. |
+| `pim.pe.operand_width` | int | `32` | Datapath width in bits, used by BOTH halves of the model. Timing: with `bit_serial: true` compute cost scales linearly with width (a W-bit op = W bit-steps); with `bit_serial: false` it has no cycle cost. Power/area: always sizes the register files, queue entries and result buses. The power model quantises to 32-bit granularity, so a narrower element is priced as 32-bit and says so. |
 | `pim.pe.energy_factor` | double | `1.0` | Per-op energy scale factor (reporting only, does not affect timing). |
+| `pim.pe.lanes` | int | `1` | Datapath replication. `1` = scalar, `W` = W-wide. Sizes the arithmetic units, register file and result bus in the power/area model. It does NOT speed the element up on its own -- the timing model expresses width through `throughput_factor`, so set both. Declaring lanes without throughput_factor warns, since the result is an element that pays for W lanes and runs like one. |
+| `pim.pe.floating_point` | bool | `true` | Whether the element has a floating-point unit. Default true because three of the five kernels are FP32. WARNS when false: this removes the unit from the power description only -- the timing model never sees an opcode, so it will not charge software emulation. Honest for an integer kernel, not for a floating-point one. |
+| `pim.pe.imem_bytes` | int | `4096` | Size of the element's resident instruction memory. Spans a command-driven in-bank engine (hundreds of bytes) to a programmable near-bank one (kilobytes); minimum 64. This is the axis that decides which kernels fit on an element. |
 
 **Cycle model**: BBL cycles = `instructions * compute_factor / throughput_factor`, load/store = `access_factor` cycles each.
+
+**What the compute unit is, and is not.** All PE types consume the same x86-64
+instruction stream: QEMU executes the guest binary and the plugin reports retired
+instruction counts and load/store addresses. The compute unit does not decode --
+it charges every instruction the same scaled cost, so it models no instruction
+set and cannot distinguish a floating-point operation from an integer one. What
+it does model, and what these knobs describe, is the cost of an operation and the
+cost of reaching data: the memory-interface path, locality, and the in-memory
+network hierarchy. Use it for memory-bound kernels, which is what it is for.
 
 ### PE Placement (`pim.placement`)
 

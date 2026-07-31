@@ -955,9 +955,15 @@ struct UnifiedConfig {
      * cannot run most of the suite. 4 KB of instruction memory sits between a
      * command-driven in-bank engine and a fully programmable near-bank one. */
     int  pe_lanes = 1;
-    int  pe_element_bits = 32;
     bool pe_has_fp = true;
     int  pe_imem_bytes = 4096;
+    /* Datapath WIDTH is deliberately absent here. It already exists as
+     * alu_operand_width (pim.pe.operand_width), which the timing model reads as
+     * ALUCore::operandWidth. 1.9.39 added a second field for the power model and
+     * parsed it separately -- two names for one physical quantity, free to
+     * disagree the moment anyone set either one. That is the exact pattern this
+     * release train exists to remove, so the second name is gone and the power
+     * model reads the same field the timing model does. */
 
     // Simulator parallelism (YAML: simulation.parallel, default true). ONE knob for
     // both OMP and MPI paths: true = parallelize the simulation whenever it
@@ -3931,7 +3937,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
      * die populations the element is priced against. */
     mcfg.device_scope = true;
     mcfg.pe_lanes       = config.pe_lanes;
-    mcfg.pe_element_bits= config.pe_element_bits;
+    mcfg.pe_element_bits= config.alu_operand_width;   // ONE width, shared
     mcfg.pe_has_fp      = config.pe_has_fp;
     mcfg.pe_imem_bytes  = config.pe_imem_bytes;
 
@@ -4676,7 +4682,7 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
          * sits on the memory die, a host node is a server part. */
         mcfg.device_scope   = (node.role == UnifiedConfig::SystemNode::DEVICE);
         mcfg.pe_lanes       = config.pe_lanes;
-        mcfg.pe_element_bits= config.pe_element_bits;
+        mcfg.pe_element_bits= config.alu_operand_width;   // ONE width, shared
         mcfg.pe_has_fp      = config.pe_has_fp;
         mcfg.pe_imem_bytes  = config.pe_imem_bytes;
 
@@ -7129,9 +7135,14 @@ int main(int argc, char** argv) {
                      * documented defaults, so no existing config changes
                      * meaning. */
                     config.pe_lanes = yaml_cfg["pim"]["pe"]["lanes"].as<int>(config.pe_lanes);
-                    config.pe_element_bits =
-                        yaml_cfg["pim"]["pe"]["element_bits"].as<int>(config.pe_element_bits);
                     config.pe_has_fp = yaml_cfg["pim"]["pe"]["floating_point"].as<bool>(config.pe_has_fp);
+                    if (yaml_cfg["pim"]["pe"]["element_bits"]) {
+                        std::cerr << "Error: pim.pe.element_bits was withdrawn. The "
+                                  << "element's datapath width is pim.pe.operand_width, "
+                                  << "which the timing model already reads; a second "
+                                  << "name for it let the two halves disagree.\n";
+                        return 1;
+                    }
                     config.pe_imem_bytes =
                         yaml_cfg["pim"]["pe"]["imem_bytes"].as<int>(config.pe_imem_bytes);
                     if (config.pe_lanes < 1) {
@@ -7139,24 +7150,70 @@ int main(int argc, char** argv) {
                                   << config.pe_lanes << ").\n";
                         return 1;
                     }
-                    if (config.pe_element_bits != 32 && config.pe_element_bits != 64) {
-                        /* Only 32 and 64 are honest today: the register file and
-                         * the functional units are the only places the width is
-                         * read, and the kernels are all 32-bit. Refuse the rest
-                         * rather than accept a number that changes nothing. */
-                        std::cerr << "Error: pim.pe.element_bits must be 32 or 64 (got "
-                                  << config.pe_element_bits << ").\n";
-                        return 1;
-                    }
                     // ALU scaling factors
                     config.alu_compute_factor = yaml_cfg["pim"]["pe"]["compute_factor"].as<double>(config.alu_compute_factor);
                     config.alu_access_factor = yaml_cfg["pim"]["pe"]["access_factor"].as<double>(config.alu_access_factor);
                     config.alu_throughput_factor = yaml_cfg["pim"]["pe"]["throughput_factor"].as<double>(config.alu_throughput_factor);
                     config.alu_operand_width = yaml_cfg["pim"]["pe"]["operand_width"].as<int>(config.alu_operand_width);
+                    /* 1.9.40: validated now that it reaches the power model too.
+                     * It was previously read only by the bit-serial cycle
+                     * charge, which clamps with max(w,1), so a zero was merely
+                     * inert; it now sizes register files and buses, where a
+                     * zero-bit array aborts the array model outright. */
+                    if (config.alu_operand_width < 1) {
+                        std::cerr << "Error: pim.pe.operand_width must be at least 1 (got "
+                                  << config.alu_operand_width << ").\n";
+                        return 1;
+                    }
                     config.alu_bit_serial = yaml_cfg["pim"]["pe"]["bit_serial"].as<bool>(config.alu_bit_serial);
                     config.alu_energy_factor = yaml_cfg["pim"]["pe"]["energy_factor"].as<double>(config.alu_energy_factor);
                     // In-order PE issue width (in_order_core only; default 2)
                     config.inorder_issue_width = yaml_cfg["pim"]["pe"]["issue_width"].as<int>(config.inorder_issue_width);
+
+                    /* 1.9.40: the two halves must agree about what the element
+                     * is. Both checks below are placed AFTER the scaling factors
+                     * are parsed, because each compares a power-model
+                     * description against a timing-model one. */
+
+                    /* An element described as wide in power but scalar in
+                     * timing. lanes replicates the arithmetic, the register file
+                     * and the result bus in the power model; the timing model
+                     * expresses the same width through throughput_factor, which
+                     * divides the per-instruction cost. Declaring lanes without
+                     * throughput_factor gives an element that PAYS for W lanes
+                     * and RUNS like one. That is a legitimate thing to model
+                     * deliberately (a wide datapath the code fails to use), so
+                     * this warns rather than refuses -- but silently is exactly
+                     * how the previous defects happened. */
+                    if (config.pe_lanes > 1 && config.alu_throughput_factor <= 1.0) {
+                        std::cerr << "[config] WARNING: pim.pe.lanes=" << config.pe_lanes
+                                  << " widens the POWER description (one arithmetic unit "
+                                  << "and register file per lane) but throughput_factor is "
+                                  << config.alu_throughput_factor << ", so the TIMING model "
+                                  << "still charges a scalar element. The result is an "
+                                  << "element that pays for " << config.pe_lanes
+                                  << " lanes and runs like one. Set throughput_factor to "
+                                  << "match unless the serialisation is intended.\n";
+                    }
+
+                    /* An element described without floating point, running
+                     * floating-point kernels. Removing the FPU from the power
+                     * description does NOT make the timing model emulate
+                     * floating point in software, which is what a real part
+                     * lacking an FPU would have to do -- tens to hundreds of
+                     * operations per operation. So this is honest for an
+                     * integer kernel and not honest for a floating-point one,
+                     * and the model cannot tell which it is about to run. */
+                    if (!config.pe_has_fp) {
+                        std::cerr << "[config] WARNING: pim.pe.floating_point=false removes "
+                                  << "the floating-point unit from the POWER description "
+                                  << "only. The timing model charges every instruction "
+                                  << "identically -- it never sees an opcode -- so it will "
+                                  << "not charge software emulation. This is honest for a "
+                                  << "kernel with no floating-point operations, and NOT "
+                                  << "honest for one that has them: the element would run "
+                                  << "at full speed with no unit to run on.\n";
+                    }
                 }
                 // placement can live either at pim.placement (older flat form)
                 // or pim.pe.placement (newer nested form, used by README and

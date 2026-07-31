@@ -161,7 +161,15 @@ public:
          * generated description say what the element actually is instead of
          * borrowing an in-order core wholesale. */
         int  pe_lanes;         // 1 = scalar; W = W-wide SIMD
-        int  pe_element_bits;  // 32: the kernels are float/int 32-bit
+        /* 1.9.40: this is NOT its own configuration knob. It mirrors
+         * alu_operand_width (pim.pe.operand_width), the width the TIMING model
+         * already charges through ALUCore::operandWidth. 1.9.39 briefly gave the
+         * power model a second name for the same physical quantity, parsed
+         * separately -- so operand_width: 64 would have produced a 64-bit
+         * datapath in timing and a 32-bit one in power. One quantity, one name.
+         * Note the power model quantises to 32-bit granularity; a narrower
+         * element warns rather than silently disagreeing. */
+        int  pe_element_bits;
         bool pe_has_fp;        // three of five kernels are FP32, so normally true
         int  pe_imem_bytes;    // instruction store: ~128 B command file .. 24 KB
                                // spans command-driven to fully programmable, and
@@ -369,6 +377,7 @@ private:
      * latches the one-time warning when they are not, so a sweep does not emit
      * the same line for every node of every cell. */
     mutable bool warned_mix_ = false;
+    mutable bool warned_narrow_datapath_ = false;  // 1.9.40
     /* 1.9.36: per-core intra-core power split, transported from the forked child
      * (which alone holds the model object). Diagnostic only -- nothing consumes
      * these -- but they are what makes the ALU-versus-core error MEASURABLE
