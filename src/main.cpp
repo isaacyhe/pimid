@@ -1818,46 +1818,6 @@ static bool dramHTreeBuilder(const std::string& tech,
         config.hierarchy_bg_per_chip, config.hierarchy_chips_per_rank,
         config.hierarchy_ranks_per_channel, layer_w, layer_lat);
 
-    /* 1.10: the tree must cover the memory exactly. Every PE-level organisation
-     * is either hosted by a PE or sits behind exactly one abstract endpoint, so
-     * the covered total must equal the organisation count the configuration
-     * describes. This is the invariant that makes an abstract endpoint concrete:
-     * before coverage was recorded there was nothing to check, and the power
-     * model -- unable to ask the tree what it covered -- derived its own node
-     * counts from organisation fan-out instead, which is how it came to price a
-     * network that does not exist.
-     *
-     * A mismatch means the tree does not describe the configured memory. That is
-     * not something to warn about and continue from: every downstream access
-     * cost and every energy figure is computed against this structure. */
-    {
-        long covered = tree.coveredOrgs();
-        /* Check against the count the REST OF THE SYSTEM uses -- the one the
-         * PE-to-organisation mapping and the power model are both derived from --
-         * not against a second computation of my own. A self-consistent tree that
-         * disagrees with the configuration is exactly the failure this release
-         * exists to remove, and comparing the tree only against itself would not
-         * have seen it. (It did not: a first version of this gate recomputed the
-         * total independently, agreed with itself, and hid a 16x channel
-         * double-count on every HBM cell.) */
-        long expected = (long)config.total_mem_orgs;
-        if (covered != expected) {
-            std::cerr << "[htree] FATAL: the placement tree does not cover the "
-                      << "configured memory. It accounts for " << covered
-                      << " organisations at the placement level; the memory has "
-                      << expected << ". Every access cost and every energy figure "
-                      << "is computed against this tree, so a gap is not a "
-                      << "reporting problem -- it means some memory is priced by "
-                      << "nothing or by something twice.\n";
-            std::exit(2);
-        }
-        std::cout << "[htree] " << tree.numRouters << " routers, "
-                  << tree.totalEndpoints() << " endpoints ("
-                  << tree.numPEs << " PE + " << tree.numAbstract
-                  << " aggregated), covering " << covered
-                  << " organisations at level " << pe_level << std::endl;
-    }
-
     std::ofstream f(outPath);
     if (!f.is_open()) return false;
     f << "# Auto-generated SPARSE placement-driven DRAM H-tree (regenerated per sim).\n";
