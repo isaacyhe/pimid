@@ -7,6 +7,51 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.9.42 -- the memory was not being charged at all in a co-simulation
+
+A co-simulated system reported no memory array energy. Not for the host, and not
+for the processing device either -- although the identical configuration run in
+device scope reported it. The system total was cores, caches, interconnect and
+memory controllers, with the memory itself absent.
+
+Nothing was missing from the models. The array energy computation lived inside
+the device-scope path only, and the per-node path never called it.
+
+### One memory, one charge
+
+The ticket that tracked this said host memory energy was missing and should be
+added. Building that literally would have been wrong. This simulator models one
+host and one memory: the memory either IS the processing device, or it is a plain
+main memory with no processing in it and the run is host-only. Either way there
+is one array. In a co-simulation the host's accesses and the elements' accesses
+land on the same silicon, so the charge is the sum of them, applied once. A host
+term beside a device term would have priced that silicon twice -- the same fault
+this release train has been removing elsewhere, introduced by the release meant
+to fix a gap.
+
+So the technologies the nodes name are checked rather than assumed. If two ever
+disagree about what the memory is, the run stops and says so, because that is a
+topology this build does not model and charging one of them while dropping the
+other would misprice the system without any sign that it had. Several memories,
+devices and hosts is a later extension.
+
+The computation is written as its own small routine rather than moved out of the
+device-scope path, so that path is untouched and its results are unchanged by
+construction rather than by test.
+
+Interface energy is deliberately not charged here. It is already charged
+host-side in device scope, and it is an inherited constant rather than a
+measurement, so adding it in a second place would compound an approximation
+instead of a measurement.
+
+### Data impact
+
+Co-simulated cells gain a memory array energy term they did not have. Device
+scope is bit-identical -- verified, and guaranteed by that path being unmodified.
+
+Non-DRAM technologies in system scope say plainly that their array is not charged
+there yet, rather than printing a number shaped like a DRAM one.
+
 ## 1.9.41 -- the simulator is deterministic; the workload is not
 
 An investigation that ended somewhere other than where it started.

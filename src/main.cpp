@@ -4580,6 +4580,82 @@ static void runPowerAnalysis(const UnifiedConfig& config,
  * @brief Per-node power analysis for system scope — runs McPAT once per node type.
  * Each node gets its own DeviceProfile derived from its core_type.
  */
+/* 1.9.42: the one memory's array energy, for the scopes that were not charging
+ * it. Written as its own small computation rather than by relocating the
+ * device-scope block, so that path stays byte-for-byte what it was and is
+ * bit-identical by construction.
+ *
+ * WHAT WAS WRONG: the array energy computation lived only inside
+ * runPowerAnalysis, the device-scope path. Co-simulation goes through
+ * runPerNodePowerAnalysis and never reached it, so a co-simulated system
+ * reported NO memory array energy at all -- not for the host, and not for the
+ * processing device either, though the identical configuration in device scope
+ * reported it. The models were never missing. The call was.
+ *
+ * WHY ONE TERM AND NOT TWO: this build models one host and one memory. The
+ * memory either IS the processing device, or it is a plain non-PIM main memory
+ * and the run is host-only. resolveMemoryTopology has already resolved which,
+ * into node.memory_tech, so every node names the SAME array -- in a
+ * co-simulation the host's accesses and the elements' accesses land on one
+ * piece of silicon. Summing them and charging once is the model; charging a host
+ * term beside a device term would price that silicon twice, which is the fault
+ * this release exists to avoid rather than introduce.
+ *
+ * Interface energy is deliberately excluded here. It is charged host-side in the
+ * device-scope path already, and it is inherited constant rather than measured
+ * (tracked separately), so adding it in a second place would compound an
+ * approximation instead of a measurement. */
+static void reportSharedMemoryArrayEnergy(const std::string& memory_tech,
+                                          uint64_t mem_rd, uint64_t mem_wr)
+{
+    if (memory_tech.empty() || (mem_rd + mem_wr) == 0) return;
+
+    const bool is_dram = !(memory_tech == "SRAM" || memory_tech == "STT_MRAM" ||
+                           memory_tech == "PCM"  || memory_tech == "RERAM");
+    if (!is_dram) {
+        /* NVM and SRAM arrays are priced by NVSim/CACTI on a different footing.
+         * Say so rather than print a DRAM-shaped number for them. */
+        std::cout << "\n--- Memory Array Energy (system) ---" << std::endl;
+        std::cout << "  Technology:    " << memory_tech
+                  << " -- array energy not charged in system scope yet; the "
+                     "non-DRAM path is priced by its own model in device scope."
+                  << std::endl;
+        return;
+    }
+
+    try {
+        pimid::RamulatorWrapper ram_oracle("", memory_tech);
+        ram_oracle.initialize();
+        /* Intensive per-access accessors. getArrayReadEnergyNJ folds activation
+         * and column access, so act/pre are NOT added separately -- adding them
+         * would double-count within the array term itself. */
+        const double rd_nj = ram_oracle.getArrayReadEnergyNJ();
+        const double wr_nj = ram_oracle.getArrayWriteEnergyNJ();
+        const double bg_mw = ram_oracle.getBackgroundPowerMW();
+
+        const double total_rd_mj = rd_nj * static_cast<double>(mem_rd) / 1e6;
+        const double total_wr_mj = wr_nj * static_cast<double>(mem_wr) / 1e6;
+
+        std::cout << "\n--- Memory Array Energy (system) ---" << std::endl;
+        std::cout << "  Technology:    " << memory_tech
+                  << " (Ramulator2 energy model)" << std::endl;
+        std::cout << "  Accesses:      " << (mem_rd + mem_wr)
+                  << " total on ONE array (host and device share it)" << std::endl;
+        std::cout << "  Per-access:    read=" << std::fixed << std::setprecision(3)
+                  << rd_nj << " nJ, write=" << wr_nj << " nJ (incl act+col)"
+                  << std::endl;
+        std::cout << "  Background:    " << std::setprecision(3) << bg_mw
+                  << " mW/device (standby+refresh)" << std::endl;
+        std::cout << "  Array dynamic: " << std::setprecision(3)
+                  << (total_rd_mj + total_wr_mj) << " mJ (rd=" << total_rd_mj
+                  << " + wr=" << total_wr_mj << ")"
+                  << std::defaultfloat << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "  [Memory array] Ramulator2 query failed: " << e.what()
+                  << std::endl;
+    }
+}
+
 static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                                      const ZSimParsedOutput& zsim_stats,
                                      const std::string& output_dir) {
@@ -4967,6 +5043,36 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
         }
 
         results.push_back(result);
+    }
+
+    /* 1.9.42: charge the one memory's array, which this scope never did.
+     * Technologies are CHECKED, not assumed: if two nodes ever disagree about
+     * what the memory is, that is a topology this build does not model and it
+     * stops, rather than charging one of them and silently dropping the other.
+     * Several memories is 2.1. */
+    {
+        std::string mem_tech, tech_owner;
+        for (const auto& node : config.system_nodes) {
+            if (node.memory_tech.empty()) continue;
+            if (mem_tech.empty()) { mem_tech = node.memory_tech; tech_owner = node.name; }
+            else if (node.memory_tech != mem_tech) {
+                std::cerr << "[power] FATAL: nodes '" << tech_owner << "' and '"
+                          << node.name << "' name different memory technologies ("
+                          << mem_tech << " vs " << node.memory_tech << "). This build "
+                          << "models ONE memory -- either the processing device IS the "
+                          << "host's memory, or the run is host-only with a plain one. "
+                          << "Charging one of these and ignoring the other would "
+                          << "misprice the system silently, so this refuses instead.\n";
+                std::exit(2);
+            }
+        }
+        /* has_activity() distinguishes "did no work" from "was never measured"
+         * (1.9.35), so an unmeasured group contributes nothing rather than a
+         * fabricated zero. */
+        uint64_t all_rd = 0, all_wr = 0;
+        if (zsim_stats.host.has_activity()) { all_rd += zsim_stats.host.mem_rd; all_wr += zsim_stats.host.mem_wr; }
+        if (zsim_stats.dev.has_activity())  { all_rd += zsim_stats.dev.mem_rd;  all_wr += zsim_stats.dev.mem_wr;  }
+        reportSharedMemoryArrayEnergy(mem_tech, all_rd, all_wr);
     }
 
     // System totals
