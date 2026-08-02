@@ -64,7 +64,36 @@ struct SparseHTree {
     std::map<int,int> abstractOf;         // router id -> abstract endpoint id (if it has empties)
     std::map<int,int> peOfLeaf;           // leaf router id -> PE index
 
+    /* 1.10: an abstract endpoint's COVERAGE -- how many PE-level memory
+     * organisations sit behind it. The build used to test `live < fanout` and
+     * then discard `fanout - live`, so an endpoint knew it stood for something
+     * but not how much. That missing number is why the power model could not be
+     * driven off this tree and fell back to organisation fan-out instead.
+     *
+     * Coverage does NOT change what the interface costs. An interface is priced
+     * by the LINK it terminates -- buffer depth is that link's bandwidth-delay
+     * product, port width is that link's width -- so one interface fronting many
+     * organisations costs the same as one fronting a single organisation. That
+     * is exactly why memory without a processing element can be aggregated and a
+     * processing element cannot: a PE injects continuously and needs its own,
+     * while memory only responds, at a rate the link above it already caps.
+     *
+     * What coverage IS for: charging the ARRAY behind the interface, sizing the
+     * link against the aggregate it carries, and reporting an endpoint as the
+     * concrete thing it represents rather than an unnamed placeholder. */
+    std::map<int,long> coverageOf;        // abstract endpoint id -> PE-level orgs behind it
+    std::map<int,int>  frontsLevel;       // abstract endpoint id -> level those orgs hang below
+
     int totalEndpoints() const { return numPEs + numAbstract; }
+
+    /* 1.10: total PE-level organisations this tree accounts for -- one per PE
+     * (a PE sits AT its organisation) plus every organisation behind an abstract
+     * endpoint. Must equal the memory's total organisation count. */
+    long coveredOrgs() const {
+        long n = numPEs;
+        for (const auto& kv : coverageOf) n += kv.second;
+        return n;
+    }
 
     // Endpoint a target unit routes to: PE index if the unit hosts a PE; else the
     // abstract endpoint of the unit's deepest LIVE ancestor. -1 only if the map is
@@ -99,6 +128,62 @@ inline int childFanout(int L, int N, int SA, int BpBG, int BGpC, int CpR, int Rp
         case 1: return SA > 0 ? SA : 1;        // bank -> subarrays
         default: return 1;
     }
+}
+
+// PE-level organisations beneath ONE node at level L. A node at level L has
+// childFanout(L) children at L-1, so the count multiplies down to the PE level.
+// L == peLevel is the organisation itself: 1.
+inline long orgsBelow(int L, int peLevel, int N,
+                      int SA, int BpBG, int BGpC, int CpR, int RpCh) {
+    long n = 1;
+    for (int l = peLevel + 1; l <= L; ++l) {
+        n *= (long)childFanout(l, N, SA, BpBG, BGpC, CpR, RpCh);
+    }
+    return n;
+}
+
+/* The ROOT's real fan-out. childFanout(6) returns the channel count, but some
+ * technologies FOLD their channels into a lower level -- HBM puts channels per
+ * stack into chips_per_rank (HBM2 8, HBM3 16) -- so for those the channel index
+ * that decompose() produces is always zero and the root has exactly one live
+ * child. Taking childFanout(6) at face value there invents empty channels that
+ * do not exist, and an abstract endpoint covering memory that is already counted
+ * below. Same double-book the 1.9.35 HBM rank guard refuses in the other
+ * direction.
+ *
+ * Derive it from the organisation id space instead, which cannot double-count:
+ * whatever the unit ids actually span, divided by what one channel holds. */
+inline int rootFanout(int peLevel, int N,
+                      int SA, int BpBG, int BGpC, int CpR, int RpCh) {
+    long perChannel = orgsBelow(5, peLevel, N, SA, BpBG, BGpC, CpR, RpCh);
+    long declared   = (long)childFanout(6, N, SA, BpBG, BGpC, CpR, RpCh);
+    if (perChannel <= 0) return 1;
+    /* If the channel count is already folded below, the id space spans one
+     * channel and the root is single-child. Detect that rather than assume it:
+     * a folded technology has its channel count equal to a lower fan-out. */
+    if (declared > 1 && (long)CpR == declared) return 1;
+    return (int)(declared > 0 ? declared : 1);
+}
+
+/* 1.10: which ROUTER LEVEL carries the channel dimension.
+ *
+ * The seven level names are DDR-shaped -- subarray, bank, bankgroup, chip, rank,
+ * channel, system -- and HBM does not fit them. An HBM stack has no separate
+ * chip dimension, so its channel count is stored in chips_per_rank (the source
+ * comment says so: "chips_per_rank = channels per stack (HBM2 8, HBM3 16)").
+ * For those parts the CHIP level IS the channel level, and the level named
+ * "channel" is empty.
+ *
+ * This matters because a channel is where the memory model's coverage stops.
+ * Aggregating memory ACROSS channels puts several independent data buses behind
+ * one endpoint: their parallelism disappears, and the path out to each of them
+ * is below the network endpoint and outside the memory model, so nothing prices
+ * it. Aggregating WITHIN a channel is fine -- the memory model covers it.
+ *
+ * Detected, not assumed, by the same test rootFanout uses: a folded technology
+ * has its channel count equal to a lower fan-out. */
+inline int channelBearingLevel(int N, int CpR) {
+    return (N > 1 && CpR == N) ? 3 : 5;   // 3 = chip slot (folded), else 5
 }
 
 // Build the sparse tree from the PE home units. layerW/layerLat index the 4 link
@@ -146,6 +231,53 @@ inline SparseHTree buildSparseHTree(const std::vector<uint64_t>& peHomes,
     t.numPEs = (int)peHomes.size();
     t.numRouters = nextRouter;
 
+    /* 1.10: MATERIALISE EVERY CHANNEL before aggregating.
+     *
+     * Aggregation collapses a router's empty children into one endpoint. Left
+     * unchecked that merges across channels: measured on a single-element HBM3
+     * configuration, ONE endpoint fronted 480 organisations -- fifteen entire
+     * channels -- because HBM keeps its channels in the chip slot and the level
+     * merely looked like a safe sub-channel one.
+     *
+     * Fifteen channels have fifteen independent data buses. Behind one endpoint
+     * their parallelism vanishes, and the path to each is below the network
+     * endpoint yet outside the memory model, so nothing prices it.
+     *
+     * So the channel dimension is always real: every channel gets its own
+     * router, whether or not a processing element lives in it. Aggregation then
+     * happens strictly WITHIN a channel, where the memory model's coverage
+     * holds. Empty channels each get their own endpoint from the pass below --
+     * which is what they physically are, not a fifteenth of one thing.
+     *
+     * Costs a handful of routers on sparse placements and buys a tree whose
+     * every endpoint sits inside exactly one channel. */
+    {
+        int chLevel = channelBearingLevel(N, CpR);
+        std::vector<std::pair<int,std::string>> toScan;  // (router id, key prefix)
+        for (auto& kv : t.routerOf) toScan.push_back({ kv.second, kv.first });
+        for (auto& rk : toScan) {
+            auto it = info.find(rk.first);
+            if (it == info.end()) continue;
+            int level = it->second.first;
+            if (level != chLevel + 1) continue;      // parent of the channel tier
+            int fanout = (level == 6)
+                       ? rootFanout(t.peLevel, N, SA, BpBG, BGpC, CpR, RpCh)
+                       : childFanout(level, N, SA, BpBG, BGpC, CpR, RpCh);
+            for (int c = 0; c < fanout; ++c) {
+                std::string key = rk.second + "/" + std::to_string(c);
+                if (t.routerOf.find(key) != t.routerOf.end()) continue;  // already live
+                int rid = nextRouter++;
+                t.routerOf[key] = rid;
+                info[rid] = { chLevel, {} };
+                info[rk.first].second.insert(c);      // now a live child of its parent
+                int dfl = chLevel - t.peLevel;
+                int li = (dfl < 0 ? 0 : (dfl < 3 ? dfl : 3));
+                t.intLinks.push_back({ rk.first, rid, layerW[li], layerLat[li] });
+            }
+        }
+        t.numRouters = nextRouter;
+    }
+
     // Abstract endpoints: a router at level L (> peLevel) whose live-child count is
     // below its fan-out has empty children -> one abstract endpoint, hung on it via
     // the child link layer. Deterministic order = router id.
@@ -155,13 +287,25 @@ inline SparseHTree buildSparseHTree(const std::vector<uint64_t>& peHomes,
         int level = kv.second.first;
         int live = (int)kv.second.second.size();
         if (level <= t.peLevel) continue;             // leaf level: below = Ramulator
-        int fanout = childFanout(level, N, SA, BpBG, BGpC, CpR, RpCh);
+        int fanout = (level == 6)
+                   ? rootFanout(t.peLevel, N, SA, BpBG, BGpC, CpR, RpCh)
+                   : childFanout(level, N, SA, BpBG, BGpC, CpR, RpCh);
         if (live < fanout) {                          // has empty children
             int abst = nextEndpoint++;
             t.abstractOf[rid] = abst;
             int childLevel = level - 1;               // the empty children's level
+            /* 1.10: what this endpoint concretely stands for -- every PE-level
+             * organisation beneath each empty child. Summed over all abstract
+             * endpoints and added to the PE count, this must equal the total
+             * organisation count exactly; the caller gates on that, because a
+             * mismatch means the tree does not cover the memory. */
+            t.coverageOf[abst] = (long)(fanout - live)
+                               * orgsBelow(childLevel, t.peLevel, N,
+                                           SA, BpBG, BGpC, CpR, RpCh);
+            t.frontsLevel[abst] = childLevel;
             int dfl = childLevel - t.peLevel;         // hops above leaf
             int li = (dfl < 0 ? 0 : (dfl < 3 ? dfl : 3));
+
             t.extLinks.push_back({ abst, rid, layerW[li], layerLat[li] });
         }
     }

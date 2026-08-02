@@ -1827,6 +1827,76 @@ static bool dramHTreeBuilder(const std::string& tech,
         config.hierarchy_bg_per_chip, config.hierarchy_chips_per_rank,
         config.hierarchy_ranks_per_channel, layer_w, layer_lat);
 
+    /* 1.10: the tree must cover the memory exactly. Every organisation at the
+     * placement level is either hosted by a processing element or sits behind
+     * exactly one aggregated endpoint, so the covered total must equal the count
+     * the rest of the system uses -- the same field the element-to-memory
+     * mapping and the power model are derived from.
+     *
+     * Checked against THAT field, deliberately, and not against a second
+     * computation of our own. A first version of this check recomputed the total
+     * independently, agreed with itself, and sailed past a sixteen-fold
+     * channel double-count on every stacked-memory cell. A tree verified only
+     * against itself proves nothing.
+     *
+     * A mismatch is fatal rather than a warning: every access cost and every
+     * energy figure is computed against this structure, so a gap means some
+     * memory is priced by nothing, or by something twice. */
+    {
+        long covered = tree.coveredOrgs();
+        long expected = (long)config.total_mem_orgs;
+        if (expected > 0 && covered != expected) {
+            std::cerr << "[htree] FATAL: the placement tree does not cover the "
+                      << "configured memory. It accounts for " << covered
+                      << " organisations at the placement level; the configuration "
+                      << "describes " << expected << ". Every access cost and every "
+                      << "energy figure is computed against this tree, so this is "
+                      << "not a reporting problem -- some memory would be priced by "
+                      << "nothing, or by something twice.\n";
+            std::exit(2);
+        }
+        std::cout << "[htree] " << tree.numRouters << " routers, "
+                  << tree.totalEndpoints() << " endpoints ("
+                  << tree.numPEs << " PE + " << tree.numAbstract
+                  << " aggregated), covering " << covered
+                  << " organisations at level " << pe_level << std::endl;
+
+        /* 1.10: WHERE the aggregated endpoints sit, and how much each fronts.
+         *
+         * This decides whether the memory below them needs a network model at
+         * all. Everything under an aggregated endpoint is array, and the array's
+         * shared datapath -- bank conflicts, bus turnaround, the global dataline
+         * -- is already priced by the technology's own timing model. Adding a
+         * second, analytical network term over the same path would charge that
+         * contention twice.
+         *
+         * That reasoning holds only while the endpoint sits AT OR BELOW the
+         * channel, because the memory model works within a channel. An endpoint
+         * at rank or system level fronts a path that neither the network model
+         * nor the memory model covers, and that IS a gap rather than a
+         * duplication. Reported rather than assumed, because the level is
+         * emergent today -- it falls out of wherever the emptiness begins. */
+        static const char* lvl_name[] = { "subarray", "bank", "bankgroup",
+                                          "chip", "rank", "channel", "system" };
+        std::map<int,int>  per_level;
+        std::map<int,long> orgs_at_level;
+        for (const auto& kv : tree.frontsLevel) {
+            per_level[kv.second]++;
+            auto c = tree.coverageOf.find(kv.first);
+            if (c != tree.coverageOf.end()) orgs_at_level[kv.second] += c->second;
+        }
+        for (const auto& kv : per_level) {
+            int L = kv.first;
+            const char* nm = (L >= 0 && L <= 6) ? lvl_name[L] : "?";
+            std::cout << "[htree]   " << kv.second << " aggregated at " << nm
+                      << " level, fronting " << orgs_at_level[L] << " organisations"
+                      << (L > 5 ? "  <-- ABOVE CHANNEL: not covered by the memory "
+                                  "model either; this path is priced by nothing"
+                                : "")
+                      << std::endl;
+        }
+    }
+
     std::ofstream f(outPath);
     if (!f.is_open()) return false;
     f << "# Auto-generated SPARSE placement-driven DRAM H-tree (regenerated per sim).\n";

@@ -7,6 +7,71 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.10.0 -- the tree now knows where a channel begins
+
+The placement tree collapses regions with no processing element into a single
+aggregated endpoint. That is the right idea: memory nobody computes in does not
+need its own network interface, because an interface costs what its link costs
+and not what sits behind it.
+
+But nothing stopped the collapse from crossing a channel boundary, and on sparse
+placements it did.
+
+### What was wrong
+
+Measured on a single-element stacked-memory configuration: one endpoint stood for
+four hundred and eighty organisations. That is fifteen entire channels behind one
+interface.
+
+Channels are independent. Fifteen of them have fifteen data buses working in
+parallel, and collapsing them into one destination throws that parallelism away.
+Worse, the path out to each of them is below the network's endpoint and outside
+the memory model, which only covers within a channel -- so nothing priced it at
+all.
+
+It stayed invisible because of a naming accident. The hierarchy's level names are
+shaped after conventional memory: subarray, bank, bank group, chip, rank,
+channel, system. A stacked part has no separate chip dimension, so its channel
+count is stored in the chip slot. The aggregation was therefore happening at a
+level called "chip", which reads as safely below "channel" while in fact BEING
+the channel. The same folding produced a sixteen-fold coverage error earlier in
+this release, wearing the same disguise.
+
+### What changed
+
+The channel tier is now always real: every channel gets its own router whether or
+not a processing element lives in it. Aggregation then happens strictly within a
+channel, where the memory model's coverage holds, and an empty channel gets its
+own endpoint -- which is what it physically is, rather than a fifteenth of one
+thing.
+
+Which tier carries the channel is detected, not assumed: a technology that folds
+its channels into a lower slot is recognised by the same test that caught the
+coverage error, so no technology is special-cased by name and a future part that
+folds the same way is handled without further change.
+
+The cost is a handful of routers on sparse placements.
+
+### Also in this release
+
+Aggregated endpoints now record what they stand for -- how many organisations,
+and at which tier -- and the tree is checked against the organisation count the
+rest of the system uses. A mismatch stops the run rather than warning, because
+every access cost and every energy figure is computed against this structure.
+
+That check is deliberately made against the count the rest of the system uses,
+and not against a second computation of the tree's own. An earlier version
+compared the tree only against itself, agreed, and concealed the coverage error
+described above.
+
+### Data impact
+
+Timing changes for sparse placements on technologies that fold their channels --
+those configurations previously routed to an endpoint that stood for many
+channels at once. Fully-populated placements are unaffected, because every
+channel already held a processing element and there was nothing to materialise.
+Conventional memory is unaffected at every placement, since it does not fold.
+
 ## 1.9.44 -- documentation for the whole train
 
 One pass over the documentation for everything the preceding fifteen releases
