@@ -2070,6 +2070,51 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
     config.hierarchy_bg_per_chip = bg_per_chip;
     config.hierarchy_chips_per_rank = chips_per_rank;
 
+    /* 1.10.1: activate-budget (tFAW) density warning.
+     *
+     * JEDEC bounds row activation per rank with a rolling four-activate window:
+     * at most four ACTIVATE commands may begin in any tFAW interval. The window
+     * is a CHARGE limit, not a timing convenience -- activation is the
+     * current-hungry operation, and tFAW is what holds a rank inside its supply
+     * budget. Ramulator2 carries it per technology as the nFAW/.window entry.
+     *
+     * A PIM placement can ask for more than the window allows. Placing elements
+     * below the rank gives each one its own rows to open, so the rank is asked
+     * for as many independent activation streams as there are elements sharing
+     * it. Past four, the standard says they cannot all proceed.
+     *
+     * We warn rather than refuse. Beating the window is exactly the kind of
+     * design this simulator exists to explore, and a real part could widen it
+     * with more charge pumps -- that is the user's call, not ours. But it must
+     * be a stated call: the timing model prices these accesses WITHOUT
+     * enforcing tFAW, so a placement past the window is optimistic by however
+     * much the standard would have serialised, and the power model has no term
+     * for the extra charge either. Silence here would read as endorsement. */
+    const bool faw_tech = !(tech == "SRAM" || tech == "STT_MRAM" ||
+                            tech == "PCM"  || tech == "RERAM");
+    if (faw_tech && config.pe_hierarchy_level >= 0 &&
+        config.pe_hierarchy_level <= 3 && config.num_pes > 0) {
+        const int kActivateWindow = 4;   // JEDEC nFAW: four activates per tFAW
+        int ranks = config.hierarchy_ranks_per_channel;
+        if (ranks < 1) ranks = 1;
+        int pes_per_rank = (config.num_pes + ranks - 1) / ranks;
+        if (pes_per_rank > kActivateWindow) {
+            std::cerr << "[config] WARNING: " << config.num_pes << " elements at "
+                      << config.placement_level << " placement put " << pes_per_rank
+                      << " independent activation streams on one " << tech
+                      << " rank, above the JEDEC four-activate (tFAW) window.\n"
+                      << "  The window is a charge limit. PIMID does not enforce "
+                         "it in the timing model, so this configuration is "
+                         "optimistic by whatever tFAW would have serialised, and "
+                         "the power model carries no term for the extra "
+                         "activation charge.\n"
+                      << "  Keep it if the design intends to widen the window "
+                         "(more charge pumps); otherwise reduce pim.pe.count to "
+                      << kActivateWindow * ranks
+                      << " or place the elements at a coarser tier.\n";
+        }
+    }
+
     // --- Subarray geometry (physical sub-bank structure, BELOW the JEDEC row) ---
     // A subarray is a vertical group of wordlines (rows) inside a bank. It is NOT
     // part of the JEDEC standard, nor of Ramulator2 (both stop at row/column), so
@@ -2472,6 +2517,13 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
             //    default for any link that omits per-link fields, and still drives
             //    non-DRAM paths). simple/calibrated/approximate/curve are left
             //    unchanged.
+            /* 1.10.1: remember what the user asked for before ANY override, so
+             * the fabric-mismatch warning below can compare against the fabric
+             * actually used. Two different overrides can fire here -- the
+             * detailed-DRAM CUSTOM emitter and the H_TREE fallback -- so the
+             * comparison has to happen after both, not inside either. */
+            const std::string requested_topo = config.noc_topology;
+
             bool detailed_dram =
                 config.noc_cycle_accurate &&
                 (tech == "DDR3" || tech == "DDR4" || tech == "DDR5" ||
@@ -2611,6 +2663,33 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
                     for (int i = 0; i < 7; ++i) config.hierarchy_level_latency[i] = ll;
                     for (int i = 0; i < 6; ++i) config.hierarchy_bridge_latency[i] = 0;
                 }
+            }
+
+            /* 1.10.1: fabric-mismatch warning.
+             *
+             * Overriding the fabric is correct -- a DRAM die's internal datapath
+             * is a hierarchical tree, not a flat mesh, and the detailed path
+             * goes further and emits a per-technology CUSTOM tree. What was
+             * missing is telling the user. Someone who wrote noc.topology:
+             * MESH_2D got a tree and no indication their key had been discarded.
+             *
+             * Compared here, after BOTH overrides (CUSTOM above, H_TREE just
+             * now), because either can be the one that fires. Only when the key
+             * was actually set -- the default is MESH_2D, and complaining about
+             * a default nobody chose would be noise. */
+            if (config.noc_topology_user_set &&
+                config.noc_topology != requested_topo) {
+                std::cerr << "[config] WARNING: noc.topology=" << requested_topo
+                          << " was requested, but " << tech << " is a DRAM device "
+                             "whose internal datapath is a hierarchical tree, not "
+                             "a flat fabric. Using " << config.noc_topology
+                          << " instead.\n"
+                          << "  The requested fabric is not what this memory has, "
+                             "so honouring it would price a network the device "
+                             "does not contain. To model a genuine logic-die mesh, "
+                             "place the elements at LOGIC_DIE; to supply your own "
+                             "fabric, set noc.topology to CUSTOM with a topology "
+                             "file.\n";
             }
         }
     }
