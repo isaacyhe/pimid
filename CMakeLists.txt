@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.15)
-project(PIMID VERSION 1.10.1 LANGUAGES CXX)
+project(PIMID VERSION 1.10.2 LANGUAGES CXX)
+
+# The reported version is taken FROM the project version, so the two cannot
+# drift apart again. --version had been answering 1.8.0 ever since that release
+# because the string was written out by hand and nothing tied it to anything.
+add_compile_definitions(PIMID_VERSION="${PROJECT_VERSION}")
 
 # C++17 standard required
 set(CMAKE_CXX_STANDARD 17)
