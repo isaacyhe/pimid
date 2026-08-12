@@ -18,4 +18,4 @@
 | [cache_warehouse.md](cache_warehouse.md) | Characterization cache warehouse internals |
 | [external.md](external.md) | Vendored external simulators (QEMU, ZSim, Ramulator2, CACTI, NVSim, McPAT, Garnet) |
 | [external_models.md](external_models.md) | Integrating your own network/memory model via the adapter interface |
-| [changelog_1.8-1.9.md](changelog_1.8-1.9.md) | Release + defect ledger for the 1.8.0 -> 1.9.1 train (system-scope MPI wiring, co-sim MPI window, measured MPI pricing, OMP critical-path metric) |
+| [changelog.md](changelog.md) | Release + defect ledger, newest first. 

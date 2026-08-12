@@ -1,4 +1,4 @@
-# Changelog / defect ledger -- 1.8.0 -> 1.9.28
+# Changelog / defect ledger
 
 Release + defect ledger for the co-sim MPI window, the measured-feedback MPI
 pricing model, and the OMP critical-path metric. One entry per release; each
@@ -6,6 +6,70 @@ gives the defect fixed, a one-line root cause, and a data-impact note (which
 sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
+
+## 1.10.4 -- the repository states the version it actually is
+
+The README badge still read 1.10.0 while the binary reported 1.10.3, and the
+changelog stopped at 1.10.0 -- so three shipped releases were absent from the
+documented history and the public landing page advertised a version that had
+been superseded twice. Same fault as the hardcoded --version string 1.10.2
+fixed: a version written by hand, tracking nothing.
+
+The badge and the changelog are now part of the release, and publish-public.sh
+refuses to publish when the badge and the project version disagree, so this
+cannot drift again unnoticed. The ledger is renamed changelog.md, since it long
+ago stopped being about the 1.8-1.9 train.
+
+## 1.10.3 -- the in-memory fabric is described as the memory is built
+
+The default DRAM fabric was four virtual channels with four-deep buffers, which
+describes a packet-switched router a DRAM die does not contain. It is now the
+smallest description the routing needs: one UP and one DOWN channel, buffers of
+two. Two rather than one, because the tree routing stays deadlock-free only by
+keeping the two directions in separate VC classes; a request for one is warned
+and lifted.
+
+A link's width now follows the tier it crosses rather than its distance from
+the leaf. Choosing by distance made the width depend on how deep the tree
+happened to be, so the channel link -- the narrowest in the device -- was priced
+with the width of a fat inner datapath whenever the placement was coarse, in the
+direction that makes memory look faster than it is.
+
+And noc.levels[<tier>].link_width_bits now reaches the detailed DRAM tree. It
+was parsed and then ignored on the default path, so a user modelling a widened
+channel silently received the stock part's numbers. A run under an override
+says so in the output.
+
+DATA IMPACT: invalidates device-scope network timing for every DRAM technology.
+The direction is more cycles (narrower upper links, less buffering); the
+magnitude is not established -- both execution models vary more run-to-run
+(16% and 20% measured) than the effect -- and belongs to the corpus
+re-simulation.
+
+## 1.10.2 -- the repository carries sources, and says which version it is
+
+Two compiled CACTI executables (2.5 MB each) and two upstream PDFs (3.6 MB) were
+committed into a source repository; the build referenced none of them. And
+--version had answered 1.8.0 since that release, because the string was written
+by hand with nothing tying it to the project version. It now comes from
+PROJECT_VERSION through a compile definition.
+
+DATA IMPACT: none.
+
+## 1.10.1 -- two configurations the model was letting pass in silence
+
+Placing elements below the rank asks that rank for more concurrent row
+activations than the JEDEC four-activate (tFAW) window permits. PIMID does not
+refuse -- widening the window is a legitimate design -- but the timing model
+does not enforce tFAW, so such a run is optimistic by whatever the window would
+have serialised, and now says so.
+
+Requesting a mesh, ring or crossbar on a DRAM device was already overridden to
+the hierarchical tree, correctly, and silently. The override is now reported,
+naming both the requested fabric and the one used.
+
+DATA IMPACT: none. Both are print-only; single-element runs are bit-exact
+against 1.10.0.
 
 ## 1.10.0 -- the tree now knows where a channel begins
 
