@@ -14,6 +14,7 @@
 #ifndef PE_MEMORY_INTERFACE_H_
 #define PE_MEMORY_INTERFACE_H_
 
+#include <atomic>
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -430,7 +431,20 @@ public:
         return (k >= lag) ? gn->latencyForEpoch(k - lag) : 0;
     }
 
+    /* 1.10.6: direction mix of the traffic offered to the channel DQ bus.
+     * Aggregate, not per-channel: elements round-robin across channels, so
+     * every channel sees statistically the same mix, and one pair of counters
+     * keeps the deterministic (epoch-frozen) MPI path free of per-channel
+     * ordering state. The RATIO is quantized to 1/64 before use, so the
+     * rounding of the final wait is insensitive to the last few accesses. */
+    struct DqMix {
+        static inline std::atomic<uint64_t> reads{0};
+        static inline std::atomic<uint64_t> writes{0};
+    };
+
     uint64_t access(MemReq& req) override {
+        if (req.type == GETS) DqMix::reads.fetch_add(1, std::memory_order_relaxed);
+        else                  DqMix::writes.fetch_add(1, std::memory_order_relaxed);
         // Update coherence state
         switch (req.type) {
             case PUTS: case PUTX: *req.state = I; break;
@@ -885,10 +899,40 @@ protected:
         double wait = 0.0;
         if (perChanSvcRate > 1e-9) {
             double svcTime = 1.0 / perChanSvcRate;
-            double rho = (aggArrivalRate / (double)c) / perChanSvcRate;
+            /* 1.10.6: the DQ bus pays to reverse direction, and a pure
+             * bandwidth limit does not know that. Expected turnaround per
+             * access for a mixed stream = 2 * P(read) * P(write) * t_turn
+             * (a direction change happens when consecutive accesses differ).
+             * All-read or all-write streams pay nothing, exactly as the bus
+             * would. t_turn is the technology's own tWTR from its Ramulator2
+             * preset, converted here at the SAME clock as svcTime. */
+            /* Turnaround is SERVICE, not queueing: the access itself holds
+             * the bus for the reversal whether or not anyone is waiting
+             * behind it. The first version of this charge lived only inside
+             * the queueing term, where rho ~ 0.02 on every measured
+             * configuration multiplied it to zero -- the gate caught the
+             * penalty never engaging. So the expected turnaround is charged
+             * per access directly, AND lengthens the service time the queue
+             * sees, so waiting traffic queues behind the reversal too. */
+            double turnExp = 0.0;
+            if (zinfo->hierarchy.dqTurnNsX100 > 0) {
+                uint64_t rd = DqMix::reads.load(std::memory_order_relaxed);
+                uint64_t wr = DqMix::writes.load(std::memory_order_relaxed);
+                uint64_t tot = rd + wr;
+                if (tot > 0) {
+                    uint32_t prQ = (uint32_t)((rd * 64) / tot);   // P(read) in 64ths
+                    double pr = (double)prQ / 64.0;
+                    double turnCyc = ((double)zinfo->hierarchy.dqTurnNsX100 / 100.0)
+                                     * bwFreqMHz / 1000.0;
+                    turnExp = 2.0 * pr * (1.0 - pr) * turnCyc;
+                    svcTime += turnExp;
+                }
+            }
+            double rho = (aggArrivalRate / (double)c) * svcTime;
             if (rho > 0.98) rho = 0.98;
             if (rho > 0.01)
                 wait = (rho * svcTime) / (2.0 * (1.0 - rho));
+            wait += turnExp;   // the access's own reversal, paid regardless of load
         }
         return (uint32_t)(wait + 0.5);
     }
@@ -1254,66 +1298,18 @@ protected:
                 //   aggBW [B/s] -> bytes/cycle = aggBW / freqHz ; lines = /lineSize
                 // Datasheet aggregate BW (MB/s); overridable via PIMID_NOC_AGGBW_MBS
                 // for validation A/B (force-saturate to prove the cap engages).
-                uint64_t aggMBs = zinfo->hierarchy.nocAggBandwidthMBs;
-                // Near-data aggregate-BANDWIDTH uplift -- THE bandwidth win of fine
-                // placement (the latency win is the separate proximity term above).
-                // nocAggBandwidthMBs is the external channel-DQ datasheet ceiling:
-                // the wall a HOST access hits. A near-data PE does NOT egress through
-                // that shared DQ -- many fine units each drain their own open row in
-                // parallel -- so the effective aggregate cap rises ABOVE the DQ
-                // ceiling. Per-unit egress is still only the channel rate (prefetch
-                // is BW-neutral); the gain is PARALLELISM, bounded by activation/
-                // power limits (tFAW, refresh, shared global structures) -- i.e. the
-                // ~4-16x realistic PIM regime (HBM-PIM measures ~4x), NOT the
-                // page/tRC full-row figure (that is in-situ/Ambit compute, a
-                // different machine). Conservative monotone uplift: subarray 4x,
-                // bank/bank-group 2x, rank+ (still funnels to the DQ) 1x.
-                {
-                    uint32_t lvl = zinfo->hierarchy.placementLevel;
-                    aggMBs *= (lvl == 0) ? 4u : ((lvl == 1 || lvl == 2) ? 2u : 1u);
-                }
-                {
-                    const char* e = getenv("PIMID_NOC_AGGBW_MBS");
-                    if (e && e[0]) { long long v = atoll(e); if (v > 0) aggMBs = (uint64_t)v; }
-                }
-                double aggBytesPerSec = (double)aggMBs * 1e6;
-                // Device clock (not the global/host clock) for bytes->cycle. See
-                // the matching note in the MLP bwFloor path: in system-scope
-                // co-sim sys.frequency = host, so using it here would host-clock
-                // the device channel-BW wait. 0 => freqMHz is already the device.
-                double bwFreqMHz = (zinfo->hierarchy.nocBandwidthFreqMHz > 0)
-                    ? (double)zinfo->hierarchy.nocBandwidthFreqMHz
-                    : (double)zinfo->freqMHz;
-                double freqHz = bwFreqMHz * 1e6;
-                double lineSize = (double)zinfo->lineSize;
-                if (lineSize < 1.0) lineSize = 64.0;
-                double aggLinesPerCycle = (freqHz > 0.0)
-                    ? (aggBytesPerSec / freqHz) / lineSize : 0.0;
-                uint32_t c = zinfo->hierarchy.dramChannels;
-                if (c < 1) c = 1;
-                double perChanSvcRate = aggLinesPerCycle / (double)c;  // lines/cyc/channel
-
-                double wait = 0.0;
-                if (perChanSvcRate > 1e-9) {
-                    double svcTime = 1.0 / perChanSvcRate;       // cyc/line per channel
-                    // Per-channel utilization: aggregate load spread over c channels.
-                    double rho = (aggArrivalRate / (double)c) / perChanSvcRate;
-                    if (rho > 0.98) rho = 0.98;
-                    // M/D/1 per channel: E[W] = ρ·S / (2·(1-ρ)). Diverges as the
-                    // aggregate offered rate approaches c·perChanSvcRate (= aggBW),
-                    // so steady-state throughput cannot exceed the channel BW.
-                    if (rho > 0.01)
-                        wait = (rho * svcTime) / (2.0 * (1.0 - rho));
-                }
-                cbwWait = (uint32_t)(wait + 0.5);
+                /* 1.10.6: ONE formula. This block was the original the
+                 * epoch-frozen MPI path's channelWaitFromRate() was extracted
+                 * from -- extracted, but this copy was never rerouted, so the
+                 * two paths could drift. They did: the DQ-turnaround charge
+                 * landed only in the helper, and every OpenMP run sailed past
+                 * it -- the gate showed on == off to the cycle. The duplicate
+                 * dies here; both runtimes now price from the same function. */
+                cbwWait = channelWaitFromRate(aggArrivalRate);
                 cbwLastPhase = zinfo->numPhases;
                 if (zinfo->numPhases <= 4 || zinfo->numPhases % 50 == 0)
-                    info("[ChanBW] phase=%lu aggMBs=%lu c=%u offRate=%.5f "
-                         "svcRate=%.5f rho=%.3f wait=%u",
-                         zinfo->numPhases, (unsigned long)aggMBs, c,
-                         aggArrivalRate, perChanSvcRate,
-                         (perChanSvcRate>1e-9? (aggArrivalRate/(double)c)/perChanSvcRate : 0.0),
-                         cbwWait);
+                    info("[ChanBW] phase=%lu offRate=%.5f wait=%u",
+                         zinfo->numPhases, aggArrivalRate, cbwWait);
             }
             futex_unlock(&cbwLock);
         }

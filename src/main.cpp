@@ -1132,6 +1132,10 @@ struct UnifiedConfig {
     // num_banks × per-MI-BW (which is ~10× the real DDR4 channel). 0 = unknown
     // (no cap; pre-fix behavior). Set in the DRAM H-tree block.
     long long hierarchy_agg_bandwidth_mbs = 0;
+    // 1.10.6: DQ-bus turnaround. Cycles (network clock) charged when the shared
+    // channel data bus reverses direction. 0 = off. Default ON for DRAM.
+    int hierarchy_dq_turn_cycles = 0;
+    bool dq_turnaround_enabled = true;   // memory.dq_turnaround: false to disable
     bool hierarchy_enabled = false;
 
     // PE-MI distributed memory interface config
@@ -2526,6 +2530,31 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
                 // Real datasheet AGGREGATE sustainable BW (MB/s): the detailed
                 // NoC model caps effective DRAM BW at this (channel bottleneck).
                 config.hierarchy_agg_bandwidth_mbs = (long long)agg_mbs;
+                /* 1.10.6: the shared channel DQ bus pays a penalty to reverse
+                 * direction, and a bandwidth-limited link does not know that.
+                 * tWTR (write-to-read) is the dominant JEDEC turnaround; the
+                 * value is each technology's OWN, read from the Ramulator2
+                 * preset this run selects (nWTR_L x tCK -- see dram/impl/*.cpp),
+                 * not invented. Read-to-write is approximated by the same
+                 * figure; stated approximation, conservative in direction.
+                 * Off with memory.dq_turnaround: false -- a design with a
+                 * dedicated PIM interconnect has no shared bus to turn. */
+                if (config.dq_turnaround_enabled) {
+                    double twtr_ns =
+                        (tech=="DDR3")   ? 7.50 :   // DDR3_1600H  : 6ck  x 1.250
+                        (tech=="DDR4")   ? 7.50 :   // DDR4_2400R  : 9ck  x 0.833
+                        (tech=="DDR5")   ? 10.00 :  // DDR5_3200AN : 16ck x 0.625
+                        (tech=="LPDDR5") ? 12.50 :  // LPDDR5_6400 : 10ck x 1.250
+                        (tech=="GDDR6")  ? 6.27 :   // GDDR6_2000  : 11ck x 0.570
+                        (tech=="HBM2")   ? 8.33 :   // HBM2_2.4    : 10ck x 0.833
+                        (tech=="HBM3")   ? 8.11 :   // HBM3_6.4    : 26ck x 0.312
+                        0.0;
+                    /* Stored as ns x100; the interface converts at the SAME
+                     * clock its service-time formula uses, so the two cannot
+                     * be quoted in different cycle domains. */
+                    config.hierarchy_dq_turn_cycles =
+                        (int)std::lround(twtr_ns * 100.0);
+                }
                 // Parallel DRAM channel count (HBM3=16, HBM2=8, DDR/LPDDR/GDDR=1).
                 uint32_t nch = bw_q.getNumChannels();
                 config.hierarchy_dram_channels = (nch >= 1) ? (int)nch : 1;
@@ -3017,6 +3046,7 @@ static void emitZSimHierarchyBlock(std::ostream& out, const UnifiedConfig& confi
     out << "        channelsPerSystem = " << config.hierarchy_channels_per_system << ";\n";
     out << "        dramChannels = " << config.hierarchy_dram_channels << ";\n";
     out << "        nocAggBandwidthMBs = " << config.hierarchy_agg_bandwidth_mbs << ";\n";
+    out << "        dqTurnNsX100 = " << config.hierarchy_dq_turn_cycles << ";\n";
     for (int i = 0; i < 7; ++i)
         out << "        levelLatency" << i << " = " << config.hierarchy_level_latency[i] << ";\n";
     for (int i = 0; i < 6; ++i)
@@ -8023,6 +8053,9 @@ int main(int argc, char** argv) {
 
             // Load memory configuration
             if (yaml_cfg["memory"]) {
+                if (yaml_cfg["memory"]["dq_turnaround"])
+                    config.dq_turnaround_enabled =
+                        yaml_cfg["memory"]["dq_turnaround"].as<bool>(true);
                 config.memory_tech = canonicalMemTech(
                     yaml_cfg["memory"]["technology"].as<std::string>(config.memory_tech));
 

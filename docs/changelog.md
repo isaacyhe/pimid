@@ -7,6 +7,31 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.10.6 -- the shared channel data bus pays to reverse direction
+
+A DRAM channel's DQ bus is one road: reads and writes take turns, and turning
+costs tWTR. A bandwidth-limited link knows the road's width but not the cost
+of turning, so mixed read/write streams rode free. The expected penalty --
+2 x P(read) x P(write) x tWTR, zero for any single-direction stream, exactly
+as the bus behaves -- is now charged per access and lengthens the service
+time the channel queue sees. tWTR is each technology's own, from the
+Ramulator2 preset the run selects (DDR3/DDR4 7.5 ns, DDR5 10, LPDDR5 12.5,
+GDDR6 6.27, HBM2 8.33, HBM3 8.11); the direction mix is measured from the
+run's own traffic. Read-to-write is charged at the write-to-read figure, a
+stated approximation. memory.dq_turnaround: false disables it, for designs
+whose PIM interconnect is not a shared bus.
+
+Two of this fix's own defects were caught by its gate before shipping: the
+charge first sat inside the queueing term, where utilisation ~0.02 multiplied
+it to zero; and the OpenMP path carried an un-rerouted duplicate of the
+pricing formula, so the charge reached only the MPI path. The duplicate is
+deleted -- both runtimes now price from one function.
+
+DATA IMPACT: device-scope timing for every DRAM configuration with a mixed
+read/write stream. Measured: stream_triad (2.4:1 mix) on HBM3, 1 element,
++4.1% cycles, deterministic. Single-direction streams and dq_turnaround:false
+are bit-exact with 1.10.5.
+
 ## 1.10.5 -- power describes the fabric the timing model routes on
 
 McPAT was handed one router per element on a ceil(sqrt(elements)) square grid,

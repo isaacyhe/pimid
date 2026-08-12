@@ -224,6 +224,8 @@ struct GlobSimInfo {
         // per-MI M/D/1 servers permit ~10× the real DDR4 channel BW). 0 = no
         // cap (pre-fix behavior / non-DRAM).
         uint64_t nocAggBandwidthMBs = 0;
+        // 1.10.6: time to reverse the shared channel DQ bus, ns x100 (0 = off)
+        uint32_t dqTurnNsX100 = 0;
         // Frequency (MHz) used to convert DEVICE memory bandwidth (bytes/s) into
         // bytes/cycle for the M/D/1 + bandwidth-floor contention terms. In a
         // standalone device-scope run this equals sys.frequency (the single
