@@ -1171,6 +1171,15 @@ struct UnifiedConfig {
     int pages_per_unit = 32;  // contiguous block (pages) per placement-level unit; sized by subarray capacity
     // Derived: total network endpoints (depends on connection mode)
     int total_network_endpoints = -1;
+
+    /* 1.10.4: what the placement tree ACTUALLY built, recorded when it is built.
+     * The power model has been describing a different machine from the one the
+     * timing model routes on -- a square mesh of one router per element -- because
+     * it had no way to ask. These are that answer. -1 = no tree was built. */
+    int htree_branch_routers = -1;   // routers with >= 2 children (real branch points)
+    int htree_all_routers    = -1;   // including degenerate single-child pass-throughs
+    int htree_endpoints      = -1;   // PE endpoints + aggregated-region endpoints
+    int htree_abstract       = -1;   // of those, the aggregated regions
     // Derived: topology-aware NoC average one-way latency (cycles)
     int noc_avg_one_way_latency = 0;
     // Derived: bisection bandwidth in links (for M/D/1 contention)
@@ -1747,7 +1756,7 @@ static int topologyClassForTopology(const std::string& topology);
  */
 static bool dramHTreeBuilder(const std::string& tech,
                              const std::string& outPath,
-                             const UnifiedConfig& config) {
+                             UnifiedConfig& config) {
     int num_pes = config.num_pes;
     int pe_level = config.pe_hierarchy_level;
     // Per-tech per-layer (link_width_bits, freq_GHz), layers leaf->root: L0,L1,L2,L3; plus channel count N.
@@ -1893,6 +1902,32 @@ static bool dramHTreeBuilder(const std::string& tech,
                       << "nothing, or by something twice.\n";
             std::exit(2);
         }
+        /* 1.10.5: record what was actually built, for the power model.
+         *
+         * Until now the power model described a different machine from the one
+         * the timing model routes on: a square mesh with one router per
+         * element. The tree is neither square nor one-per-element -- it is
+         * sparse, its router count follows elements x depth, and many of its
+         * routers are single-child pass-throughs that are wire, not logic.
+         *
+         * A pass-through is counted separately from a branch point because
+         * only a branch point arbitrates. Charging a router's crossbar and
+         * arbiter to a node that merely forwards would inflate fabric power by
+         * whatever fraction of the tree is degenerate -- which for a coarse
+         * placement is most of it. */
+        std::map<int,int> childrenOf;
+        for (const auto& l : tree.intLinks) childrenOf[l.a]++;
+        int branch = 0;
+        for (const auto& kv : childrenOf) if (kv.second >= 2) ++branch;
+        config.htree_all_routers    = tree.numRouters;
+        config.htree_branch_routers = branch;
+        config.htree_endpoints      = tree.totalEndpoints();
+        config.htree_abstract       = tree.numAbstract;
+        std::cout << "[htree] " << branch << " branch routers of "
+                  << tree.numRouters << " (" << (tree.numRouters - branch)
+                  << " pass-through), " << tree.totalEndpoints()
+                  << " endpoints\n";
+
         std::cout << "[htree] " << tree.numRouters << " routers, "
                   << tree.totalEndpoints() << " endpoints ("
                   << tree.numPEs << " PE + " << tree.numAbstract
@@ -4220,8 +4255,26 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         mcfg.l3_size_bytes = config.enable_l3 ? config.l3_size_kb * 1024ULL : 0;
     }
 
-    // If PE-MCs are enabled, model them as memory controllers in McPAT
-    if (config.pe_mc_enabled && config.pes_per_mc > 0) {
+    /* 1.10.5: a controller per REGION, not per group of elements.
+     *
+     * num_pes / pes_per_mc counts controllers by how the elements were grouped,
+     * which is a statement about the elements and not about the memory. What a
+     * controller actually serves is a region: the memory behind one endpoint of
+     * the placement tree. An element's own region is one such endpoint; a
+     * region with no element in it is an aggregated endpoint, and it needs a
+     * controller too -- memory that only ever responds still has to be
+     * sequenced, refreshed and its bus turned around.
+     *
+     * That is also why an aggregated endpoint is a controller and not an
+     * injecting network interface: it never issues traffic of its own. Counting
+     * it as an injector would give the fabric a source that does not exist.
+     *
+     * The endpoint count comes from the tree that was actually built. Where no
+     * tree exists (non-DRAM, or hierarchy disabled) the old grouping is the
+     * only information available, so it stands. */
+    if (config.htree_endpoints > 0) {
+        mcfg.num_memory_controllers = config.htree_endpoints;
+    } else if (config.pe_mc_enabled && config.pes_per_mc > 0) {
         mcfg.num_memory_controllers = config.num_pes / config.pes_per_mc;
     } else {
         mcfg.num_memory_controllers = 1;
@@ -4233,10 +4286,36 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     // for 1-PE device/hierarchy runs, collapsing their power to core+MC (~0.1W).
     mcfg.has_noc = (config.num_pes > 1 || config.hierarchy_enabled);
     mcfg.noc_clock_mhz = config.frequency_mhz;
-    mcfg.noc_num_routers = config.num_pes;
-    int grid_side = static_cast<int>(std::ceil(std::sqrt(config.num_pes)));
-    mcfg.noc_num_rows = grid_side;
-    mcfg.noc_num_cols = grid_side;
+    /* 1.10.5: the fabric priced here is the one the timing model routes on.
+     *
+     * It was one router per element on a ceil(sqrt(elements)) square grid --
+     * a mesh, of a size derived from the element count. The device has no such
+     * thing. It has the placement tree: sparse, as deep as the hierarchy the
+     * elements sit in, with a router count that follows elements x depth rather
+     * than elements, and no square anywhere in it. So the two halves of the
+     * simulator were describing different machines, and the power half was
+     * describing one that is not built.
+     *
+     * Only BRANCH routers are charged. A single-child router in the tree is a
+     * pass-through: signal enters, signal leaves, nothing is arbitrated. Its
+     * cost is wire, already carried by the link, and charging it a crossbar and
+     * an allocator would bill logic that is not there -- on a coarse placement,
+     * for most of the tree.
+     *
+     * Rows and columns describe a mesh, and a tree is not one. Reported as a
+     * single row of branch routers rather than a square, so the geometry claims
+     * only what is known: how many arbitrating nodes there are. */
+    if (config.htree_branch_routers >= 0) {
+        int branch = config.htree_branch_routers > 0 ? config.htree_branch_routers : 1;
+        mcfg.noc_num_routers = branch;
+        mcfg.noc_num_rows = 1;
+        mcfg.noc_num_cols = branch;
+    } else {
+        mcfg.noc_num_routers = config.num_pes;
+        int grid_side = static_cast<int>(std::ceil(std::sqrt(config.num_pes)));
+        mcfg.noc_num_rows = grid_side;
+        mcfg.noc_num_cols = grid_side;
+    }
 
     McPAT mcpat(mcfg);
 

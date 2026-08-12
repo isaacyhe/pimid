@@ -7,6 +7,28 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.10.5 -- power describes the fabric the timing model routes on
+
+McPAT was handed one router per element on a ceil(sqrt(elements)) square grid,
+and controllers by element grouping. The device contains neither: it has the
+placement tree -- sparse, element x depth routers, most of them single-child
+pass-throughs that are wire rather than arbitration -- and one
+controller-worthy endpoint per region, aggregated regions included, because
+memory that only responds still needs sequencing and refresh.
+
+Power now takes the router count from the built tree and charges only branch
+routers; pass-throughs are carried by their links. Controllers are counted per
+tree endpoint. Sixteen bank-placed elements on HBM3 build one branch router and
+fifty pass-throughs -- the square mesh billed sixteen routers for that
+configuration, and billed the same fabric for every placement level, which is
+the defect: placement changed the machine and power could not see it.
+
+DATA IMPACT: device-scope power for every DRAM configuration with the detailed
+network. Direction and size vary by placement (deep trees shed invented
+routers; measured: 16-PE BANK/HBM3 3.9 W -> 3.8 W, CHIP unchanged at 3.0 W).
+Timing is untouched -- verified bit-equal on the deterministic single-element
+configuration.
+
 ## 1.10.4 -- the repository states the version it actually is
 
 The README badge still read 1.10.0 while the binary reported 1.10.3, and the
