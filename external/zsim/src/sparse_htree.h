@@ -186,9 +186,35 @@ inline int channelBearingLevel(int N, int CpR) {
     return (N > 1 && CpR == N) ? 3 : 5;   // 3 = chip slot (folded), else 5
 }
 
+/* 1.10.3: WHICH LAYER a link belongs to is a property of the TIER it crosses,
+ * not of how far it happens to sit from the leaf.
+ *
+ * The four layers describe a physical ladder: L0 is the innermost link (widest,
+ * a subarray or bank datapath), L3 is the channel link (narrowest, the DQ bus
+ * out of the channel). Those widths and clocks come from each technology's
+ * organisation, so they belong to named tiers.
+ *
+ * Choosing by distance from the leaf -- min(hops, 3) -- makes a link's width
+ * depend on how deep the tree happens to be. The same physical channel link is
+ * L3 in a subarray-placed tree, and L1 or L0 in a chip-placed one, because the
+ * tree above a coarse placement is shorter. The channel DQ bus, the narrowest
+ * link in the device, would then be priced with the width of an inner subarray
+ * datapath -- and in the direction that makes the memory look faster than it is.
+ *
+ * Measure inward from the channel instead, which is where the ladder is anchored
+ * and where the memory model's coverage stops. channelBearingLevel already knows
+ * that HBM folds its channels into the chip slot, so a folded technology gets
+ * its channel link labelled L3 rather than L2. */
+inline int layerForLevel(int childLevel, int chanLevel) {
+    int d = chanLevel - childLevel;      // tiers inward from the channel
+    if (d <= 0) return 3;                // the channel link itself (and above)
+    if (d >= 3) return 0;                // innermost: subarray/bank datapath
+    return 3 - d;                        // 1 tier in -> L2, 2 tiers in -> L1
+}
+
 // Build the sparse tree from the PE home units. layerW/layerLat index the 4 link
-// layers (0=leaf/widest ... 3=channel/narrowest); a link d hops above the leaf
-// uses layer min(d,3).
+// layers (0=leaf/widest ... 3=channel/narrowest), assigned by the tier each link
+// crosses (see layerForLevel).
 inline SparseHTree buildSparseHTree(const std::vector<uint64_t>& peHomes,
                                     int peLevel, int N,
                                     int SA, int BpBG, int BGpC, int CpR, int RpCh,
@@ -198,6 +224,9 @@ inline SparseHTree buildSparseHTree(const std::vector<uint64_t>& peHomes,
     t.SA = SA; t.BpBG = BpBG; t.BGpC = BGpC; t.CpR = CpR; t.RpCh = RpCh;
     t.routerOf[""] = 0;
     int nextRouter = 1;
+    // Which level carries the channel: the anchor the link layers are measured
+    // inward from (folded for HBM, where the chip slot IS the channel).
+    const int chanLevel = channelBearingLevel(N, CpR);
     // per-router: (level, set of live child coords)
     std::map<int, std::pair<int, std::set<long>>> info;
     info[0] = { 6, {} };                       // ROOT at level 6 (system)
@@ -216,9 +245,9 @@ inline SparseHTree buildSparseHTree(const std::vector<uint64_t>& peHomes,
                 rid = nextRouter++;
                 t.routerOf[key] = rid;
                 int parentLevel = info[parent].first;
-                info[rid] = { parentLevel - 1, {} };
-                int dfl = (Lp - 1) - i;               // hops above leaf
-                int li = dfl < 3 ? dfl : 3;
+                int childLevel = parentLevel - 1;
+                info[rid] = { childLevel, {} };
+                int li = layerForLevel(childLevel, chanLevel);
                 t.intLinks.push_back({ parent, rid, layerW[li], layerLat[li] });
             } else {
                 rid = it->second;
@@ -270,8 +299,7 @@ inline SparseHTree buildSparseHTree(const std::vector<uint64_t>& peHomes,
                 t.routerOf[key] = rid;
                 info[rid] = { chLevel, {} };
                 info[rk.first].second.insert(c);      // now a live child of its parent
-                int dfl = chLevel - t.peLevel;
-                int li = (dfl < 0 ? 0 : (dfl < 3 ? dfl : 3));
+                int li = layerForLevel(chLevel, chanLevel);
                 t.intLinks.push_back({ rk.first, rid, layerW[li], layerLat[li] });
             }
         }
@@ -303,9 +331,7 @@ inline SparseHTree buildSparseHTree(const std::vector<uint64_t>& peHomes,
                                * orgsBelow(childLevel, t.peLevel, N,
                                            SA, BpBG, BGpC, CpR, RpCh);
             t.frontsLevel[abst] = childLevel;
-            int dfl = childLevel - t.peLevel;         // hops above leaf
-            int li = (dfl < 0 ? 0 : (dfl < 3 ? dfl : 3));
-
+            int li = layerForLevel(childLevel, chanLevel);
             t.extLinks.push_back({ abst, rid, layerW[li], layerLat[li] });
         }
     }

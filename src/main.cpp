@@ -1045,6 +1045,11 @@ struct UnifiedConfig {
     std::string noc_routing;              // empty = default for topology
     int noc_vcs_per_vnet;
     int noc_buffers_per_vc;
+    // 1.10.3: did the user actually ask for these, or are they carrying the
+    // built-in default? The per-technology fabric defaults below must not
+    // overwrite an explicit choice.
+    bool noc_vcs_user_set = false;
+    bool noc_buffers_user_set = false;
     std::string noc_topology_file;        // required for CUSTOM topology
     std::string noc_routing_table_file;   // optional for TABLE routing
     int noc_control_msg_bits;             // 0 = default (64 bits)
@@ -1773,6 +1778,39 @@ static bool dramHTreeBuilder(const std::string& tech,
         L[0]={512,1.8}; L[1]={384,1.8}; L[2]={256,1.8}; L[3]={128,1.8}; N=16;
     } else {
         return false;  // not a modeled DRAM tech
+    }
+
+    /* 1.10.3: the per-technology table above is the DEFAULT, not a ceiling.
+     *
+     * Defaults describe the memory as it is built. But the point of this
+     * simulator is to ask what a memory could be, and a user exploring a
+     * PIM-optimised part may well want a wider channel link or a faster inner
+     * datapath than any shipping device has. noc.levels[<tier>].link_width_bits
+     * and .frequency_ghz already exist for exactly that, and are already parsed
+     * -- they simply never reached this builder, so on the DEFAULT detailed-DRAM
+     * path they were accepted and silently discarded. The same shape of fault as
+     * the fabric key 1.10.1 had to start reporting.
+     *
+     * The override is expressed per TIER (subarray..channel), which is how a
+     * user thinks about the device, and mapped onto the layer that tier belongs
+     * to by the same rule the tree itself uses. Overriding a tier that shares a
+     * layer with another tier moves both -- unavoidable with four layers over
+     * six tiers, and better than ignoring the key. */
+    {
+        const int chanLevel = pimid_htree::channelBearingLevel(
+            N, config.hierarchy_chips_per_rank);
+        for (int lvl = 0; lvl < 6; ++lvl) {
+            const auto& ov = config.network_level_overrides[lvl];
+            if (ov.link_width_bits <= 0 && ov.frequency_ghz <= 0.0) continue;
+            int li = pimid_htree::layerForLevel(lvl, chanLevel);
+            if (ov.link_width_bits > 0) L[li].width_bits = ov.link_width_bits;
+            if (ov.frequency_ghz > 0.0) L[li].freq_ghz  = ov.frequency_ghz;
+            std::cerr << "[config] in-memory fabric: tier " << lvl
+                      << " overridden by noc.levels -> layer L" << li
+                      << " width=" << L[li].width_bits << "b freq="
+                      << L[li].freq_ghz << "GHz (hypothetical fabric, not "
+                      << tech << " as built)\n";
+        }
     }
 
     const double REF_BW   = 115.2;  // GB/s, HBM3 L0 (= max layer BW across all techs)
@@ -2556,7 +2594,40 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
                     // (the minimum the scheme needs); the config default of 4
                     // (2 UP + 2 DOWN) gives head-of-line headroom on the single-
                     // channel bottleneck.
-                    if (config.noc_vcs_per_vnet < 2) config.noc_vcs_per_vnet = 2;
+                    /* 1.10.3: the DRAM fabric is described simply by default.
+                     *
+                     * A DRAM die's internal datapath is wires and repeaters
+                     * driven by the command path -- there is no packet-switched
+                     * router with a deep virtual-channel pool anywhere in it. We
+                     * route it through Garnet because that is how PIMID prices
+                     * contention, not because the memory contains that machine,
+                     * so the default description should be the smallest one the
+                     * routing scheme actually requires. Four VCs and four-deep
+                     * buffers described a fabric a DRAM part does not have, and
+                     * bought it head-of-line headroom the silicon has no reason
+                     * to enjoy.
+                     *
+                     * TWO is the floor, not one. TreeRouter's deadlock-freedom
+                     * argument rests on separating UP traffic from DOWN traffic
+                     * into different VC classes; with a single VC the up and
+                     * down phases of the same tree share buffers and the
+                     * converging hub can close a cycle -- which is exactly the
+                     * deadlock the old 32-VC stopgap was papering over. So the
+                     * simple default is 1 UP + 1 DOWN, and buffers follow at 2.
+                     *
+                     * A user who names either value keeps it, including a
+                     * deeper fabric for a logic-die design that genuinely has
+                     * one. We only refuse to go below the deadlock floor. */
+                    if (!config.noc_vcs_user_set)     config.noc_vcs_per_vnet = 2;
+                    if (!config.noc_buffers_user_set) config.noc_buffers_per_vc = 2;
+                    if (config.noc_vcs_per_vnet < 2) {
+                        std::cerr << "[config] WARNING: noc.vcs_per_vnet="
+                                  << config.noc_vcs_per_vnet << " is below the two "
+                                     "the tree routing needs to keep UP and DOWN "
+                                     "traffic in separate VC classes; raising to 2 "
+                                     "to stay deadlock-free.\n";
+                        config.noc_vcs_per_vnet = 2;
+                    }
 
                     // ── NI FLIT-COUNT bandwidth model (replaces the old per-link
                     //    occupancy, which pinned upstream VCs for K cycles and
@@ -7735,10 +7806,14 @@ int main(int argc, char** argv) {
                 config.noc_routing = yaml_cfg["noc"]["routing"].as<std::string>(config.noc_routing);
                 std::transform(config.noc_routing.begin(), config.noc_routing.end(),
                                config.noc_routing.begin(), ::toupper);
+                if (yaml_cfg["noc"]["vcs_per_vnet"]) config.noc_vcs_user_set = true;
                 config.noc_vcs_per_vnet = yaml_cfg["noc"]["vcs_per_vnet"].as<int>(config.noc_vcs_per_vnet);
                 // Accept both virtual_channels_per_vn and vcs_per_vnet
-                if (yaml_cfg["noc"]["virtual_channels_per_vn"])
+                if (yaml_cfg["noc"]["virtual_channels_per_vn"]) {
                     config.noc_vcs_per_vnet = yaml_cfg["noc"]["virtual_channels_per_vn"].as<int>();
+                    config.noc_vcs_user_set = true;
+                }
+                if (yaml_cfg["noc"]["buffers_per_vc"]) config.noc_buffers_user_set = true;
                 config.noc_buffers_per_vc = yaml_cfg["noc"]["buffers_per_vc"].as<int>(config.noc_buffers_per_vc);
                 // Accept clock_mhz under noc as frequency override for NoC
                 if (yaml_cfg["noc"]["clock_mhz"])
