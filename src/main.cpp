@@ -1181,6 +1181,8 @@ struct UnifiedConfig {
      * timing model routes on -- a square mesh of one router per element -- because
      * it had no way to ask. These are that answer. -1 = no tree was built. */
     int htree_branch_routers = -1;   // routers with >= 2 children (real branch points)
+    int htree_level_branch[7]    = {-1,-1,-1,-1,-1,-1,-1};  // 1.11: per-level census
+    int htree_level_endpoints[7] = {-1,-1,-1,-1,-1,-1,-1};
     int htree_all_routers    = -1;   // including degenerate single-child pass-throughs
     int htree_endpoints      = -1;   // PE endpoints + aggregated-region endpoints
     int htree_abstract       = -1;   // of those, the aggregated regions
@@ -1925,6 +1927,10 @@ static bool dramHTreeBuilder(const std::string& tech,
         for (const auto& kv : childrenOf) if (kv.second >= 2) ++branch;
         config.htree_all_routers    = tree.numRouters;
         config.htree_branch_routers = branch;
+        for (int l = 0; l < 7; ++l) {
+            config.htree_level_branch[l]    = tree.branchAtLevel[l];
+            config.htree_level_endpoints[l] = tree.endpointsAtLevel[l];
+        }
         config.htree_endpoints      = tree.totalEndpoints();
         config.htree_abstract       = tree.numAbstract;
         std::cout << "[htree] " << branch << " branch routers of "
@@ -4095,11 +4101,28 @@ static std::vector<pimid::McPATWrapper::NoCLevelConfig> buildNoCLevelsForMcPAT(
             // Lower levels (subarray/bank) → bus; upper levels → router NoC
             nc.type = (lvl <= 1) ? 0 : topologyToMcPATType(config.noc_topology);
 
+            /* 1.11: size each level from the BUILT tree, not from the raw
+             * organisation count. total_network_endpoints counts every bank and
+             * subarray -- ~528 on a 16-element HBM3 config -- so this loop was
+             * pricing a 23x23 bus and a 12x12 bank-group NoC: hundreds of
+             * routers, 53 of the device's 63 mm^2 and 1.3 W of leakage, for a
+             * tree that actually built ONE branch router. A level's chargeable
+             * nodes are its branch routers plus the endpoints attached there;
+             * a level with neither is wire and is skipped. Falls back to the
+             * old estimate only when no tree was built. */
             // Estimate node counts per level (use network endpoints at PE level)
             int nodes = 1;
             int pe_level_nodes = (config.total_network_endpoints > 0)
                                   ? config.total_network_endpoints : config.num_pes;
-            if (lvl == pe_level) {
+            if (config.htree_level_branch[0] >= 0) {
+                int chg = config.htree_level_branch[lvl]
+                        + config.htree_level_endpoints[lvl];
+                if (chg <= 0) continue;   // pure pass-through wire: nothing to price
+                nodes = chg;
+                int g = static_cast<int>(std::ceil(std::sqrt((double)chg)));
+                nc.horizontal_nodes = g;
+                nc.vertical_nodes = g;
+            } else if (lvl == pe_level) {
                 int grid = static_cast<int>(std::ceil(std::sqrt(pe_level_nodes)));
                 nc.horizontal_nodes = grid;
                 nc.vertical_nodes = grid;
@@ -4687,7 +4710,17 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                 uint32_t total_banks = ram_oracle.getBanksPerBankGroup()
                                      * ram_oracle.getBankGroupsPerChip();
                 dram_cfg.capacity_bytes = chip_bytes;
-                dram_cfg.line_size = 64;
+                /* 1.11: CACTI requires block_bytes*8 >= output width. A 64B
+                 * block is fine for x4/x8/x16 parts but rejects the wide HBM
+                 * interface outright ("Block size must be at least 128"), and
+                 * the failure silently degraded every HBM die area to the
+                 * JEDEC density fallback. Size the block from the interface,
+                 * exactly the relation CACTI enforces. */
+                {
+                    uint32_t iow = static_cast<uint32_t>(
+                        std::max(8, ram_oracle.getChipIOBits()));
+                    dram_cfg.line_size = std::max(64u, iow / 8u);
+                }
                 dram_cfg.associativity = 1;
                 dram_cfg.banks = std::max(1u, total_banks);
                 dram_cfg.tech_node_nm = clampTechNodeNm(config.tech_node_nm, "DRAM array");
@@ -5426,8 +5459,21 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
     std::cout << "\n--- System Total ---" << std::endl;
     std::cout << "  Power: " << std::fixed << std::setprecision(2)
               << sys_power << " W (" << sys_dyn << " dyn + " << sys_leak << " leak)" << std::endl;
-    std::cout << "  Area:  " << sys_area << " mm^2"
-              << std::defaultfloat << std::endl;
+    std::cout << "  Area:  " << sys_area << " mm^2";
+    /* 1.11: the aggregate alone hides the number that matters for a PIM
+     * add-on: how much silicon the device ADDS to a host that already
+     * exists. Print the per-node split, so "host socket X + device Y"
+     * can be quoted without re-deriving it from logs. */
+    {
+        bool first = true;
+        for (const auto& r : results) {
+            if (!r.valid) continue;
+            std::cout << (first ? "  (" : " + ") << r.name << " " << r.area;
+            first = false;
+        }
+        if (!first) std::cout << " per node)";
+    }
+    std::cout << std::defaultfloat << std::endl;
 }
 
 /**

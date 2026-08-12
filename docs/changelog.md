@@ -7,6 +7,34 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.0 -- power and area price the tree that was built, at every level
+
+1.10.5 fixed the top-level network inputs; the hierarchical (levels) machinery
+was separate plumbing and never got the cure. It sized every tier from the raw
+organisation count -- about 528 endpoints on a sixteen-element HBM3
+configuration -- and so priced a 23x23 bus at the bank level and a 12x12 NoC at
+the bank-group level: hundreds of routers, 53 of the device's 63 mm^2 and 1.3 W
+of leakage, for a tree that actually built ONE branch router.
+
+The tree now reports a per-level census of itself (branch routers and attached
+endpoints per tier, derived from the builder's own bookkeeping), and the levels
+machinery consumes it. A tier with no arbitration and no endpoints is wire and
+is skipped, not priced. Non-DRAM configurations, which build no tree, keep the
+old estimator. Measured on 16-element HBM3: NoC area 53.4 -> 5.3 mm^2, device
+total 62.9 -> 14.8 mm^2, device leakage 1.8 -> 0.44 W. Timing bit-equal.
+
+Also: the system-scope report now prints per-node area (host socket vs device
+add-on) instead of one aggregate; CACTI's DRAM path no longer fails silently on
+wide interfaces (block sized from the interface, the relation CACTI enforces);
+and CACTI's comm-DRAM die areas are diagnostic only -- cross-checked against
+JEDEC density figures they came back nonphysical (four techs identical at
+20.9 mm^2, HBM3 at 756 mm^2, beyond a reticle), so the vendor-anchored density
+path remains authoritative.
+
+DATA IMPACT: device-scope power AND area for every DRAM configuration with the
+detailed network. The phantom-router leakage was ~35% of device power on the
+measured configuration.
+
 ## 1.10.6 -- the shared channel data bus pays to reverse direction
 
 A DRAM channel's DQ bus is one road: reads and writes take turns, and turning

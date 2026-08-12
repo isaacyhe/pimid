@@ -84,6 +84,15 @@ struct SparseHTree {
     std::map<int,long> coverageOf;        // abstract endpoint id -> PE-level orgs behind it
     std::map<int,int>  frontsLevel;       // abstract endpoint id -> level those orgs hang below
 
+    /* 1.11: per-LEVEL census of what was actually built, for the power model's
+     * hierarchical (levels) machinery. branchAtLevel counts routers with >= 2
+     * children -- arbitration that exists. endpointsAtLevel counts network
+     * endpoints attached at that level: PE leaves at the placement level, and
+     * each aggregated region at the level it fronts. A level with neither is
+     * pure pass-through wire and costs the power model nothing. */
+    int branchAtLevel[7] = {0,0,0,0,0,0,0};
+    int endpointsAtLevel[7] = {0,0,0,0,0,0,0};
+
     int totalEndpoints() const { return numPEs + numAbstract; }
 
     /* 1.10: total PE-level organisations this tree accounts for -- one per PE
@@ -336,6 +345,22 @@ inline SparseHTree buildSparseHTree(const std::vector<uint64_t>& peHomes,
         }
     }
     t.numAbstract = nextEndpoint - t.numPEs;
+
+    /* 1.11: census the built tree by level. Uses the same info map the build
+     * maintained, so this cannot disagree with the tree it describes. */
+    for (const auto& kv : info) {
+        int lvl = kv.second.first;
+        if (lvl < 0 || lvl > 6) continue;
+        if ((int)kv.second.second.size() >= 2) t.branchAtLevel[lvl]++;
+    }
+    {
+        int pl = t.peLevel < 0 ? 0 : t.peLevel;
+        t.endpointsAtLevel[pl] += t.numPEs;
+        for (const auto& kv : t.frontsLevel) {
+            int lvl = kv.second;
+            if (lvl >= 0 && lvl <= 6) t.endpointsAtLevel[lvl]++;
+        }
+    }
     return t;
 }
 
