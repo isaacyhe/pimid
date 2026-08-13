@@ -481,12 +481,16 @@ void McPATWrapper::computePower() {
                 auto w = [](const Component* p) -> double {
                     return p ? (p->rt_power.readOp.dynamic + p->rt_power.readOp.leakage) : 0.0;
                 };
-                blob.core_ifu_w    = w(c0.ifu);
-                blob.core_lsu_w    = w(c0.lsu);
-                blob.core_mmu_w    = w(c0.mmu);
-                blob.core_exu_w    = w(c0.exu);
-                blob.core_pipe_w   = w(c0.corepipe);
-                blob.core_undiff_w = w(c0.undiffCore);
+                /* 1.11.4: block weights carry the family core-power ratio so
+                 * the printed split is consistent with the scaled core total
+                 * (audit: they were captured unscaled). */
+                double br = fam_core_power_ratio_;
+                blob.core_ifu_w    = w(c0.ifu) * br;
+                blob.core_lsu_w    = w(c0.lsu) * br;
+                blob.core_mmu_w    = w(c0.mmu) * br;
+                blob.core_exu_w    = w(c0.exu) * br;
+                blob.core_pipe_w   = w(c0.corepipe) * br;
+                blob.core_undiff_w = w(c0.undiffCore) * br;
             }
 
             std::fwrite(&blob, sizeof(blob), 1, f);
@@ -644,10 +648,12 @@ void McPATWrapper::extractResults() {
         PowerMetrics pm;
         double dyn = comp.rt_power.readOp.dynamic;
         pm.runtime_dynamic = (std::isfinite(dyn)) ? dyn : 0.0;
-        pm.subthreshold_leakage = long_channel
+        double sub = long_channel
             ? comp.power.readOp.longer_channel_leakage
             : comp.power.readOp.leakage;
-        pm.gate_leakage = comp.power.readOp.gate_leakage;
+        double gate = comp.power.readOp.gate_leakage;
+        pm.subthreshold_leakage = (std::isfinite(sub)) ? sub : 0.0;   // 1.11.4: guarded like the peak path
+        pm.gate_leakage         = (std::isfinite(gate)) ? gate : 0.0;
         pm.total_leakage = pm.subthreshold_leakage + pm.gate_leakage;
         pm.total_dynamic = pm.runtime_dynamic;
         pm.total_power = pm.total_dynamic + pm.total_leakage;
@@ -708,58 +714,81 @@ void McPATWrapper::extractResults() {
     mcpat_mc_area_mm2_ = mcpat_processor_->mcs.area.get_area() * 1e-6;
     mcpat_total_area_mm2_ = mcpat_processor_->area.get_area() * 1e-6;
 
-    /* 1.11.2: DRAM-periphery process family (interim factor model).
+    /* 1.11.2/1.11.3/1.11.4: DRAM-periphery process family (factor harness).
      *
-     * McPAT prices every device in a LOGIC process; a PE at subarray, bank,
-     * bank-group or chip level physically lives in the DRAM die's peripheral
-     * transistors, which are a different device (thick oxide, long channel,
-     * high Vth, retention-grade leakage). Until 1.11.3 gives McPAT a real
-     * DRAM_PERIPHERY device family, the CORE component is rescaled here by
-     * factors read off CACTI's own 22nm table (tech_params/22nm.dat), hp vs
-     * comm-dram columns -- tool-sourced, not literature-guessed:
-     *   area    x2.44  = l_phy 0.022/0.009 um (linear pitch penalty; the
-     *                    squared 5.98 is the pessimistic bound, gates use
-     *                    the UPMEM die as anchor)
-     *   dynamic x0.82  = (C_g_ideal+C_fringe)*Vdd^2 ratio:
-     *                    2.52e-16*0.81 / (3.87e-16*0.64)
-     *   leakage x9e-7  = I_off_n ratio 1.1e-13/1.216e-7 (retention-grade
-     *                    devices; the near-zero result is physical, and the
-     *                    1.9.10 IDD data is the cross-check that DRAM-die
-     *                    background power is carried by Ramulator2, not here)
-     * Cross-check: x2.4 CV/I delay ratio puts a ~1 GHz logic PE at ~420 MHz,
-     * inside the published UPMEM DPU band (350-466 MHz).
-     * Applied BEFORE the system total below so every aggregate agrees. */
+     * McPAT prices every device in a LOGIC process; silicon at subarray, bank,
+     * bank-group or chip level lives in the DRAM die's peripheral transistors.
+     * CACTI itself cannot price general logic in its comm-dram device (gate-0,
+     * 1.11.3: UCA asserts readOp.dynamic>0 -- Vth 1.0 > Vdd 0.9 functions only
+     * inside the DRAM-array machinery with wordline boost), so the harness
+     * rescales McPAT's logic result by device-column ratios. ONE derivation,
+     * per class table (audit hotfix 1.11.4 -- previously the two tables used
+     * different formulas and the 0C leakage row):
+     *   area = l_phy_cd / l_phy_hp                      (linear pitch penalty;
+     *          the squared value is the pessimistic bound)
+     *   dyn  = (C_g_ideal+C_fringe)*Vdd^2, cd/hp
+     *   leak = I_off_n*Vdd at the 80C ROW, cd/hp        (McPAT runs at 350K =
+     *          77C; the 0C row understated the ratio ~7-8x)
+     *   22nm.dat: area .022/.009=2.44  dyn 2.041e-16/2.477e-16=0.82
+     *             leak (7.85e-12*0.9)/(1.296e-6*0.8)=6.8e-6
+     *   32nm.dat: area .032/.013=2.46  dyn 3.09e-16/4.649e-16=0.66
+     *             leak (3.19e-12*1.0)/(1.62e-6*0.9)=2.2e-6
+     * Subthreshold leakage is rebased on McPAT's PLAIN leakage, not the
+     * longer-channel-discounted value: the comm-dram ratio already encodes a
+     * long-channel device, and stacking both double-discounts (audit).
+     * Gate leakage shares the factor: comm-dram t_ox is ~6x thicker, so its
+     * gate term is if anything still overstated. On-die L2/L3 sit in the same
+     * silicon as the PE and carry the same factors (audit: they were logic-
+     * priced through 1.11.3). Applied BEFORE the system total so every
+     * aggregate agrees. */
     if (config_.process_family == 1) {
-        /* 1.11.3: factors are PER CLASS TABLE, read off the hp vs comm-dram
-         * columns of the CACTI table the DRAM generation class maps to
-         * (getDRAMGenClass): 22 nm for post-DDR3 generations, 32 nm for
-         * DDR3-class. Same derivation as 1.11.2 (area = l_phy ratio, dynamic
-         * = (C_g_ideal+C_fringe)*Vdd^2 ratio, leakage = I_off_n*Vdd ratio),
-         * now evaluated in the right table so different DRAM generations
-         * carry different periphery devices:
-         *   22nm.dat: l_phy .022/.009, C 2.52/3.87e-16, Vdd .9/.8,
-         *             I_off 1.1e-13/1.216e-7   (delay ratio ~2.4)
-         *   32nm.dat: l_phy .032/.013, C 3.09/5.74e-16, Vdd 1.0/.9,
-         *             I_off 3.63e-14/1.52e-7   (delay ratio ~1.5) */
         double kAreaFactor, kDynFactor, kLeakFactor;
         if (config_.dram_periph_table_nm == 32) {
-            kAreaFactor = 2.46; kDynFactor = 0.66; kLeakFactor = 2.7e-7;
+            kAreaFactor = 2.46; kDynFactor = 0.66; kLeakFactor = 2.2e-6;
         } else {
-            kAreaFactor = 2.44; kDynFactor = 0.82; kLeakFactor = 9.0e-7;
+            kAreaFactor = 2.44; kDynFactor = 0.82; kLeakFactor = 6.8e-6;
+        }
+        if (config_.device_type != 0) {
+            std::cerr << "[power] WARNING: DRAM-periphery factors are derived "
+                         "against the hp column, but device_type="
+                      << config_.device_type << " prices the PE in a different "
+                         "column. Factor basis and pricing basis disagree."
+                      << std::endl;
         }
         double pitch = (config_.subarray_pitch_factor > 0.0)
                            ? config_.subarray_pitch_factor : 1.0;
-        double area_before = mcpat_core_area_mm2_;
-        mcpat_core_area_mm2_ *= kAreaFactor * pitch;
-        mcpat_total_area_mm2_ += (mcpat_core_area_mm2_ - area_before);
 
-        PowerMetrics& pm = component_power_[ComponentType::CORE];
-        pm.runtime_dynamic       *= kDynFactor;
-        pm.subthreshold_leakage  *= kLeakFactor;
-        pm.gate_leakage          *= kLeakFactor;
-        pm.total_leakage = pm.subthreshold_leakage + pm.gate_leakage;
-        pm.total_dynamic = pm.runtime_dynamic;
-        pm.total_power   = pm.total_dynamic + pm.total_leakage;
+        auto applyFamily = [&](PowerMetrics& pm, const Component& comp,
+                               double dynF, double leakF) {
+            double plainSub = comp.power.readOp.leakage;      // NOT longer_channel
+            if (!std::isfinite(plainSub)) plainSub = 0.0;
+            pm.runtime_dynamic      *= dynF;
+            pm.subthreshold_leakage  = plainSub * leakF;
+            pm.gate_leakage         *= leakF;
+            pm.total_leakage = pm.subthreshold_leakage + pm.gate_leakage;
+            pm.total_dynamic = pm.runtime_dynamic;
+            pm.total_power   = pm.total_dynamic + pm.total_leakage;
+        };
+
+        double core_before = component_power_[ComponentType::CORE].total_power;
+        applyFamily(component_power_[ComponentType::CORE],
+                    mcpat_processor_->core, kDynFactor, kLeakFactor);
+        applyFamily(component_power_[ComponentType::L2_CACHE],
+                    mcpat_processor_->l2, kDynFactor, kLeakFactor);
+        applyFamily(component_power_[ComponentType::L3_CACHE],
+                    mcpat_processor_->l3, kDynFactor, kLeakFactor);
+        double core_after = component_power_[ComponentType::CORE].total_power;
+        fam_core_power_ratio_ = (core_before > 0.0) ? core_after / core_before : 1.0;
+
+        double area_delta = 0.0;
+        double a0 = mcpat_core_area_mm2_;
+        mcpat_core_area_mm2_ *= kAreaFactor * pitch;
+        area_delta += mcpat_core_area_mm2_ - a0;
+        a0 = mcpat_l2_area_mm2_; mcpat_l2_area_mm2_ *= kAreaFactor;
+        area_delta += mcpat_l2_area_mm2_ - a0;
+        a0 = mcpat_l3_area_mm2_; mcpat_l3_area_mm2_ *= kAreaFactor;
+        area_delta += mcpat_l3_area_mm2_ - a0;
+        mcpat_total_area_mm2_ += area_delta;
     }
 
     // System total
@@ -792,13 +821,21 @@ void McPATWrapper::extractResults() {
     double peak_dyn = 0.0;
     double peak_leak = 0.0;
     {
-        // 1.11.2: peak reads the raw processor structures, so the CORE share
-        // carries the same DRAM-periphery factors as the runtime metrics.
+        // 1.11.2/1.11.4: peak reads the raw processor structures, so the CORE
+        // share carries the same DRAM-periphery factors as the runtime
+        // metrics -- same values, same 80C-row derivation, same plain-leakage
+        // rebase (no long-channel stacking) as the block above.
         double core_pd = peakDynamic(mcpat_processor_->core);
         double core_pl = peakLeakage(mcpat_processor_->core);
         if (config_.process_family == 1) {
-            if (config_.dram_periph_table_nm == 32) { core_pd *= 0.66; core_pl *= 2.7e-7; }
-            else                                    { core_pd *= 0.82; core_pl *= 9.0e-7; }
+            double dynF  = (config_.dram_periph_table_nm == 32) ? 0.66 : 0.82;
+            double leakF = (config_.dram_periph_table_nm == 32) ? 2.2e-6 : 6.8e-6;
+            double plainSub = mcpat_processor_->core.power.readOp.leakage;
+            double gate     = mcpat_processor_->core.power.readOp.gate_leakage;
+            if (!std::isfinite(plainSub)) plainSub = 0.0;
+            if (!std::isfinite(gate))     gate = 0.0;
+            core_pd *= dynF;
+            core_pl  = (plainSub + gate) * leakF;
         }
         peak_dyn += core_pd;
         peak_leak += core_pl;

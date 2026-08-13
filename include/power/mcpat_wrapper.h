@@ -451,6 +451,10 @@ private:
 
     // McPAT area results (mm^2), populated by extractResults()
     double mcpat_core_area_mm2_ = 0.0;
+    // 1.11.4: scaled/unscaled core power ratio under the DRAM-periphery
+    // family; the CoreBreakdown block weights are multiplied by this so the
+    // printed split stays consistent with the scaled core total.
+    double fam_core_power_ratio_ = 1.0;
     double mcpat_l2_area_mm2_ = 0.0;
     double mcpat_l3_area_mm2_ = 0.0;
     double mcpat_noc_area_mm2_ = 0.0;

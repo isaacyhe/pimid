@@ -7,6 +7,30 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.4 -- audit hotfix: the leakage factor was read at the wrong temperature
+
+The user's Opus audit fleet (five rounds over the open 1.11.x issues) turned
+its first round on the 1.11.2/1.11.3 factor harness itself and found five
+defects, all fixed here. (1) The leakage factors were derived from the 0C row
+of the CACTI tables while McPAT runs at 350 K (~77C); the 80C row raises the
+DRAM-periphery leakage ratio ~7-8x (22 nm: 9.0e-7 -> 6.8e-6; 32 nm: 2.7e-7 ->
+2.2e-6). Still retention-grade -- but no longer understated. (2) The 22 nm
+and 32 nm factors were derived with inconsistent formulas; both now use one
+derivation (I_off*Vdd at 80C, cd/hp), stated in the code. (3) The factor was
+applied on top of McPAT's longer-channel leakage discount; comm-dram is
+already a long-channel device, so leakage is now rebased on the plain value
+(no double discount; peak path identical). (4) On-die L2/L3 sit in the same
+DRAM-die silicon as the PE but were still logic-priced; they now carry the
+same family factors, power and area. (5) The CoreBreakdown block weights were
+captured unscaled and printed against a scaled core total; they now carry the
+core-power ratio. Plus: leakage fields NaN-guarded in extraction (the peak
+path already was), the factor literals live in one place, and a basis
+mismatch (device_type != hp with family factors) warns.
+
+DATA IMPACT: DRAM-periphery-family PE leakage (up ~7-8x from a tiny base)
+and on-die cache power/area for placements with device caches. Timing
+untouched.
+
 ## 1.11.3 -- the periphery device is per-generation, and the istore is a RAM
 
 Two refinements to the 1.11.2 process surface. (1) The DRAM-periphery factor
