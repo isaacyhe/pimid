@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(PIMID VERSION 1.11.0 LANGUAGES CXX)
+project(PIMID VERSION 1.11.1 LANGUAGES CXX)
 
 # The reported version is taken FROM the project version, so the two cannot
 # drift apart again. --version had been answering 1.8.0 ever since that release

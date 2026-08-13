@@ -7,6 +7,25 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.1 -- one array-area model: CACTI calibrated by JEDEC (user design)
+
+Raw CACTI comm-DRAM areas failed physics (four technologies identical, HBM3
+past a reticle); the JEDEC density figure is vendor-anchored but structurally
+blind -- it cannot respond when a user reconfigures banks or IO. Each now
+contributes what it is good at: k = JEDEC(preset org) / CACTI(preset org),
+computed at the technology's own Ramulator2 organisation, and the reported
+die area is CACTI(effective org) x k. At the stock organisation this is
+exactly the vendor-anchored figure; under reconfiguration it moves by CACTI's
+structural derivative. k is printed with the raw value, so a calibrated
+number can never pass as a raw tool output. Fallback to plain JEDEC density
+when CACTI fails.
+
+Measured k across the seven technologies spans 0.05 to 1.2 -- a factor of 24,
+the one-line demonstration of why raw CACTI could not be primary.
+
+DATA IMPACT: reported DRAM die area only; power and timing bit-equal
+(verified 10164674 cycles unchanged).
+
 ## 1.11.0 -- power and area price the tree that was built, at every level
 
 1.10.5 fixed the top-level network inputs; the hierarchical (levels) machinery

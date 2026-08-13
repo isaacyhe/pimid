@@ -4733,21 +4733,55 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                 dram_cfg.burst_len = 8;
                 dram_cfg.int_prefetch_w = 8;
 
-                pimid::CACTIWrapper cacti_dram(dram_cfg);
-                cacti_dram.initialize();
-                if (cacti_dram.isValid()) {
-                    double die_area = cacti_dram.getArea();
-                    std::cout << "  Area:            " << std::fixed << std::setprecision(2)
-                              << die_area << " mm^2/die (CACTI 7 comm-DRAM)"
-                              << std::defaultfloat << std::endl;
-                } else {
-                    // Fallback to JEDEC density if CACTI DRAM fails
+/* 1.11.1: CALIBRATED CACTI (user design, 2026-08-13). Neither source
+                 * alone is right: CACTI's absolute die areas failed the JEDEC
+                 * cross-check (four techs identical, HBM3 past a reticle), while
+                 * the JEDEC density figure knows nothing about structure -- it
+                 * cannot respond when a user reconfigures banks or IO. So each
+                 * contributes what it is good at: k = JEDEC(preset org) /
+                 * CACTI(preset org), computed at the technology's own Ramulator2
+                 * organisation, and the reported area is CACTI(effective org) x k.
+                 * At the stock organisation this is exactly the vendor-anchored
+                 * figure; under reconfiguration it moves by CACTI's structural
+                 * derivative. k is printed, so a calibrated number can never be
+                 * mistaken for a raw tool output. */
+                double jedec_ref;
+                {
                     double density = getDRAMDieDensity(config.memory_tech);
-                    double chip_mbit = ram_oracle.getChipSizeMB() * 8.0;
-                    double die_area = (chip_mbit / density) * 1.12;
+                    double chip_mbit = (double)chip_bytes * 8.0 / (1024.0*1024.0);
+                    jedec_ref = (chip_mbit / density) * 1.12;   // 1.12: spine/pad overhead
+                }
+                // Reference run: the PRESET organisation (oracle values, no overrides)
+                pimid::CACTIWrapper cacti_ref(dram_cfg);
+                cacti_ref.initialize();
+                // Effective run: the organisation this simulation actually models
+                auto eff_cfg = dram_cfg;
+                {
+                    int bpb = (config.banks_per_bg_override > 0)
+                              ? config.banks_per_bg_override
+                              : ram_oracle.getBanksPerBankGroup();
+                    int bgc = (config.bg_per_chip_override > 0)
+                              ? config.bg_per_chip_override
+                              : ram_oracle.getBankGroupsPerChip();
+                    eff_cfg.banks = std::max(1, bpb * bgc);
+                }
+                pimid::CACTIWrapper cacti_eff(eff_cfg);
+                cacti_eff.initialize();
+                if (cacti_ref.isValid() && cacti_eff.isValid() &&
+                    cacti_ref.getArea() > 0.0) {
+                    double k = jedec_ref / cacti_ref.getArea();
+                    double die_area = cacti_eff.getArea() * k;
+                    std::cout << "  Area:            " << std::fixed << std::setprecision(2)
+                              << die_area << " mm^2/die (CACTI x k, k="
+                              << std::setprecision(3) << k
+                              << " JEDEC-calibrated; raw CACTI "
+                              << std::setprecision(2) << cacti_eff.getArea()
+                              << ")" << std::endl;
+                } else {
+                    double die_area = jedec_ref;
                     std::cout << "  Area:            " << std::fixed << std::setprecision(2)
                               << die_area << " mm^2/die (JEDEC density fallback)"
-                              << std::defaultfloat << std::endl;
+                              << std::endl;
                 }
             } catch (const std::exception& e) {
                 std::cerr << "  [DRAM area] CACTI query failed: " << e.what() << std::endl;
