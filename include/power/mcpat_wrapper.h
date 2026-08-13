@@ -222,6 +222,19 @@ public:
         int tech_node_nm;
         int temperature_k;
 
+        /* 1.11.2: process family of the PE silicon (device scope only).
+         *   0 = LOGIC          native McPAT pricing, unchanged
+         *   1 = DRAM_PERIPHERY the PE is built from the DRAM die's
+         *       peripheral transistors (UPMEM-style). Interim factor model
+         *       until 1.11.3 lands a real McPAT device family: the CORE
+         *       component is rescaled by factors derived from CACTI's own
+         *       22nm device tables (tech_params/22nm.dat, hp vs comm-dram
+         *       columns) -- see extractResults() for the derivation.
+         * In-class defaults keep every existing construction site (which
+         * assigns fields one by one) at native-logic behavior. */
+        int process_family = 0;
+        double subarray_pitch_factor = 1.0;  // extra area factor at SUBARRAY placement
+
         // McPAT system-level parameters (exposed for architecture exploration)
         int device_type;                    // 0=HP, 1=LSTP, 2=LOP
         int longer_channel_device;          // 0 or 1

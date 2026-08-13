@@ -708,6 +708,46 @@ void McPATWrapper::extractResults() {
     mcpat_mc_area_mm2_ = mcpat_processor_->mcs.area.get_area() * 1e-6;
     mcpat_total_area_mm2_ = mcpat_processor_->area.get_area() * 1e-6;
 
+    /* 1.11.2: DRAM-periphery process family (interim factor model).
+     *
+     * McPAT prices every device in a LOGIC process; a PE at subarray, bank,
+     * bank-group or chip level physically lives in the DRAM die's peripheral
+     * transistors, which are a different device (thick oxide, long channel,
+     * high Vth, retention-grade leakage). Until 1.11.3 gives McPAT a real
+     * DRAM_PERIPHERY device family, the CORE component is rescaled here by
+     * factors read off CACTI's own 22nm table (tech_params/22nm.dat), hp vs
+     * comm-dram columns -- tool-sourced, not literature-guessed:
+     *   area    x2.44  = l_phy 0.022/0.009 um (linear pitch penalty; the
+     *                    squared 5.98 is the pessimistic bound, gates use
+     *                    the UPMEM die as anchor)
+     *   dynamic x0.82  = (C_g_ideal+C_fringe)*Vdd^2 ratio:
+     *                    2.52e-16*0.81 / (3.87e-16*0.64)
+     *   leakage x9e-7  = I_off_n ratio 1.1e-13/1.216e-7 (retention-grade
+     *                    devices; the near-zero result is physical, and the
+     *                    1.9.10 IDD data is the cross-check that DRAM-die
+     *                    background power is carried by Ramulator2, not here)
+     * Cross-check: x2.4 CV/I delay ratio puts a ~1 GHz logic PE at ~420 MHz,
+     * inside the published UPMEM DPU band (350-466 MHz).
+     * Applied BEFORE the system total below so every aggregate agrees. */
+    if (config_.process_family == 1) {
+        const double kAreaFactor = 2.44;
+        const double kDynFactor  = 0.82;
+        const double kLeakFactor = 9.0e-7;
+        double pitch = (config_.subarray_pitch_factor > 0.0)
+                           ? config_.subarray_pitch_factor : 1.0;
+        double area_before = mcpat_core_area_mm2_;
+        mcpat_core_area_mm2_ *= kAreaFactor * pitch;
+        mcpat_total_area_mm2_ += (mcpat_core_area_mm2_ - area_before);
+
+        PowerMetrics& pm = component_power_[ComponentType::CORE];
+        pm.runtime_dynamic       *= kDynFactor;
+        pm.subthreshold_leakage  *= kLeakFactor;
+        pm.gate_leakage          *= kLeakFactor;
+        pm.total_leakage = pm.subthreshold_leakage + pm.gate_leakage;
+        pm.total_dynamic = pm.runtime_dynamic;
+        pm.total_power   = pm.total_dynamic + pm.total_leakage;
+    }
+
     // System total
     system_power_ = PowerMetrics();
     for (const auto& pair : component_power_) {
@@ -737,8 +777,18 @@ void McPATWrapper::extractResults() {
 
     double peak_dyn = 0.0;
     double peak_leak = 0.0;
-    peak_dyn += peakDynamic(mcpat_processor_->core);
-    peak_leak += peakLeakage(mcpat_processor_->core);
+    {
+        // 1.11.2: peak reads the raw processor structures, so the CORE share
+        // carries the same DRAM-periphery factors as the runtime metrics.
+        double core_pd = peakDynamic(mcpat_processor_->core);
+        double core_pl = peakLeakage(mcpat_processor_->core);
+        if (config_.process_family == 1) {
+            core_pd *= 0.82;
+            core_pl *= 9.0e-7;
+        }
+        peak_dyn += core_pd;
+        peak_leak += core_pl;
+    }
     peak_dyn += peakDynamic(mcpat_processor_->l2);
     peak_leak += peakLeakage(mcpat_processor_->l2);
     peak_dyn += peakDynamic(mcpat_processor_->l3);

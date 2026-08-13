@@ -7,6 +7,36 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.2 -- the process surface: every domain on its own silicon
+
+Three related fictions removed. (1) The technology-node knob was clamped only
+at the bottom: any value >= 22 passed through, so CACTI silently interpolated
+unvalidated blends for intermediate nodes, and its 16nm.dat -- a 25-byte stub
+reading "Invalid technology nodes" -- was reachable for 16-21 nm requests.
+The knob is now a positive-list: 22, 32, 45, 65, 90 nm (the nodes every
+linked tool evaluates from real tables), anything else a fatal config error.
+(2) The logic node reached the DRAM die: setting a 45 nm host re-priced HBM3
+arrays as 45 nm DRAM silicon. The DRAM array now derives its process from the
+technology generation (DDR3=3x/2x on the 32 nm table, everything newer on
+22 nm; printed), and power.tech_node_nm names logic domains only. (3) Every
+PE was priced as logic-process silicon regardless of where it sits. A
+placement x technology matrix now selects the process family: subarray/bank/
+bank-group/chip PEs on DRAM technologies are DRAM-periphery devices, scaled
+by factors read off CACTI's own 22 nm hp vs comm-dram device columns (area
+x2.44 from l_phy, dynamic x0.82 from C*V^2, leakage ~0 from I_off -- the
+retention-grade device is the physics, and Ramulator2 carries DRAM-die
+background power). Rank/channel/LOGIC_DIE/host PEs and all PEs beside
+SRAM/NVM arrays remain logic. Cross-check: the x2.4 CV/I delay ratio puts a
+1 GHz logic PE at ~420 MHz, inside UPMEM's published 350-466 MHz band; a
+warning fires above 700 MHz. Interim factors; 1.11.3 replaces them with a
+real McPAT DRAM_PERIPHERY device family. Subarray placements gain
+power.subarray_pitch_factor (default unity).
+
+DATA IMPACT: device PE power and area for BANK/BG/CHIP/SUBARRAY placements
+on DRAM technologies (most of the corpus); timing untouched. DRAM die area
+unchanged at default configs (same 22 nm table as before for post-DDR3
+technologies; DDR3 moves to the 32 nm table).
+
 ## 1.11.1 -- one array-area model: CACTI calibrated by JEDEC (user design)
 
 Raw CACTI comm-DRAM areas failed physics (four technologies identical, HBM3

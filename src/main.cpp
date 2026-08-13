@@ -1230,6 +1230,10 @@ struct UnifiedConfig {
     int host_l3_kb = 8192;
     std::string host_memory_tech = "DDR4";
     int host_tech_node_nm = -1;  // -1 = inherit device node (config.tech_node_nm); see power.host_tech_node_nm
+    // 1.11.2: extra area factor for SUBARRAY-placed PEs (bitline-pitch layout
+    // constraint, DRISA-style). Default unity: no speculative precision until
+    // the IDD cross-check shows the single-factor model failing.
+    double subarray_pitch_factor = 1.0;  // power.subarray_pitch_factor
 
     // Power analysis
     bool enable_power = true;  // --power / --no-power / YAML power.enabled
@@ -3990,37 +3994,55 @@ static double getDRAMDieDensity(const std::string& tech) {
     return 90.0;  // default: DDR4-class
 }
 
+/* 1.11.2: a DRAM die has NO free process-node knob. Its process is a
+ * consequence of the technology generation (vendors speak in derived classes
+ * -- 1x/1y/1z/1a/1b -- not nanometers), so power.tech_node_nm must not reach
+ * the DRAM array: before this release, setting a 45 nm *logic* node silently
+ * re-priced every HBM3 die as 45 nm DRAM silicon. The class below is the
+ * generation the technology implies (vendor/ISSCC provenance, same map the
+ * device-model spec fixes), and cacti_table_nm is only the nearest real CACTI
+ * table used to shape the structure response -- the absolute scale is the
+ * JEDEC k-calibration's job (1.11.1), which divides the table choice out. */
+struct DRAMGenClass { const char* cls; int cacti_table_nm; };
+static DRAMGenClass getDRAMGenClass(const std::string& tech) {
+    if (tech == "DDR3")   return {"3x/2x", 32};
+    if (tech == "DDR4")   return {"1x",    22};
+    if (tech == "DDR5")   return {"1a",    22};
+    if (tech == "LPDDR5") return {"1a",    22};
+    if (tech == "GDDR6")  return {"1y/1z", 22};
+    if (tech == "HBM2")   return {"1y",    22};
+    if (tech == "HBM3")   return {"1a/1b", 22};
+    return {"1x", 22};  // default: DDR4-class, matches the density default
+}
+
 /**
  * Map memory technology to McPAT MC parameters.
  */
-/* 1.9.35: clamp a requested technology node to the model floor, LOUDLY.
+/* 1.11.2: validate a requested technology node against the positive-list.
  *
- * The linked CACTI/McPAT models do not go below 22 nm, and the code enforced
- * that with a bare std::max(22, requested). A configuration asking for 14, 7 or
- * 5 nm was therefore silently raised to 22 and the run reported 22 nm area,
- * power and cache latency with no indication anywhere that the requested node
- * had been ignored. A study sweeping technology nodes below the floor would
- * have produced identical numbers at every point and read as "technology does
- * not matter here".
+ * The 1.9.35 clamp only guarded the bottom (sub-22 raised to 22, loudly).
+ * Everything else passed through, which admitted two failure modes the tools
+ * themselves do not guard: CACTI silently INTERPOLATES between its tables for
+ * any intermediate value (28 nm quietly becomes a 32/22 blend of unvalidated
+ * quality), and its 16nm.dat is a 25-byte stub reading "Invalid technology
+ * nodes" that the dispatcher will happily try to parse for 16-21 nm requests.
  *
- * Silently substituting a value the caller did not ask for is the failure mode
- * this release train has now hit nine times (a name that did not match, a table
- * with no entry for the case, a list cleared before use). The substitution is
- * still made -- there is no model to fall back to -- but it is now stated. */
-static int clampTechNodeNm(int requested_nm, const char* site) {
-    static bool warned = false;
-    if (requested_nm > 0 && requested_nm < 22) {
-        if (!warned) {
-            warned = true;
-            std::cout << "  [tech] WARNING: " << requested_nm << " nm was requested but the "
-                         "linked CACTI/McPAT models stop at 22 nm. Using 22 nm. Reported "
-                         "area, power and cache latency are 22 nm values, NOT "
-                      << requested_nm << " nm values. (first at: " << site << ")"
-                      << std::endl;
-        }
-        return 22;
+ * The only nodes every linked tool evaluates from real tables are 22, 32, 45,
+ * 65 and 90 nm (CACTI exact tables; NVSim branches; McPAT rides the CACTI
+ * params; 22 is also the McPAT calibration floor). Anything else is now a
+ * fatal configuration error naming the valid set -- not a clamp, not a warn:
+ * a swept study must fail loudly at the invalid point, not plateau silently. */
+static int validateTechNodeNm(int requested_nm, const char* site) {
+    if (requested_nm <= 0) return 22;  // unset: the calibrated default
+    static const int kValidNodes[] = {22, 32, 45, 65, 90};
+    for (int n : kValidNodes) {
+        if (requested_nm == n) return requested_nm;
     }
-    return (requested_nm > 0) ? requested_nm : 22;
+    std::cerr << "ERROR: technology node " << requested_nm << " nm (" << site
+              << ") is not supported. Valid nodes: 22, 32, 45, 65, 90 nm "
+                 "(the nodes all linked tools evaluate from real, calibrated "
+                 "tables; 22 nm is the finest)." << std::endl;
+    std::exit(1);
 }
 
 static pimid::McPATWrapper::MCTechParams getMCTechParamsForMcPAT(
@@ -4247,8 +4269,53 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     McPAT::SystemConfig mcfg;
     mcfg.num_cores = config.num_pes;
     mcfg.core_clock_mhz = config.frequency_mhz;
-    mcfg.tech_node_nm = config.tech_node_nm;
+    mcfg.tech_node_nm = validateTechNodeNm(config.tech_node_nm, "device PE node");
     mcfg.temperature_k = 350;
+
+    /* 1.11.2: placement x technology -> PE process family. Every row is
+     * anchored to shipped silicon:
+     *   SUBARRAY..CHIP on a DRAM tech  -> DRAM_PERIPHERY (UPMEM DPU; DRISA)
+     *   RANK/CHANNEL on a DRAM tech    -> LOGIC (DIMM/base-die buffer, AxDIMM)
+     *   LOGIC_DIE                      -> LOGIC (HBM base die)
+     *   any level on SRAM/NVM techs    -> LOGIC (bitcell density is the
+     *       array model's problem; the PE beside the array is ordinary CMOS,
+     *       eMRAM/ePCM being BEOL over a logic wafer)
+     * HOST_MC PEs sit in the host controller: LOGIC by definition. */
+    {
+        bool dram_family_tech =
+            !(config.memory_tech == "SRAM" || config.memory_tech == "STT_MRAM" ||
+              config.memory_tech == "PCM"  || config.memory_tech == "RERAM");
+        bool on_dram_silicon = dram_family_tech &&
+            config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3;
+        if (on_dram_silicon) {
+            mcfg.process_family = 1;  // DRAM_PERIPHERY (interim factors)
+            mcfg.subarray_pitch_factor =
+                (config.pe_hierarchy_level == 0) ? config.subarray_pitch_factor : 1.0;
+            DRAMGenClass gc = getDRAMGenClass(config.memory_tech);
+            std::cout << "  [tech] PE process family: DRAM-periphery (placement "
+                      << config.placement_level << " on " << config.memory_tech
+                      << ", class " << gc.cls << "); interim factors from CACTI "
+                         "22nm hp/comm-dram tables (area x2.44, dynamic x0.82, "
+                         "leakage ~0)" << std::endl;
+            /* Bounds anchor: UPMEM's DPU, the only shipped bank-level PE,
+             * runs 350-466 MHz. A DRAM-periphery PE clocked far above that
+             * band claims silicon nobody has demonstrated. */
+            if (config.frequency_mhz > 700) {
+                std::cout << "  [tech] WARNING: " << config.frequency_mhz
+                          << " MHz PE in DRAM periphery exceeds the plausible "
+                             "band (UPMEM DPU: 350-466 MHz; CACTI device delay "
+                             "ratio ~2.4x vs logic). Power is reported at the "
+                             "requested clock; the clock itself is the "
+                             "hypothesis." << std::endl;
+            }
+        } else {
+            mcfg.process_family = 0;  // LOGIC (native)
+            std::cout << "  [tech] PE process family: logic ("
+                      << validateTechNodeNm(config.tech_node_nm, "device PE node")
+                      << " nm, placement " << config.placement_level << " on "
+                      << config.memory_tech << ")" << std::endl;
+        }
+    }
     /* 1.9.32: this is the memory die, not the host processor. See
      * SystemConfig::device_scope -- it selects which of McPAT's two calibrated
      * die populations the element is priced against. */
@@ -4574,7 +4641,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         {
             int host_tn = (config.host_tech_node_nm >= 0)
                 ? config.host_tech_node_nm : config.tech_node_nm;
-            host_cfg.tech_node_nm = clampTechNodeNm(host_tn, "host node");
+            host_cfg.tech_node_nm = validateTechNodeNm(host_tn, "host node");
         }
         host_cfg.temperature_k = 350;
 
@@ -4723,7 +4790,18 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                 }
                 dram_cfg.associativity = 1;
                 dram_cfg.banks = std::max(1u, total_banks);
-                dram_cfg.tech_node_nm = clampTechNodeNm(config.tech_node_nm, "DRAM array");
+                /* 1.11.2: the DRAM die's process is derived from its
+                 * technology generation, NOT taken from power.tech_node_nm
+                 * (that knob now names logic domains only). */
+                {
+                    DRAMGenClass gc = getDRAMGenClass(config.memory_tech);
+                    dram_cfg.tech_node_nm = gc.cacti_table_nm;
+                    std::cout << "  [tech] DRAM array process: generation class "
+                              << gc.cls << " (derived from " << config.memory_tech
+                              << "; CACTI " << gc.cacti_table_nm
+                              << " nm table shapes structure, JEDEC k sets scale;"
+                                 " independent of power.tech_node_nm)" << std::endl;
+                }
                 dram_cfg.is_cache = false;
                 dram_cfg.is_main_memory = true;
                 dram_cfg.cell_type = pimid::CACTIWrapper::COMM_DRAM;
@@ -4801,7 +4879,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             sram_cfg.line_size = config.cache_line_size;
             sram_cfg.associativity = 1;
             sram_cfg.banks = 1;
-            sram_cfg.tech_node_nm = clampTechNodeNm(config.tech_node_nm, "SRAM array");
+            sram_cfg.tech_node_nm = validateTechNodeNm(config.tech_node_nm, "SRAM array");
             sram_cfg.is_cache = false;  // RAM mode
             sram_cfg.read_write_ports = config.ports_per_bank;
 
@@ -4837,7 +4915,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             pimid::NVSimWrapper::NVMConfig nvm_cfg;
             nvm_cfg.capacity_bytes = 64 * 1024;  // one bank
             nvm_cfg.word_width_bits = config.cache_line_size * 8;  // one full line per access (64 B = 512 b), matching the CACTI/SRAM path
-            nvm_cfg.process_node_nm = clampTechNodeNm(config.tech_node_nm, "NVM array");
+            nvm_cfg.process_node_nm = validateTechNodeNm(config.tech_node_nm, "NVM array");
             if (config.memory_tech == "STT_MRAM")
                 nvm_cfg.nvm_type = pimid::NVSimWrapper::NVMType::STTRAM;
             else if (config.memory_tech == "PCM")
@@ -5126,8 +5204,28 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
         McPAT::SystemConfig mcfg;
         mcfg.num_cores = node.num_cores;
         mcfg.core_clock_mhz = node.frequency_mhz;
-        mcfg.tech_node_nm = clampTechNodeNm(node.tech_node_nm, "system node");
+        mcfg.tech_node_nm = validateTechNodeNm(node.tech_node_nm, "system node");
         mcfg.temperature_k = 350;
+
+        /* 1.11.2: same placement x technology -> process family matrix as the
+         * device-scope path. Placement is global (pim.placement), the memory
+         * technology is the node's own. Host nodes are logic by definition. */
+        if (node.role == UnifiedConfig::SystemNode::DEVICE) {
+            bool dram_family_tech =
+                !(node.memory_tech == "SRAM" || node.memory_tech == "STT_MRAM" ||
+                  node.memory_tech == "PCM"  || node.memory_tech == "RERAM");
+            if (dram_family_tech &&
+                config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3) {
+                mcfg.process_family = 1;
+                mcfg.subarray_pitch_factor =
+                    (config.pe_hierarchy_level == 0) ? config.subarray_pitch_factor : 1.0;
+                std::cout << "  [tech] " << node.name
+                          << ": PE process family DRAM-periphery (placement "
+                          << config.placement_level << " on " << node.memory_tech
+                          << ", class " << getDRAMGenClass(node.memory_tech).cls
+                          << "; interim CACTI hp/comm-dram factors)" << std::endl;
+            }
+        }
 
         McPAT::DeviceProfile profile;
         bool is_alu = false;
@@ -8315,6 +8413,11 @@ int main(int argc, char** argv) {
                 config.host_tech_node_nm =
                     yaml_cfg["power"]["host_tech_node_nm"].as<int>(config.host_tech_node_nm);
             }
+            // 1.11.2: subarray bitline-pitch area knob (default unity)
+            if (yaml_cfg["power"] && yaml_cfg["power"]["subarray_pitch_factor"]) {
+                config.subarray_pitch_factor =
+                    yaml_cfg["power"]["subarray_pitch_factor"].as<double>(1.0);
+            }
 
             // McPAT derived-parameter overrides
             if (yaml_cfg["power"] && yaml_cfg["power"]["mcpat_overrides"]) {
@@ -9004,7 +9107,7 @@ int main(int argc, char** argv) {
                 mcfg.l3_size_bytes = 0;
                 mcfg.num_memory_controllers = 0;
                 mcfg.mc_clock_mhz = result.clockMhz / 2.0;
-                mcfg.tech_node_nm = config.tech_node_nm;
+                mcfg.tech_node_nm = validateTechNodeNm(config.tech_node_nm, "device NoC probe");
                 mcfg.temperature_k = 350;
                 mcfg.has_noc = true;
                 // 1.9.32: a synthetic probe of the IN-MEMORY network.
