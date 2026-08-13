@@ -73,7 +73,6 @@ public:
     void setBankEnergyOverridePJPerByte(double v) { energy_bank_override_pJ_per_byte_ = v; }
     double getArrayReadEnergyNJ() const;     // array rd (act+col, amortized) per 64B
     double getArrayWriteEnergyNJ() const;    // array wr per 64B
-    double getInterfaceEnergyNJ() const;     // off-chip I/O per 64B (host-side term)
     double getTerminationEnergyNJ() const;   // ODT/termination per 64B (DDR-class; HBM=0)
     // Override termination energy (pJ/bit; <0 = model default, 0 = force no termination).
     void setTerminationOverridePJPerBit(double v) { energy_term_override_pJ_per_bit_ = v; }

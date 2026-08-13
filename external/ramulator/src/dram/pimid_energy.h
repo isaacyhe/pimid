@@ -61,14 +61,23 @@ inline double arrayReadNJ(const std::string& tech, double tRC, double tRAS,
 }
 inline double arrayWriteNJ(const std::string& tech, double tRC, double tRAS,
                            double tBurst, double bank_override_pJ_per_byte) {
-    return arrayReadNJ(tech, tRC, tRAS, tBurst, bank_override_pJ_per_byte) * 1.2;
+    /* 1.11.5 (audit): writes consult IDD4W, not read*1.2. Same shape as the
+     * read term: activate/precharge share plus the write burst current. */
+    if (bank_override_pJ_per_byte > 0.0)
+        return bank_override_pJ_per_byte * 64.0 / 1000.0 * 1.2;
+    IDDSpec s = iddFor(tech);
+    double e_actpre_pJ = s.vdd * (s.idd0 * tRC - s.idd3n * tRAS - s.idd2n * (tRC - tRAS));
+    double e_wr_pJ     = s.vdd * (s.idd4w - s.idd3n) * tBurst;
+    const double ROW_MISS_FRAC = 0.5;
+    return (ROW_MISS_FRAC * e_actpre_pJ + e_wr_pJ) / 1000.0;
 }
 
-// Off-chip DRAM I/O per 64B burst (DQ read current; excludes termination).
-inline double interfaceNJ(const std::string& tech, double tBurst) {
-    IDDSpec s = iddFor(tech);
-    return (s.vdd * (s.idd4r - s.idd3n) * tBurst) / 1000.0;
-}
+/* 1.11.5 (audit): interfaceNJ REMOVED. It returned vdd*(idd4r-idd3n)*tBurst
+ * -- bit-identical to the burst term already inside arrayReadNJ, so every
+ * consumer that added it double-charged the DQ read current. JEDEC IDD4R is
+ * measured with the outputs driving: the on-die I/O switching is already in
+ * the array term. The genuinely ADDITIONAL off-chip energy is termination
+ * (below), which was computed and never charged. */
 
 // ODT/termination per 64B, per I/O standard. term_override_pJ_per_bit >= 0 = user knob.
 // termination_enable=false forces 0. HBM = 0 by physics (interposer microbumps).

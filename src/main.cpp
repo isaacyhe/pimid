@@ -4738,37 +4738,50 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         try {
             pimid::RamulatorWrapper ram_oracle("", config.memory_tech);
             ram_oracle.initialize();
-            // 1.9.10: use the INTENSIVE per-access accessors. The old code called
-            // getReadEnergy()/getWriteEnergy() -- which return total_reads_*per-access
-            // (== 0 on this fresh, never-fed oracle) -- and then multiplied by mem_rd
-            // again, yielding 0.000 nJ everywhere. getArrayReadEnergyNJ() already folds
-            // activation + column access, so act/pre are not added separately (would
-            // double-count). Interface (off-chip I/O) is charged HOST-side only.
+            // 1.9.10: use the INTENSIVE per-access accessors (the older
+            // extensive pair returned 0 on a fresh oracle). getArrayReadEnergyNJ()
+            // folds activation + column access AND the DQ burst current --
+            // JEDEC IDD4R is measured with the outputs driving.
+            //
+            // 1.11.5 (audit): the old iface term was bit-identical to that DQ
+            // burst current, so every access was double-charged; and it was
+            // charged for ALL placements under a comment claiming host-side
+            // only. The interface term is now TERMINATION (ODT) -- the
+            // genuinely additional off-chip energy, previously computed and
+            // never charged -- and it is placement-aware: an access from an
+            // on-die PE (subarray..chip) never crosses the DQ pins, so it
+            // carries no termination at all. HBM terminates nothing at any
+            // placement (interposer microbumps; the model returns 0 there by
+            // physics, not by this gate).
             double rd_energy = ram_oracle.getArrayReadEnergyNJ();
             double wr_energy = ram_oracle.getArrayWriteEnergyNJ();
-            double iface_energy = ram_oracle.getInterfaceEnergyNJ();
+            bool crosses_dq = (config.pe_hierarchy_level >= 4 ||
+                               config.pe_hierarchy_level == -1);  // RANK+ or HOST_MC
+            double iface_energy = crosses_dq ? ram_oracle.getTerminationEnergyNJ() : 0.0;
             double bg_power_mw = ram_oracle.getBackgroundPowerMW();
             double ref_energy = ram_oracle.getRefreshPowerMW();  // per-device mW
             double leakage_mw = bg_power_mw;
 
-            // Scale by actual access counts (array term; interface added host-side)
             double total_rd_nj = rd_energy * zsim_stats.mem_rd;
             double total_wr_nj = wr_energy * zsim_stats.mem_wr;
             double total_act_nj = 0.0;  // folded into array rd/wr (no double-count)
-            double total_pre_nj = iface_energy * (zsim_stats.mem_rd + zsim_stats.mem_wr);
+            double total_iface_nj = iface_energy * (zsim_stats.mem_rd + zsim_stats.mem_wr);
 
             std::cout << "  Technology:      " << config.memory_tech << " (Ramulator2 energy model)" << std::endl;
             std::cout << "  Per-access:      read=" << std::fixed << std::setprecision(3)
                       << rd_energy << " nJ, write=" << wr_energy << " nJ" << std::endl;
-            std::cout << "  Interface (I/O): " << iface_energy << " nJ/access (host-side / off-chip)" << std::endl;
+            std::cout << "  Termination:     " << iface_energy << " nJ/access ("
+                      << (crosses_dq ? "accesses cross the DQ pins at this placement"
+                                     : "on-die placement: no DQ crossing, no termination")
+                      << ")" << std::endl;
             std::cout << "  Array incl act+col in read/write terms above" << std::endl;
             std::cout << "  Refresh:         " << ref_energy << " mW/device" << std::endl;
             std::cout << "  Background:      " << bg_power_mw << " mW/device (standby+refresh)" << std::endl;
             std::cout << "  Leakage:         " << leakage_mw << " mW" << std::endl;
             std::cout << "  Total dynamic:   " << std::setprecision(1)
-                      << (total_rd_nj + total_wr_nj + total_act_nj + total_pre_nj) / 1e6
+                      << (total_rd_nj + total_wr_nj + total_act_nj + total_iface_nj) / 1e6
                       << " mJ (rd=" << total_rd_nj / 1e6 << " + wr=" << total_wr_nj / 1e6
-                      << " + act=" << total_act_nj / 1e6 << " + pre=" << total_pre_nj / 1e6 << ")"
+                      << " + act=" << total_act_nj / 1e6 << " + term=" << total_iface_nj / 1e6 << ")"
                       << std::defaultfloat << std::endl;
 
             // DRAM die area via CACTI 7 (commercial DRAM cell model)

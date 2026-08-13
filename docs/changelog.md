@@ -7,6 +7,27 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.5 -- the DQ pins are charged once, and only when they are crossed
+
+The audit's interface-energy findings, memory side. (1) The 'interface'
+term was vdd*(IDD4R-IDD3N)*tBurst -- bit-identical to the DQ burst current
+already inside the array read term (JEDEC IDD4R is measured with outputs
+driving), so every access was double-charged. interfaceNJ is deleted; the
+interface term is now TERMINATION (ODT) -- the genuinely additional
+off-chip energy, computed per I/O standard since 1.9.10 and never charged
+until now (dead code resurrected). (2) Termination is placement-aware: an
+access from an on-die PE (subarray/bank/BG/chip) never crosses the DQ
+pins and carries none; RANK/CHANNEL/HOST_MC accesses do. HBM terminates
+nothing at any placement (interposer microbumps -- the model's own zero,
+by physics). (3) Writes consult IDD4W: the write burst term is
+vdd*(IDD4W-IDD3N)*tBurst plus the activate share, replacing read*1.2.
+(4) The total-dynamic line prints 'term=', not the false 'pre='.
+
+DATA IMPACT: memory dynamic energy everywhere -- on-die placements drop
+(double-charge removed, nothing added), off-die DDR-class placements
+exchange the DQ double-charge for real termination, writes move by
+IDD4W/IDD4R. Timing untouched.
+
 ## 1.11.4 -- audit hotfix: the leakage factor was read at the wrong temperature
 
 The user's Opus audit fleet (five rounds over the open 1.11.x issues) turned

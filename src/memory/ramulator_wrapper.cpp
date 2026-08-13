@@ -462,9 +462,6 @@ double RamulatorWrapper::getArrayWriteEnergyNJ() const {
     return Ramulator::pimid_energy::arrayWriteNJ(
         dram_type_, getTRC(), getTRAS(), getTBurst(), energy_bank_override_pJ_per_byte_);
 }
-double RamulatorWrapper::getInterfaceEnergyNJ() const {
-    return Ramulator::pimid_energy::interfaceNJ(dram_type_, getTBurst());
-}
 double RamulatorWrapper::getTerminationEnergyNJ() const {
     return Ramulator::pimid_energy::terminationNJ(dram_type_, energy_term_override_pJ_per_bit_);
 }
