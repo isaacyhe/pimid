@@ -730,9 +730,23 @@ void McPATWrapper::extractResults() {
      * inside the published UPMEM DPU band (350-466 MHz).
      * Applied BEFORE the system total below so every aggregate agrees. */
     if (config_.process_family == 1) {
-        const double kAreaFactor = 2.44;
-        const double kDynFactor  = 0.82;
-        const double kLeakFactor = 9.0e-7;
+        /* 1.11.3: factors are PER CLASS TABLE, read off the hp vs comm-dram
+         * columns of the CACTI table the DRAM generation class maps to
+         * (getDRAMGenClass): 22 nm for post-DDR3 generations, 32 nm for
+         * DDR3-class. Same derivation as 1.11.2 (area = l_phy ratio, dynamic
+         * = (C_g_ideal+C_fringe)*Vdd^2 ratio, leakage = I_off_n*Vdd ratio),
+         * now evaluated in the right table so different DRAM generations
+         * carry different periphery devices:
+         *   22nm.dat: l_phy .022/.009, C 2.52/3.87e-16, Vdd .9/.8,
+         *             I_off 1.1e-13/1.216e-7   (delay ratio ~2.4)
+         *   32nm.dat: l_phy .032/.013, C 3.09/5.74e-16, Vdd 1.0/.9,
+         *             I_off 3.63e-14/1.52e-7   (delay ratio ~1.5) */
+        double kAreaFactor, kDynFactor, kLeakFactor;
+        if (config_.dram_periph_table_nm == 32) {
+            kAreaFactor = 2.46; kDynFactor = 0.66; kLeakFactor = 2.7e-7;
+        } else {
+            kAreaFactor = 2.44; kDynFactor = 0.82; kLeakFactor = 9.0e-7;
+        }
         double pitch = (config_.subarray_pitch_factor > 0.0)
                            ? config_.subarray_pitch_factor : 1.0;
         double area_before = mcpat_core_area_mm2_;
@@ -783,8 +797,8 @@ void McPATWrapper::extractResults() {
         double core_pd = peakDynamic(mcpat_processor_->core);
         double core_pl = peakLeakage(mcpat_processor_->core);
         if (config_.process_family == 1) {
-            core_pd *= 0.82;
-            core_pl *= 9.0e-7;
+            if (config_.dram_periph_table_nm == 32) { core_pd *= 0.66; core_pl *= 2.7e-7; }
+            else                                    { core_pd *= 0.82; core_pl *= 9.0e-7; }
         }
         peak_dyn += core_pd;
         peak_leak += core_pl;
@@ -1109,6 +1123,12 @@ std::string McPATWrapper::generateXMLConfig() const {
     xml << "    <param name=\"temperature\" value=\"" << config_.temperature_k << "\"/>\n";
     xml << "    <param name=\"number_cache_levels\" value=\"" << num_cache_levels << "\"/>\n";
     xml << "    <param name=\"interconnect_projection_type\" value=\"" << config_.interconnect_projection_type << "\"/>\n";
+    /* 1.11.3 gate-0 verdict: device_type=4 (comm-dram) as a GLOBAL device is
+     * rejected by CACTI itself -- UCA asserts power.readOp.dynamic > 0 because
+     * the retention-grade device (Vth 1.0 > Vdd 0.9) only functions inside the
+     * DRAM-array machinery where wordline boost exists. General logic cannot
+     * be priced in that device by these tools; the factor harness below is
+     * therefore the mechanism, not an interim. */
     xml << "    <param name=\"device_type\" value=\"" << config_.device_type << "\"/>\n";
     xml << "    <param name=\"longer_channel_device\" value=\"" << config_.longer_channel_device << "\"/>\n";
     /* 1.9.32: reference class, emitted explicitly instead of inherited.
@@ -1372,7 +1392,10 @@ std::string McPATWrapper::generateXMLConfig() const {
             xml << "      <component id=\"system.core" << i << ".icache\" name=\"icache\">\n";
             xml << "        <param name=\"icache_config\" value=\"" << imem_bytes
                 << ",8,1,1,1,1,64,0\"/>\n";
-            xml << "        <param name=\"buffer_sizes\" value=\"1,1,1,0\"/>\n";
+            /* 1.11.3 (#111): buffer_sizes[0]=0 is the fork's marker for a
+             * RESIDENT store -- InstFetchU builds it as a pure RAM (no tag)
+             * and does not build miss/fill/prefetch buffers at all. */
+            xml << "        <param name=\"buffer_sizes\" value=\"0,0,0,0\"/>\n";
             xml << "        <stat name=\"read_accesses\" value=\"" << ifetch_per_core << "\"/>\n";
             xml << "        <stat name=\"read_misses\" value=\"0\"/>\n";
             xml << "        <stat name=\"conflicts\" value=\"0\"/>\n";

@@ -7,6 +7,30 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.3 -- the periphery device is per-generation, and the istore is a RAM
+
+Two refinements to the 1.11.2 process surface. (1) The DRAM-periphery factor
+set is now read from the CACTI table the technology's generation class maps
+to, not fixed at 22 nm: DDR3-class periphery uses the 32 nm hp/comm-dram
+columns (area x2.46, dynamic x0.66, leakage x2.7e-7, delay ~1.5x), everything
+newer the 22 nm columns (x2.44 / x0.82 / x9e-7, ~2.4x) -- different DRAM
+generations now carry measurably different periphery devices. Gate-0 also
+settled the mechanism question: pricing a whole PE natively in CACTI's
+comm-dram device (device_type=4) is rejected by CACTI itself (UCA asserts
+readOp.dynamic > 0; the retention device with Vth 1.0 V > Vdd 0.9 V only
+works inside the DRAM-array machinery where wordline boost exists). The
+factor harness is therefore the mechanism, documented as such. (2) #111: a
+PE's instruction store is a resident RAM, not a cache. buffer_sizes[0]=0 now
+marks it in the fork's InstFetchU: the array is built pure-RAM (no tag) and
+the miss/fill/prefetch buffers -- structures a scratchpad does not have --
+are not built at all. Previously the store carried a tag array and three
+one-entry MSHR-class buffers whose combined overhead rivals a small imem
+itself.
+
+DATA IMPACT: device PE power and area wherever the ALU imem is priced (all
+alu_core PEs, both families), and DDR3-placement PEs specifically via the
+32 nm factor set. Timing untouched.
+
 ## 1.11.2 -- the process surface: every domain on its own silicon
 
 Three related fictions removed. (1) The technology-node knob was clamped only

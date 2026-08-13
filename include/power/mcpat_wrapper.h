@@ -234,6 +234,9 @@ public:
          * assigns fields one by one) at native-logic behavior. */
         int process_family = 0;
         double subarray_pitch_factor = 1.0;  // extra area factor at SUBARRAY placement
+        // 1.11.3: which CACTI table the DRAM generation class maps to (22 or
+        // 32); selects the per-class hp/comm-dram factor set.
+        int dram_periph_table_nm = 22;
 
         // McPAT system-level parameters (exposed for architecture exploration)
         int device_type;                    // 0=HP, 1=LSTP, 2=LOP

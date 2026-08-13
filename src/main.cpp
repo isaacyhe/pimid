@@ -4288,15 +4288,16 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         bool on_dram_silicon = dram_family_tech &&
             config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3;
         if (on_dram_silicon) {
-            mcfg.process_family = 1;  // DRAM_PERIPHERY (interim factors)
+            mcfg.process_family = 1;  // DRAM_PERIPHERY (per-class factors)
             mcfg.subarray_pitch_factor =
                 (config.pe_hierarchy_level == 0) ? config.subarray_pitch_factor : 1.0;
             DRAMGenClass gc = getDRAMGenClass(config.memory_tech);
+            mcfg.dram_periph_table_nm = gc.cacti_table_nm;
             std::cout << "  [tech] PE process family: DRAM-periphery (placement "
                       << config.placement_level << " on " << config.memory_tech
-                      << ", class " << gc.cls << "); interim factors from CACTI "
-                         "22nm hp/comm-dram tables (area x2.44, dynamic x0.82, "
-                         "leakage ~0)" << std::endl;
+                      << ", class " << gc.cls << "); factors from CACTI "
+                      << gc.cacti_table_nm << "nm hp/comm-dram columns"
+                      << std::endl;
             /* Bounds anchor: UPMEM's DPU, the only shipped bank-level PE,
              * runs 350-466 MHz. A DRAM-periphery PE clocked far above that
              * band claims silicon nobody has demonstrated. */
@@ -5219,11 +5220,14 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 mcfg.process_family = 1;
                 mcfg.subarray_pitch_factor =
                     (config.pe_hierarchy_level == 0) ? config.subarray_pitch_factor : 1.0;
+                DRAMGenClass ngc = getDRAMGenClass(node.memory_tech);
+                mcfg.dram_periph_table_nm = ngc.cacti_table_nm;
                 std::cout << "  [tech] " << node.name
                           << ": PE process family DRAM-periphery (placement "
                           << config.placement_level << " on " << node.memory_tech
-                          << ", class " << getDRAMGenClass(node.memory_tech).cls
-                          << "; interim CACTI hp/comm-dram factors)" << std::endl;
+                          << ", class " << ngc.cls << "; factors from CACTI "
+                          << ngc.cacti_table_nm << "nm hp/comm-dram columns)"
+                          << std::endl;
             }
         }
 
