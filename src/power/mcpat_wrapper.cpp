@@ -731,94 +731,12 @@ void McPATWrapper::extractResults() {
     mcpat_mc_area_mm2_ = mcpat_processor_->mcs.area.get_area() * 1e-6;
     mcpat_total_area_mm2_ = mcpat_processor_->area.get_area() * 1e-6;
 
-    /* 1.11.2/1.11.3/1.11.4: DRAM-periphery process family (factor harness).
-     *
-     * McPAT prices every device in a LOGIC process; silicon at subarray, bank,
-     * bank-group or chip level lives in the DRAM die's peripheral transistors.
-     * CACTI itself cannot price general logic in its comm-dram device (gate-0,
-     * 1.11.3: UCA asserts readOp.dynamic>0 -- Vth 1.0 > Vdd 0.9 functions only
-     * inside the DRAM-array machinery with wordline boost), so the harness
-     * rescales McPAT's logic result by device-column ratios. ONE derivation,
-     * per class table (audit hotfix 1.11.4 -- previously the two tables used
-     * different formulas and the 0C leakage row):
-     *   area = l_phy_cd / l_phy_hp                      (linear pitch penalty;
-     *          the squared value is the pessimistic bound)
-     *   dyn  = (C_g_ideal+C_fringe)*Vdd^2, cd/hp
-     *   leak = I_off_n*Vdd at ROW 50, cd/hp. CACTI's temperature rows are
-     *          KELVIN-MINUS-300 (parameter.cc:175, thermal_temp ==
-     *          temperature-300), so the model's 350K is row 50 -- the
-     *          1.11.4 hotfix read row 80 (=380K), audit round 3 caught it.
-     *   22nm.dat: area .022/.009=2.44  dyn 2.041e-16/2.477e-16=0.82
-     *             leak (1.98e-12*0.9)/(2.152e-7*0.8)=1.0e-5
-     *   32nm.dat: area .032/.013=2.46  dyn 3.09e-16/4.649e-16=0.66
-     *             leak (7.55e-13*1.0)/(2.69e-7*0.9)=3.1e-6
-     * COLUMN BASIS (audit objection, answered): CACTI labels comm-dram as
-     * the DRAM cell-access device, not the periphery. It is kept as the
-     * factor basis deliberately: it is the only DRAM-process device column
-     * populated in BOTH tables (lp-dram is all-zero at 22nm), and its CV/I
-     * delay ratio (~2.4x) reproduces the published UPMEM DPU band -- the
-     * one silicon anchor we have for DRAM-process logic. The 32nm lp-dram
-     * column, where it exists, gives the same ~2.4x delay but a 4.3x area
-     * ratio: our 2.44/2.46 is the CONSERVATIVE end of CACTI's own
-     * DRAM-process band. No tool in the chain carries a true DRAM-periphery
-     * logic device; this is the closest tool-sourced proxy, stated as such.
-     * Subthreshold leakage is rebased on McPAT's PLAIN leakage, not the
-     * longer-channel-discounted value: the comm-dram ratio already encodes a
-     * long-channel device, and stacking both double-discounts (audit).
-     * Gate leakage shares the factor: comm-dram t_ox is ~6x thicker, so its
-     * gate term is if anything still overstated. On-die L2/L3 sit in the same
-     * silicon as the PE and carry the same factors (audit: they were logic-
-     * priced through 1.11.3). Applied BEFORE the system total so every
-     * aggregate agrees. */
-    if (config_.process_family == 1) {
-        double kAreaFactor, kDynFactor, kLeakFactor;
-        if (config_.dram_periph_table_nm == 32) {
-            kAreaFactor = 2.46; kDynFactor = 0.66; kLeakFactor = 3.1e-6;
-        } else {
-            kAreaFactor = 2.44; kDynFactor = 0.82; kLeakFactor = 1.0e-5;
-        }
-        if (config_.device_type != 0) {
-            std::cerr << "[power] WARNING: DRAM-periphery factors are derived "
-                         "against the hp column, but device_type="
-                      << config_.device_type << " prices the PE in a different "
-                         "column. Factor basis and pricing basis disagree."
-                      << std::endl;
-        }
-        double pitch = (config_.subarray_pitch_factor > 0.0)
-                           ? config_.subarray_pitch_factor : 1.0;
-
-        auto applyFamily = [&](PowerMetrics& pm, const Component& comp,
-                               double dynF, double leakF) {
-            double plainSub = comp.power.readOp.leakage;      // NOT longer_channel
-            if (!std::isfinite(plainSub)) plainSub = 0.0;
-            pm.runtime_dynamic      *= dynF;
-            pm.subthreshold_leakage  = plainSub * leakF;
-            pm.gate_leakage         *= leakF;
-            pm.total_leakage = pm.subthreshold_leakage + pm.gate_leakage;
-            pm.total_dynamic = pm.runtime_dynamic;
-            pm.total_power   = pm.total_dynamic + pm.total_leakage;
-        };
-
-        double core_before = component_power_[ComponentType::CORE].total_power;
-        applyFamily(component_power_[ComponentType::CORE],
-                    mcpat_processor_->core, kDynFactor, kLeakFactor);
-        applyFamily(component_power_[ComponentType::L2_CACHE],
-                    mcpat_processor_->l2, kDynFactor, kLeakFactor);
-        applyFamily(component_power_[ComponentType::L3_CACHE],
-                    mcpat_processor_->l3, kDynFactor, kLeakFactor);
-        double core_after = component_power_[ComponentType::CORE].total_power;
-        fam_core_power_ratio_ = (core_before > 0.0) ? core_after / core_before : 1.0;
-
-        double area_delta = 0.0;
-        double a0 = mcpat_core_area_mm2_;
-        mcpat_core_area_mm2_ *= kAreaFactor * pitch;
-        area_delta += mcpat_core_area_mm2_ - a0;
-        a0 = mcpat_l2_area_mm2_; mcpat_l2_area_mm2_ *= kAreaFactor;
-        area_delta += mcpat_l2_area_mm2_ - a0;
-        a0 = mcpat_l3_area_mm2_; mcpat_l3_area_mm2_ *= kAreaFactor;
-        area_delta += mcpat_l3_area_mm2_ - a0;
-        mcpat_total_area_mm2_ += area_delta;
-    }
+    /* 1.11.12: the DRAM-periphery family MOVED INTO McPAT (processor.cc,
+     * driven by the dram_periph_* XML params). What used to be a
+     * post-scaling of extracted results is now a property of the machine
+     * McPAT priced, so components, aggregate and areas are transformed by
+     * the tool that owns them -- the borders rule, and the end of a class
+     * of aggregate-vs-parts drift. Extraction reads what McPAT produced. */
 
     /* 1.11.8 (#84): power-gating interpolation at the tool boundary.
      * Endpoints are BOTH the tool's (active leakage and power_gated_leakage
@@ -836,10 +754,8 @@ void McPATWrapper::extractResults() {
             PowerMetrics& pm = component_power_[t];
             double active = pm.total_leakage;
             double gated  = pm.power_gated_leakage;
-            if (config_.process_family == 1 && t == ComponentType::CORE) {
-                double leakF = (config_.dram_periph_table_nm == 32) ? 3.1e-6 : 1.0e-5;
-                gated *= leakF;
-            }
+            /* 1.11.12: no family rescale here -- McPAT already returned
+             * family-priced endpoints, active AND gated alike. */
             if (gated > active) gated = active;   // never a PG penalty
             double eff = active * (1.0 - r) + gated * r;
             double scale = (active > 0.0) ? eff / active : 1.0;
@@ -891,16 +807,7 @@ void McPATWrapper::extractResults() {
         // rebase (no long-channel stacking) as the block above.
         double core_pd = peakDynamic(mcpat_processor_->core);
         double core_pl = peakLeakage(mcpat_processor_->core);
-        if (config_.process_family == 1) {
-            double dynF  = (config_.dram_periph_table_nm == 32) ? 0.66 : 0.82;
-            double leakF = (config_.dram_periph_table_nm == 32) ? 3.1e-6 : 1.0e-5;
-            double plainSub = mcpat_processor_->core.power.readOp.leakage;
-            double gate     = mcpat_processor_->core.power.readOp.gate_leakage;
-            if (!std::isfinite(plainSub)) plainSub = 0.0;
-            if (!std::isfinite(gate))     gate = 0.0;
-            core_pd *= dynF;
-            core_pl  = (plainSub + gate) * leakF;
-        }
+        // 1.11.12: peak reads the same family-priced structures; no rescale.
         peak_dyn += core_pd;
         peak_leak += core_pl;
     }
@@ -1259,6 +1166,24 @@ std::string McPATWrapper::generateXMLConfig() const {
      * carries clocking and control overhead; 0 would zero it, which is a
      * cheaper answer than the truth. */
     xml << "    <param name=\"opt_clockrate\" value=\"1\"/>\n";
+    /* 1.11.12 (borders rule): the DRAM-periphery family is DESCRIBED to
+     * McPAT, which owns the components and applies it internally; the
+     * wrapper no longer post-scales results. Scope says which components sit
+     * on the memory die: PE cores + their caches + the on-die fabric + the
+     * element controllers (subarray..chip placements). Rank/channel and
+     * base-die designs keep their logic on a buffer die and stay family 0. */
+    if (config_.process_family == 1) {
+        double fa, fd, fl;
+        if (config_.dram_periph_table_nm == 32) { fa = 2.46; fd = 0.66; fl = 3.1e-6; }
+        else                                    { fa = 2.44; fd = 0.82; fl = 1.0e-5; }
+        double pitch = (config_.subarray_pitch_factor > 0.0)
+                           ? config_.subarray_pitch_factor : 1.0;
+        xml << "    <param name=\"dram_periph_family\" value=\"1\"/>\n";
+        xml << "    <param name=\"dram_periph_area\" value=\"" << (fa * pitch) << "\"/>\n";
+        xml << "    <param name=\"dram_periph_dyn\" value=\"" << fd << "\"/>\n";
+        xml << "    <param name=\"dram_periph_leak\" value=\"" << fl << "\"/>\n";
+        xml << "    <param name=\"dram_periph_scope\" value=\"15\"/>\n";
+    }
     /* 1.11.8: sys.power_gating enables McPAT/CACTI's sleep-transistor
      * model so per-component power_gated_leakage endpoints are computed.
      * Emitted only when the described design gates SOMETHING -- all-false

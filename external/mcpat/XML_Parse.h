@@ -602,6 +602,19 @@ typedef struct{
 	system_mc flashc;
 	system_niu niu;
 	system_pcie pcie;
+	/* PIMID 1.11.12: DRAM-PERIPHERY DEVICE FAMILY. McPAT prices every device
+	 * in a logic process; silicon on a DRAM die (PEs, their caches, the
+	 * on-die fabric and element controllers) is built from the die's
+	 * peripheral transistors instead. CACTI cannot price general logic in
+	 * its comm-dram device (gate-0, 1.11.3), so the family is a transform of
+	 * McPAT's own logic result, applied HERE -- inside the tool that owns
+	 * the components -- rather than by post-scaling the results outside
+	 * (model-borders rule). 0 = logic = untouched. */
+	int    dram_periph_family;      // 0 = logic (default), 1 = DRAM periphery
+	double dram_periph_area;        // area factor
+	double dram_periph_dyn;         // dynamic factor
+	double dram_periph_leak;        // leakage factor (on PLAIN leakage)
+	int    dram_periph_scope;       // bitmask: 1=core 2=caches 4=noc 8=mcs
 } root_system;
 
 class ParseXML

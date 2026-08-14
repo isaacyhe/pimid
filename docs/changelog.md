@@ -7,6 +7,47 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.12 -- the DRAM-periphery family becomes a property of the machine
+
+#120 and the model-borders migration together, because they are the same
+change. Since 1.11.2 the periphery transform lived in the wrapper, scaling
+McPAT's CORE result after the fact -- which meant the on-die fabric and the
+element controllers, silicon on the same die as the PEs, kept being priced
+in a logic process, and the transform sat outside the tool that owns the
+components. Both are now one thing: McPAT's XML carries a DRAM_PERIPHERY
+device family (dram_periph_family/area/dyn/leak/scope), and McPAT applies
+it internally to the components the scope names -- PE cores, their caches,
+the on-die NoC and the element controllers -- then rebuilds its own totals
+from the transformed parts. The wrapper describes the family and reads
+whatever McPAT produced; it no longer post-scales anything.
+
+Two consequences beyond tidiness. The aggregate and the parts can no longer
+drift apart, which is the failure 1.11.0 found in the NoC census and 1.11.4
+found in the CoreBreakdown split. And the power-gating endpoints from
+1.11.8 arrive already family-priced, active and gated alike, so the
+interpolation no longer needs to know about process families at all.
+
+Scope is placement-derived, not global: rank/channel and base-die designs
+put their logic on a buffer or base die and stay in the logic family.
+
+Two things the gate caught before this shipped, both worth stating because
+they are the release's own subject matter. The per-level NoC objects the
+reporting layer reads were not transformed with the aggregate, so the
+breakdown printed logic-process leakage under a periphery-priced total --
+the exact aggregate-versus-parts drift this change exists to end, appearing
+inside it. And the AREA factor was being applied to the fabric, which is a
+category error: the pitch penalty is a TRANSISTOR claim, while the 1.10.5
+census showed most tree nodes are single-child pass-throughs, i.e. wire,
+whose pitch on a DRAM die does not follow the device. Applying it anyway
+put a 16-PE add-on at 36 mm^2 against its own 40.78 mm^2 HBM3 die -- 88% of
+the memory it is embedded in. Device factors (dynamic, leakage) now apply
+to everything on the die; the pitch factor applies only where area is
+transistor-dominated. The add-on lands at 28 mm^2, 69% of the die.
+
+DATA IMPACT: device NoC, MC and cache power/area for subarray/bank/BG/chip
+placements on DRAM technologies -- previously logic-priced. PE cores land
+where they did. Timing untouched.
+
 ## 1.11.11 -- an element without an FP unit stops running FP for free
 
 #113. pim.pe.floating_point=false removed the floating-point unit from the

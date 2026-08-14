@@ -85,6 +85,12 @@ void ParseXML::parse(char* filepath)
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"device_type")==0) {sys.device_type=atoi(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"longer_channel_device")==0) {sys.longer_channel_device=(bool)atoi(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"power_gating")==0) {sys.power_gating=(bool)atoi(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
+		/* PIMID 1.11.12: DRAM-periphery device family */
+		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_family")==0) {sys.dram_periph_family=atoi(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
+		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_area")==0) {sys.dram_periph_area=atof(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
+		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_dyn")==0) {sys.dram_periph_dyn=atof(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
+		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_leak")==0) {sys.dram_periph_leak=atof(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
+		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_scope")==0) {sys.dram_periph_scope=atoi(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"opt_dynamic_power")==0) {sys.opt_dynamic_power=(bool)atoi(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"opt_lakage_power")==0) {sys.opt_lakage_power=(bool)atoi(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"opt_clockrate")==0) {sys.opt_clockrate=(bool)atoi(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
@@ -1835,6 +1841,11 @@ void ParseXML::initialize() //Initialize all
 	sys.pcie.duty_cycle =1;
 	sys.pcie.total_load_perc=1;
 	sys.pcie.transferred_bytes=0;   /* PIMID 1.11.7: 0 = legacy load-scaled path */
+	/* PIMID 1.11.12: family off by default -- an unmodified XML prices in
+	 * logic exactly as before. */
+	sys.dram_periph_family=0; sys.dram_periph_area=1.0;
+	sys.dram_periph_dyn=1.0;  sys.dram_periph_leak=1.0;
+	sys.dram_periph_scope=0;
 	sys.pcie.link_pj_per_bit=0;
 	//system_flash_controller
 	sys.flashc.mc_clock =1;

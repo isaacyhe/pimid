@@ -402,6 +402,80 @@ Processor::Processor(ParseXML *XML_interface)
 	  }
   }
 
+  /* PIMID 1.11.12: DRAM-PERIPHERY DEVICE FAMILY, applied inside the tool.
+   *
+   * Components that sit on a DRAM die are built from that die's peripheral
+   * transistors -- thick oxide, long channel, high Vth, retention-grade
+   * leakage -- not from the logic process McPAT prices everything in. CACTI
+   * refuses to price general logic in its comm-dram device (its UCA asserts
+   * a positive dynamic term, and that device only functions inside the array
+   * machinery with wordline boost), so the family is expressed as a
+   * transform of McPAT's own logic result, with factors read from CACTI's hp
+   * vs comm-dram device columns at the technology's own generation table.
+   *
+   * It is applied HERE, over the components McPAT owns, rather than by
+   * scaling the outputs afterwards: one owner per model. The scope mask says
+   * which components are on the memory die -- PE cores (1), their caches
+   * (2), the on-die fabric (4), the element controllers (8) -- because a
+   * rank- or channel-level design has its logic on a buffer or base die
+   * instead, and those must stay in the logic family.
+   *
+   * Leakage rebases on PLAIN leakage: the comm-dram ratio already encodes a
+   * long-channel device, so stacking McPAT's longer-channel discount on top
+   * would double-count it. */
+  if (XML->sys.dram_periph_family == 1) {
+      const double fa = XML->sys.dram_periph_area;
+      const double fd = XML->sys.dram_periph_dyn;
+      const double fl = XML->sys.dram_periph_leak;
+      const int    sc = XML->sys.dram_periph_scope;
+      auto applyFam = [&](Component& c, bool scaleArea) {
+          double plainLeak = c.power.readOp.leakage;
+          c.power.readOp.dynamic    *= fd;
+          c.rt_power.readOp.dynamic *= fd;
+          c.power.readOp.leakage                        = plainLeak * fl;
+          c.power.readOp.longer_channel_leakage         = plainLeak * fl;
+          c.power.readOp.gate_leakage                  *= fl;
+          c.rt_power.readOp.leakage                     = plainLeak * fl;
+          c.rt_power.readOp.longer_channel_leakage      = plainLeak * fl;
+          c.rt_power.readOp.gate_leakage               *= fl;
+          if (scaleArea) c.area.set_area(c.area.get_area() * fa);
+      };
+      /* AREA vs DEVICE factors are not the same claim. The dynamic and
+       * leakage factors are device physics and apply to every component on
+       * the die. The AREA factor is a transistor-PITCH penalty, and it may
+       * only be applied where area is transistor-dominated. The fabric's
+       * area is not: the 1.10.5 census showed most tree nodes are
+       * single-child pass-throughs, i.e. WIRE, and wire pitch on a DRAM die
+       * does not follow the device pitch. So the NoC takes the device
+       * factors and keeps its logic-process area -- stated, because the
+       * alternative (scaling a wire-dominated area by a device ratio) put a
+       * 16-PE add-on at 88% of its own HBM3 die. */
+      if (sc & 1) applyFam(core, true);
+      if (sc & 2) { applyFam(l2, true); applyFam(l3, true); }
+      if (sc & 4) {
+          applyFam(noc, false);              // device factors, logic-process area
+          /* The per-level objects the reporting layer reads must carry the
+           * same transform as the aggregate: a breakdown that disagrees with
+           * its own total is the drift this release exists to end. */
+          for (int ni = 0; ni < numNOC; ni++) applyFam(*nocs[ni], false);
+      }
+      if (sc & 8) applyFam(mcs, true);
+      /* Rebuild the processor totals from the transformed components so the
+       * aggregate and the parts agree -- the failure mode 1.11.0 found in the
+       * NoC census and 1.11.4 found in the CoreBreakdown split. */
+      power = core.power + l2.power + l3.power + noc.power + mcs.power;
+      rt_power = core.rt_power + l2.rt_power + l3.rt_power
+               + noc.rt_power + mcs.rt_power;
+      area.set_area(core.area.get_area() + l2.area.get_area()
+                  + l3.area.get_area() + noc.area.get_area()
+                  + mcs.area.get_area());
+      if (XML->sys.pcie.number_units > 0) {
+          power = power + pcies.power;
+          rt_power = rt_power + pcies.rt_power;
+          area.set_area(area.get_area() + pcies.area.get_area());
+      }
+  }
+
 //  //clock power
 //  globalClock.init_wire_external(is_default, &interface_ip);
 //  globalClock.clk_area           =area*1e6; //change it from mm^2 to um^2
