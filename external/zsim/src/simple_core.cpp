@@ -76,6 +76,10 @@ void SimpleCore::bbl(Address bblAddr, BblInfo* bblInfo) {
     instrs += bblInfo->instrs;
         { uint64_t _ph = zinfo->numPhases; pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); }  // 1.11.8 PG residency
         mixAdd(bblInfo);  // 1.11.10 measured instruction mix
+        if (!zinfo->hierarchy.peHasFpu && zinfo->hierarchy.fpEmulCycles &&
+            bblInfo->nFp) {   // 1.11.11 (#113): soft-float on an FPU-less element
+            curCycle += (uint64_t)bblInfo->nFp * zinfo->hierarchy.fpEmulCycles;
+        }
     curCycle += bblInfo->instrs;
 
     Address endBblAddr = bblAddr + bblInfo->bytes;

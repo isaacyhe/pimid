@@ -477,6 +477,8 @@ static void InitSystem(Config& config) {
         zinfo->hierarchy.dramChannels = config.get<uint32_t>("sys.hierarchy.dramChannels", 1);
         zinfo->hierarchy.nocAggBandwidthMBs = config.get<uint64_t>("sys.hierarchy.nocAggBandwidthMBs", 0);
         zinfo->hierarchy.dqTurnNsX100 = config.get<uint32_t>("sys.hierarchy.dqTurnNsX100", 0);
+        zinfo->hierarchy.fpEmulCycles = config.get<uint32_t>("sys.hierarchy.fpEmulCycles", 0);  // 1.11.11
+        zinfo->hierarchy.peHasFpu = config.get<bool>("sys.hierarchy.peHasFpu", true);           // 1.11.11
         // Device clock used for bandwidth->cycle conversion (see zsim.h). 0 =>
         // use the global sys.frequency. In system-scope co-sim PIMID emits the
         // DEVICE node frequency here so device contention is not host-clocked.

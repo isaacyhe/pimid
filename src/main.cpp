@@ -1062,6 +1062,15 @@ struct UnifiedConfig {
      * command-driven in-bank engine and a fully programmable near-bank one. */
     int  pe_lanes = 1;
     bool pe_has_fp = true;
+    /* 1.11.11 (#113): cycles charged per FP-class instruction when the
+     * element has no FPU (soft-float emulation). Default 0 = the pre-1.11.11
+     * behaviour (nothing charged), so no existing run moves; the run now
+     * REPORTS the contradiction either way. A documented starting point for
+     * users who want it priced: soft-float add/mul on an integer datapath is
+     * tens of integer operations (glibc soft-fp, ~20-60 depending on op and
+     * width) -- the knob is deliberately not defaulted to an invented
+     * constant. */
+    uint32_t pe_fp_emul_cycles = 0;
     int  pe_imem_bytes = 4096;
     /* Datapath WIDTH is deliberately absent here. It already exists as
      * alu_operand_width (pim.pe.operand_width), which the timing model reads as
@@ -3160,6 +3169,11 @@ static void emitZSimHierarchyBlock(std::ostream& out, const UnifiedConfig& confi
     out << "        dramChannels = " << config.hierarchy_dram_channels << ";\n";
     out << "        nocAggBandwidthMBs = " << config.hierarchy_agg_bandwidth_mbs << ";\n";
     out << "        dqTurnNsX100 = " << config.hierarchy_dq_turn_cycles << ";\n";
+    /* 1.11.11 (#113): the element's FP capability and the cost of not having
+     * one now reach the TIMING model, which since 1.11.10 can see FP-class
+     * instructions per block. */
+    out << "        fpEmulCycles = " << config.pe_fp_emul_cycles << ";\n";
+    out << "        peHasFpu = " << (config.pe_has_fp ? "true" : "false") << ";\n";
     for (int i = 0; i < 7; ++i)
         out << "        levelLatency" << i << " = " << config.hierarchy_level_latency[i] << ";\n";
     for (int i = 0; i < 6; ++i)
@@ -4367,6 +4381,26 @@ static void runPowerAnalysis(const UnifiedConfig& config,
 
     // YAML overrides for McPAT derived parameters
     const std::map<std::string, double>& overrides = config.mcpat_overrides;
+
+    /* 1.11.11 (#113): device scope reports the FP-without-FPU contradiction
+     * too -- the system-scope copy of this report is in
+     * runPerNodePowerAnalysis; a device-scope run is the common case and was
+     * the one the gate caught missing. */
+    if (!config.pe_has_fp && zsim_stats.mix_fp > 0) {
+        std::cout << "  [fp] " << zsim_stats.mix_fp
+                  << " FP-class instructions executed on an element declared "
+                     "WITHOUT an FP unit";
+        if (config.pe_fp_emul_cycles > 0) {
+            std::cout << "; charged " << config.pe_fp_emul_cycles
+                      << " cycles each as soft-float emulation ("
+                      << (zsim_stats.mix_fp * (uint64_t)config.pe_fp_emul_cycles)
+                      << " cycles total)" << std::endl;
+        } else {
+            std::cout << "; charged NOTHING (pim.pe.fp_emulation_cycles=0) -- "
+                         "the reported time is for hardware this element does "
+                         "not have" << std::endl;
+        }
+    }
 
     /* 1.11.8 (#84): per-component PG residencies from the run's measured
      * activity (r = 1 - activePhases/phases; phases from zsim.out). PE
@@ -5868,6 +5902,25 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
      * (HOST_MC: the elements sit at the host controller, so their accesses
      * are host-memory accesses BY CONSTRUCTION -- a structural zero, not a
      * missing measurement, and the report must distinguish the two). */
+    /* 1.11.11 (#113): an FPU-less element that executed FP-class code is a
+     * configuration describing a machine that cannot run its workload. The
+     * counted mix makes it visible; say so with the number, whether or not
+     * the emulation was priced. */
+    if (!config.pe_has_fp && zsim_stats.mix_fp > 0) {
+        std::cout << "  [fp] " << zsim_stats.mix_fp
+                  << " FP-class instructions executed on an element declared "
+                     "WITHOUT an FP unit";
+        if (config.pe_fp_emul_cycles > 0) {
+            std::cout << "; charged " << config.pe_fp_emul_cycles
+                      << " cycles each as soft-float emulation ("
+                      << (zsim_stats.mix_fp * (uint64_t)config.pe_fp_emul_cycles)
+                      << " cycles total)" << std::endl;
+        } else {
+            std::cout << "; charged NOTHING (pim.pe.fp_emulation_cycles=0) -- "
+                         "the reported time is for hardware this element does "
+                         "not have" << std::endl;
+        }
+    }
     if (zsim_stats.pemi_local_acc + zsim_stats.pemi_remote_acc > 0) {
         uint64_t tot = zsim_stats.pemi_local_acc + zsim_stats.pemi_remote_acc;
         std::cout << "  [locality] PE-MI accesses: "
@@ -8137,6 +8190,8 @@ int main(int argc, char** argv) {
                      * meaning. */
                     config.pe_lanes = yaml_cfg["pim"]["pe"]["lanes"].as<int>(config.pe_lanes);
                     config.pe_has_fp = yaml_cfg["pim"]["pe"]["floating_point"].as<bool>(config.pe_has_fp);
+                    config.pe_fp_emul_cycles = yaml_cfg["pim"]["pe"]["fp_emulation_cycles"]
+                                                   .as<uint32_t>(config.pe_fp_emul_cycles);  // 1.11.11
                     if (yaml_cfg["pim"]["pe"]["element_bits"]) {
                         std::cerr << "Error: pim.pe.element_bits was withdrawn. The "
                                   << "element's datapath width is pim.pe.operand_width, "
@@ -8206,14 +8261,20 @@ int main(int argc, char** argv) {
                      * integer kernel and not honest for a floating-point one,
                      * and the model cannot tell which it is about to run. */
                     if (!config.pe_has_fp) {
-                        std::cerr << "[config] WARNING: pim.pe.floating_point=false removes "
-                                  << "the floating-point unit from the POWER description "
-                                  << "only. The timing model charges every instruction "
-                                  << "identically -- it never sees an opcode -- so it will "
-                                  << "not charge software emulation. This is honest for a "
-                                  << "kernel with no floating-point operations, and NOT "
-                                  << "honest for one that has them: the element would run "
-                                  << "at full speed with no unit to run on.\n";
+                        std::cerr << "[config] pim.pe.floating_point=false: the element "
+                                  << "has no FP unit. Since 1.11.10 the timing model CAN "
+                                  << "see FP-class instructions, so the run will report "
+                                  << "how many executed";
+                        if (config.pe_fp_emul_cycles > 0) {
+                            std::cerr << " and charge " << config.pe_fp_emul_cycles
+                                      << " cycles each as soft-float emulation.\n";
+                        } else {
+                            std::cerr << ", but charge nothing for them "
+                                      << "(pim.pe.fp_emulation_cycles=0). Honest for a "
+                                      << "kernel with no FP; for one that has FP, set the "
+                                      << "knob or the element runs code it has no unit "
+                                      << "for at full speed.\n";
+                        }
                     }
                 }
                 // placement can live either at pim.placement (older flat form)

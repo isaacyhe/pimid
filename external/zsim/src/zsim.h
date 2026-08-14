@@ -227,6 +227,16 @@ struct GlobSimInfo {
         uint64_t nocAggBandwidthMBs = 0;
         // 1.10.6: time to reverse the shared channel DQ bus, ns x100 (0 = off)
         uint32_t dqTurnNsX100 = 0;
+        /* 1.11.11 (#113): extra cycles charged per FP-class instruction when
+         * the element has NO floating-point unit (pim.pe.floating_point:
+         * false). Until 1.11.10 the timing model could not see an opcode, so
+         * an integer-only element ran floating-point code at full speed --
+         * the config described a machine that could not execute the workload
+         * and nothing said so. The decoder's class census (BblInfo::nFp) now
+         * makes the emulation chargeable. 0 = charge nothing (the pre-1.11.11
+         * behaviour, kept as the default so no existing run moves). */
+        uint32_t fpEmulCycles = 0;
+        bool     peHasFpu = true;
         // Frequency (MHz) used to convert DEVICE memory bandwidth (bytes/s) into
         // bytes/cycle for the M/D/1 + bandwidth-floor contention terms. In a
         // standalone device-scope run this equals sys.frequency (the single

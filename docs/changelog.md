@@ -7,6 +7,30 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.11 -- an element without an FP unit stops running FP for free
+
+#113. pim.pe.floating_point=false removed the floating-point unit from the
+POWER description and nowhere else, and the code said why: "the timing
+model charges every instruction identically -- it never sees an opcode".
+As of 1.11.10 it does. The decoder's class census travels with each basic
+block, so an FPU-less element can now be told what it just executed.
+
+Two things follow. The run REPORTS the contradiction with its measured
+size -- "N FP-class instructions executed on an element declared WITHOUT
+an FP unit" -- which no configuration could previously discover. And the
+emulation becomes chargeable: pim.pe.fp_emulation_cycles adds that many
+cycles per FP-class instruction in the timing model (through
+sys.hierarchy.fpEmulCycles / peHasFpu into zsim). The default is 0 --
+nothing charged, every existing run bit-identical -- because the honest
+per-op cost of soft-float depends on the operation and the width (glibc
+soft-fp is tens of integer operations), and inventing one constant for
+all of them is the failure mode this train exists to remove. The knob is
+offered, documented, and left to the user; what is NOT left to the user
+is knowing that the situation occurred.
+
+DATA IMPACT: none by default. With the knob set, timing and everything
+derived from it move on FPU-less elements that execute FP code.
+
 ## 1.11.10 -- the instruction mix is counted, not assumed
 
 #112. Every instruction the decoder handles already carries a class
