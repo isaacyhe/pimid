@@ -123,6 +123,16 @@ public:
     struct PGSpec {
         bool pg_core = false, pg_noc = false, pg_mc = false;
         double r_core = 0.0, r_noc = 0.0, r_mc = 0.0;
+        /* 1.11.18 (audit go-through): the SHARED caches gate on their own
+         * no-access signal, not on core retirement -- spec #84 says so, and
+         * the counter (pgSharedCacheActivePhases) has been instrumented,
+         * exported and parsed since 1.11.8 while L2/L3 were interpolated
+         * with r_core. A core can retire from its L1s for long windows with
+         * the LLC untouched, so the two residencies are genuinely different
+         * numbers. Defaults to r_core when no shared-cache counter was seen
+         * (single-level configs), which reproduces the old behavior. */
+        double r_shared_cache = 0.0;
+        bool   have_shared_cache = false;
     };
     void setPGSpec(const PGSpec& s) { pg_spec_ = s; }
 

@@ -96,6 +96,17 @@ uint64_t RamulatorMemory::access(MemReq& req) {
         default: panic("!?");
     }
 
+    /* 1.11.18 (audit go-through): PG residency. Everything except a clean
+     * writeback (PUTS, explicitly not a real access) keeps this controller
+     * busy. Without this the tracker never advanced on a Ramulator-backed
+     * machine, so r_idle came out 1.0 and power gating was credited with
+     * the whole leakage, silently. */
+    if (req.type != PUTS) {
+        uint64_t ph = zinfo->numPhases;
+        if (pgIsDevice) zinfo->pgres.devMC[0].touch(ph);
+        else            zinfo->pgres.hostMC.touch(ph);
+    }
+
     uint64_t respCycle = req.cycle + minLatency;
     assert(respCycle > req.cycle);
 

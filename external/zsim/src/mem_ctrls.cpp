@@ -86,6 +86,12 @@ uint64_t SimpleMemory::access(MemReq& req) {
             profWrites.atomicInc();
             profTotalWrLat.atomicInc(curLatency);
             __sync_fetch_and_add(&curPhaseAccesses, 1);
+            /* 1.11.18 (audit go-through): a dirty writeback IS memory traffic
+             * -- the controller is busy. 1.11.8 marked only GETS/GETX, so a
+             * write-heavy phase could be credited as idle and power-gated.
+             * (PUTS falls through below without marking: a clean writeback is
+             * explicitly not a real access here.) */
+            zinfo->pgres.hostMC.touch(zinfo->numPhases);
             //Note no break
         case PUTS:
             //Not a real access -- memory must treat clean wbacks as if they never happened.

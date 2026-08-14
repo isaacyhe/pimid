@@ -1546,6 +1546,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
             mpi_roi_baselined = true;
             for (uint32_t c = 0; c < zinfo->numCores; c++)
                 if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
+            zinfo->pgres.markRoi(zinfo->numPhases);   // 1.11.18: PG residency window
             snapshotRoiBaseCyc();
             if (getenv("PIMID_DEBUG_RDV"))
                 info("Thread %d: synthesized per-rank ROI baseline at first "
@@ -1691,6 +1692,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         mpi_roi_baselined = true;
         for (uint32_t c = 0; c < zinfo->numCores; c++)
             if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
+        zinfo->pgres.markRoi(zinfo->numPhases);   // 1.11.18: PG residency window
         snapshotRoiBaseCyc();
         if (getenv("PIMID_DEBUG_RDV"))
             info("Thread %d: synthesized per-rank ROI baseline at first MPI %s "
@@ -2240,6 +2242,7 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
         // array-init/setup that otherwise runs on the launcher PE and dominates.
         for (uint32_t c = 0; c < zinfo->numCores; c++)
             if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
+        zinfo->pgres.markRoi(zinfo->numPhases);   // 1.11.18: PG residency window
         // This rank got a real roi_begin -> don't also synthesize a baseline at
         // the first MPI op (see handleMpiMagicOp). rank 0 takes this path.
         mpi_roi_baselined = true;
@@ -2496,6 +2499,7 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         // array-init/setup that otherwise runs on the launcher PE and dominates.
         for (uint32_t c = 0; c < zinfo->numCores; c++)
             if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
+        zinfo->pgres.markRoi(zinfo->numPhases);   // 1.11.18: PG residency window
         // This rank got a real roi_begin -> don't also synthesize a baseline at
         // the first MPI op (see handleMpiMagicOp). rank 0 takes this path.
         mpi_roi_baselined = true;

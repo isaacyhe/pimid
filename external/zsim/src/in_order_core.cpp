@@ -92,12 +92,7 @@ uint64_t InOrderCore::getPhaseCycles() const {
 void InOrderCore::initStats(AggregateStat* parentStat) {
     AggregateStat* coreStat = new AggregateStat();
     coreStat->init(name.c_str(), "Core stats");
-    {   // 1.11.8 PG residency: phases in which this core retired anything
-        ProxyStat* pgStat = new ProxyStat();
-        pgStat->init("pgActivePhases", "Phases with retirement (PG residency)",
-                     (uint64_t*)&pgAct.activePhases);
-        coreStat->append(pgStat);
-    }
+    // 1.11.18: pgActivePhases now emitted (ROI-relative) by mixInitStats.
     mixInitStats(coreStat);   // 1.11.10 measured instruction mix
 
     // Report cycles/instrs RELATIVE to the ROI baseline (roi_begin); roiBase* are
@@ -416,7 +411,10 @@ void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
     if (!decodeMode) {
         // Legacy IPC=1 immediate path (byte-identical A/B baseline).
         instrs += bblInfo->instrs;
-        { uint64_t _ph = zinfo->numPhases; pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); }  // 1.11.8 PG residency
+        /* 1.11.8 PG residency; 1.11.18: injected timing charges are waits,
+         * not retirement (see the core .cpp files). */
+        if (!bblInfo->synth) { uint64_t _ph = zinfo->numPhases;
+            pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); }
         mixAdd(bblInfo);  // 1.11.10 measured instruction mix
         if (!zinfo->hierarchy.peHasFpu && zinfo->hierarchy.fpEmulCycles &&
             bblInfo->nFp) {   // 1.11.11 (#113): soft-float on an FPU-less element
@@ -446,7 +444,10 @@ void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
     prevBbl = bblInfo;
 
     instrs += sim->instrs;
-        { uint64_t _ph = zinfo->numPhases; pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); }  // 1.11.8 PG residency
+    /* 1.11.8 PG residency; 1.11.18: the SIMULATED block decides (deferred
+     * path), and an injected charge is a wait, not retirement. */
+    if (!sim->synth) { uint64_t _ph = zinfo->numPhases;
+        pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); }
     /* 1.11.16 (verification audit): count the mix and charge soft-float for
      * the BBL being SIMULATED (sim = the deferred previous BBL), not the one
      * just arriving -- instrs and the census were offset by one basic block

@@ -143,7 +143,13 @@ class Core : public GlobAlloc {
             roiBaseMixInt = mixInt; roiBaseMixMul = mixMul; roiBaseMixFp = mixFp;
             roiBaseMixLd  = mixLd;  roiBaseMixSt  = mixSt;  roiBaseMixBr = mixBr;
             roiBaseMixSyn = mixSyn;
+            /* 1.11.18 (audit go-through): the PG residency counter rebases
+             * WITH the rest. It was whole-run while every activity counter
+             * it is weighed against is ROI-relative, so a pre-ROI warm-up
+             * moved the residency without moving the work it prices. */
+            roiBasePgActive = pgAct.activePhases;
         }
+        uint64_t roiBasePgActive = 0;
         inline void mixInitStats(AggregateStat* coreStat) {
             struct M { const char* n; const char* d; uint64_t* v; };
             /* ROI-relative like instrs: the deltas are what the power model
@@ -164,6 +170,11 @@ class Core : public GlobAlloc {
             add("mixLd",  "Load uops (measured)", &mixLd, &roiBaseMixLd);
             add("mixSt",  "Store uops (measured)", &mixSt, &roiBaseMixSt);
             add("mixBr",  "Branch-class instructions (measured)", &mixBr, &roiBaseMixBr);
+            /* 1.11.18: PG residency, ROI-relative and emitted HERE so all
+             * five core types share one definition (the five per-core
+             * ProxyStat copies were whole-run). */
+            add("pgActivePhases", "Phases with retirement (PG residency)",
+                (uint64_t*)&pgAct.activePhases, &roiBasePgActive);
             /* 1.11.16: flag-based, all core types. OOOCore's own oooBbl-null
              * inference (which also misclassified real >1024-insn fallback
              * TBs as synthetic) no longer emits a stat -- ONE producer, or

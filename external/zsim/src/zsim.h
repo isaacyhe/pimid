@@ -439,6 +439,23 @@ struct GlobSimInfo {
         PhaseActivity noc;
         PhaseActivity hostMC;
         PhaseActivity devMC[64];  // per-channel grand MCs (device)
+        /* 1.11.18 (audit go-through): ROI baselines. The residency is a
+         * FRACTION of the priced window, and every activity counter it is
+         * weighed against is ROI-relative -- these snapshots (taken at
+         * roi_begin, with the phase index) make the numerator and its
+         * denominator the same window. All zero without an ROI, which
+         * reproduces the whole-run behavior exactly. */
+        uint64_t roiPhase = 0;
+        uint64_t roiAnyCore = 0, roiSharedCache = 0, roiNoc = 0;
+        uint64_t roiHostMC = 0, roiDevMC0 = 0;
+        inline void markRoi(uint64_t phase) {
+            roiPhase = phase;
+            roiAnyCore     = anyCore.activePhases;
+            roiSharedCache = sharedCache.activePhases;
+            roiNoc         = noc.activePhases;
+            roiHostMC      = hostMC.activePhases;
+            roiDevMC0      = devMC[0].activePhases;
+        }
     } pgres;
 
     // Kernel LAUNCH cost tree (1.7.3, HANDOFF ISSUE 2). The host launches a

@@ -24,6 +24,7 @@ class RamulatorMemory : public MemObject {
         std::multimap<uint64_t, RamulatorAccEvent*> inflightRequests;
 
         uint64_t curCycle;
+        bool pgIsDevice = false;   // 1.11.18: which PG tracker this MC marks
 
         PAD();
         Counter profReads;
@@ -43,6 +44,12 @@ class RamulatorMemory : public MemObject {
         const char* getName() { return name.c_str(); }
         void initStats(AggregateStat* parentStat);
         uint64_t access(MemReq& req);
+        /* 1.11.18 (audit go-through): PG residency. This controller marked
+         * NOTHING, so a machine whose memory is Ramulator-backed reported an
+         * always-idle MC and took the maximum gating credit silently. The
+         * flag says which tracker this instance owns (device MCs are built
+         * by the SystemRouter block; the global one is the host's). */
+        void setPGDevice(bool isDevice) { pgIsDevice = isDevice; }
         uint32_t tick(uint64_t cycle);
         void enqueue(RamulatorAccEvent* ev, uint64_t cycle);
 

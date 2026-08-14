@@ -84,12 +84,7 @@ OOOCore::OOOCore(FilterCache* _l1i, FilterCache* _l1d, g_string& _name) : Core(_
 void OOOCore::initStats(AggregateStat* parentStat) {
     AggregateStat* coreStat = new AggregateStat();
     coreStat->init(name.c_str(), "Core stats");
-    {   // 1.11.8 PG residency: phases in which this core retired anything
-        ProxyStat* pgStat = new ProxyStat();
-        pgStat->init("pgActivePhases", "Phases with retirement (PG residency)",
-                     (uint64_t*)&pgAct.activePhases);
-        coreStat->append(pgStat);
-    }
+    // 1.11.18: pgActivePhases now emitted (ROI-relative) by mixInitStats.
     mixInitStats(coreStat);   // 1.11.10 measured instruction mix
 
     // Report cycles/instrs RELATIVE to the ROI baseline (roi_begin); roiBase* are
@@ -472,7 +467,12 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
     }
 
     instrs += bblInstrs;
-        { uint64_t _ph = zinfo->numPhases; pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); }  // 1.11.8 PG residency
+        { /* 1.11.8 PG residency. 1.11.18: an INJECTED timing charge is a
+           * WAIT (barrier/flush/launch), not retirement -- marking it
+           * active credited the very windows power gating exists for as
+           * busy, so a co-sim PE could never show idle residency. */
+          if (!bblInfo->synth) { uint64_t _ph = zinfo->numPhases;
+              pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); } }
     mixAdd(bblInfo);  // 1.11.10 measured instruction mix
     uops += bbl->uops;
     bbls++;

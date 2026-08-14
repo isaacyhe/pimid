@@ -505,8 +505,19 @@ void McPATWrapper::computePower() {
             blob.core_exu_w = blob.core_pipe_w = blob.core_undiff_w = 0.0;
             if (!mcpat_processor_->cores.empty()) {
                 const Core& c0 = *mcpat_processor_->cores[0];
-                auto w = [](const Component* p) -> double {
-                    return p ? (p->rt_power.readOp.dynamic + p->rt_power.readOp.leakage) : 0.0;
+                /* 1.11.18 (audit go-through): UNITS. A per-core sub-block's
+                 * rt_power.readOp.dynamic is ENERGY (Joules over the run) --
+                 * McPAT converts it to Watts only when aggregating into the
+                 * Processor level (processor.cc:114 multiplies the core's
+                 * rt_power by 1/executionTime). The leakage term is already
+                 * Watts. Adding them raw added Joules to Watts, so every
+                 * printed block weight was wrong by the run length (and the
+                 * blocks-sum-vs-total check compared incomparable units).
+                 * Divide the dynamic term, as the tool does. */
+                const double execT = (c0.executionTime > 0.0) ? c0.executionTime : 1.0;
+                auto w = [execT](const Component* p) -> double {
+                    return p ? (p->rt_power.readOp.dynamic / execT
+                                + p->rt_power.readOp.leakage) : 0.0;
                 };
                 /* 1.11.4: block weights carry the family core-power ratio so
                  * the printed split is consistent with the scaled core total
@@ -525,7 +536,7 @@ void McPATWrapper::computePower() {
                 }
                 auto wf = [&](const Component* p) -> double {
                     if (!p) return 0.0;
-                    double dyn = p->rt_power.readOp.dynamic;
+                    double dyn = p->rt_power.readOp.dynamic / execT;  // 1.11.18: J -> W
                     double leak = p->rt_power.readOp.leakage;
                     if (!std::isfinite(dyn)) dyn = 0.0;
                     if (!std::isfinite(leak)) leak = 0.0;
@@ -829,9 +840,14 @@ void McPATWrapper::extractResults() {
             pm.total_power   = pm.total_dynamic + pm.total_leakage;
             return scale;
         };
+        /* 1.11.18: shared caches gate on the shared-cache signal (#84), not
+         * on core retirement; fall back to r_core only when the run carried
+         * no shared-cache counter. */
+        const double r_sc = pg_spec_.have_shared_cache ? pg_spec_.r_shared_cache
+                                                       : pg_spec_.r_core;
         if (pg_spec_.pg_core) applyPG(ComponentType::CORE, pg_spec_.r_core);
-        if (pg_spec_.pg_core) applyPG(ComponentType::L2_CACHE, pg_spec_.r_core);
-        if (pg_spec_.pg_core) applyPG(ComponentType::L3_CACHE, pg_spec_.r_core);
+        if (pg_spec_.pg_core) applyPG(ComponentType::L2_CACHE, r_sc);
+        if (pg_spec_.pg_core) applyPG(ComponentType::L3_CACHE, r_sc);
         if (pg_spec_.pg_noc) {
             double s = applyPG(ComponentType::NOC, pg_spec_.r_noc);
             /* 1.11.16: the per-level NoC breakdown must ride the same scale

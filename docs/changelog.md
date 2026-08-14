@@ -7,6 +7,69 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.18 -- power gating measures what it claims to measure
+
+The PG-correctness cluster of the pre-fleet triage, plus a units defect
+sitting next to it. Every item here made power gating credit savings it had
+not earned, or measure them against the wrong window.
+
+- **CoreBreakdown added Joules to Watts.** A per-core sub-block's
+  rt_power.readOp.dynamic is ENERGY over the run -- McPAT converts it only
+  when aggregating to the Processor level (processor.cc multiplies the
+  core's rt_power by 1/executionTime). The leakage term is already Watts.
+  Every printed block weight was therefore wrong by the run length, and the
+  blocks-sum-vs-core-total check compared incomparable units. Both the
+  weight and the family-scaled variant now divide by executionTime.
+- **The shared caches gate on the shared-cache signal.** #84 says so, and
+  the counter has been instrumented, exported and parsed since 1.11.8 --
+  while L2/L3 were interpolated with the CORE's retirement residency. A core
+  can retire out of its L1s for long windows with the LLC untouched.
+  Reported as its own `shared$=` residency; falls back to r_core only when a
+  run carries no shared-cache counter.
+- **Injected timing charges no longer count as retirement.** Barrier, flush
+  and launch waits are exactly the windows power gating exists for, and they
+  were marking the PE ACTIVE (they arrive as BBLs). The 1.11.16 `synth` flag
+  makes the distinction available at all six core retirement sites.
+- **The residency and the work it prices share a window.** PG residency was
+  whole-run while every activity counter it is weighed against is
+  ROI-relative. The five global trackers and the per-core counter now rebase
+  at roi_begin, and a new `pgPhaseWindow` stat carries the matching
+  denominator (absent on older dumps -> falls back to the whole-run count).
+- **Controllers that never marked anything now do.** RamulatorMemory marked
+  NO PG activity at all -- a Ramulator-backed machine reported an always-idle
+  MC and took the entire leakage as a gating credit, silently. SimpleMemory
+  missed dirty writebacks (PUTX). Both fixed; and when a residency still
+  comes out exactly 1.0 on a run that moved memory traffic, the credit is
+  REFUSED with a printed reason instead of taken.
+- **SRAM main memory honors pim.mc.pg.** It sat in the same if/else chain as
+  the DRAM descent and the NVM retention floor and did nothing. SRAM is
+  volatile, so only the periphery can gate: the periphery share is declared
+  (0.30) and gated at the CACTI-class sleep-tx residual (0.35), with the
+  cell array keeping full leakage. Both constants printed.
+- **The DRAM power-down credit is the power-down delta.** The descent
+  interpolated from IDD3N (active standby), but entering IDD2P requires
+  precharged banks, and an idle controller closes pages whether or not a
+  power-down feature exists -- so the IDD3N->IDD2N step is page policy, not
+  power gating. On our own IDD table that over-credited by 1.36x (HBM3) to
+  2.00x (GDDR6). The credit is now IDD2N->IDD2P. The baseline stays at
+  IDD3N deliberately, so PG-OFF results are unchanged and the model now
+  under-credits rather than over-credits.
+
+**What the ROI fix uncovered.** On the 16-PE gate cell the PE residency
+falls from 0.932863 to 0.551424 -- not because idleness changed, but because
+the window did: the run simulates 6577 phases of which the priced ROI is
+**79**. Ninety-nine percent of the phases the old residency averaged over
+were setup. Every PG number since 1.11.8, including the "79% reduction at
+93% idle" figure recorded as the PG validation, measured the setup phase
+rather than the workload. The 93% was the machine waiting to start.
+
+Data impact: any run with `pg: true` re-prices (smaller, more defensible
+savings) -- on top of the 1.11.16 correction, PG-enabled results from
+1.11.8-1.11.17 should be treated as superseded, and the recorded PG
+validation figure retired. PG-OFF runs are unchanged (the gate asserts
+cycles AND power bit-identical). The CoreBreakdown fix changes a printed
+diagnostic, not the component totals McPAT reports.
+
 ## 1.11.17 -- the mechanical half of the 200-finding go-through
 
 The FIX-NOW class of the full-audit triage (the mechanical defects; the 34

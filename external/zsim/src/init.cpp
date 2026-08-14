@@ -1132,7 +1132,9 @@ static void InitSystem(Config& config) {
                     }
                     uint64_t cpuFreqHz = 1000000ULL * zinfo->freqMHz;
                     uint32_t domain = d * zinfo->numDomains / numDevices;
-                    mc = new RamulatorMemory(ramCfg, cpuFreqHz, devLat, domain, mcName);
+                    RamulatorMemory* rmc = new RamulatorMemory(ramCfg, cpuFreqHz, devLat, domain, mcName);
+                    rmc->setPGDevice(true);   // 1.11.18: device-side PG tracker
+                    mc = rmc;
                 } else if (devType == "WeaveSimple") {
                     uint32_t bw = config.get<uint32_t>((devPrefix + ".bandwidth").c_str(), 12800);
                     uint32_t boundLat = config.get<uint32_t>((devPrefix + ".boundLatency").c_str(), devLat);
@@ -1702,26 +1704,40 @@ static void InitGlobalStats() {
 
     // 1.11.8 (#84): PG residency trackers -> zsim.out root scalars.
     // Idle residency derives at consumption: r = 1 - activePhases/phase.
-    ProxyStat* pgAny = new ProxyStat();
-    pgAny->init("pgAnyCoreActivePhases", "Phases with >=1 core retiring",
-                (uint64_t*)&zinfo->pgres.anyCore.activePhases);
-    zinfo->rootStat->append(pgAny);
-    ProxyStat* pgSC = new ProxyStat();
-    pgSC->init("pgSharedCacheActivePhases", "Phases with >=1 shared-cache access",
-               (uint64_t*)&zinfo->pgres.sharedCache.activePhases);
-    zinfo->rootStat->append(pgSC);
-    ProxyStat* pgNoc = new ProxyStat();
-    pgNoc->init("pgNocActivePhases", "Phases with >=1 fabric injection",
-                (uint64_t*)&zinfo->pgres.noc.activePhases);
-    zinfo->rootStat->append(pgNoc);
-    ProxyStat* pgHMC = new ProxyStat();
-    pgHMC->init("pgHostMCActivePhases", "Phases with >=1 host-MC access",
-                (uint64_t*)&zinfo->pgres.hostMC.activePhases);
-    zinfo->rootStat->append(pgHMC);
-    ProxyStat* pgDMC = new ProxyStat();
-    pgDMC->init("pgDevMCActivePhases", "Phases with >=1 device-MC access",
-                (uint64_t*)&zinfo->pgres.devMC[0].activePhases);
-    zinfo->rootStat->append(pgDMC);
+    /* 1.11.18 (audit go-through): ROI-RELATIVE. These were whole-run while
+     * every activity counter the residency is weighed against is windowed
+     * at roi_begin; pgPhaseWindow is the matching denominator (numPhases
+     * minus the ROI phase), so consumers divide two numbers from the same
+     * window. Without an ROI every base is 0 and these are the old values. */
+    auto addPgStat = [](const char* n, const char* d,
+                        volatile uint64_t* cur, uint64_t* base) {
+        auto fn = [cur, base]() -> uint64_t {
+            uint64_t c = *cur, b = *base;
+            return (c > b) ? (c - b) : 0;
+        };
+        auto* st = new LambdaStat<decltype(fn)>(fn);
+        st->init(n, d);
+        zinfo->rootStat->append(st);
+    };
+    addPgStat("pgAnyCoreActivePhases", "Phases with >=1 core retiring (ROI)",
+              &zinfo->pgres.anyCore.activePhases, &zinfo->pgres.roiAnyCore);
+    addPgStat("pgSharedCacheActivePhases", "Phases with >=1 shared-cache access (ROI)",
+              &zinfo->pgres.sharedCache.activePhases, &zinfo->pgres.roiSharedCache);
+    addPgStat("pgNocActivePhases", "Phases with >=1 fabric injection (ROI)",
+              &zinfo->pgres.noc.activePhases, &zinfo->pgres.roiNoc);
+    addPgStat("pgHostMCActivePhases", "Phases with >=1 host-MC access (ROI)",
+              &zinfo->pgres.hostMC.activePhases, &zinfo->pgres.roiHostMC);
+    addPgStat("pgDevMCActivePhases", "Phases with >=1 device-MC access (ROI)",
+              &zinfo->pgres.devMC[0].activePhases, &zinfo->pgres.roiDevMC0);
+    {   // the denominator for all of the above
+        auto fnw = []() -> uint64_t {
+            uint64_t p = zinfo->numPhases, b = zinfo->pgres.roiPhase;
+            return (p > b) ? (p - b) : 0;
+        };
+        auto* stw = new LambdaStat<decltype(fnw)>(fnw);
+        stw->init("pgPhaseWindow", "Phases in the priced (ROI) window");
+        zinfo->rootStat->append(stw);
+    }
 }
 
 

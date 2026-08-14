@@ -398,6 +398,13 @@ struct ZSimParsedOutput {
     uint64_t pg_noc_active = 0;
     uint64_t pg_hostmc_active = 0;
     uint64_t pg_devmc_active = 0;
+    uint64_t pg_phase_window = 0;   // 1.11.18: ROI-relative denominator (0 = use phases)
+    /* 1.11.18: the window every PG residency divides by. Pre-1.11.18 dumps
+     * carry no pgPhaseWindow, so the whole-run phase count is used and the
+     * old numbers reproduce exactly. */
+    uint64_t pg_window() const {
+        return (pg_phase_window > 0) ? pg_phase_window : phases;
+    }
     uint64_t phases = 0;
     /* 1.11.9 (#86, audit): the PE-MI locality split has been EMITTED since
      * 1.5.3 and parsed by nobody -- the one measurement that says whether a
@@ -868,6 +875,10 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
                 else if (key == "pgHostMCActivePhases") { out.pg_hostmc_active = val; }
                 else if (key == "pgDevMCActivePhases") { out.pg_devmc_active = val; }
                 else if (key == "phase") { out.phases = val; }
+                /* 1.11.18: the PG denominator is the PRICED window (phases
+                 * since roi_begin), matching the now-ROI-relative numerators.
+                 * Absent on pre-1.11.18 dumps -> falls back to `phase`. */
+                else if (key == "pgPhaseWindow") { out.pg_phase_window = val; }
                 else if (key == "syntheticInstrs") {
                     out.syntheticInstrs += val; if (grp) grp->syntheticInstrs += val;
                 }
@@ -4443,13 +4454,20 @@ static void runPowerAnalysis(const UnifiedConfig& config,
      * bit-identical path (gate invariant). */
     pimid::McPATWrapper::PGSpec pgspec;
     {
-        double ph = static_cast<double>(zsim_stats.phases);
+        double ph = static_cast<double>(zsim_stats.pg_window());  // 1.11.18: priced window
         if (ph > 0.0 && (config.pg_pe || config.pg_noc || config.pg_mc)) {
             if (config.pg_pe && config.num_pes > 0) {
                 double meanActive = static_cast<double>(zsim_stats.dev.pgActivePhases)
                                     / (config.num_pes * ph);
                 pgspec.pg_core = true;
                 pgspec.r_core = 1.0 - std::min(1.0, meanActive);
+                /* 1.11.18: the shared caches carry their OWN residency (the
+                 * counter has existed since 1.11.8 and was never consumed). */
+                if (zsim_stats.pg_sharedcache_active > 0) {
+                    pgspec.have_shared_cache = true;
+                    pgspec.r_shared_cache = 1.0 - std::min(1.0,
+                        static_cast<double>(zsim_stats.pg_sharedcache_active) / ph);
+                }
             }
             if (config.pg_noc) {
                 pgspec.pg_noc = true;
@@ -4461,8 +4479,33 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                 pgspec.r_mc = 1.0 - std::min(1.0,
                     static_cast<double>(zsim_stats.pg_devmc_active) / ph);
             }
+            /* 1.11.18 (audit go-through): a residency of exactly 1.0 while
+             * the run DID move memory traffic means the tracker was never
+             * armed on this path (only the PE-MI and the Ramulator/Simple
+             * controllers mark them), not that the component idled. Crediting
+             * the whole leakage on an unarmed counter is the most dangerous
+             * failure mode this model has, so it is refused and said out
+             * loud rather than silently taken. */
+            {
+                uint64_t traffic = zsim_stats.mem_rd + zsim_stats.mem_wr;
+                auto refuse = [&](const char* what, bool& flag, double& r) {
+                    if (!flag || r < 1.0 || traffic == 0) return;
+                    std::cout << "  [pg] WARNING: " << what << " residency came out "
+                                 "1.0 (never marked active) while the run moved "
+                              << traffic << " memory accesses -- the tracker is not "
+                                 "armed on this path. Refusing the gating credit "
+                                 "for it (r=0); this is a missing counter, not an "
+                                 "idle component." << std::endl;
+                    r = 0.0;
+                };
+                refuse("NoC", pgspec.pg_noc, pgspec.r_noc);
+                refuse("device MC", pgspec.pg_mc, pgspec.r_mc);
+            }
             std::cout << "  [pg] residencies (idle fraction): "
                       << (pgspec.pg_core ? ("pe=" + std::to_string(pgspec.r_core) + " ") : "pe=none(by design) ")
+                      << (pgspec.have_shared_cache
+                              ? ("shared$=" + std::to_string(pgspec.r_shared_cache) + " ")
+                              : "shared$=none(no counter) ")   // 1.11.18
                       << (pgspec.pg_noc ? ("noc=" + std::to_string(pgspec.r_noc) + " ") : "noc=none(by design) ")
                       << (pgspec.pg_mc ? ("mc=" + std::to_string(pgspec.r_mc)) : "mc=none(by design)")
                       << "  [all-idle overlap="
@@ -5044,10 +5087,10 @@ static void runPowerAnalysis(const UnifiedConfig& config,
              * residency; refresh always continues. Without the flag (or with
              * zero phases) this is exactly getBackgroundPowerMW(). */
             double mc_r_idle = 0.0;
-            if (config.pg_mc && zsim_stats.phases > 0) {
+            if (config.pg_mc && zsim_stats.pg_window() > 0) {
                 mc_r_idle = 1.0 - std::min(1.0,
                     static_cast<double>(zsim_stats.pg_devmc_active)
-                        / static_cast<double>(zsim_stats.phases));
+                        / static_cast<double>(zsim_stats.pg_window()));
             }
             double bg_power_mw = ram_oracle.getBackgroundEffectiveMW(mc_r_idle);
             if (mc_r_idle > 0.0) {
@@ -5207,6 +5250,35 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             double leakage = cacti.getLeakagePower() * config.num_banks;  // device = num_banks banks
             double area = cacti.getArea() * config.num_banks;
 
+            /* 1.11.18 (audit go-through): pim.mc.pg reached the DRAM branch
+             * (IDD2P descent) and the NVM branch (retention floor) and did
+             * NOTHING here -- an SRAM main memory silently ignored the flag
+             * in the same if/else chain. SRAM is VOLATILE: gating the array
+             * loses the data, so only the PERIPHERY can gate, at the same
+             * CACTI-class sleep-tx residual the McPAT endpoints use
+             * (Vcc_min/Vdd ~= 0.35). The cell array keeps its full leakage.
+             * The split is stated rather than assumed: CACTI does not
+             * separate them here, so the periphery share is declared. */
+            if (config.pg_mc && zsim_stats.pg_window() > 0) {
+                double r_idle = 1.0 - std::min(1.0,
+                    static_cast<double>(zsim_stats.pg_devmc_active)
+                        / static_cast<double>(zsim_stats.pg_window()));
+                if (r_idle > 0.0) {
+                    const double kPeripheryShare = 0.30;  // declared, not measured
+                    const double kSleepTxResidual = 0.35; // Vcc_min/Vdd, CACTI-class
+                    double before = leakage;
+                    double periph = leakage * kPeripheryShare;
+                    double cells  = leakage - periph;
+                    leakage = cells + periph * ((1.0 - r_idle) + kSleepTxResidual * r_idle);
+                    std::cout << "  [pg] SRAM periphery gating: idle residency "
+                              << r_idle << " -> leakage " << before << " -> "
+                              << leakage << " mW (cells stay powered: volatile; "
+                                 "periphery share " << kPeripheryShare
+                              << " declared, sleep-tx residual " << kSleepTxResidual
+                              << ")" << std::endl;
+                }
+            }
+
             double total_rd_nj = rd_energy * zsim_stats.mem_rd;
             double total_wr_nj = wr_energy * zsim_stats.mem_wr;
 
@@ -5250,10 +5322,10 @@ static void runPowerAnalysis(const UnifiedConfig& config,
              * periphery leakage collapses toward the sleep-transistor floor
              * (~2% of active, the CACTI-class sleep-tx residual) during
              * measured no-traffic residency. The one place PG is free. */
-            if (config.pg_mc && zsim_stats.phases > 0) {
+            if (config.pg_mc && zsim_stats.pg_window() > 0) {   // 1.11.18: priced window
                 double r_idle = 1.0 - std::min(1.0,
                     static_cast<double>(zsim_stats.pg_devmc_active)
-                        / static_cast<double>(zsim_stats.phases));
+                        / static_cast<double>(zsim_stats.pg_window()));
                 if (r_idle > 0.0) {
                     const double kSleepTxFloor = 0.02;
                     double before = leakage;
@@ -5783,9 +5855,9 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 bool noc_pg = node.pg_noc || config.pg_noc;
                 bool mc_pg  = node.pg_mc  || config.pg_mc;
                 if (node.role == UnifiedConfig::SystemNode::DEVICE &&
-                    (pe_pg || noc_pg || mc_pg) && zsim_stats.phases > 0) {
+                    (pe_pg || noc_pg || mc_pg) && zsim_stats.pg_window() > 0) {
                     pimid::McPATWrapper::PGSpec nps;
-                    double ph = static_cast<double>(zsim_stats.phases);
+                    double ph = static_cast<double>(zsim_stats.pg_window());
                     if (pe_pg && node.num_cores > 0) {
                         double meanActive =
                             static_cast<double>(zsim_stats.dev.pgActivePhases)

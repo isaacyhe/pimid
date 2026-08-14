@@ -140,7 +140,21 @@ inline double backgroundEffectiveMW(const std::string& tech, double r_idle) {
     const double kHysteresisDerate = 0.99;
     double r = r_idle * kHysteresisDerate;
     double standby_mw  = s.vdd * s.idd3n;   // per-device (see boundary note above)
-    double pd_mw       = s.vdd * s.idd2p;
+    /* 1.11.18 (audit go-through): the credit is the POWER-DOWN delta, taken
+     * from PRECHARGE STANDBY (IDD2N), not from active standby (IDD3N).
+     * Entering IDD2P requires all banks precharged, and an idle controller
+     * closes its pages whether or not a power-down feature exists -- so the
+     * IDD3N->IDD2N step is page policy, which this model does not track, and
+     * attributing it to pim.mc.pg over-credited the saving by 1.4x (HBM3)
+     * to 2.0x (GDDR6) on our own IDD table. The baseline is deliberately
+     * left at IDD3N so PG-OFF results are unchanged; the effect is that PG
+     * now under-credits rather than over-credits. (Whether the baseline
+     * itself should descend to IDD2N on idle is a page-policy modelling
+     * question, parked for the memory-controller release.) */
+    double pd_delta_mw  = s.vdd * (s.idd2n - s.idd2p);
+    if (pd_delta_mw < 0.0) pd_delta_mw = 0.0;   // guard odd rows
+    double pd_mw       = standby_mw - pd_delta_mw;
+    if (pd_mw < 0.0) pd_mw = 0.0;
     return standby_mw * (1.0 - r) + pd_mw * r + refreshMW(tech);
 }
 
