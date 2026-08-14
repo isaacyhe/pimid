@@ -727,12 +727,24 @@ void McPATWrapper::extractResults() {
      *   area = l_phy_cd / l_phy_hp                      (linear pitch penalty;
      *          the squared value is the pessimistic bound)
      *   dyn  = (C_g_ideal+C_fringe)*Vdd^2, cd/hp
-     *   leak = I_off_n*Vdd at the 80C ROW, cd/hp        (McPAT runs at 350K =
-     *          77C; the 0C row understated the ratio ~7-8x)
+     *   leak = I_off_n*Vdd at ROW 50, cd/hp. CACTI's temperature rows are
+     *          KELVIN-MINUS-300 (parameter.cc:175, thermal_temp ==
+     *          temperature-300), so the model's 350K is row 50 -- the
+     *          1.11.4 hotfix read row 80 (=380K), audit round 3 caught it.
      *   22nm.dat: area .022/.009=2.44  dyn 2.041e-16/2.477e-16=0.82
-     *             leak (7.85e-12*0.9)/(1.296e-6*0.8)=6.8e-6
+     *             leak (1.98e-12*0.9)/(2.152e-7*0.8)=1.0e-5
      *   32nm.dat: area .032/.013=2.46  dyn 3.09e-16/4.649e-16=0.66
-     *             leak (3.19e-12*1.0)/(1.62e-6*0.9)=2.2e-6
+     *             leak (7.55e-13*1.0)/(2.69e-7*0.9)=3.1e-6
+     * COLUMN BASIS (audit objection, answered): CACTI labels comm-dram as
+     * the DRAM cell-access device, not the periphery. It is kept as the
+     * factor basis deliberately: it is the only DRAM-process device column
+     * populated in BOTH tables (lp-dram is all-zero at 22nm), and its CV/I
+     * delay ratio (~2.4x) reproduces the published UPMEM DPU band -- the
+     * one silicon anchor we have for DRAM-process logic. The 32nm lp-dram
+     * column, where it exists, gives the same ~2.4x delay but a 4.3x area
+     * ratio: our 2.44/2.46 is the CONSERVATIVE end of CACTI's own
+     * DRAM-process band. No tool in the chain carries a true DRAM-periphery
+     * logic device; this is the closest tool-sourced proxy, stated as such.
      * Subthreshold leakage is rebased on McPAT's PLAIN leakage, not the
      * longer-channel-discounted value: the comm-dram ratio already encodes a
      * long-channel device, and stacking both double-discounts (audit).
@@ -744,9 +756,9 @@ void McPATWrapper::extractResults() {
     if (config_.process_family == 1) {
         double kAreaFactor, kDynFactor, kLeakFactor;
         if (config_.dram_periph_table_nm == 32) {
-            kAreaFactor = 2.46; kDynFactor = 0.66; kLeakFactor = 2.2e-6;
+            kAreaFactor = 2.46; kDynFactor = 0.66; kLeakFactor = 3.1e-6;
         } else {
-            kAreaFactor = 2.44; kDynFactor = 0.82; kLeakFactor = 6.8e-6;
+            kAreaFactor = 2.44; kDynFactor = 0.82; kLeakFactor = 1.0e-5;
         }
         if (config_.device_type != 0) {
             std::cerr << "[power] WARNING: DRAM-periphery factors are derived "
@@ -829,7 +841,7 @@ void McPATWrapper::extractResults() {
         double core_pl = peakLeakage(mcpat_processor_->core);
         if (config_.process_family == 1) {
             double dynF  = (config_.dram_periph_table_nm == 32) ? 0.66 : 0.82;
-            double leakF = (config_.dram_periph_table_nm == 32) ? 2.2e-6 : 6.8e-6;
+            double leakF = (config_.dram_periph_table_nm == 32) ? 3.1e-6 : 1.0e-5;
             double plainSub = mcpat_processor_->core.power.readOp.leakage;
             double gate     = mcpat_processor_->core.power.readOp.gate_leakage;
             if (!std::isfinite(plainSub)) plainSub = 0.0;

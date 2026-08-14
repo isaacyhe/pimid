@@ -7,6 +7,25 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.6 -- audit hotfix 2: CACTI's temperature rows are Kelvin-minus-300
+
+Round 3 of the audit caught the 1.11.4 hotfix's own error: CACTI's I_off
+table rows are indexed as (T_kelvin - 300) -- parameter.cc:175 compares
+thermal_temp against temperature-300 -- so the model's 350 K is row 50,
+and the "80C" row 1.11.4 read is actually 380 K. Corrected: 22 nm leakage
+factor 6.8e-6 -> 1.0e-5, 32 nm 2.2e-6 -> 3.1e-6 (higher, still
+retention-grade). The audit's column-basis objection (comm-dram is CACTI's
+cell-access device, not the periphery) is answered in-code rather than
+patched around: comm-dram is the only DRAM-process device column populated
+in both tables (lp-dram is all-zero at 22 nm), its ~2.4x delay ratio
+reproduces the UPMEM DPU band, and the 32 nm lp-dram alternative agrees on
+delay while giving a 4.3x area ratio -- so 2.44/2.46 is the conservative
+end of CACTI's own DRAM-process band. Stated as a proxy, because no tool
+in the chain carries a true DRAM-periphery logic device.
+
+DATA IMPACT: DRAM-periphery-family PE leakage only (factor ~1.5x up from
+1.11.4, on a micro-watt base). Timing untouched.
+
 ## 1.11.5 -- the DQ pins are charged once, and only when they are crossed
 
 The audit's interface-energy findings, memory side. (1) The 'interface'
