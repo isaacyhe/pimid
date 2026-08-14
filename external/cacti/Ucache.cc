@@ -577,12 +577,15 @@ bool calculate_time(
 
     if (g_ip->power_gating)
     {
-    	ptr_array->sram_sleep_tx_width= uca->bank.mat.sram_sleep_tx->width;
+    	/* PIMID 1.11.16: null-guard the sleep-tx pointers -- they are only
+    	 * allocated for non-FA mats / decoders whose PG path ran (see
+    	 * mat.cc); the width fields default to 0 otherwise. */
+    	ptr_array->sram_sleep_tx_width= uca->bank.mat.sram_sleep_tx ? uca->bank.mat.sram_sleep_tx->width : 0;
     	ptr_array->sram_sleep_tx_area= uca->bank.mat.array_sleep_tx_area;
     	ptr_array->sram_sleep_wakeup_latency= uca->bank.mat.array_wakeup_t;
     	ptr_array->sram_sleep_wakeup_energy= uca->bank.mat.array_wakeup_e.readOp.dynamic;
 
-    	ptr_array->wl_sleep_tx_width= uca->bank.mat.row_dec->sleeptx->width;
+    	ptr_array->wl_sleep_tx_width= uca->bank.mat.row_dec->sleeptx ? uca->bank.mat.row_dec->sleeptx->width : 0;
     	ptr_array->wl_sleep_tx_area= uca->bank.mat.wl_sleep_tx_area;
     	ptr_array->wl_sleep_wakeup_latency= uca->bank.mat.wl_wakeup_t;
     	ptr_array->wl_sleep_wakeup_energy= uca->bank.mat.wl_wakeup_e.readOp.dynamic;

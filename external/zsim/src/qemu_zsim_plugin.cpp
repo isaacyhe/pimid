@@ -120,8 +120,11 @@ static void pimid_noc_mark_state(uint32_t st) {
  * consumes the SAME x86-decoded DynUop stream as the OOO core (its oooBbl), so we
  * must also run the decoder when an in-order core is present. PIMID_INORDER_NODECODE
  * disables that decode (in-order falls back to the legacy IPC=1 path), mirroring
- * PIMID_OOO_NODECODE. Only OOOCore and InOrderCore read oooBbl, so alu/simple/null
- * stay byte-identical. */
+ * PIMID_OOO_NODECODE. Only OOOCore and InOrderCore read oooBbl; since 1.11.15
+ * decode runs for EVERY core type (the class census needs it), and alu/simple/
+ * null consume instrs/bytes/census -- their nFp feeds the 1.11.11 soft-float
+ * charge when pim.pe.floating_point=false, so decode is timing-visible on
+ * those cores ONLY under that non-default config. */
 static bool g_inorder_present = false;
 static bool g_inorder_decode_disabled = false;  /* PIMID_INORDER_NODECODE=1 */
 static bool g_inorder_nobranch = false;  /* PIMID_INORDER_NOBRANCH=1: skip branch feed */
@@ -1009,10 +1012,12 @@ static BblInfo* getOrCreateBblInfo(uint64_t tbAddr, uint32_t numInsns, uint32_t 
     }
 
     BblInfo* bbl = nullptr;
-    /* Decode into DynUops only when an OOO core is present (its oooBbl is the
-     * only reader). Cap TB size to keep the transient decode buffers bounded;
-     * oversized TBs fall back to the synthetic path (they are rare and
-     * typically not hot compute loops). */
+    /* Decode into DynUops + class census (since 1.11.15: for every core
+     * type, not just OOO). Cap TB size to keep the transient decode buffers
+     * bounded; oversized TBs fall back to the simple path with a ZERO census
+     * (they are rare and typically not hot compute loops) -- the wrapper's
+     * deficit guard sees that under-coverage and falls back to fractions if
+     * it exceeds 5%. */
     if (g_decode_enabled && tb && numInsns > 0 &&
             numInsns <= 1024) {
         static const uint32_t MAXI = 1024;
@@ -1582,7 +1587,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
             }
 
             if (barrierLat > 0) {
-                BblInfo* bbl = createSimpleBblInfo(barrierLat, barrierLat * 4);
+                BblInfo* bbl = createSimpleBblInfo(barrierLat, barrierLat * 4, true);  // 1.11.16: injected charge
                 fPtrs[tid].bblPtr(tid, 0, bbl);
             }
 
@@ -2051,7 +2056,7 @@ static void chargeCoherenceFlush(uint32_t tid) {
     uint64_t flushCyc = coherenceFlushCycles();
     if (flushCyc == 0) return;
     uint32_t fc = (uint32_t)std::min<uint64_t>(flushCyc, 0xFFFFFFFFull);
-    BblInfo* bbl = createSimpleBblInfo(fc, 0);  // 1.11.7: no phantom fetch
+    BblInfo* bbl = createSimpleBblInfo(fc, 0, true);  // 1.11.7: no phantom fetch; 1.11.16: injected charge
     fPtrs[tid].bblPtr(tid, 0, bbl);
     __sync_fetch_and_add(&zinfo->xing.flushBytes, zinfo->coherence.footprintBytes);
     __sync_fetch_and_add(&zinfo->xing.count, 1);
@@ -2097,7 +2102,7 @@ static void chargeLaunchCost(uint32_t tid) {
     uint64_t launchCyc = launchCostCycles();
     if (launchCyc == 0) return;
     uint32_t lc = (uint32_t)std::min<uint64_t>(launchCyc, 0xFFFFFFFFull);
-    BblInfo* bbl = createSimpleBblInfo(lc, 0);  // 1.11.7: no phantom fetch
+    BblInfo* bbl = createSimpleBblInfo(lc, 0, true);  // 1.11.7: no phantom fetch; 1.11.16: injected charge
     fPtrs[tid].bblPtr(tid, 0, bbl);
     /* 1.11.7: the cmd packet crosses h2d, the ack returns d2h -- both are
      * real crossings and count as such. */
@@ -2126,7 +2131,7 @@ static void chargeLaunchCost(uint32_t tid) {
  */
 static void drainHostCharges(uint32_t tid) {
     if (tid >= MAX_THREADS || !thread_initialized[tid]) return;
-    BblInfo* bbl = createSimpleBblInfo(1, 4);
+    BblInfo* bbl = createSimpleBblInfo(1, 4, true);  // 1.11.16: injected trailer
     fPtrs[tid].bblPtr(tid, 0, bbl);
 }
 
@@ -2368,7 +2373,7 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
                 /* 1.11.7: timing-only BBL -- ZERO fetch bytes. The old
                  * pcieLat*4 manufactured phantom ifetch traffic that landed
                  * in the cache/DRAM counters energy is charged from. */
-                BblInfo* bbl = createSimpleBblInfo(pcieLat, 0);
+                BblInfo* bbl = createSimpleBblInfo(pcieLat, 0, true);  // 1.11.16: injected charge
                 fPtrs[tid].bblPtr(tid, 0, bbl);
             }
             __sync_fetch_and_add(&zinfo->xing.h2dBytes, (uint64_t)payload_size);
@@ -2404,7 +2409,7 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
              * charged on the host core (it pays for the return DMA wait) */
             uint32_t pcieLat = boundaryTransferCycles(payload_size);
             if (pcieLat > 0) {
-                BblInfo* bbl = createSimpleBblInfo(pcieLat, 0);  // 1.11.7: no phantom fetch
+                BblInfo* bbl = createSimpleBblInfo(pcieLat, 0, true);  // 1.11.7: no phantom fetch; 1.11.16: injected charge
                 fPtrs[tid].bblPtr(tid, 0, bbl);
             }
             __sync_fetch_and_add(&zinfo->xing.d2hBytes, (uint64_t)payload_size);
@@ -2612,7 +2617,7 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         /* PCIe/CXL offload timing: host→device transfer latency */
         uint32_t pcieLat = boundaryTransferCycles(payload_size);
         if (pcieLat > 0) {
-            BblInfo* bbl = createSimpleBblInfo(pcieLat, 0);  // 1.11.7: no phantom fetch
+            BblInfo* bbl = createSimpleBblInfo(pcieLat, 0, true);  // 1.11.7: no phantom fetch; 1.11.16: injected charge
             fPtrs[tid].bblPtr(tid, 0, bbl);
         }
         __sync_fetch_and_add(&zinfo->xing.h2dBytes, (uint64_t)payload_size);
@@ -2638,7 +2643,7 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         /* PCIe/CXL return timing: device→host transfer latency */
         uint32_t pcieLat = boundaryTransferCycles(payload_size);
         if (pcieLat > 0) {
-            BblInfo* bbl = createSimpleBblInfo(pcieLat, 0);  // 1.11.7: no phantom fetch
+            BblInfo* bbl = createSimpleBblInfo(pcieLat, 0, true);  // 1.11.7: no phantom fetch; 1.11.16: injected charge
             fPtrs[tid].bblPtr(tid, 0, bbl);
         }
         __sync_fetch_and_add(&zinfo->xing.d2hBytes, (uint64_t)payload_size);
@@ -2696,8 +2701,9 @@ static void tb_trans_cb(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
      *  - indirect jmp (FF /4,/5)    -> BTB target check
      *  - ret (C3/C2)                -> RAS pop + target check
      * Direct jmp (E9/EB) has a fixed correctly-predicted target: no feed.
-     * g_decode_enabled is exactly (ooo && !ooo_nodecode) || (inorder &&
-     * !inorder_nodecode), so for pure-OOO configs the cond gate is unchanged. */
+     * Since 1.11.15 g_decode_enabled defaults to TRUE for every core type
+     * (census decode-always); only the PIMID_NODECODE escape restores the
+     * old (ooo && !ooo_nodecode) || (inorder && !inorder_nodecode) gate. */
     if (g_decode_enabled && n_insns > 0) {
         struct qemu_plugin_insn* last = qemu_plugin_tb_get_insn(tb, n_insns - 1);
         uint64_t lpc = qemu_plugin_insn_vaddr(last);
@@ -3177,11 +3183,17 @@ int qemu_plugin_install(qemu_plugin_id_t id,
      * census identically zero on alu/simple/null cores, i.e. on the default
      * device element and most of the corpus: the counted mix silently fell
      * back to fractions and the FP-without-FPU report could never fire.
-     * ALU-core timing is untouched (it consumes instrs and bytes, which the
-     * decoded BblInfo carries identically); the cost is decode work at
-     * translation time, once per basic block. PIMID_NODECODE=1 restores the
-     * old gating as an escape hatch. */
-    if (getenv("PIMID_NODECODE")) {
+     * ALU/simple-core timing is untouched ON DEFAULTS: they consume instrs
+     * and bytes (identical in the decoded BblInfo), plus nFp for the 1.11.11
+     * soft-float charge -- which was dead code while the census was zero, so
+     * a config with pim.pe.floating_point=false AND fp_emulation_cycles>0
+     * reports different (more honest) cycles from 1.11.15 on. With the
+     * default fpEmulCycles=0 the charge stays inert and timing is
+     * bit-identical. The cost is decode work at translation time, once per
+     * basic block. PIMID_NODECODE=1 restores the old gating as an escape
+     * hatch (value-checked: PIMID_NODECODE=0 means decode-always). */
+    const char* nodecode_env = getenv("PIMID_NODECODE");
+    if (nodecode_env && nodecode_env[0] && strcmp(nodecode_env, "0") != 0) {
         g_decode_enabled = (g_ooo_present && !g_ooo_decode_disabled) ||
                            (g_inorder_present && !g_inorder_decode_disabled);
     } else {

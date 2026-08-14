@@ -85,7 +85,10 @@ class Decoder : public Component
 
     ~Decoder()
     {
-    	if (!sleeptx)
+    	/* PIMID 1.11.16: condition was INVERTED (deleted only null, leaked
+    	 * every real allocation, and read an indeterminate pointer when
+    	 * nothing was allocated -- latent while PG was dead). */
+    	if (sleeptx)
     		delete sleeptx;
     };
 };
@@ -263,7 +266,8 @@ class Driver : public Component
 
   ~Driver()
   {
-  	if (!sleeptx)
+  	/* PIMID 1.11.16: inverted condition fixed (see ~Decoder). */
+  	if (sleeptx)
   		delete sleeptx;
   };
 };

@@ -284,15 +284,18 @@ void ArrayST::optimize_array()
 	local_result.power.readOp.longer_channel_leakage =
 		local_result.power.readOp.leakage*long_channel_device_reduction;
 
-	if (l_ip.assoc==0)//only use this function for CAM/FA since other array types compute pg leakage automatically
-	{
-		local_result.power.readOp.power_gated_leakage =
-			local_result.power.readOp.leakage*pg_reduction;
-	}
-	else
-	{
-		local_result.power.readOp.power_gated_leakage *= l_ip.nbanks;//normal array types
-	}
+	/* PIMID 1.11.16 (verification audit): the old else-branch multiplied a
+	 * value CACTI NEVER writes -- grep of the vendored CACTI 7 shows no
+	 * assignment to power_gated_leakage anywhere (only the zero
+	 * constructor and the propagating operators), so set-associative
+	 * arrays (every cache data/tag array, i.e. the leakage-dominant
+	 * structures) carried a gated endpoint of exactly 0 and power gating
+	 * was credited with TOTAL leakage elimination on them. The analytic
+	 * Vcc_min/Vdd retention endpoint below is McPAT's own model -- the
+	 * same one logic.cc/noc.cc/memoryctrl.cc already use for every logic
+	 * block -- applied uniformly to all array classes. */
+	local_result.power.readOp.power_gated_leakage =
+		local_result.power.readOp.leakage*pg_reduction;
 
 	local_result.power.readOp.power_gated_with_long_channel_leakage = local_result.power.readOp.power_gated_leakage * long_channel_device_reduction;//power-gating atop long channel
 
@@ -305,15 +308,9 @@ void ArrayST::optimize_array()
 	local_result.data_array2->power.readOp.leakage *= l_ip.nbanks;
 	local_result.data_array2->power.readOp.longer_channel_leakage =
 		local_result.data_array2->power.readOp.leakage*long_channel_device_reduction;
-	if (l_ip.assoc==0)//only use this function for CAM/FA since other array types compute pg leakage automatically
-	{
-		local_result.data_array2->power.readOp.power_gated_leakage =
-			local_result.data_array2->power.readOp.leakage*pg_reduction;
-	}
-	else
-	{
-		local_result.data_array2->power.readOp.power_gated_leakage *= l_ip.nbanks;//normal array types
-	}
+	/* PIMID 1.11.16: uniform analytic endpoint (see the power block above). */
+	local_result.data_array2->power.readOp.power_gated_leakage =
+		local_result.data_array2->power.readOp.leakage*pg_reduction;
 	local_result.data_array2->power.readOp.power_gated_with_long_channel_leakage = local_result.data_array2->power.readOp.power_gated_leakage * long_channel_device_reduction;
 
 	local_result.data_array2->power = local_result.data_array2->power* pppm_t;
@@ -325,7 +322,9 @@ void ArrayST::optimize_array()
 		local_result.tag_array2->power.writeOp.dynamic *= sckRation;
 		local_result.tag_array2->power.searchOp.dynamic *= sckRation;
 		local_result.tag_array2->power.readOp.leakage *= l_ip.nbanks;
-		local_result.tag_array2->power.readOp.power_gated_leakage *= l_ip.nbanks;
+		/* PIMID 1.11.16: uniform analytic endpoint (see the power block above). */
+		local_result.tag_array2->power.readOp.power_gated_leakage =
+			local_result.tag_array2->power.readOp.leakage*pg_reduction;
 		local_result.tag_array2->power.readOp.longer_channel_leakage =
 			local_result.tag_array2->power.readOp.leakage*long_channel_device_reduction;
 

@@ -159,10 +159,14 @@ void OOOCore::initStats(AggregateStat* parentStat) {
     coreStat->append(bblsStat);
     coreStat->append(approxInstrsStat);
     coreStat->append(branchesStat);   // 1.9.33
-    auto zsi = [this]() -> uint64_t { return syntheticInstrs - roiBaseSyntheticInstrs; };
-    LambdaStat<decltype(zsi)>* synInstrsStat = new LambdaStat<decltype(zsi)>(zsi);
-    synInstrsStat->init("syntheticInstrs", "Of instrs, injected timing charges (not executed code)");
-    coreStat->append(synInstrsStat);
+    /* 1.11.16 (verification audit): the oooBbl-null-based syntheticInstrs
+     * stat is GONE -- it also counted real >1024-insn fallback TBs as
+     * synthetic (subtracting real work from the retired base), and the
+     * flag-based counter in Core::mixInitStats now reports the stat for
+     * every core type. Emitting both here would make the parser sum two
+     * "syntheticInstrs" keys in this core's group and subtract twice. The
+     * syntheticBbls stat below is unchanged: it describes the MODELING path
+     * taken (decoded vs 1-CPI fallback), not injected charges. */
     coreStat->append(mispredBranchesStat);
     coreStat->append(decodedBblsStat);
     coreStat->append(syntheticBblsStat);

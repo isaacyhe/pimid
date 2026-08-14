@@ -64,7 +64,8 @@ Mat::Mat(const DynamicParameter & dyn_p)
   num_subarrays_per_row(dp.Ndwl/dp.num_mats_h_dir),
   array_leakage(0),
   wl_leakage(0),
-  cl_leakage(0)
+  cl_leakage(0),
+  sram_sleep_tx(0)   /* PIMID 1.11.16: was indeterminate; only assigned under power_gating */
  {
   assert(num_subarrays_per_mat <= 4);
   assert(num_subarrays_per_row <= 2);
@@ -532,7 +533,9 @@ Mat::~Mat()
     delete ml_precharge_drv;
     delete ml_to_ram_wl_drv;
   }
-  if (!sram_sleep_tx)
+  /* PIMID 1.11.16: inverted condition fixed (deleted only null, leaked
+   * every real allocation). */
+  if (sram_sleep_tx)
   {
 	  delete sram_sleep_tx;
   }
@@ -1767,14 +1770,23 @@ void Mat::compute_power_energy()
 
     	//cout<<"leakage1"<<power.readOp.gate_leakage<<endl;
 
+    	/* PIMID 1.11.16: null-guard both sleep-tx pointers. sram_sleep_tx is
+    	 * only allocated for non-FA mats, and row_dec->sleeptx only when the
+    	 * decoder's compute_power_gating() ran (row_dec->exist) -- the old
+    	 * unconditional dereference survived on the incidental
+    	 * MINSUBARRAYROWS>=16 invariant, not by design. */
     	//Power gating data summary
-    	array_sleep_tx_area = sram_sleep_tx->area.get_area()*subarray.num_cols * num_subarrays_per_mat*dp.num_mats;
-    	array_wakeup_e.readOp.dynamic = sram_sleep_tx->wakeup_power.readOp.dynamic * num_subarrays_per_mat*subarray.num_cols*dp.num_act_mats_hor_dir;
-    	array_wakeup_t = sram_sleep_tx->wakeup_delay;
+    	if (sram_sleep_tx) {
+    		array_sleep_tx_area = sram_sleep_tx->area.get_area()*subarray.num_cols * num_subarrays_per_mat*dp.num_mats;
+    		array_wakeup_e.readOp.dynamic = sram_sleep_tx->wakeup_power.readOp.dynamic * num_subarrays_per_mat*subarray.num_cols*dp.num_act_mats_hor_dir;
+    		array_wakeup_t = sram_sleep_tx->wakeup_delay;
+    	}
 
-    	wl_sleep_tx_area = row_dec->sleeptx->area.get_area()*subarray.num_rows * num_subarrays_per_mat*dp.num_mats;
-    	wl_wakeup_e.readOp.dynamic = row_dec->sleeptx->wakeup_power.readOp.dynamic * num_subarrays_per_mat*subarray.num_rows*dp.num_act_mats_hor_dir;
-    	wl_wakeup_t = row_dec->sleeptx->wakeup_delay;
+    	if (row_dec->sleeptx) {
+    		wl_sleep_tx_area = row_dec->sleeptx->area.get_area()*subarray.num_rows * num_subarrays_per_mat*dp.num_mats;
+    		wl_wakeup_e.readOp.dynamic = row_dec->sleeptx->wakeup_power.readOp.dynamic * num_subarrays_per_mat*subarray.num_rows*dp.num_act_mats_hor_dir;
+    		wl_wakeup_t = row_dec->sleeptx->wakeup_delay;
+    	}
 
     }
 

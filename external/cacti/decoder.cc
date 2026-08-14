@@ -60,6 +60,7 @@ Decoder::Decoder(
   is_wl_tr(is_wl_tr_),
   total_driver_nwidth(0),
   total_driver_pwidth(0),
+  sleeptx(0),   /* PIMID 1.11.16: was indeterminate; only assigned under power_gating */
   cell(cell_),
   nodes_DSTN(1)
 {
@@ -1539,7 +1540,8 @@ Driver::Driver(double c_gate_load_, double c_wire_load_, double r_wire_load_, bo
 //  power(),
   is_dram_(is_dram),
   total_driver_nwidth(0),
-  total_driver_pwidth(0)
+  total_driver_pwidth(0),
+  sleeptx(0)   /* PIMID 1.11.16: was indeterminate; only assigned under power_gating */
 {
   for (int i = 0; i < MAX_NUMBER_GATES_STAGE; i++)
   {

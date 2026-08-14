@@ -441,11 +441,23 @@ Processor::Processor(ParseXML *XML_interface)
           /* 1.11.15 (audit): the GATED endpoints must ride the same family
            * transform, or power gating on a periphery component compares a
            * family-priced active value against a logic-priced gated one and
-           * the interpolation collapses to a no-op. */
-          c.power.readOp.power_gated_leakage                       *= fl;
-          c.power.readOp.power_gated_with_long_channel_leakage     *= fl;
-          c.rt_power.readOp.power_gated_leakage                    *= fl;
-          c.rt_power.readOp.power_gated_with_long_channel_leakage  *= fl;
+           * the interpolation collapses to a no-op.
+           *
+           * 1.11.16 (verification audit): REBASE, do not scale. The active
+           * side above deliberately drops McPAT's longer-channel discount
+           * (the comm-dram ratio already encodes a long-channel device);
+           * scaling power_gated_with_long_channel_leakage in place kept that
+           * discount on the gated side only, so the two endpoints were on
+           * different bases and PG savings were over-credited ~2.25x --
+           * exactly the mismatch 1.11.15 claimed to have ended. Both gated
+           * fields rebase on the plain (pre-long-channel) gated value, the
+           * mirror of lines 435-436. */
+          double plainGated   = c.power.readOp.power_gated_leakage;
+          double plainGatedRt = c.rt_power.readOp.power_gated_leakage;
+          c.power.readOp.power_gated_leakage                       = plainGated * fl;
+          c.power.readOp.power_gated_with_long_channel_leakage     = plainGated * fl;
+          c.rt_power.readOp.power_gated_leakage                    = plainGatedRt * fl;
+          c.rt_power.readOp.power_gated_with_long_channel_leakage  = plainGatedRt * fl;
           if (scaleArea) c.area.set_area(c.area.get_area() * fa);
       };
       /* AREA vs DEVICE factors are not the same claim. The dynamic and

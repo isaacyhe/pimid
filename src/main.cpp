@@ -1461,6 +1461,17 @@ struct UnifiedConfig {
         std::string memory_tech = "DDR4";
         int ports_per_bank = 1;
         int banks = 0;                 // 0 = use global default
+
+        /* 1.11.16 (verification audit): per-node PG flags. The 1.11.15
+         * per-node setPGSpec block keyed on the GLOBAL config.pg_* flags,
+         * which only the device-scope YAML surface (top-level pim:/noc:)
+         * can set -- no system-scope config could reach it. Spec #84 says
+         * per-component pg: at initialization, so system-scope nodes parse
+         * their own devices[].pim.pe.pg / devices[].pim.mc.pg /
+         * devices[].noc.pg (default false = bit-identical). */
+        bool pg_pe  = false;
+        bool pg_noc = false;
+        bool pg_mc  = false;
         // Memory-topology knob (1.7.4, HANDOFF MEMORY-TOPOLOGY ADDENDUM).
         // DEVICE role only. true (DEFAULT): this PIM device IS the host's main
         // memory -- host tech = device tech BY CONSTRUCTION (preserves the
@@ -4403,6 +4414,20 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         }
     }
 
+    /* 1.11.16 (verification audit): the PE-MI locality report existed only
+     * in runPerNodePowerAnalysis (system scope), but the placement corpus --
+     * the only sweep this measurement exists for -- is entirely DEVICE
+     * scope, so the very runs that carry remoteAcc never printed it. */
+    if (zsim_stats.pemi_local_acc + zsim_stats.pemi_remote_acc > 0) {
+        uint64_t tot = zsim_stats.pemi_local_acc + zsim_stats.pemi_remote_acc;
+        std::cout << "  [locality] PE-MI accesses: "
+                  << zsim_stats.pemi_local_acc << " local + "
+                  << zsim_stats.pemi_remote_acc << " remote ("
+                  << std::fixed << std::setprecision(1)
+                  << (100.0 * static_cast<double>(zsim_stats.pemi_local_acc) / tot)
+                  << "% local at this placement)" << std::defaultfloat << std::endl;
+    }
+
     /* 1.11.8 (#84): per-component PG residencies from the run's measured
      * activity (r = 1 - activePhases/phases; phases from zsim.out). PE
      * residency uses the device group's per-core mean so N idle PEs and
@@ -4460,9 +4485,17 @@ static void runPowerAnalysis(const UnifiedConfig& config,
               config.memory_tech == "PCM"  || config.memory_tech == "RERAM");
         bool on_dram_silicon = dram_family_tech &&
             config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3;
+        /* 1.11.16 (verification audit): the MCPHY question is PLACEMENT, not
+         * process family. An on-die element MC (subarray..chip) drives no
+         * off-chip DQ pins whatever the bitcell technology -- an SRAM or PCM
+         * PIM at BANK placement was keeping the full off-chip PHY while its
+         * termination term was already placement-gated to zero. The sibling
+         * crosses_dq predicate uses the same placement test with no tech
+         * condition; this now matches it. */
+        if (config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3)
+            mcfg.mc_offchip_phy = false;   // on-die element MC: no DQ pins
         if (on_dram_silicon) {
             mcfg.process_family = 1;  // DRAM_PERIPHERY (per-class factors)
-            mcfg.mc_offchip_phy = false;  // 1.11.15: on-die MCs drive no DQ pins
             mcfg.subarray_pitch_factor =
                 (config.pe_hierarchy_level == 0) ? config.subarray_pitch_factor : 1.0;
             DRAMGenClass gc = getDRAMGenClass(config.memory_tech);
@@ -5515,6 +5548,14 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
         return (it != overrides.end()) ? static_cast<int>(it->second) : fallback;
     };
 
+    /* 1.11.16 (verification audit): "priced exactly once" must be a property
+     * of the CODE, not of the single-host config shape -- a two-host YAML
+     * parses fine today and would have priced the same crossing bytes on
+     * every HOST node. First host carries the link; the warning latch keeps
+     * the unknown-link message to one line instead of one per node. */
+    bool xing_link_charged = false;
+    bool xing_warned_unknown = false;
+
     for (const auto& node : config.system_nodes) {
         if (node.num_cores == 0) continue;  // memory-only, skip
 
@@ -5534,10 +5575,13 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
             bool dram_family_tech =
                 !(node.memory_tech == "SRAM" || node.memory_tech == "STT_MRAM" ||
                   node.memory_tech == "PCM"  || node.memory_tech == "RERAM");
+            /* 1.11.16: MCPHY gated on PLACEMENT alone (see the device-scope
+             * site) -- on-die element MCs drive no DQ pins on any tech. */
+            if (config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3)
+                mcfg.mc_offchip_phy = false;
             if (dram_family_tech &&
                 config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3) {
                 mcfg.process_family = 1;
-                mcfg.mc_offchip_phy = false;  // 1.11.15
                 mcfg.subarray_pitch_factor =
                     (config.pe_hierarchy_level == 0) ? config.subarray_pitch_factor : 1.0;
                 DRAMGenClass ngc = getDRAMGenClass(node.memory_tech);
@@ -5633,30 +5677,53 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
 
             /* 1.11.15 (audit): power gating never reached system scope --
              * setPGSpec had one call site, in the device-scope path. Device
-             * nodes here get the same residency-driven spec. */
-            if (node.role == UnifiedConfig::SystemNode::DEVICE &&
-                (config.pg_pe || config.pg_noc || config.pg_mc) &&
-                zsim_stats.phases > 0) {
-                pimid::McPATWrapper::PGSpec nps;
-                double ph = static_cast<double>(zsim_stats.phases);
-                if (config.pg_pe && node.num_cores > 0) {
-                    double meanActive =
-                        static_cast<double>(zsim_stats.dev.pgActivePhases)
-                        / (node.num_cores * ph);
-                    nps.pg_core = true;
-                    nps.r_core = 1.0 - std::min(1.0, meanActive);
+             * nodes here get the same residency-driven spec.
+             *
+             * 1.11.16 (verification audit): the 1.11.15 block keyed on the
+             * GLOBAL config.pg_* flags, which no documented system-scope
+             * config can set (they parse from top-level pim:/noc: keys, the
+             * device-scope schema) -- the block was dead for every shipped
+             * system YAML. Per-node devices[].pim.pe.pg / .pim.mc.pg /
+             * .noc.pg now drive it (global flags still honored as an OR for
+             * mixed configs), and the applied residencies are PRINTED with
+             * the node name -- a PG run must be tellable from a non-PG run
+             * in its own log. */
+            {
+                bool pe_pg  = node.pg_pe  || config.pg_pe;
+                bool noc_pg = node.pg_noc || config.pg_noc;
+                bool mc_pg  = node.pg_mc  || config.pg_mc;
+                if (node.role == UnifiedConfig::SystemNode::DEVICE &&
+                    (pe_pg || noc_pg || mc_pg) && zsim_stats.phases > 0) {
+                    pimid::McPATWrapper::PGSpec nps;
+                    double ph = static_cast<double>(zsim_stats.phases);
+                    if (pe_pg && node.num_cores > 0) {
+                        double meanActive =
+                            static_cast<double>(zsim_stats.dev.pgActivePhases)
+                            / (node.num_cores * ph);
+                        nps.pg_core = true;
+                        nps.r_core = 1.0 - std::min(1.0, meanActive);
+                    }
+                    if (noc_pg) {
+                        nps.pg_noc = true;
+                        nps.r_noc = 1.0 - std::min(1.0,
+                            static_cast<double>(zsim_stats.pg_noc_active) / ph);
+                    }
+                    if (mc_pg) {
+                        nps.pg_mc = true;
+                        nps.r_mc = 1.0 - std::min(1.0,
+                            static_cast<double>(zsim_stats.pg_devmc_active) / ph);
+                    }
+                    mcpat.setPGSpec(nps);
+                    std::cout << "  [pg] " << node.name
+                              << " residencies (idle fraction):"
+                              << " pe=" << (nps.pg_core ? nps.r_core : 0.0)
+                              << (nps.pg_core ? "" : " (pg off)")
+                              << " noc=" << (nps.pg_noc ? nps.r_noc : 0.0)
+                              << (nps.pg_noc ? "" : " (pg off)")
+                              << " mc=" << (nps.pg_mc ? nps.r_mc : 0.0)
+                              << (nps.pg_mc ? "" : " (pg off)")
+                              << std::endl;
                 }
-                if (config.pg_noc) {
-                    nps.pg_noc = true;
-                    nps.r_noc = 1.0 - std::min(1.0,
-                        static_cast<double>(zsim_stats.pg_noc_active) / ph);
-                }
-                if (config.pg_mc) {
-                    nps.pg_mc = true;
-                    nps.r_mc = 1.0 - std::min(1.0,
-                        static_cast<double>(zsim_stats.pg_devmc_active) / ph);
-                }
-                mcpat.setPGSpec(nps);
             }
 
             /* 1.11.7 (#85): crossing energy in the path co-sim actually
@@ -5680,44 +5747,65 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                  * link types no longer abort AFTER the simulation ran --
                  * validation is loud but the run's results survive, with the
                  * link dynamic explicitly marked unpriced. */
+                /* 1.11.16 (verification audit), four corrections.
+                 * (a) pj_per_bit_override now OVERRIDES: a knob named
+                 *     override that was only consulted when the table failed
+                 *     was a config-surface trap.
+                 * (b) The unknown-link warning is latched (was once per
+                 *     node) and only computed where it matters.
+                 * (c) An unpriced link is MARKED in the [xing] summary line
+                 *     on stdout, not just a stderr note a batch harness
+                 *     drops.
+                 * (d) The link is charged to the FIRST host node only
+                 *     (xing_link_charged), and the byte parenthetical now
+                 *     sums to the number in front of it -- flush is reported
+                 *     as the separate reattributed quantity it is. */
                 uint64_t xbytes = zsim_stats.xing_h2d_bytes +
                                   zsim_stats.xing_d2h_bytes;
-                double pjbit = McPAT::linkEnergyPJPerBit(config.pcie_link_type);
-                if (pjbit < 0.0 && config.pcie_pj_per_bit_override >= 0.0)
+                double pjbit;
+                if (config.pcie_pj_per_bit_override >= 0.0) {
                     pjbit = config.pcie_pj_per_bit_override;
+                } else {
+                    pjbit = McPAT::linkEnergyPJPerBit(config.pcie_link_type);
+                }
                 bool link_unpriced = false;
                 if (pjbit < 0.0) {
-                    std::cerr << "[power] WARNING: unknown link type '"
-                              << config.pcie_link_type << "' and no "
-                                 "power.pcie.pj_per_bit_override given -- link "
-                                 "transfer dynamic UNPRICED (0). Known: "
-                                 "pcie_gen3/4/5, cxl*, nvlink*, interposer."
-                              << std::endl;
+                    if (!xing_warned_unknown) {
+                        xing_warned_unknown = true;
+                        std::cerr << "[power] WARNING: unknown link type '"
+                                  << config.pcie_link_type << "' and no "
+                                     "power.pcie.pj_per_bit_override given -- link "
+                                     "transfer dynamic UNPRICED (0). Known: "
+                                     "pcie_gen3/4/5, cxl*, nvlink*, interposer."
+                                  << std::endl;
+                    }
                     pjbit = 0.0;
                     link_unpriced = true;
                 }
-                (void)link_unpriced;
+                bool charge_here =
+                    (node.role == UnifiedConfig::SystemNode::HOST) &&
+                    !xing_link_charged;
+                if (charge_here) xing_link_charged = true;
                 McPAT::PCIeStats ps;
                 ps.number_units = 1;             // this node's end of the link
                 ps.num_channels = config.pcie_num_lanes;
                 ps.duty_cycle = 1.0;
                 ps.total_load_perc = 0.0;        // legacy path off; bytes drive it
                 ps.transferred_bytes =
-                    (node.role == UnifiedConfig::SystemNode::HOST)
-                        ? static_cast<double>(xbytes) : 0.0;   // 1.11.15: link priced once
+                    charge_here ? static_cast<double>(xbytes) : 0.0;   // link priced once
                 ps.link_pj_per_bit = pjbit;
                 ps.link_clock_mhz =
                     (config.pcie_link_type == "pcie_gen3") ? 500 : 1000;
                 mcpat.setPCIeStats(ps);
-                if (node.role == UnifiedConfig::SystemNode::HOST) {
+                if (charge_here) {
                     std::cout << "  [xing] " << node.name << ": link "
                               << config.pcie_link_type << ", " << xbytes
                               << " B crossed (h2d " << zsim_stats.xing_h2d_bytes
                               << " + d2h " << zsim_stats.xing_d2h_bytes
-                              << " + flush " << zsim_stats.xing_flush_bytes
                               << "), " << zsim_stats.xing_count
-                              << " crossings, " << pjbit << " pJ/bit; flush "
-                              << zsim_stats.xing_flush_bytes
+                              << " crossings, " << pjbit << " pJ/bit"
+                              << (link_unpriced ? " [link dynamic UNPRICED: unknown link type]" : "")
+                              << "; flush " << zsim_stats.xing_flush_bytes
                               << " B rides the MEMORY channel (charged as "
                                  "writes, not link traffic)" << std::endl;
                 }
@@ -6045,13 +6133,27 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
         /* 1.11.15 (audit): the coherence-flush footprint is host dirty lines
          * written back to MEMORY -- it belongs in the array-write charge, not
          * on the PCIe PHY (where 1.11.7 had priced it as 99.999% of the link
-         * bytes). One 64B line per write. */
-        uint64_t flush_wr = zsim_stats.xing_flush_bytes / 64;
-        if (flush_wr > 0) {
+         * bytes). One line per write.
+         *
+         * 1.11.16 (verification audit): (a) the line size is the CONFIGURED
+         * one, not a literal 64 -- with sys.cache_line_size=128 the flush
+         * contributed 2x the writeback events it should have; (b) the
+         * "charged as memory writes" line prints AFTER a branch actually
+         * lands the charge -- the 1.11.15 shape announced the charge
+         * unconditionally and then could drop it (empty tech, no host
+         * activity), asserting an energy charge that was never made. */
+        uint64_t line_b = (config.cache_line_size > 0)
+                              ? static_cast<uint64_t>(config.cache_line_size) : 64;
+        uint64_t flush_wr = zsim_stats.xing_flush_bytes / line_b;
+        bool flush_charged = false;
+        auto sayFlushCharged = [&](const char* where) {
+            if (flush_wr == 0) return;
+            flush_charged = true;
             std::cout << "  [mem] coherence flush: " << zsim_stats.xing_flush_bytes
-                      << " B (" << flush_wr << " line writebacks) charged as "
-                         "memory writes on the host-visible array" << std::endl;
-        }
+                      << " B (" << flush_wr << " line writebacks, "
+                      << line_b << " B lines) charged as memory writes on "
+                      << where << std::endl;
+        };
         if (coupled) {
             std::string tech = d_tech.empty() ? h_tech : d_tech;
             uint64_t all_rd = 0, all_wr = 0;
@@ -6062,6 +6164,7 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 std::cout << "  [mem] one memory (" << tech
                           << "): host and device accesses land on the same "
                              "silicon and are charged once" << std::endl;
+                sayFlushCharged("the shared array");
                 reportSharedMemoryArrayEnergy(tech, all_rd, all_wr);
                 mem_area_total += computeDramDieAreaMM2(tech, false);
             }
@@ -6077,6 +6180,7 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 zsim_stats.host.has_activity()) {
                 std::cout << "  [mem] " << node.name << " (" << node.memory_tech
                           << "): host-side array energy" << std::endl;
+                sayFlushCharged("the host-side array");
                 reportSharedMemoryArrayEnergy(node.memory_tech,
                                               zsim_stats.host.mem_rd,
                                               zsim_stats.host.mem_wr + flush_wr);  // 1.11.15
@@ -6095,6 +6199,16 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 dev_done = true;
             }
         }
+        }
+        if (flush_wr > 0 && !flush_charged) {
+            /* 1.11.16: reporting must not outrun the accounting -- if no
+             * branch landed the writebacks, say so instead of staying
+             * silent after the bytes were measured. */
+            std::cerr << "[power] WARNING: coherence flush ("
+                      << zsim_stats.xing_flush_bytes << " B) was NOT charged "
+                         "-- no host-visible array took the writebacks "
+                         "(empty memory tech or no host activity)."
+                      << std::endl;
         }
     }
 
@@ -9264,16 +9378,19 @@ int main(int argc, char** argv) {
                                     node.alu_throughput_factor = pim["pe"]["throughput_factor"].as<double>(node.alu_throughput_factor);
                                     node.alu_operand_width = pim["pe"]["operand_width"].as<int>(node.alu_operand_width);
                                     node.alu_energy_factor = pim["pe"]["energy_factor"].as<double>(node.alu_energy_factor);
+                                    node.pg_pe = pim["pe"]["pg"].as<bool>(node.pg_pe);  // 1.11.16 (#84)
                                 }
                                 if (pim["mc"]) {
                                     node.pe_mc_type = pim["mc"]["type"].as<std::string>(node.pe_mc_type);
                                     node.pes_per_mc = pim["mc"]["pes_per_mc"].as<int>(node.pes_per_mc);
+                                    node.pg_mc = pim["mc"]["pg"].as<bool>(node.pg_mc);  // 1.11.16 (#84)
                                 }
                             }
 
                             if (d["noc"]) {
                                 node.noc_topology = d["noc"]["topology"].as<std::string>(node.noc_topology);
                                 node.noc_model = d["noc"]["model"].as<std::string>(node.noc_model);
+                                node.pg_noc = d["noc"]["pg"].as<bool>(node.pg_noc);  // 1.11.16 (#84)
                             }
                         } else {
                             // Memory-only device: no PEs/cores

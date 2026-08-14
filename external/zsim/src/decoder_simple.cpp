@@ -9,7 +9,7 @@
 #include "galloc.h"
 #include <string.h>
 
-BblInfo* createSimpleBblInfo(uint32_t instrs, uint32_t bytes) {
+BblInfo* createSimpleBblInfo(uint32_t instrs, uint32_t bytes, bool synth) {
     // Allocate BblInfo + one DynBbl header so that oooBbl[0].uops is valid.
     // OOO/Timing cores access oooBbl[0] even for synthetic BBLs; without the
     // extra space, they read past the allocation (undefined behaviour / segfault).
@@ -18,5 +18,6 @@ BblInfo* createSimpleBblInfo(uint32_t instrs, uint32_t bytes) {
     BblInfo* bbl = static_cast<BblInfo*>(__gm_calloc(1, total));
     bbl->instrs = instrs;
     bbl->bytes = bytes;
+    bbl->synth = synth ? 1 : 0;   // 1.11.16: injected-charge marker
     return bbl;
 }

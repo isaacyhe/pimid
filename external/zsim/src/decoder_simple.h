@@ -82,7 +82,12 @@ struct BblInfo;  // defined in core.h
  *
  * This allocates from the global heap (gm_malloc) so it persists across
  * phases. The BblInfo is suitable for SimpleCore which only uses instrs/bytes.
- */
-BblInfo* createSimpleBblInfo(uint32_t instrs, uint32_t bytes);
+ *
+ * 1.11.16: synth=true marks an INJECTED timing charge (barrier latency, PCIe
+ * launch/transfer, drain trailer) whose "instrs" are cycles, not code; cores
+ * count them into syntheticInstrs so the power model can subtract them from
+ * the retired base. Real-code fallbacks (undecoded large TBs, trace replay)
+ * keep the default false. */
+BblInfo* createSimpleBblInfo(uint32_t instrs, uint32_t bytes, bool synth = false);
 
 #endif  // DECODER_SIMPLE_H_

@@ -208,6 +208,16 @@ void McPATWrapper::setNoCActivity(const NoCActivityStats& stats) {
     power_computed_ = false;
 }
 
+/* 1.11.16 (verification audit): ONE authority for the DRAM-periphery family
+ * factors. They were duplicated as literals in computePower's block-split,
+ * which is exactly the aggregate-vs-parts drift trap 1.11.12 removed by
+ * moving the transform into the tool -- a future edit to the emitted factors
+ * would have left the printed core split scaled by stale numbers. */
+static void periphFamilyFactors(int table_nm, double& fa, double& fd, double& fl) {
+    if (table_nm == 32) { fa = 2.46; fd = 0.66; fl = 3.1e-6; }
+    else                { fa = 2.44; fd = 0.82; fl = 1.0e-5; }
+}
+
 double McPATWrapper::linkEnergyPJPerBit(const std::string& link_type) {
     /* 1.11.15 (audit): match the TIMING side's vocabulary by family --
      * cxl_2_0/cxl_3_0, nvlink_3_0/4_0/c2c and interposer are accepted link
@@ -509,8 +519,9 @@ void McPATWrapper::computePower() {
                  * applyFam (it works on the Processor-level aggregates). */
                 double fdW = 1.0, flW = 1.0;
                 if (config_.process_family == 1) {
-                    fdW = (config_.dram_periph_table_nm == 32) ? 0.66 : 0.82;
-                    flW = (config_.dram_periph_table_nm == 32) ? 3.1e-6 : 1.0e-5;
+                    double faW = 1.0;   // 1.11.16: same authority as the XML emission
+                    periphFamilyFactors(config_.dram_periph_table_nm, faW, fdW, flW);
+                    (void)faW;
                 }
                 auto wf = [&](const Component* p) -> double {
                     if (!p) return 0.0;
@@ -768,43 +779,71 @@ void McPATWrapper::extractResults() {
      * Endpoints are BOTH the tool's (active leakage and power_gated_leakage
      * from the same McPAT/CACTI run); the measured residency r weights them:
      * leak_eff = active*(1-r) + gated*r. Applied only to components the
-     * described design gates (pg flags); audit caveat carried: the tool's
-     * gated aggregate keeps active leakage for logic blocks without sleep-tx
-     * models, so savings are CONSERVATIVE. Under the DRAM-periphery family
-     * the gated endpoint is scaled by the same leakage factor as the active
-     * one (same silicon transform). */
+     * described design gates (pg flags).
+     *
+     * 1.11.16 (verification audit) -- three corrections here.
+     * (1) The interpolation runs on SUBTHRESHOLD leakage only. The gated
+     *     endpoint is a subthreshold quantity (every McPAT producer derives
+     *     it from power.readOp.leakage alone), while the old active side
+     *     used sub+gate: the bases differed by the gate-leakage share, and
+     *     gate-oxide tunnelling -- which a sleep rail does NOT remove -- was
+     *     credited with PG savings. Gate leakage now stays at its active
+     *     value.
+     * (2) The 1.11.15 comment claimed savings were CONSERVATIVE because
+     *     blocks without sleep-tx models "keep active leakage". They kept
+     *     ZERO (the dead-endpoint defect, fixed in array.cc this release),
+     *     which is anti-conservative; with the uniform analytic endpoint the
+     *     residual is Vcc_min/Vdd (~0.35) of active, McPAT's own retention
+     *     floor.
+     * (3) Diagnostics go to STDERR: extractResults runs in the forked child
+     *     whose stdout is /dev/null, so the 1.11.15 inversion warning was
+     *     unreachable. The check is also two-sided now -- a near-zero gated
+     *     endpoint (the failure mode that actually shipped) warns just like
+     *     an inverted one. */
     {
-        auto applyPG = [&](ComponentType t, double r) {
-            if (r <= 0.0) return;
+        auto applyPG = [&](ComponentType t, double r) -> double {
+            if (r <= 0.0) return 1.0;
             if (r > 1.0) r = 1.0;
             PowerMetrics& pm = component_power_[t];
-            double active = pm.total_leakage;
+            double active = pm.subthreshold_leakage;
             double gated  = pm.power_gated_leakage;
-            /* 1.11.12: no family rescale here -- McPAT already returned
-             * family-priced endpoints, active AND gated alike. */
             if (gated > active) {
-                /* 1.11.15 (audit): a gated endpoint above the active one means
-                 * the two are on different bases (the family no-op defect
-                 * class). Clamp so no PG penalty is charged, but say so --
-                 * the silent pin was hiding exactly that inversion. */
-                std::cout << "  [pg] WARNING: gated leakage (" << gated
-                          << " W) exceeds active (" << active
+                std::cerr << "[pg] WARNING: gated leakage (" << gated
+                          << " W) exceeds active subthreshold (" << active
                           << " W) -- endpoints on different bases; clamping, "
                              "no savings credited for this component."
                           << std::endl;
                 gated = active;
+            } else if (active > 0.0 && gated < 0.05 * active) {
+                std::cerr << "[pg] WARNING: gated leakage (" << gated
+                          << " W) is below 5% of active (" << active
+                          << " W) -- a zero/degenerate gated endpoint (the "
+                             "1.11.15 dead-endpoint class) credits near-total "
+                             "leakage elimination; check the tool endpoints."
+                          << std::endl;
             }
             double eff = active * (1.0 - r) + gated * r;
             double scale = (active > 0.0) ? eff / active : 1.0;
             pm.subthreshold_leakage *= scale;
-            pm.gate_leakage         *= scale;
             pm.total_leakage = pm.subthreshold_leakage + pm.gate_leakage;
             pm.total_power   = pm.total_dynamic + pm.total_leakage;
+            return scale;
         };
         if (pg_spec_.pg_core) applyPG(ComponentType::CORE, pg_spec_.r_core);
         if (pg_spec_.pg_core) applyPG(ComponentType::L2_CACHE, pg_spec_.r_core);
         if (pg_spec_.pg_core) applyPG(ComponentType::L3_CACHE, pg_spec_.r_core);
-        if (pg_spec_.pg_noc)  applyPG(ComponentType::NOC, pg_spec_.r_noc);
+        if (pg_spec_.pg_noc) {
+            double s = applyPG(ComponentType::NOC, pg_spec_.r_noc);
+            /* 1.11.16: the per-level NoC breakdown must ride the same scale
+             * or the printed levels sum to the pre-gating leakage while the
+             * aggregate shows the post-gating figure -- the aggregate-vs-
+             * parts drift this train exists to end, one layer up. */
+            for (auto& lv : noc_level_power_) {
+                lv.subthreshold_leakage *= s;
+                lv.total_leakage = lv.subthreshold_leakage + lv.gate_leakage;
+                lv.total_power   = lv.total_dynamic + lv.total_leakage;
+            }
+        }
         if (pg_spec_.pg_mc)   applyPG(ComponentType::MEMORY_CONTROLLER, pg_spec_.r_mc);
     }
 
@@ -1211,8 +1250,7 @@ std::string McPATWrapper::generateXMLConfig() const {
      * base-die designs keep their logic on a buffer die and stay family 0. */
     if (config_.process_family == 1) {
         double fa, fd, fl;
-        if (config_.dram_periph_table_nm == 32) { fa = 2.46; fd = 0.66; fl = 3.1e-6; }
-        else                                    { fa = 2.44; fd = 0.82; fl = 1.0e-5; }
+        periphFamilyFactors(config_.dram_periph_table_nm, fa, fd, fl);   // 1.11.16: single authority
         double pitch = (config_.subarray_pitch_factor > 0.0)
                            ? config_.subarray_pitch_factor : 1.0;
         xml << "    <param name=\"dram_periph_family\" value=\"1\"/>\n";
@@ -1392,16 +1430,33 @@ std::string McPATWrapper::generateXMLConfig() const {
              * zero execution energy. With census branches the classes sum to
              * the census total by construction, so the check becomes
              * SYMMETRIC: any deficit against retired instructions is printed,
-             * and a deficit above 5% rejects the measurement. */
+             * and a deficit above 5% rejects the measurement.
+             *
+             * 1.11.16 (verification audit): the value logic is now independent
+             * of the print-once latch, and every fallback is a REAL fallback.
+             * The 1.11.15 shape had three defects: (1) the reject branch
+             * zeroed mi/mf and then flowed into the assignment below -- the
+             * XML carried a 0-int/0-fp/100%-branch mix, the exact 1.9.28
+             * degeneracy this guard exists to prevent; (2) the <=5% residual
+             * correction sat INSIDE the !warned_mix_ guard, so the number
+             * depended on whether a message had been printed (and the child's
+             * regenerated XML could differ from the parent's); (3) fallbacks
+             * kept int/fp from the PRE-census nonbr while branch kept the
+             * census value, so the classes no longer summed to retirement. */
+            uint64_t pre_br = br_per_core, pre_int = int_per_core, pre_fp = fp_per_core;
             if (meas_mix_br_ > 0) {
                 br_per_core = meas_mix_br_ / ncores;
                 if (br_per_core > inst_per_core) br_per_core = inst_per_core;
                 nonbr = inst_per_core - br_per_core;
+                int_per_core = nonbr * 875 / 1000;   // fraction fallback, census-branch base
+                fp_per_core  = nonbr - int_per_core;
             }
+            bool census_ok = true;
             uint64_t classified = mi + mf + br_per_core;
             if (classified < inst_per_core) {
                 uint64_t deficit = inst_per_core - classified;
-                if (deficit * 20 > inst_per_core) {   // >5%
+                if (deficit * 20 > inst_per_core) {   // >5%: reject the census
+                    census_ok = false;
                     if (!warned_mix_) {
                         warned_mix_ = true;
                         std::cout << "  [Activity] measured mix rejected: "
@@ -1411,21 +1466,31 @@ std::string McPATWrapper::generateXMLConfig() const {
                                      "disagree; using documented fractions."
                                   << std::endl;
                     }
-                    mi = 0; mf = 0;   // falls through to fraction path below
-                } else if (deficit > 0 && !warned_mix_) {
-                    warned_mix_ = true;
-                    std::cout << "  [Activity] mix census covers "
-                              << classified << "/" << inst_per_core
-                              << " per core (deficit " << deficit
-                              << ", <5%); residual priced as integer."
-                              << std::endl;
+                } else if (deficit > 0) {
                     mi += deficit;    // conservative: residual as int-class
+                    if (!warned_mix_) {
+                        warned_mix_ = true;
+                        std::cout << "  [Activity] mix census covers "
+                                  << classified << "/" << inst_per_core
+                                  << " per core (deficit " << deficit
+                                  << ", <5%); residual priced as integer."
+                                  << std::endl;
+                    }
                 }
             }
-            if (mi + mf > nonbr) {
+            if (!census_ok) {
+                /* Full fraction fallback: the BRANCH class reverts too -- a
+                 * census that disagrees with retirement by >5% is not trusted
+                 * for any of its classes. */
+                br_per_core  = pre_br;
+                nonbr        = inst_per_core - br_per_core;
+                int_per_core = pre_int;
+                fp_per_core  = pre_fp;
+            } else if (mi + mf > nonbr) {
                 /* More classified instructions than retired ones means the two
                  * counters are on different bases -- the 1.9.28/1.11.9 defect
-                 * class. Say so and keep the fractions rather than pretend. */
+                 * class. Say so and keep the fractions (recomputed above on
+                 * the census-branch base, so int+fp+branch still sums). */
                 if (!warned_mix_) {
                     warned_mix_ = true;
                     std::cout << "  [Activity] measured mix (" << mi << " int+mul, "
@@ -1710,13 +1775,18 @@ std::string McPATWrapper::generateXMLConfig() const {
     xml << "    <component id=\"system.mc\" name=\"mc\">\n";
     /* 1.11.15 (audit): McPAT builds an MCPHY -- a per-bit OFF-CHIP I/O
      * driver charge on every access -- whenever type==0. An on-die element
-     * MC drives no DQ pins, and that charge double-counted the interface on
-     * top of the termination term while being placement-blind. On-die MCs
-     * are emitted as type=1 (embedded class) with no PHY. */
+     * MC drives no pins at all, so no off-chip driver model applies to it;
+     * on-die MCs are emitted as type=1 (embedded class) with no PHY.
+     * (1.11.16 correction to the recorded rationale: at the on-die
+     * placements the termination term was ALREADY zero, so the MCPHY was a
+     * single wrong-in-kind charge, not a double count. At RANK+ the PHY
+     * driver and the ODT termination are genuinely distinct charges and
+     * both belong -- do NOT "complete" this fix by stripping the PHY there.
+     * The redundant conditional withPHY emission was deleted: line below
+     * already emits withPHY=0 unconditionally, and McPAT ignores withPHY
+     * for type=0 anyway.) */
     xml << "      <param name=\"type\" value=\""
         << (config_.mc_offchip_phy ? 0 : 1) << "\"/>\n";
-    if (!config_.mc_offchip_phy)
-        xml << "      <param name=\"withPHY\" value=\"0\"/>\n";
     xml << "      <param name=\"mc_clock\" value=\"" << static_cast<int>(config_.mc_clock_mhz) << "\"/>\n";
     xml << "      <param name=\"vdd\" value=\"0\"/>\n";
     xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";

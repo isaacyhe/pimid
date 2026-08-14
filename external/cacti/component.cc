@@ -35,6 +35,7 @@
 #include <assert.h>
 #include <iostream>
 #include <math.h>
+#include <stdio.h>   /* PIMID 1.11.16: degenerate-cell stderr note */
 
 #include "bank.h"
 #include "component.h"
@@ -110,9 +111,22 @@ double Component::compute_gate_area(
    * condition -- the function already returns 0.0 for degenerate P/N
    * ratios three lines up. The assert here aborted the whole McPAT child
    * the first time power gating genuinely reached CACTI (the enable was
-   * dead until this release, so this path had never executed). */
+   * dead until this release, so this path had never executed).
+   * PIMID 1.11.16 (verification audit): this helper is shared by every
+   * decoder/driver/mux in CACTI, not just the sleep-tx path, and this
+   * build does NOT define NDEBUG -- so the softened assert is a real
+   * behaviour change for all callers. A silent zero from an ordinary
+   * array would under-report area (the deliverable); say so ONCE on
+   * stderr so a degenerate geometry is visible without aborting. */
   if (w_folded_pmos <= 0 || w_folded_nmos <= 0)
   {
+    static bool warned_degenerate = false;
+    if (!warned_degenerate) {
+      warned_degenerate = true;
+      fprintf(stderr, "[CACTI] note: compute_gate_area hit a degenerate cell "
+                      "(h_gate below the min diffusion gap); contributing 0 "
+                      "area for it (further occurrences silent).\n");
+    }
     return 0.0;
   }
 

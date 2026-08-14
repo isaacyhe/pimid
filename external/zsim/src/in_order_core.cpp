@@ -441,10 +441,15 @@ void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
 
     instrs += sim->instrs;
         { uint64_t _ph = zinfo->numPhases; pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); }  // 1.11.8 PG residency
-    mixAdd(bblInfo);  // 1.11.10 measured instruction mix
+    /* 1.11.16 (verification audit): count the mix and charge soft-float for
+     * the BBL being SIMULATED (sim = the deferred previous BBL), not the one
+     * just arriving -- instrs and the census were offset by one basic block
+     * (the exact counter pair the deficit guard compares), and the FP charge
+     * landed for a block whose execution had not been simulated yet. */
+    mixAdd(sim);  // 1.11.10 measured instruction mix
     if (!zinfo->hierarchy.peHasFpu && zinfo->hierarchy.fpEmulCycles &&
-        bblInfo->nFp) {   // 1.11.11 (#113): soft-float on an FPU-less element
-        curCycle += (uint64_t)bblInfo->nFp * zinfo->hierarchy.fpEmulCycles;
+        sim->nFp) {   // 1.11.11 (#113): soft-float on an FPU-less element
+        curCycle += (uint64_t)sim->nFp * zinfo->hierarchy.fpEmulCycles;
     }
     bbls++;
 

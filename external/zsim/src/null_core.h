@@ -57,7 +57,12 @@ class NullCore : public Core {
         InstrFuncPtrs GetFuncPtrs();
 
         // Snapshot current counters as the ROI baseline (called on roi_begin).
-        void markRoiBegin() override { roiBaseInstrs = instrs; roiBaseCycle = curCycle; }
+        // 1.11.16 (verification audit): the mix census must rebase WITH
+        // instrs -- every other core type calls mixMarkRoi() here, and a
+        // null-core run with pre-ROI warm-up was reporting ROI-windowed
+        // instrs against a whole-run census (the 1.9.29 counter-base defect
+        // class, activated by decode-always).
+        void markRoiBegin() override { roiBaseInstrs = instrs; roiBaseCycle = curCycle; mixMarkRoi(); }
 
     protected:
         inline void bbl(BblInfo* bblInstrs);

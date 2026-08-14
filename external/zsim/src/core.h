@@ -44,12 +44,23 @@
 struct BblInfo {
     uint32_t instrs;
     uint32_t bytes;
-    uint16_t nInt;     // ALU/MOV/LEA/NOP/GENERIC + IDIV
-    uint16_t nMul;     // IMUL (integer multiply/divide unit)
+    uint16_t nInt;     // ALU/MOV/LEA/NOP/GENERIC (1.11.16: matches the classifier -- IDIV is in nMul)
+    uint16_t nMul;     // IMUL + IDIV (integer multiply/divide unit)
     uint16_t nFp;      // FADD/FMUL/FDIV/FMA/VECALU/VECMOV
     uint16_t nBr;      // BRANCH
     uint16_t nLoad;
     uint16_t nStore;
+    /* 1.11.16 (verification audit): explicit marker for INJECTED timing
+     * charges (barrier latency, PCIe launch/transfer, drain trailers). Their
+     * "instrs" are cycles, not executed code, and every core type must be
+     * able to subtract them from its retired-instruction base -- before this
+     * flag only OOOCore inferred it (from oooBbl absence, which also
+     * misclassified real >1024-insn fallback TBs), so on alu/simple/null
+     * PEs the injected cycles inflated the base the mix census is compared
+     * against and could push the deficit guard into full rejection. Both
+     * allocation sites gm_calloc, so decoded/real BBLs carry 0. Field packs
+     * into existing padding: sizeof(BblInfo) stays 24, heap layout untouched. */
+    uint16_t synth;    // 1 = injected timing charge, 0 = real code
     DynBbl oooBbl[0]; //0 bytes, but will be 1-sized when we have an element (and that element has variable size as well)
 };
 
@@ -115,15 +126,23 @@ class Core : public GlobAlloc {
          * rule. ROI-rebased alongside instrs (see markRoiBegin overrides). */
         uint64_t mixInt = 0, mixMul = 0, mixFp = 0, mixLd = 0, mixSt = 0;
         uint64_t mixBr = 0;   // 1.11.15: decoder-classified control transfers
+        /* 1.11.16: injected timing charges (BblInfo::synth) counted HERE so
+         * every core type reports syntheticInstrs, not just OOOCore -- on
+         * alu/simple/null PEs the barrier/PCIe charges were inflating the
+         * retired base with no way to subtract them. */
+        uint64_t mixSyn = 0;
         uint64_t roiBaseMixInt = 0, roiBaseMixMul = 0, roiBaseMixFp = 0,
-                 roiBaseMixLd = 0, roiBaseMixSt = 0, roiBaseMixBr = 0;
+                 roiBaseMixLd = 0, roiBaseMixSt = 0, roiBaseMixBr = 0,
+                 roiBaseMixSyn = 0;
         inline void mixAdd(const BblInfo* b) {
             mixInt += b->nInt; mixMul += b->nMul; mixFp += b->nFp;
             mixLd  += b->nLoad; mixSt += b->nStore; mixBr += b->nBr;
+            if (b->synth) mixSyn += b->instrs;   // injected cycles-as-instrs
         }
         inline void mixMarkRoi() {
             roiBaseMixInt = mixInt; roiBaseMixMul = mixMul; roiBaseMixFp = mixFp;
             roiBaseMixLd  = mixLd;  roiBaseMixSt  = mixSt;  roiBaseMixBr = mixBr;
+            roiBaseMixSyn = mixSyn;
         }
         inline void mixInitStats(AggregateStat* coreStat) {
             struct M { const char* n; const char* d; uint64_t* v; };
@@ -145,6 +164,11 @@ class Core : public GlobAlloc {
             add("mixLd",  "Load uops (measured)", &mixLd, &roiBaseMixLd);
             add("mixSt",  "Store uops (measured)", &mixSt, &roiBaseMixSt);
             add("mixBr",  "Branch-class instructions (measured)", &mixBr, &roiBaseMixBr);
+            /* 1.11.16: flag-based, all core types. OOOCore's own oooBbl-null
+             * inference (which also misclassified real >1024-insn fallback
+             * TBs as synthetic) no longer emits a stat -- ONE producer, or
+             * the parser would sum both and subtract twice. */
+            add("syntheticInstrs", "Of instrs, injected timing charges (not executed code)", &mixSyn, &roiBaseMixSyn);
         }
 
         explicit Core(g_string& _name) : lastUpdateCycles(0), lastUpdateInstrs(0), name(_name) {}

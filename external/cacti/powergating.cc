@@ -82,10 +82,17 @@ Sleep_tx::Sleep_tx(
 
     /* PIMID 1.11.15: guard degenerate inputs -- zero/NaN width (device
      * params absent for this cell class) or a cell too narrow to fold a
-     * transistor into. A zero-area sleep network is the honest result. */
+     * transistor into. A zero-area sleep network is the honest result.
+     * PIMID 1.11.16 (verification audit): do NOT run compute_penalty() with
+     * the degenerate width -- it divides by simplified_*_Isat(width=0), so
+     * wakeup_delay came out +inf and flowed into Mat::array_wakeup_t and
+     * uca_org_t::sram_sleep_wakeup_latency. A zero-area sleep network has
+     * zero wakeup penalty, stated explicitly. */
     if (!(width > 0) || !(cell.w > 0)) {
         area.set_h(0); area.set_w(0);
-        compute_penalty();
+        c_intrinsic_sleep = 0;
+        wakeup_delay = 0;
+        wakeup_power.readOp.dynamic = 0;
         return;
     }
     raw_area   = compute_gate_area(INV, 1, width, p_to_n_sz_ratio*width, cell.w*2)/2; //Only single device, assuming device is laide on the side

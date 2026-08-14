@@ -7,6 +7,72 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.16 -- the audit's fixes are audited, and three of them fall
+
+Seven adversarial verifiers (one per 1.11.15 fix claim + a fresh sweep of the
+hotfix diff) REFUTED three clusters. The repairs, all in this release:
+
+POWER GATING HAD NO REAL ENDPOINTS. CACTI never assigns
+power_gated_leakage anywhere in the vendored fork -- the 1.11.15 enable
+repair opened a path to a value nothing writes. For set-associative arrays
+(every cache data/tag array) McPAT multiplied that never-written zero, so
+the gated endpoint was 0 and leak_eff credited ~100% leakage elimination
+-- ANTI-conservative, the opposite of the in-code caveat. Fixed in the
+tool: array.cc now computes the analytic Vcc_min/Vdd retention endpoint
+for ALL array classes, the same model McPAT's own logic/NoC/MC units
+already use. The residual is ~0.35 of active subthreshold, not ~0.
+
+THE GATED ENDPOINT KEPT A DISCOUNT THE ACTIVE ONE DROPPED. applyFam
+rebases active leakage on the plain value (the comm-dram ratio already
+encodes a long-channel device) but only SCALED the gated fields, so the
+default long-channel read compared mismatched bases and over-credited PG
+savings ~2.25x. The recorded "15% sleep-tx residual" was
+0.35 x long-channel-factor -- an artifact, not an endpoint. Fixed: gated
+fields rebase exactly like lines 435-436. applyPG also now interpolates
+SUBTHRESHOLD only (a sleep rail does not remove gate-oxide tunnelling),
+warns two-sidedly (near-zero endpoints too, on stderr -- the child's
+stdout is /dev/null), and scales the per-level NoC breakdown with the
+aggregate.
+
+THE CENSUS REJECT PATH EMITTED THE 1.9.28 DEGENERACY. The >5% reject set
+mi=mf=0 and "fell through" into the assignment below it -- McPAT was told
+0-int/0-fp/100%-branch, strictly worse than the fractions it claimed to
+restore. The residual-as-int correction sat inside the print-once latch,
+so the number depended on whether a message had printed (and the forked
+child's regenerated XML differed from the parent's). Restructured:
+census_ok flag, value logic decoupled from printing, fractions recomputed
+on the census-branch base so classes always sum to retirement, and a
+rejected census reverts its branch class too.
+
+INJECTED CHARGES NOW SUBTRACT ON EVERY CORE TYPE. Barrier/PCIe/drain
+charges are cycles-as-instrs; only OOOCore reported syntheticInstrs (by
+oooBbl absence, which also misclassified real >1024-insn fallback TBs).
+BblInfo carries an explicit synth flag set at the eight injection sites;
+the shared mix machinery counts and reports it for alu/simple/null/
+in-order/OOO alike, so MPI cells no longer manufacture a census deficit.
+
+Also: MCPHY gated on PLACEMENT alone (SRAM/NVM on-die element MCs lose
+the off-chip PHY they never had); per-node pg: keys parse in system scope
+(devices[].pim.pe.pg / .pim.mc.pg / .noc.pg) with residencies printed per
+node; PE-MI locality line now prints in device scope (where the placement
+corpus lives); coherence-flush writebacks use the configured line size and
+the "charged" line prints only where a branch lands the charge;
+pj_per_bit_override actually overrides; crossing bytes priced on the
+first host only, with unpriced links marked in the summary; NullCore
+rebases its census at ROI; in-order deferred path counts mix/FP for the
+block it simulates; CACTI sleep-tx pointers initialized, inverted
+destructor conditions fixed, degenerate-width wakeup no longer +inf, and
+the softened compute_gate_area assert says so once on stderr; family
+factors deduplicated behind one helper; stale pre-1.11.12 wrapper copy
+(src/mcpat_wrapper.*, not in the build) moved to attic/.
+
+Data impact: any 1.11.8-1.11.15 run with pg: true is invalid (PG savings
+over-credited); PG-off runs are unaffected. SRAM/STT-MRAM/PCM/ReRAM cells
+at subarray..chip placement re-price (off-chip MCPHY removed) -- area and
+MC power drop. MPI/co-sim cells re-price their instruction base
+(syntheticInstrs now subtracted on ALU PEs). Corpus re-sim (already
+gated on this train) covers all three.
+
 ## 1.11.15 -- the train audits itself, and fixes what it finds
 
 A 30-agent, 5-round adversarial audit of everything 1.11.2-1.11.14 shipped
