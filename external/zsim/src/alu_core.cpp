@@ -65,6 +65,7 @@ void ALUCore::initStats(AggregateStat* parentStat) {
                      (uint64_t*)&pgAct.activePhases);
         coreStat->append(pgStat);
     }
+    mixInitStats(coreStat);   // 1.11.10 measured instruction mix
 
     // Report cycles/instrs RELATIVE to the ROI baseline (roi_begin), so serial
     // pre-ROI init/setup on the launcher PE is excluded from the kernel metric.
@@ -123,6 +124,7 @@ void ALUCore::join() {
 inline void ALUCore::bbl(BblInfo* bblInfo) {
     instrs += bblInfo->instrs;
         { uint64_t _ph = zinfo->numPhases; pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); }  // 1.11.8 PG residency
+        mixAdd(bblInfo);  // 1.11.10 measured instruction mix
 
     // Datapath mode: bit-serial charges ~W bit-steps per op (cost proportional to
     // operand width, W-bit op = W single-bit steps); bit-parallel (default) charges

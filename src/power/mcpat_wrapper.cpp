@@ -1413,6 +1413,40 @@ std::string McPATWrapper::generateXMLConfig() const {
         uint64_t nonbr = inst_per_core - br_per_core;
         uint64_t int_per_core = nonbr * 875 / 1000;   // 87.5% of non-branch
         uint64_t fp_per_core  = nonbr - int_per_core;
+        /* 1.11.10 (#112): use the COUNTED mix when the decoder produced one.
+         * The 87.5/12.5 split above was a documented stand-in for exactly this
+         * measurement; it stays as the fallback for core models that never
+         * decode. int carries mul/div (McPAT has no separate integer-multiply
+         * stat at this level; the FU it drives is the same execution unit). */
+        const uint64_t ncores = std::max(1, config_.num_cores);
+        bool mix_measured = (meas_int_ + meas_fp_ + meas_mul_) > 0;
+        if (mix_measured) {
+            uint64_t mi = (meas_int_ + meas_mul_) / ncores;
+            uint64_t mf = meas_fp_ / ncores;
+            if (mi + mf > nonbr) {
+                /* More classified instructions than retired ones means the two
+                 * counters are on different bases -- the 1.9.28/1.11.9 defect
+                 * class. Say so and keep the fractions rather than pretend. */
+                if (!warned_mix_) {
+                    warned_mix_ = true;
+                    std::cout << "  [Activity] measured mix (" << mi << " int+mul, "
+                              << mf << " fp per core) exceeds retired non-branch "
+                              << nonbr << " -- bases disagree, using fractions"
+                              << std::endl;
+                }
+            } else {
+                int_per_core = mi;
+                fp_per_core  = mf;
+                if (!warned_mix_) {
+                    warned_mix_ = true;
+                    std::cout << "  [Activity] instruction mix COUNTED: "
+                              << int_per_core << " int+mul, " << fp_per_core
+                              << " fp, " << br_per_core << " branch per core "
+                              << "(decoder-classified; the 87.5/12.5 stand-in "
+                                 "is not used)" << std::endl;
+                }
+            }
+        }
         xml << "      <stat name=\"int_instructions\" value=\"" << int_per_core << "\"/>\n";
         xml << "      <stat name=\"fp_instructions\" value=\"" << fp_per_core << "\"/>\n";
         xml << "      <stat name=\"branch_instructions\" value=\"" << br_per_core << "\"/>\n";

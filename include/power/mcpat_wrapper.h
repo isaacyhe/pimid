@@ -337,6 +337,18 @@ public:
     void setMeasuredCoreActivity(uint64_t uops, uint64_t branches,
                                  uint64_t mispredicted);
 
+    /* 1.11.10 (#112): the COUNTED instruction mix, classified by the decoder
+     * (x86_decoder.h OpClass) rather than the documented 87.5/12.5 split that
+     * stood in for it. All-core totals; the XML divides by core count like
+     * every other stat. Zero for any class means "not measured" and that term
+     * falls back to the previous fraction, so a core model without a decoder
+     * behaves exactly as before. */
+    void setMeasuredMix(uint64_t nInt, uint64_t nMul, uint64_t nFp,
+                        uint64_t nLd, uint64_t nSt) {
+        meas_int_ = nInt; meas_mul_ = nMul; meas_fp_ = nFp;
+        meas_ld_ = nLd;   meas_st_ = nSt;   power_computed_ = false;
+    }
+
     void setTotalInstructions(uint64_t instructions);
 
     // Split cache stat setters — use actual ZSim counters, not combined reads/writes
@@ -419,6 +431,8 @@ private:
     uint64_t total_instructions_;
     uint64_t meas_uops_ = 0;         // 1.9.28: 0 => fall back to fractions
     uint64_t meas_branches_ = 0;
+    uint64_t meas_int_ = 0, meas_mul_ = 0, meas_fp_ = 0,
+             meas_ld_ = 0, meas_st_ = 0;   // 1.11.10
     uint64_t meas_mispred_ = 0;
     /* 1.9.29: the measured counters are used only when self-consistent against
      * the instruction count (see the mix construction in the XML writer). This

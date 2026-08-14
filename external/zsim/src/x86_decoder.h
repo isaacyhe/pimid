@@ -1012,6 +1012,12 @@ static inline BblInfo* createDecodedBblInfo(uint64_t bblAddr,
     uint32_t decWidth = 4;  /* front-end decode/issue width for decCycle spread */
     uint32_t emitted = 0;
 
+    /* 1.11.10 (#112): census the classes the decoder already determines, so
+     * the instruction mix is COUNTED rather than assumed. Saturating at
+     * uint16_t max because a basic block with 65k instructions of one class
+     * is not a thing that happens -- if it ever did, clamping is visible in
+     * the ratios while wrapping would silently invert them. */
+    uint32_t cInt = 0, cMul = 0, cFp = 0, cBr = 0, cLd = 0, cSt = 0;
     for (uint32_t k = 0; k < nInsns; k++) {
         Decoded d;
         decodeOne(insnBytes[k], insnLens[k], d);
@@ -1019,12 +1025,23 @@ static inline BblInfo* createDecodedBblInfo(uint64_t bblAddr,
         uint32_t decCycle = emitted / decWidth;
         emitUops(d, uops, decCycle, loads, stores);
         emitted = (uint32_t)uops.size();
+        cLd += loads; cSt += stores;
+        switch (d.cls) {
+            case C_IMUL: case C_IDIV:                       cMul++; break;
+            case C_FADD: case C_FMUL: case C_FDIV:
+            case C_FMA:  case C_VECALU: case C_VECMOV:      cFp++;  break;
+            case C_BRANCH:                                  cBr++;  break;
+            default:                                        cInt++; break;
+        }
         if (d.strKind && d.repPrefixed) repInstrs++;
         if (d.approx || d.cls == C_GENERIC) {
             approx++;
             if (outApproxKeys) outApproxKeys->push_back(dbgKey(d));
         }
     }
+    auto sat16 = [](uint32_t v) -> uint16_t {
+        return (uint16_t)((v > 0xFFFFu) ? 0xFFFFu : v);
+    };
 
     uint32_t nUops = (uint32_t)uops.size();
     /* Allocate BblInfo + DynBbl with room for nUops (at least 1 for the header). */
@@ -1033,6 +1050,8 @@ static inline BblInfo* createDecodedBblInfo(uint64_t bblAddr,
     BblInfo* bbl = static_cast<BblInfo*>(__gm_calloc(1, total));
     bbl->instrs = nInsns;
     bbl->bytes = tbBytes;
+    bbl->nInt = sat16(cInt); bbl->nMul = sat16(cMul); bbl->nFp = sat16(cFp);
+    bbl->nBr  = sat16(cBr);  bbl->nLoad = sat16(cLd); bbl->nStore = sat16(cSt);
     DynBbl& db = bbl->oooBbl[0];
     db.addr = bblAddr;
     db.uops = nUops;

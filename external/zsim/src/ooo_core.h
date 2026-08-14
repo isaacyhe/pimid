@@ -610,6 +610,7 @@ class OOOCore : public Core {
              * the parser SUMS it with ROI-windowed cycles for
              * host_wall_cycles -- mixing bases. Rebase it like the rest. */
             roiBaseCCycles = cRec.getContentionCycles();
+            mixMarkRoi();   // 1.11.10
         }
 
     private:

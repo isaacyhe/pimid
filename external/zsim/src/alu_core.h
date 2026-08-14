@@ -97,7 +97,7 @@ class ALUCore : public Core {
         }
 
         // Snapshot current counters as the ROI baseline (called on roi_begin).
-        void markRoiBegin() override { roiBaseInstrs = instrs; roiBaseCycle = curCycle; }
+        void markRoiBegin() override { roiBaseInstrs = instrs; roiBaseCycle = curCycle; mixMarkRoi(); }
         uint64_t getRoiBaseCycle() const override { return roiBaseCycle; }
         uint32_t getSrcId() const override { return srcId_; }
 

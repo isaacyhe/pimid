@@ -7,6 +7,44 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.10 -- the instruction mix is counted, not assumed
+
+#112. Every instruction the decoder handles already carries a class
+(x86_decoder.h OpClass: ALU, MOV, LEA, IMUL, IDIV, FADD, FMUL, FDIV, FMA,
+VECALU, VECMOV, BRANCH), and every one of those classifications was thrown
+away the moment the uops were emitted. The class census is now recorded per
+basic block at decode, accumulated per core at retirement (all five core
+types, ROI-rebased alongside instrs), exported through zsim's stats tree and
+parsed like every other activity counter -- and McPAT is fed the COUNTED
+int/mul/fp split instead of the documented 87.5/12.5 stand-in that had been
+holding its place since 1.9.28. Load and store uop counts ride along on the
+same path.
+
+The stand-in remains the fallback: a core model that never decodes (or a
+class that measures zero) keeps the fractions, so nothing regresses where
+there is nothing to count. And if the classified count ever exceeds the
+retired non-branch count -- the two counters disagreeing on base, the defect
+class 1.11.9 root-caused -- the fractions are kept and the disagreement is
+printed rather than papered over.
+
+This is what 1.11.9 unblocked: the mix-consistency gate had been rejecting
+the measured set because instrs was latched from one core while the activity
+counters were all-core sums. With both on the same base, the measurement is
+usable for the first time.
+
+Measured on a 16-PE in-order HBM3 cell: 152,799 integer, 113 multiply and
+263,787 FP-class instructions of 487,424 retired -- about 63% FP where the
+stand-in assumed 87.5% INTEGER. The assumption was not merely imprecise for
+this kernel; it was inverted.
+
+DATA IMPACT: core dynamic power wherever the real mix differs from
+87.5/12.5 int/fp -- which is everywhere with FP content. Timing untouched:
+the deterministic 1-PE cell is bit-equal, and the 16-PE cell's 4% gate
+difference was shown to be the cell's own variance, not the release's --
+the UNCHANGED 1.11.9 binary varies 6.11% run-to-run on that cell (the two
+binaries' first runs agree to 0.03%). Bit-equality arms belong on
+deterministic cells; the 1.9.41 finding, re-confirmed.
+
 ## 1.11.9 -- co-simulation reports what it measured
 
 #86 and its audit sheet (six blockers). (1) System scope HARD-ABORTED on a

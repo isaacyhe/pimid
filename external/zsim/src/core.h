@@ -32,9 +32,24 @@
 #include "g_std/g_string.h"
 #include "stats.h"
 
+/* 1.11.10 (#112): STATIC instruction-class census of this basic block,
+ * filled once at decode from the class the decoder already assigns to every
+ * instruction (x86_decoder.h OpClass) and then thrown away. Cores add these
+ * to their own dynamic accumulators at retirement, so the mix McPAT is fed
+ * is COUNTED, not the documented fractions it fell back to. uint16_t: a
+ * basic block that holds 65k instructions of one class does not exist, and
+ * the saturating adds below say so rather than wrapping silently.
+ * Synthetic timing BBLs (createSimpleBblInfo) leave these zero -- they are
+ * charges, not code, and must not enter the mix. */
 struct BblInfo {
     uint32_t instrs;
     uint32_t bytes;
+    uint16_t nInt;     // ALU/MOV/LEA/NOP/GENERIC + IDIV
+    uint16_t nMul;     // IMUL (integer multiply/divide unit)
+    uint16_t nFp;      // FADD/FMUL/FDIV/FMA/VECALU/VECMOV
+    uint16_t nBr;      // BRANCH
+    uint16_t nLoad;
+    uint16_t nStore;
     DynBbl oooBbl[0]; //0 bytes, but will be 1-sized when we have an element (and that element has variable size as well)
 };
 
@@ -93,6 +108,42 @@ class Core : public GlobAlloc {
          * core type's .cpp (which see zinfo); also marks the global
          * anyCore tracker there, from which all-idle overlap derives. */
         PhaseActivity pgAct;
+
+        /* 1.11.10 (#112): dynamic instruction-mix accumulators, added from
+         * each retired BBL's static census. Held in the base class so every
+         * core type reports the same five stats and the parser needs one
+         * rule. ROI-rebased alongside instrs (see markRoiBegin overrides). */
+        uint64_t mixInt = 0, mixMul = 0, mixFp = 0, mixLd = 0, mixSt = 0;
+        uint64_t roiBaseMixInt = 0, roiBaseMixMul = 0, roiBaseMixFp = 0,
+                 roiBaseMixLd = 0, roiBaseMixSt = 0;
+        inline void mixAdd(const BblInfo* b) {
+            mixInt += b->nInt; mixMul += b->nMul; mixFp += b->nFp;
+            mixLd  += b->nLoad; mixSt += b->nStore;
+        }
+        inline void mixMarkRoi() {
+            roiBaseMixInt = mixInt; roiBaseMixMul = mixMul; roiBaseMixFp = mixFp;
+            roiBaseMixLd  = mixLd;  roiBaseMixSt  = mixSt;
+        }
+        inline void mixInitStats(AggregateStat* coreStat) {
+            struct M { const char* n; const char* d; uint64_t* v; };
+            /* ROI-relative like instrs: the deltas are what the power model
+             * consumes, and mixing bases is the defect 1.11.9 root-caused. */
+            static thread_local uint64_t dummy;
+            (void)dummy;
+            auto add = [&](const char* n, const char* d, uint64_t* cur, uint64_t* base) {
+                auto fn = [cur, base]() -> uint64_t {
+                    return (*cur > *base) ? (*cur - *base) : 0;
+                };
+                auto* st = new LambdaStat<decltype(fn)>(fn);
+                st->init(n, d);
+                coreStat->append(st);
+            };
+            add("mixInt", "Integer-class instructions (measured)", &mixInt, &roiBaseMixInt);
+            add("mixMul", "Multiply/divide-class instructions (measured)", &mixMul, &roiBaseMixMul);
+            add("mixFp",  "FP/vector-class instructions (measured)", &mixFp, &roiBaseMixFp);
+            add("mixLd",  "Load uops (measured)", &mixLd, &roiBaseMixLd);
+            add("mixSt",  "Store uops (measured)", &mixSt, &roiBaseMixSt);
+        }
 
         explicit Core(g_string& _name) : lastUpdateCycles(0), lastUpdateInstrs(0), name(_name) {}
 

@@ -83,7 +83,7 @@ class SimpleCore : public Core {
 
         // Snapshot current counters as the ROI baseline (called on roi_begin).
         // getCycles() already nets out pimidPhantomWait (0 at roi_begin).
-        void markRoiBegin() override { roiBaseInstrs = instrs; roiBaseCycle = getCycles(); }
+        void markRoiBegin() override { roiBaseInstrs = instrs; roiBaseCycle = getCycles(); mixMarkRoi(); }
 
     protected:
         //Simulation functions

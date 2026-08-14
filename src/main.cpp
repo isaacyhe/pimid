@@ -408,6 +408,10 @@ struct ZSimParsedOutput {
      * placement actually kept its accesses local. */
     uint64_t pemi_local_acc = 0;
     uint64_t pemi_remote_acc = 0;
+    /* 1.11.10 (#112): MEASURED instruction mix, summed over cores like every
+     * other activity counter (1.11.9 put instrs on this same base, which is
+     * what lets the mix be used at all). */
+    uint64_t mix_int = 0, mix_mul = 0, mix_fp = 0, mix_ld = 0, mix_st = 0;
     /* 1.9.29: per-node measured counters. Everything below this comment that is
      * NOT inside `host`/`dev` is an ALL-NODES total, kept for the device-SCOPE
      * path (runPowerAnalysis), which simulates one node and is correct as-is.
@@ -423,6 +427,7 @@ struct ZSimParsedOutput {
      * needs its OWN measured counters, so they live here as a set. */
     struct GroupCounters {
         uint64_t pgActivePhases = 0;  // 1.11.8: sum of per-core PG activity
+        uint64_t mix_int = 0, mix_mul = 0, mix_fp = 0, mix_ld = 0, mix_st = 0;  // 1.11.10
         uint64_t instrs = 0;
         /* 1.9.33: of `instrs`, the portion that is injected timing charges
          * (coherence flush, kernel launch, barrier latency) rather than executed
@@ -855,6 +860,11 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
                 else if (key == "xingD2HBytes") { out.xing_d2h_bytes = val; }
                 else if (key == "xingCount") { out.xing_count = val; }
                 else if (key == "xingFlushBytes") { out.xing_flush_bytes = val; }
+                else if (key == "mixInt") { out.mix_int += val; if (grp) grp->mix_int += val; }
+                else if (key == "mixMul") { out.mix_mul += val; if (grp) grp->mix_mul += val; }
+                else if (key == "mixFp")  { out.mix_fp  += val; if (grp) grp->mix_fp  += val; }
+                else if (key == "mixLd")  { out.mix_ld  += val; if (grp) grp->mix_ld  += val; }
+                else if (key == "mixSt")  { out.mix_st  += val; if (grp) grp->mix_st  += val; }
                 else if (key == "localAcc")  { out.pemi_local_acc += val; }
                 else if (key == "remoteAcc") { out.pemi_remote_acc += val; }
                 else if (key == "pgAnyCoreActivePhases") { out.pg_anycore_active = val; }
@@ -4618,6 +4628,8 @@ static void runPowerAnalysis(const UnifiedConfig& config,
      * honest choice when the core model genuinely does not track them. */
     mcpat.setMeasuredCoreActivity(zsim_stats.uops, zsim_stats.branches,
                                   zsim_stats.mispredBranches);
+    mcpat.setMeasuredMix(zsim_stats.mix_int, zsim_stats.mix_mul,
+                         zsim_stats.mix_fp, zsim_stats.mix_ld, zsim_stats.mix_st);  // 1.11.10
 
     // Split cache stats from ZSim
     mcpat.setL1IAccesses(zsim_stats.l1i_total_reads(), zsim_stats.l1i_mGETS);
@@ -4809,6 +4821,8 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             host_mcpat.setMemControllerAccesses(hgrp.mem_rd, hgrp.mem_wr);
             host_mcpat.setMeasuredCoreActivity(hgrp.uops, hgrp.branches,
                                                hgrp.mispredBranches);
+            host_mcpat.setMeasuredMix(hgrp.mix_int, hgrp.mix_mul, hgrp.mix_fp,
+                                      hgrp.mix_ld, hgrp.mix_st);  // 1.11.10
             std::cout << "  [Activity] host: measured -- instrs=" << hgrp.instrs
                       << " cycles=" << host_cycles
                       << " uops=" << hgrp.uops
@@ -5765,6 +5779,8 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                  * with the instruction count it describes. */
                 mcpat.setMeasuredCoreActivity(grp->uops, grp->branches,
                                               grp->mispredBranches);
+                mcpat.setMeasuredMix(grp->mix_int, grp->mix_mul, grp->mix_fp,
+                                     grp->mix_ld, grp->mix_st);  // 1.11.10
             } else {
                 mcpat.setL1IAccesses(
                     static_cast<uint64_t>(zsim_stats.l1i_total_reads() * fb),

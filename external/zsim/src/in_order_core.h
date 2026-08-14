@@ -216,6 +216,7 @@ class InOrderCore : public Core {
             roiBaseInstrs = instrs; roiBaseCycle = getCycles();  // adjusted clock: pre-ROI phantom excluded
             roiBaseUops = uops; roiBaseBbls = bbls;              // 1.9.33
             roiBaseBranches = branches; roiBaseMispred = mispredBranches;
+            mixMarkRoi();   // 1.11.10
         }
 
         // Virtual type check for use without RTTI (Pin 4.x requires -fno-rtti)

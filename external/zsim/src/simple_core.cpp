@@ -39,6 +39,7 @@ void SimpleCore::initStats(AggregateStat* parentStat) {
                      (uint64_t*)&pgAct.activePhases);
         coreStat->append(pgStat);
     }
+    mixInitStats(coreStat);   // 1.11.10 measured instruction mix
     // Report cycles/instrs RELATIVE to the ROI baseline (roi_begin); roiBase* are
     // 0 until roi_begin, so non-ROI workloads are unaffected.
     auto x = [this]() -> uint64_t {
@@ -74,6 +75,7 @@ void SimpleCore::bbl(Address bblAddr, BblInfo* bblInfo) {
     //info("%d %d", bblInfo->instrs, bblInfo->bytes);
     instrs += bblInfo->instrs;
         { uint64_t _ph = zinfo->numPhases; pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); }  // 1.11.8 PG residency
+        mixAdd(bblInfo);  // 1.11.10 measured instruction mix
     curCycle += bblInfo->instrs;
 
     Address endBblAddr = bblAddr + bblInfo->bytes;
