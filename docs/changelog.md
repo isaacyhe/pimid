@@ -7,6 +7,34 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.13 -- corners exist where the tables have them, and nowhere else
+
+#121 asked for a per-technology corner axis: a speed corner for GDDR6 and
+HBM, a mobile corner for LPDDR5 and the NVMs, derived from CACTI's own
+device columns and activated where the 1.9.10 IDD data showed one corner
+failing. Reading the tables answered the design question before the IDD
+check could: each CACTI table carries exactly ONE commodity-DRAM device
+column. lp-dram, the only alternative, is all-zero at 22 nm. A speed
+corner for HBM periphery cannot be derived from a table that does not
+contain one, so it is not derived -- the request is refused there, with
+the reason printed, rather than approximated into existence.
+
+Where corners DO exist is the logic family: CACTI carries hp, lstp and
+lop, and McPAT already selects between them through sys.device_type. That
+choice was simply never exposed, so every logic domain in every run so far
+was priced hp without saying so. power.device_corner now exposes it
+(hp/lstp/lop, validated, default hp = every existing run bit-identical),
+which is what a host or a base-die design actually needs.
+
+The area-factor uncertainty band is printed beside the factor in use:
+2.44x is the linear l_phy ratio, the conservative end of a band whose
+other end is its square (5.95x), with the UPMEM die as the only silicon
+anchor between them. A reader can now see the width of the claim without
+reading the source.
+
+DATA IMPACT: none at defaults. Selecting a non-hp corner changes
+logic-family components only.
+
 ## 1.11.12 -- the DRAM-periphery family becomes a property of the machine
 
 #120 and the model-borders migration together, because they are the same

@@ -1071,6 +1071,19 @@ struct UnifiedConfig {
      * width) -- the knob is deliberately not defaulted to an invented
      * constant. */
     uint32_t pe_fp_emul_cycles = 0;
+    /* 1.11.13 (#121): device CORNER for LOGIC-family components. CACTI's
+     * tables carry three logic corners -- hp (high performance), lstp (low
+     * standby power), lop (low operating power) -- and McPAT already selects
+     * between them via sys.device_type; the choice was simply never exposed,
+     * so every logic domain was priced hp. Default "hp" keeps that exactly.
+     *
+     * There is NO corner axis for the DRAM-periphery family, and that is a
+     * property of the DATA, not a decision: each table holds exactly ONE
+     * commodity-DRAM device column (lp-dram, the only alternative, is
+     * all-zero at 22 nm). A speed corner for HBM periphery or a mobile
+     * corner for LPDDR5 periphery cannot be derived from tables that do not
+     * contain them, so the request is refused there and says why. */
+    std::string device_corner = "hp";   // power.device_corner: hp|lstp|lop
     int  pe_imem_bytes = 4096;
     /* Datapath WIDTH is deliberately absent here. It already exists as
      * alu_operand_width (pim.pe.operand_width), which the timing model reads as
@@ -4530,7 +4543,33 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     mcfg.num_alus = ov_get_int("num_alus", mcfg.num_alus);
     mcfg.num_muls = ov_get_int("num_muls", mcfg.num_muls);
     mcfg.num_fpus = ov_get_int("num_fpus", mcfg.num_fpus);
-    mcfg.device_type = ov_get_int("device_type", 0);
+    /* 1.11.13 (#121): corner selection, refused where the data has no
+     * corners. The area-factor UNCERTAINTY BAND is printed beside the value
+     * in use: the linear pitch ratio is the conservative end of a band whose
+     * other end is the square of the same ratio. */
+    {
+        int corner = (config.device_corner == "lstp") ? 1
+                   : (config.device_corner == "lop")  ? 2 : 0;
+        if (mcfg.process_family == 1) {
+            if (corner != 0) {
+                std::cout << "  [tech] power.device_corner=" << config.device_corner
+                          << " refused for DRAM-periphery components: each CACTI "
+                             "table carries ONE commodity-DRAM device column, so "
+                             "no corner can be derived for it (lp-dram is "
+                             "all-zero at 22 nm). Priced at the single available "
+                             "device." << std::endl;
+                corner = 0;
+            }
+            double fa = (mcfg.dram_periph_table_nm == 32) ? 2.46 : 2.44;
+            std::cout << "  [tech] periphery area factor " << fa
+                      << "x (linear l_phy ratio) -- uncertainty band ["
+                      << fa << ", " << (fa * fa)
+                      << "]: the squared ratio is the pessimistic end, the "
+                         "linear one the conservative end, and the UPMEM die is "
+                         "the only silicon anchor between them." << std::endl;
+        }
+        mcfg.device_type = ov_get_int("device_type", corner);
+    }
     mcfg.longer_channel_device = ov_get_int("longer_channel_device", 1);
     mcfg.number_hardware_threads = ov_get_int("number_hardware_threads", 1);
     mcfg.interconnect_projection_type = ov_get_int("interconnect_projection_type", 0);
@@ -8856,6 +8895,18 @@ int main(int argc, char** argv) {
                     yaml_cfg["power"]["host_tech_node_nm"].as<int>(config.host_tech_node_nm);
             }
             // 1.11.2: subarray bitline-pitch area knob (default unity)
+            if (yaml_cfg["power"] && yaml_cfg["power"]["device_corner"]) {
+                config.device_corner =
+                    yaml_cfg["power"]["device_corner"].as<std::string>(config.device_corner);
+                if (config.device_corner != "hp" && config.device_corner != "lstp" &&
+                    config.device_corner != "lop") {
+                    std::cerr << "ERROR: power.device_corner '" << config.device_corner
+                              << "' is not a corner CACTI's tables carry. Valid: hp "
+                                 "(high performance), lstp (low standby power), lop "
+                                 "(low operating power)." << std::endl;
+                    std::exit(1);
+                }
+            }
             if (yaml_cfg["power"] && yaml_cfg["power"]["subarray_pitch_factor"]) {
                 config.subarray_pitch_factor =
                     yaml_cfg["power"]["subarray_pitch_factor"].as<double>(1.0);
