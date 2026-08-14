@@ -88,6 +88,12 @@ class Core : public GlobAlloc {
         g_string name;
 
     public:
+        /* 1.11.8 (#84): per-core active-phase tracker for power-gating
+         * residency. Touched on the instruction-retirement path in each
+         * core type's .cpp (which see zinfo); also marks the global
+         * anyCore tracker there, from which all-idle overlap derives. */
+        PhaseActivity pgAct;
+
         explicit Core(g_string& _name) : lastUpdateCycles(0), lastUpdateInstrs(0), name(_name) {}
 
         virtual uint64_t getInstrs() const = 0; // typically used to find out termination conditions or dumps

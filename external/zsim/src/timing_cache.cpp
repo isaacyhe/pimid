@@ -112,6 +112,11 @@ void TimingCache::initStats(AggregateStat* parentStat) {
 
 // TODO(dsm): This is copied verbatim from Cache. We should split Cache into different methods, then call those.
 uint64_t TimingCache::access(MemReq& req) {
+    /* 1.11.8 PG residency: mark the shared-cache tracker for L2+/LLC
+     * instances only (private L1s ride their core's tracker). Name-based
+     * level test matches this repo's cache naming (l2-*, l3-*, llc*). */
+    if (name.size() >= 2 && (name[0]=='l' && (name[1]=='2' || name[1]=='3')))
+        zinfo->pgres.sharedCache.touch(zinfo->numPhases);
     EventRecorder* evRec = zinfo->eventRecorders[req.srcId];
     assert_msg(evRec, "TimingCache is not connected to InOrderCore");
 

@@ -76,7 +76,8 @@ public:
     double getTerminationEnergyNJ() const;   // ODT/termination per 64B (DDR-class; HBM=0)
     // Override termination energy (pJ/bit; <0 = model default, 0 = force no termination).
     void setTerminationOverridePJPerBit(double v) { energy_term_override_pJ_per_bit_ = v; }
-    double getBackgroundPowerMW() const;     // per-device active standby + refresh
+    double getBackgroundPowerMW() const;
+    double getBackgroundEffectiveMW(double r_idle) const;  // 1.11.8: power-down descent     // per-device active standby + refresh
     double getRefreshPowerMW() const;        // per-device refresh component only
 
     // Configuration queries

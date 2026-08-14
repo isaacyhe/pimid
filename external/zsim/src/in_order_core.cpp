@@ -92,6 +92,12 @@ uint64_t InOrderCore::getPhaseCycles() const {
 void InOrderCore::initStats(AggregateStat* parentStat) {
     AggregateStat* coreStat = new AggregateStat();
     coreStat->init(name.c_str(), "Core stats");
+    {   // 1.11.8 PG residency: phases in which this core retired anything
+        ProxyStat* pgStat = new ProxyStat();
+        pgStat->init("pgActivePhases", "Phases with retirement (PG residency)",
+                     (uint64_t*)&pgAct.activePhases);
+        coreStat->append(pgStat);
+    }
 
     // Report cycles/instrs RELATIVE to the ROI baseline (roi_begin); roiBase* are
     // 0 until roi_begin, so non-ROI workloads are unaffected. cCycles (contention)
@@ -403,6 +409,7 @@ void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
     if (!decodeMode) {
         // Legacy IPC=1 immediate path (byte-identical A/B baseline).
         instrs += bblInfo->instrs;
+        { uint64_t _ph = zinfo->numPhases; pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); }  // 1.11.8 PG residency
         curCycle += bblInfo->instrs;
         Address endBblAddr = bblAddr + bblInfo->bytes;
         for (Address fetchAddr = bblAddr; fetchAddr < endBblAddr; fetchAddr += (1 << lineBits)) {
@@ -427,6 +434,7 @@ void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
     prevBbl = bblInfo;
 
     instrs += sim->instrs;
+        { uint64_t _ph = zinfo->numPhases; pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); }  // 1.11.8 PG residency
     bbls++;
 
     if (sim->oooBbl[0].uops > 0) {

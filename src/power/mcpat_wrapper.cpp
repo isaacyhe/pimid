@@ -663,6 +663,10 @@ void McPATWrapper::extractResults() {
         double gate = comp.power.readOp.gate_leakage;
         pm.subthreshold_leakage = (std::isfinite(sub)) ? sub : 0.0;   // 1.11.4: guarded like the peak path
         pm.gate_leakage         = (std::isfinite(gate)) ? gate : 0.0;
+        double pgl = long_channel
+            ? comp.power.readOp.power_gated_with_long_channel_leakage
+            : comp.power.readOp.power_gated_leakage;                   // 1.11.8
+        pm.power_gated_leakage = (std::isfinite(pgl)) ? pgl : 0.0;
         pm.total_leakage = pm.subthreshold_leakage + pm.gate_leakage;
         pm.total_dynamic = pm.runtime_dynamic;
         pm.total_power = pm.total_dynamic + pm.total_leakage;
@@ -814,6 +818,41 @@ void McPATWrapper::extractResults() {
         a0 = mcpat_l3_area_mm2_; mcpat_l3_area_mm2_ *= kAreaFactor;
         area_delta += mcpat_l3_area_mm2_ - a0;
         mcpat_total_area_mm2_ += area_delta;
+    }
+
+    /* 1.11.8 (#84): power-gating interpolation at the tool boundary.
+     * Endpoints are BOTH the tool's (active leakage and power_gated_leakage
+     * from the same McPAT/CACTI run); the measured residency r weights them:
+     * leak_eff = active*(1-r) + gated*r. Applied only to components the
+     * described design gates (pg flags); audit caveat carried: the tool's
+     * gated aggregate keeps active leakage for logic blocks without sleep-tx
+     * models, so savings are CONSERVATIVE. Under the DRAM-periphery family
+     * the gated endpoint is scaled by the same leakage factor as the active
+     * one (same silicon transform). */
+    {
+        auto applyPG = [&](ComponentType t, double r) {
+            if (r <= 0.0) return;
+            if (r > 1.0) r = 1.0;
+            PowerMetrics& pm = component_power_[t];
+            double active = pm.total_leakage;
+            double gated  = pm.power_gated_leakage;
+            if (config_.process_family == 1 && t == ComponentType::CORE) {
+                double leakF = (config_.dram_periph_table_nm == 32) ? 3.1e-6 : 1.0e-5;
+                gated *= leakF;
+            }
+            if (gated > active) gated = active;   // never a PG penalty
+            double eff = active * (1.0 - r) + gated * r;
+            double scale = (active > 0.0) ? eff / active : 1.0;
+            pm.subthreshold_leakage *= scale;
+            pm.gate_leakage         *= scale;
+            pm.total_leakage = pm.subthreshold_leakage + pm.gate_leakage;
+            pm.total_power   = pm.total_dynamic + pm.total_leakage;
+        };
+        if (pg_spec_.pg_core) applyPG(ComponentType::CORE, pg_spec_.r_core);
+        if (pg_spec_.pg_core) applyPG(ComponentType::L2_CACHE, pg_spec_.r_core);
+        if (pg_spec_.pg_core) applyPG(ComponentType::L3_CACHE, pg_spec_.r_core);
+        if (pg_spec_.pg_noc)  applyPG(ComponentType::NOC, pg_spec_.r_noc);
+        if (pg_spec_.pg_mc)   applyPG(ComponentType::MEMORY_CONTROLLER, pg_spec_.r_mc);
     }
 
     // System total
@@ -1220,7 +1259,13 @@ std::string McPATWrapper::generateXMLConfig() const {
      * carries clocking and control overhead; 0 would zero it, which is a
      * cheaper answer than the truth. */
     xml << "    <param name=\"opt_clockrate\" value=\"1\"/>\n";
-    xml << "    <param name=\"power_gating\" value=\"0\"/>\n";
+    /* 1.11.8: sys.power_gating enables McPAT/CACTI's sleep-transistor
+     * model so per-component power_gated_leakage endpoints are computed.
+     * Emitted only when the described design gates SOMETHING -- all-false
+     * keeps the XML byte-identical to 1.11.7. */
+    xml << "    <param name=\"power_gating\" value=\""
+        << ((pg_spec_.pg_core || pg_spec_.pg_noc || pg_spec_.pg_mc) ? 1 : 0)
+        << "\"/>\n";
     /* 1.9.32: datapath width. McPAT reads machine_bits ONLY to size the
      * datapath -- the integer and floating-point register widths, the load/store
      * queue entries, and the integer, multiply and floating-point bypass buses.

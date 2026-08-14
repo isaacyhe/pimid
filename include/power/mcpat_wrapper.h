@@ -39,6 +39,7 @@ public:
         // Dynamic power (W)
         double subthreshold_leakage;
         double gate_leakage;
+        double power_gated_leakage = 0.0;  // 1.11.8: tool's gated endpoint (W)
         double runtime_dynamic;
         double total_leakage;
         double total_dynamic;
@@ -111,6 +112,19 @@ public:
         double link_pj_per_bit = 0.0;
         int    link_clock_mhz = 0;   // 0 = legacy 350
     };
+
+    /* 1.11.8 (#84): per-component power gating. pg_* mark components the
+     * DESCRIBED DESIGN can gate (v7 spec: per-component flag, default
+     * false); r_* are measured idle residencies (1 - activePhases/phases).
+     * When any pg_* is set, sys.power_gating is emitted so McPAT/CACTI
+     * compute the sleep-transistor gated endpoint, and extraction
+     * interpolates leak_eff = active*(1-r) + gated*r per component.
+     * All false => XML and results identical to 1.11.7 (gate invariant). */
+    struct PGSpec {
+        bool pg_core = false, pg_noc = false, pg_mc = false;
+        double r_core = 0.0, r_noc = 0.0, r_mc = 0.0;
+    };
+    void setPGSpec(const PGSpec& s) { pg_spec_ = s; }
 
     /* 1.11.7: per-link-type transfer energy, pJ/bit, PHY/link share only
      * (McPAT's ctrl term prices the controller logic separately -- no
@@ -473,6 +487,7 @@ private:
     // family; the CoreBreakdown block weights are multiplied by this so the
     // printed split stays consistent with the scaled core total.
     double fam_core_power_ratio_ = 1.0;
+    PGSpec pg_spec_;   // 1.11.8
     double mcpat_l2_area_mm2_ = 0.0;
     double mcpat_l3_area_mm2_ = 0.0;
     double mcpat_noc_area_mm2_ = 0.0;

@@ -29,6 +29,10 @@ struct IDDSpec {
     double idd0, idd2n, idd3n, idd4r, idd4w, idd5; // mA (per device / per channel)
     double trfc_ns, trefi_ns;
     int    channels;                               // per-stack aggregation (HBM)
+    /* 1.11.8 (#84): precharge power-down current (CKE low, fast tXP exit) --
+     * the JEDEC descent state an idle controller actually enters. Same
+     * datasheet classes as the columns above. */
+    double idd2p;                                  // mA
 };
 
 // Per-tech datasheet/JESD IDD-class values (part-number classes in comments; see
@@ -37,14 +41,18 @@ struct IDDSpec {
 //   DDR3  Micron 4Gb DDR3L-1600 (1.35);     LPDDR5 Micron 12Gb LPDDR5-6400 (1.05);
 //   GDDR6 Micron 8Gb GDDR6-14000 (1.35);    HBM2 JESD235 (1.2); HBM3 JESD238 (1.1).
 inline IDDSpec iddFor(const std::string& tech) {
-    if (tech == "DDR5")   return {1.1, 55,34,42,148,168,120, 295.0, 3900.0, 1};
-    if (tech == "DDR4")   return {1.2, 58,35,42,140,150,155, 350.0, 7800.0, 1};
-    if (tech == "DDR3")   return {1.35,60,32,45,175,180,210, 260.0, 7800.0, 1};
-    if (tech == "LPDDR5") return {1.05,32,18,24,110,120, 90, 210.0, 3904.0, 1};
-    if (tech == "GDDR6")  return {1.35,70,45,60,210,230,180, 220.0, 1900.0, 1};
-    if (tech == "HBM3")   return {1.1, 30,18,22, 90,100, 70, 160.0, 3900.0, 16};
-    if (tech == "HBM2")   return {1.2, 28,17,21, 80, 90, 65, 160.0, 3900.0, 8};
-    return {1.2, 58,35,42,140,150,155, 350.0, 7800.0, 1};  // unknown -> DDR4 class
+    /* idd2p (last column) from the same part-number classes: DDR5-4800 ~20mA,
+     * DDR4-2400 ~25 (IDD2P fast-exit), DDR3L ~18, LPDDR5 ~4 (deep mobile
+     * power-down class), GDDR6 ~30, HBM2/3 ~30-40% of IDD2N per JESD
+     * precharge-standby-powerdown deltas. */
+    if (tech == "DDR5")   return {1.1, 55,34,42,148,168,120, 295.0, 3900.0, 1, 20};
+    if (tech == "DDR4")   return {1.2, 58,35,42,140,150,155, 350.0, 7800.0, 1, 25};
+    if (tech == "DDR3")   return {1.35,60,32,45,175,180,210, 260.0, 7800.0, 1, 18};
+    if (tech == "LPDDR5") return {1.05,32,18,24,110,120, 90, 210.0, 3904.0, 1,  4};
+    if (tech == "GDDR6")  return {1.35,70,45,60,210,230,180, 220.0, 1900.0, 1, 30};
+    if (tech == "HBM3")   return {1.1, 30,18,22, 90,100, 70, 160.0, 3900.0, 16, 7};
+    if (tech == "HBM2")   return {1.2, 28,17,21, 80, 90, 65, 160.0, 3900.0, 8,  7};
+    return {1.2, 58,35,42,140,150,155, 350.0, 7800.0, 1, 25};  // unknown -> DDR4 class
 }
 
 // Array read energy per 64B (act+col, 50% row-hit collapse). bank_override_pJ_per_byte
@@ -106,6 +114,25 @@ inline double refreshMW(const std::string& tech) {
 inline double backgroundMW(const std::string& tech) {
     IDDSpec s = iddFor(tech);
     return s.vdd * s.idd3n + refreshMW(tech);
+}
+
+/* 1.11.8 (#84): background power under power-down descent. During measured
+ * no-traffic residency r_idle the device sits in precharge power-down
+ * (IDD2P, CKE low) instead of active standby; refresh continues in ALL
+ * states (DRAM must retain). A tXP-scale hysteresis discount derates the
+ * idle fraction so few-cycle gaps are not credited: phases are 10k cycles,
+ * tXP is ~10ns, so entry/exit overhead within a genuinely idle phase is
+ * <1% -- the derate factor 0.99 states it rather than ignoring it.
+ * r_idle=0 reproduces backgroundMW exactly (PG-off invariant). */
+inline double backgroundEffectiveMW(const std::string& tech, double r_idle) {
+    if (r_idle <= 0.0) return backgroundMW(tech);
+    if (r_idle > 1.0) r_idle = 1.0;
+    IDDSpec s = iddFor(tech);
+    const double kHysteresisDerate = 0.99;
+    double r = r_idle * kHysteresisDerate;
+    double standby_mw  = s.vdd * s.idd3n;
+    double pd_mw       = s.vdd * s.idd2p;
+    return standby_mw * (1.0 - r) + pd_mw * r + refreshMW(tech);
 }
 
 } // namespace pimid_energy

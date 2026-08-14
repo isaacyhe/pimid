@@ -395,6 +395,14 @@ struct ZSimParsedOutput {
     uint64_t xing_d2h_bytes = 0;
     uint64_t xing_count = 0;
     uint64_t xing_flush_bytes = 0;
+    /* 1.11.8 (#84): PG residency (latch-last root scalars + per-group
+     * per-core sums). r_idle = 1 - activePhases/phases at consumption. */
+    uint64_t pg_anycore_active = 0;
+    uint64_t pg_sharedcache_active = 0;
+    uint64_t pg_noc_active = 0;
+    uint64_t pg_hostmc_active = 0;
+    uint64_t pg_devmc_active = 0;
+    uint64_t phases = 0;
     /* 1.9.29: per-node measured counters. Everything below this comment that is
      * NOT inside `host`/`dev` is an ALL-NODES total, kept for the device-SCOPE
      * path (runPowerAnalysis), which simulates one node and is correct as-is.
@@ -409,6 +417,7 @@ struct ZSimParsedOutput {
      * 5.2M -- fewer uops than instructions, and a 0.4% branch rate. Each node
      * needs its OWN measured counters, so they live here as a set. */
     struct GroupCounters {
+        uint64_t pgActivePhases = 0;  // 1.11.8: sum of per-core PG activity
         uint64_t instrs = 0;
         /* 1.9.33: of `instrs`, the portion that is injected timing charges
          * (coherence flush, kernel launch, barrier latency) rather than executed
@@ -793,6 +802,12 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
                 else if (key == "xingD2HBytes") { out.xing_d2h_bytes = val; }
                 else if (key == "xingCount") { out.xing_count = val; }
                 else if (key == "xingFlushBytes") { out.xing_flush_bytes = val; }
+                else if (key == "pgAnyCoreActivePhases") { out.pg_anycore_active = val; }
+                else if (key == "pgSharedCacheActivePhases") { out.pg_sharedcache_active = val; }
+                else if (key == "pgNocActivePhases") { out.pg_noc_active = val; }
+                else if (key == "pgHostMCActivePhases") { out.pg_hostmc_active = val; }
+                else if (key == "pgDevMCActivePhases") { out.pg_devmc_active = val; }
+                else if (key == "phase") { out.phases = val; }
                 else if (key == "syntheticInstrs") {
                     out.syntheticInstrs += val; if (grp) grp->syntheticInstrs += val;
                 }
@@ -805,6 +820,11 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
                     out.indirBranches += val; if (grp) grp->indirBranches += val;
                 } else if (key == "rasReturns") {
                     out.rasReturns += val; if (grp) grp->rasReturns += val;
+                } else if (key == "pgActivePhases") {
+                    /* 1.11.8: per-core PG residency, summed per group; each
+                     * PE's own residency = its stat / phases, and the group
+                     * MEAN residency = sum / (numCores*phases). */
+                    if (grp) grp->pgActivePhases += val;
                 }
 
                 // 1.9.10: contention-inclusive per-group wall-clock cycles.
@@ -1264,6 +1284,11 @@ struct UnifiedConfig {
     double pcie_bandwidth_GBs = 63.0;     // peak unidirectional throughput
     int pcie_num_lanes = 16;              // lane count (also feeds McPAT num_channels)
     double pcie_pj_per_bit_override = -1.0;  // 1.11.7: user pJ/bit for unknown link types (printed)
+    /* 1.11.8 (#84): per-component power-gating flags (v7 spec). Default
+     * FALSE: a config with no pg: keys is bit-identical to 1.11.7. */
+    bool pg_pe = false;    // pim.pe.pg      (PE cores + their caches)
+    bool pg_noc = false;   // noc.pg         (device tree fabric)
+    bool pg_mc = false;    // pim.mc.pg      (device MCs; also DRAM power-down)
     std::string pcie_model = "simple";    // "simple" or "md1" for PCIe timing model
     // Host<->device link technology. Selects preset latency/BW/overhead unless
     // the user overrides them. "interposer" = 2.5D silicon interposer (UCIe-class
@@ -4278,6 +4303,41 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     // YAML overrides for McPAT derived parameters
     const std::map<std::string, double>& overrides = config.mcpat_overrides;
 
+    /* 1.11.8 (#84): per-component PG residencies from the run's measured
+     * activity (r = 1 - activePhases/phases; phases from zsim.out). PE
+     * residency uses the device group's per-core mean so N idle PEs and
+     * one busy PE weight correctly. Flags off => spec all-false =>
+     * bit-identical path (gate invariant). */
+    pimid::McPATWrapper::PGSpec pgspec;
+    {
+        double ph = static_cast<double>(zsim_stats.phases);
+        if (ph > 0.0 && (config.pg_pe || config.pg_noc || config.pg_mc)) {
+            if (config.pg_pe && config.num_pes > 0) {
+                double meanActive = static_cast<double>(zsim_stats.dev.pgActivePhases)
+                                    / (config.num_pes * ph);
+                pgspec.pg_core = true;
+                pgspec.r_core = 1.0 - std::min(1.0, meanActive);
+            }
+            if (config.pg_noc) {
+                pgspec.pg_noc = true;
+                pgspec.r_noc = 1.0 - std::min(1.0,
+                    static_cast<double>(zsim_stats.pg_noc_active) / ph);
+            }
+            if (config.pg_mc) {
+                pgspec.pg_mc = true;
+                pgspec.r_mc = 1.0 - std::min(1.0,
+                    static_cast<double>(zsim_stats.pg_devmc_active) / ph);
+            }
+            std::cout << "  [pg] residencies (idle fraction): "
+                      << (pgspec.pg_core ? ("pe=" + std::to_string(pgspec.r_core) + " ") : "pe=none(by design) ")
+                      << (pgspec.pg_noc ? ("noc=" + std::to_string(pgspec.r_noc) + " ") : "noc=none(by design) ")
+                      << (pgspec.pg_mc ? ("mc=" + std::to_string(pgspec.r_mc)) : "mc=none(by design)")
+                      << "  [all-idle overlap="
+                      << (1.0 - std::min(1.0, static_cast<double>(zsim_stats.pg_anycore_active) / ph))
+                      << " -- shared-domain comparison]" << std::endl;
+        }
+    }
+
     // ── Device McPAT ──
     McPAT::SystemConfig mcfg;
     mcfg.num_cores = config.num_pes;
@@ -4452,6 +4512,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     }
 
     McPAT mcpat(mcfg);
+    mcpat.setPGSpec(pgspec);   // 1.11.8
 
     /* Device profile.
      * 1.9.37: the out-of-order case was MISSING here. This path had only
@@ -4771,7 +4832,24 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             bool crosses_dq = (config.pe_hierarchy_level >= 4 ||
                                config.pe_hierarchy_level == -1);  // RANK+ or HOST_MC
             double iface_energy = crosses_dq ? ram_oracle.getTerminationEnergyNJ() : 0.0;
-            double bg_power_mw = ram_oracle.getBackgroundPowerMW();
+            /* 1.11.8: with pim.mc.pg the idle controller descends the DRAM
+             * into precharge power-down (IDD2P) during measured no-traffic
+             * residency; refresh always continues. Without the flag (or with
+             * zero phases) this is exactly getBackgroundPowerMW(). */
+            double mc_r_idle = 0.0;
+            if (config.pg_mc && zsim_stats.phases > 0) {
+                mc_r_idle = 1.0 - std::min(1.0,
+                    static_cast<double>(zsim_stats.pg_devmc_active)
+                        / static_cast<double>(zsim_stats.phases));
+            }
+            double bg_power_mw = ram_oracle.getBackgroundEffectiveMW(mc_r_idle);
+            if (mc_r_idle > 0.0) {
+                std::cout << "  [pg] DRAM power-down: idle residency "
+                          << mc_r_idle << " -> background "
+                          << ram_oracle.getBackgroundPowerMW() << " -> "
+                          << bg_power_mw << " mW/device (IDD2P descent, "
+                             "refresh always on)" << std::endl;
+            }
             double ref_energy = ram_oracle.getRefreshPowerMW();  // per-device mW
             double leakage_mw = bg_power_mw;
 
@@ -4956,6 +5034,24 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             double rd_energy = nvsim.getReadDynamicEnergy();  // per-access (one bank)
             double wr_energy = nvsim.getWriteDynamicEnergy();
             double leakage = nvsim.getLeakagePower() * config.num_banks;  // device = num_banks banks
+            /* 1.11.8: NVM periphery gates RETENTION-FREE -- non-volatile
+             * cells hold state unpowered, so with pim.mc.pg the array
+             * periphery leakage collapses toward the sleep-transistor floor
+             * (~2% of active, the CACTI-class sleep-tx residual) during
+             * measured no-traffic residency. The one place PG is free. */
+            if (config.pg_mc && zsim_stats.phases > 0) {
+                double r_idle = 1.0 - std::min(1.0,
+                    static_cast<double>(zsim_stats.pg_devmc_active)
+                        / static_cast<double>(zsim_stats.phases));
+                if (r_idle > 0.0) {
+                    const double kSleepTxFloor = 0.02;
+                    double before = leakage;
+                    leakage = leakage * (1.0 - r_idle) + leakage * kSleepTxFloor * r_idle;
+                    std::cout << "  [pg] NVM retention-free gating: idle residency "
+                              << r_idle << " -> periphery leakage " << before
+                              << " -> " << leakage << " mW" << std::endl;
+                }
+            }
             double area = nvsim.getArea() * config.num_banks;
 
             double total_rd_nj = rd_energy * zsim_stats.mem_rd;
@@ -7789,6 +7885,7 @@ int main(int argc, char** argv) {
                         config.pe_type = yaml_cfg["pim"]["pe"]["core_type"].as<std::string>();
                     else
                         config.pe_type = yaml_cfg["pim"]["pe"]["type"].as<std::string>(config.pe_type);
+                    config.pg_pe = yaml_cfg["pim"]["pe"]["pg"].as<bool>(config.pg_pe);  // 1.11.8
                     // Normalize pe_type aliases
                     if (config.pe_type == "OOO" || config.pe_type == "OoO" ||
                         config.pe_type == "ooo" || config.pe_type == "out-of-order")
@@ -7967,6 +8064,7 @@ int main(int argc, char** argv) {
                 }
                 // PE-MI distributed memory interface config
                 if (yaml_cfg["pim"]["mc"]) {
+                    config.pg_mc = yaml_cfg["pim"]["mc"]["pg"].as<bool>(config.pg_mc);  // 1.11.8
                     config.pe_mc_enabled = true;
                     auto mc = yaml_cfg["pim"]["mc"];
                     config.pe_mc_type = mc["type"].as<std::string>(config.pe_mc_type);
@@ -8119,6 +8217,7 @@ int main(int argc, char** argv) {
 
             // Load NoC configuration
             if (yaml_cfg["noc"]) {
+                config.pg_noc = yaml_cfg["noc"]["pg"].as<bool>(config.pg_noc);  // 1.11.8
                 if (yaml_cfg["noc"]["topology"]) config.noc_topology_user_set = true;
                 config.noc_topology = yaml_cfg["noc"]["topology"].as<std::string>(config.noc_topology);
                 std::transform(config.noc_topology.begin(), config.noc_topology.end(),

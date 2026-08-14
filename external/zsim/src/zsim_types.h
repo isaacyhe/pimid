@@ -31,4 +31,18 @@ typedef uint64_t Address;
 #define FALSE 0
 #endif
 
+/* 1.11.8 (#84): active-phase tracker for power-gating residency. Touched on
+ * an object's own event path (one compare+branch); CAS keeps shared trackers
+ * race-safe (a lost race undercounts one phase, negligible). */
+struct PhaseActivity {
+    volatile uint64_t activePhases = 0;
+    volatile uint64_t lastActivePhase = ~0ull;
+    inline void touch(uint64_t ph) {
+        uint64_t last = lastActivePhase;
+        if (last == ph) return;
+        if (__sync_bool_compare_and_swap(&lastActivePhase, last, ph))
+            __sync_fetch_and_add(&activePhases, 1);
+    }
+};
+
 #endif  // ZSIM_TYPES_H_

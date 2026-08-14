@@ -32,6 +32,7 @@
 #include "debug.h"
 #include "locks.h"
 #include "pad.h"
+#include "zsim_types.h"   // 1.11.8: PhaseActivity
 
 class Core;
 class Scheduler;
@@ -415,6 +416,20 @@ struct GlobSimInfo {
         volatile uint64_t count = 0;       // discrete crossings (all types)
         volatile uint64_t flushBytes = 0;  // coherence-flush footprint bytes
     } xing;
+
+    /* 1.11.8 (#84): per-object ACTIVE-PHASE marking for power-gating
+     * residency. Each object touches its tracker on its own event path
+     * (cores at BBL retire, shared caches at access, NoC at injection,
+     * MCs at request); idle residency = 1 - activePhases/numPhases at
+     * dump. One compare+branch per event; CAS keeps shared trackers
+     * race-safe (a lost race undercounts one phase, negligible). */
+    struct {
+        PhaseActivity anyCore;   // any core active -> all-idle overlap derives
+        PhaseActivity sharedCache;
+        PhaseActivity noc;
+        PhaseActivity hostMC;
+        PhaseActivity devMC[64];  // per-channel grand MCs (device)
+    } pgres;
 
     // Kernel LAUNCH cost tree (1.7.3, HANDOFF ISSUE 2). The host launches a
     // device kernel at the offload doorbell (co-sim roi_begin / WORK_BEGIN).

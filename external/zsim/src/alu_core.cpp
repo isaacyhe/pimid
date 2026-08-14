@@ -59,6 +59,12 @@ uint64_t ALUCore::getPhaseCycles() const {
 void ALUCore::initStats(AggregateStat* parentStat) {
     AggregateStat* coreStat = new AggregateStat();
     coreStat->init(name.c_str(), "Core stats");
+    {   // 1.11.8 PG residency: phases in which this core retired anything
+        ProxyStat* pgStat = new ProxyStat();
+        pgStat->init("pgActivePhases", "Phases with retirement (PG residency)",
+                     (uint64_t*)&pgAct.activePhases);
+        coreStat->append(pgStat);
+    }
 
     // Report cycles/instrs RELATIVE to the ROI baseline (roi_begin), so serial
     // pre-ROI init/setup on the launcher PE is excluded from the kernel metric.
@@ -116,6 +122,7 @@ void ALUCore::join() {
 // Basic block execution - only ALU operations, NO memory
 inline void ALUCore::bbl(BblInfo* bblInfo) {
     instrs += bblInfo->instrs;
+        { uint64_t _ph = zinfo->numPhases; pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); }  // 1.11.8 PG residency
 
     // Datapath mode: bit-serial charges ~W bit-steps per op (cost proportional to
     // operand width, W-bit op = W single-bit steps); bit-parallel (default) charges

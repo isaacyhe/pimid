@@ -471,6 +471,9 @@ double RamulatorWrapper::getRefreshPowerMW() const {
 double RamulatorWrapper::getBackgroundPowerMW() const {
     return Ramulator::pimid_energy::backgroundMW(dram_type_);
 }
+double RamulatorWrapper::getBackgroundEffectiveMW(double r_idle) const {
+    return Ramulator::pimid_energy::backgroundEffectiveMW(dram_type_, r_idle);  // 1.11.8
+}
 
 void RamulatorWrapper::updateEnergyMetrics() const {
     if (current_cycle_ == last_energy_update_ && last_energy_update_ != 0) {

@@ -7,6 +7,36 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.8 -- power gating: one flag per component, physics per technology
+
+#84, to the spec converged interactively (v7): NO global switch, NO
+granularity knob -- the entire config surface is a per-component pg:
+true/false at initialization (pim.pe.pg, noc.pg, pim.mc.pg; default
+false, so a config with no pg: keys is bit-identical to 1.11.7, enforced
+at the XML level). Residency is measured per component where its events
+happen (active-phase marking: cores at retirement, shared caches at
+access, the fabric at injection, MCs at request -- one compare+branch
+per event, exported through zsim's stats tree), and each gated
+component's effective leakage is the tool-certified interpolation
+leak_eff = active*(1-r) + gated*r: the gated endpoint is McPAT/CACTI's
+own sleep-transistor power_gated_leakage (dead plumbing repaired -- the
+enable never reached CACTI before), DRAM descends its JEDEC ladder
+(IDD2P precharge power-down during MC no-traffic residency, refresh
+always on, tXP hysteresis stated as a 0.99 derate), and NVM periphery
+gates retention-free to a 2% sleep-transistor floor (non-volatile cells
+hold state unpowered -- the one place PG is free). Penalty accounting,
+verified empirically at the gate rather than assumed: the sleep-
+transistor LEAKAGE endpoints respond to the enable (gated != active !=
+zero), but CACTI-P's sleep-transistor AREA overhead does NOT engage in
+the vendored path -- pg-on and pg-off areas are byte-identical -- so
+area overhead joins wake latency and entry/exit energy on the stated
+unmodelled list (all bounded, all printed; revisit post-v2). The report prints per-component
+active/gated/residency/effective plus the all-idle shared-domain
+comparison line.
+
+DATA IMPACT: none without pg: keys (bit-identical); with them, leakage
+and DRAM background only. Timing untouched in all cases.
+
 ## 1.11.7 -- crossings are counted, and the link is priced from them
 
 #85, co-sim half -- the audit's largest sheet (10 blockers). The plugin now

@@ -95,12 +95,14 @@ uint64_t SimpleMemory::access(MemReq& req) {
             profReads.atomicInc();
             profTotalRdLat.atomicInc(curLatency);
             __sync_fetch_and_add(&curPhaseAccesses, 1);
+            zinfo->pgres.hostMC.touch(zinfo->numPhases);  // 1.11.8 PG residency
             *req.state = req.is(MemReq::NOEXCL)? S : E;
             break;
         case GETX:
             profReads.atomicInc();
             profTotalRdLat.atomicInc(curLatency);
             __sync_fetch_and_add(&curPhaseAccesses, 1);
+            zinfo->pgres.hostMC.touch(zinfo->numPhases);  // 1.11.8 PG residency
             *req.state = M;
             break;
 

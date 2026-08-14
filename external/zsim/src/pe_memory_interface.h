@@ -445,6 +445,14 @@ public:
     uint64_t access(MemReq& req) override {
         if (req.type == GETS) DqMix::reads.fetch_add(1, std::memory_order_relaxed);
         else                  DqMix::writes.fetch_add(1, std::memory_order_relaxed);
+        /* 1.11.8 PG residency: every device memory access rides the device
+         * MC path and injects into the tree fabric, so this one site marks
+         * both trackers. devMC[0] carries the aggregate device-MC activity
+         * (per-channel split is a refinement once channel ids are surfaced
+         * here -- stated, not hidden). */
+        { uint64_t _ph = zinfo->numPhases;
+          zinfo->pgres.devMC[0].touch(_ph);
+          zinfo->pgres.noc.touch(_ph); }
         // Update coherence state
         switch (req.type) {
             case PUTS: case PUTX: *req.state = I; break;

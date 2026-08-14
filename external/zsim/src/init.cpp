@@ -1697,6 +1697,29 @@ static void InitGlobalStats() {
     xFlush->init("xingFlushBytes", "Coherence-flush footprint bytes crossed",
                  (uint64_t*)&zinfo->xing.flushBytes);
     zinfo->rootStat->append(xFlush);
+
+    // 1.11.8 (#84): PG residency trackers -> zsim.out root scalars.
+    // Idle residency derives at consumption: r = 1 - activePhases/phase.
+    ProxyStat* pgAny = new ProxyStat();
+    pgAny->init("pgAnyCoreActivePhases", "Phases with >=1 core retiring",
+                (uint64_t*)&zinfo->pgres.anyCore.activePhases);
+    zinfo->rootStat->append(pgAny);
+    ProxyStat* pgSC = new ProxyStat();
+    pgSC->init("pgSharedCacheActivePhases", "Phases with >=1 shared-cache access",
+               (uint64_t*)&zinfo->pgres.sharedCache.activePhases);
+    zinfo->rootStat->append(pgSC);
+    ProxyStat* pgNoc = new ProxyStat();
+    pgNoc->init("pgNocActivePhases", "Phases with >=1 fabric injection",
+                (uint64_t*)&zinfo->pgres.noc.activePhases);
+    zinfo->rootStat->append(pgNoc);
+    ProxyStat* pgHMC = new ProxyStat();
+    pgHMC->init("pgHostMCActivePhases", "Phases with >=1 host-MC access",
+                (uint64_t*)&zinfo->pgres.hostMC.activePhases);
+    zinfo->rootStat->append(pgHMC);
+    ProxyStat* pgDMC = new ProxyStat();
+    pgDMC->init("pgDevMCActivePhases", "Phases with >=1 device-MC access",
+                (uint64_t*)&zinfo->pgres.devMC[0].activePhases);
+    zinfo->rootStat->append(pgDMC);
 }
 
 
