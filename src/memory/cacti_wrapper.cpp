@@ -319,6 +319,64 @@ double CACTIWrapper::getArea() const {
     return cacti_result_->area / 1e6;  // CACTI native um^2 -> mm^2
 }
 
+/* 1.11.14 (#122): the JEDEC calibration, moved INSIDE the tool that owns the
+ * array model. It used to be computed by the caller in main.cpp, at two sites,
+ * with the density and generation tables living there too -- model logic in
+ * the orchestrator, which the borders rule forbids.
+ *
+ * The scope gate is the whole point. McPAT links this same library; a DRAM
+ * vendor-density factor applied to its cache and register-file queries would
+ * be nonsense. So calibration requires BOTH a commodity-DRAM main-memory
+ * query AND a named technology, and anything else returns raw CACTI
+ * unchanged. */
+double CACTIWrapper::vendorDieDensity(const std::string& tech) {
+    if (tech == "DDR3")   return 45.0;   // 2Gb/~5.5mm^2
+    if (tech == "DDR4")   return 90.0;   // 8Gb/~11mm^2
+    if (tech == "DDR5")   return 165.0;  // 16Gb/~12mm^2
+    if (tech == "LPDDR5") return 180.0;
+    if (tech == "GDDR6")  return 200.0;
+    if (tech == "HBM2")   return 350.0;
+    if (tech == "HBM3")   return 450.0;
+    return 90.0;                          // default: DDR4-class
+}
+
+int CACTIWrapper::generationTableNm(const std::string& tech) {
+    return (tech == "DDR3") ? 32 : 22;
+}
+
+const char* CACTIWrapper::generationClass(const std::string& tech) {
+    if (tech == "DDR3")   return "3x/2x";
+    if (tech == "DDR4")   return "1x";
+    if (tech == "DDR5")   return "1a";
+    if (tech == "LPDDR5") return "1a";
+    if (tech == "GDDR6")  return "1y/1z";
+    if (tech == "HBM2")   return "1y";
+    if (tech == "HBM3")   return "1a/1b";
+    return "1x";
+}
+
+CACTIWrapper::CalibratedArea CACTIWrapper::getCalibratedDieArea() const {
+    CalibratedArea out;
+    out.raw_mm2 = getArea();
+    out.area_mm2 = out.raw_mm2;
+    if (!valid_ || out.raw_mm2 <= 0.0) return out;
+    /* THE SCOPE GATE: commodity-DRAM main memory, with a technology named.
+     * Every SRAM/cache/RF/TLB query -- i.e. everything McPAT asks -- fails
+     * this and leaves with raw CACTI. */
+    if (config_.cell_type != COMM_DRAM || !config_.is_main_memory ||
+        config_.memory_tech.empty()) {
+        return out;
+    }
+    double chip_mbit = static_cast<double>(config_.capacity_bytes) * 8.0
+                     / (1024.0 * 1024.0);
+    double jedec_ref = (chip_mbit / vendorDieDensity(config_.memory_tech)) * 1.12;
+    if (!(jedec_ref > 0.0)) return out;
+    out.k = jedec_ref / out.raw_mm2;
+    out.area_mm2 = out.raw_mm2 * out.k;
+    out.calibrated = true;
+    return out;
+}
+
 double CACTIWrapper::getDynamicReadEnergy() const {
     if (!valid_ || !cacti_result_) return 0.0;
     // CACTI returns energy in nJ

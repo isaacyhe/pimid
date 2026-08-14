@@ -7,6 +7,42 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.14 -- the calibration moves into the tool it calibrates
+
+The border cleanup. The JEDEC k-calibration (1.11.1) was computed by the
+caller: PIMID held the vendor-density table, the generation map and the
+arithmetic, and applied them to CACTI's output at two separate call sites.
+That is model logic in the orchestrator, which the borders rule forbids and
+which had already produced one duplicated code path (1.11.9's system-scope
+helper). Density, generation map and calibration now live inside the CACTI
+fork; both call sites describe the array and ask
+CACTIWrapper::getCalibratedDieArea().
+
+The scope gate is the substance, not the packaging. McPAT links this SAME
+cacti7 library and issues thousands of cache, register-file and TLB queries
+through it -- a DRAM vendor-density factor reaching those would be a
+category error with no symptom until someone checked an L2 area. So
+calibration requires BOTH a commodity-DRAM main-memory query AND a named
+technology; every other query returns raw CACTI, byte-identical to before.
+The gate proves it with an SRAM cell rather than asserting it.
+
+Two runs still happen for a calibrated die, and that is the model rather
+than an artefact: k is defined against the PRESET organisation while the
+reported die is the EFFECTIVE one, so reconfiguring banks moves the area by
+CACTI's structural derivative around a vendor-anchored point.
+
+Gate 1124 (mi100): HBM3 die line character-identical (40.78 mm^2/die,
+k=0.054, raw CACTI 755.76) and DDR5 likewise (13.90, k=0.538) -- the
+migration is numerically inert across technologies with very different k.
+The leak arm: non-DRAM area identical (13 mm^2 both) and a DETERMINISTIC
+1-PE SRAM cell identical in power and area (0.4 W, 7.1 mm^2). The
+16-PE SRAM cell's power is not reproducible across jobs for the SAME
+binary -- 3.2 W in gate 1123, 3.3 W here, unchanged 1.11.13 both times --
+so that arm now asserts area identity plus a deterministic power cell,
+which is what can actually be asserted.
+
+DATA IMPACT: none. Same model, same numbers, computed where it belongs.
+
 ## 1.11.13 -- corners exist where the tables have them, and nowhere else
 
 #121 asked for a per-technology corner axis: a speed corner for GDDR6 and

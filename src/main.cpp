@@ -4109,21 +4109,6 @@ static GarnetParsedStats parseGarnetStatsFile(const std::string& path) {
     return stats;
 }
 
-/**
- * JEDEC die density table (Mbit/mm²) for DRAM area estimation.
- * Values from published datasheets (Micron/Samsung/SK Hynix).
- */
-static double getDRAMDieDensity(const std::string& tech) {
-    if (tech == "DDR3")   return 45.0;   // 2Gb/~5.5mm²
-    if (tech == "DDR4")   return 90.0;   // 8Gb/~11mm²
-    if (tech == "DDR5")   return 165.0;  // 16Gb/~12mm²
-    if (tech == "LPDDR5") return 180.0;
-    if (tech == "GDDR6")  return 200.0;
-    if (tech == "HBM2")   return 350.0;
-    if (tech == "HBM3")   return 450.0;
-    return 90.0;  // default: DDR4-class
-}
-
 /* 1.11.2: a DRAM die has NO free process-node knob. Its process is a
  * consequence of the technology generation (vendors speak in derived classes
  * -- 1x/1y/1z/1a/1b -- not nanometers), so power.tech_node_nm must not reach
@@ -4135,14 +4120,11 @@ static double getDRAMDieDensity(const std::string& tech) {
  * JEDEC k-calibration's job (1.11.1), which divides the table choice out. */
 struct DRAMGenClass { const char* cls; int cacti_table_nm; };
 static DRAMGenClass getDRAMGenClass(const std::string& tech) {
-    if (tech == "DDR3")   return {"3x/2x", 32};
-    if (tech == "DDR4")   return {"1x",    22};
-    if (tech == "DDR5")   return {"1a",    22};
-    if (tech == "LPDDR5") return {"1a",    22};
-    if (tech == "GDDR6")  return {"1y/1z", 22};
-    if (tech == "HBM2")   return {"1y",    22};
-    if (tech == "HBM3")   return {"1a/1b", 22};
-    return {"1x", 22};  // default: DDR4-class, matches the density default
+    /* 1.11.14 (borders rule): the generation map moved into the CACTI fork
+     * with the calibration it serves; this is a thin read of the tool's
+     * tables so callers keep their shape. */
+    return { pimid::CACTIWrapper::generationClass(tech),
+             pimid::CACTIWrapper::generationTableNm(tech) };
 }
 
 /**
@@ -5070,17 +5052,19 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                  * figure; under reconfiguration it moves by CACTI's structural
                  * derivative. k is printed, so a calibrated number can never be
                  * mistaken for a raw tool output. */
-                double jedec_ref;
-                {
-                    double density = getDRAMDieDensity(config.memory_tech);
-                    double chip_mbit = (double)chip_bytes * 8.0 / (1024.0*1024.0);
-                    jedec_ref = (chip_mbit / density) * 1.12;   // 1.12: spine/pad overhead
-                }
-                // Reference run: the PRESET organisation (oracle values, no overrides)
-                pimid::CACTIWrapper cacti_ref(dram_cfg);
+                /* 1.11.14 (#122, borders rule): the k-calibration MOVED INTO
+                 * the CACTI fork. Two runs still happen because the CALIBRATION
+                 * is defined against the preset organisation while the reported
+                 * die is the effective one -- that is the model, and it stays.
+                 * What left is the arithmetic and the vendor-density table:
+                 * both now live in the tool, where the scope gate also keeps
+                 * them away from every cache query McPAT sends through the same
+                 * library. */
+                auto ref_cfg = dram_cfg;
+                ref_cfg.memory_tech = config.memory_tech;   // opens calibration
+                pimid::CACTIWrapper cacti_ref(ref_cfg);
                 cacti_ref.initialize();
-                // Effective run: the organisation this simulation actually models
-                auto eff_cfg = dram_cfg;
+                auto eff_cfg = ref_cfg;
                 {
                     int bpb = (config.banks_per_bg_override > 0)
                               ? config.banks_per_bg_override
@@ -5092,18 +5076,20 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                 }
                 pimid::CACTIWrapper cacti_eff(eff_cfg);
                 cacti_eff.initialize();
-                if (cacti_ref.isValid() && cacti_eff.isValid() &&
-                    cacti_ref.getArea() > 0.0) {
-                    double k = jedec_ref / cacti_ref.getArea();
-                    double die_area = cacti_eff.getArea() * k;
+                auto ca_ref = cacti_ref.getCalibratedDieArea();
+                if (ca_ref.calibrated && cacti_eff.isValid() &&
+                    cacti_eff.getArea() > 0.0) {
+                    double die_area = cacti_eff.getArea() * ca_ref.k;
                     std::cout << "  Area:            " << std::fixed << std::setprecision(2)
                               << die_area << " mm^2/die (CACTI x k, k="
-                              << std::setprecision(3) << k
+                              << std::setprecision(3) << ca_ref.k
                               << " JEDEC-calibrated; raw CACTI "
                               << std::setprecision(2) << cacti_eff.getArea()
                               << ")" << std::endl;
                 } else {
-                    double die_area = jedec_ref;
+                    double chip_mbit = (double)chip_bytes * 8.0 / (1024.0*1024.0);
+                    double die_area = (chip_mbit /
+                        pimid::CACTIWrapper::vendorDieDensity(config.memory_tech)) * 1.12;
                     std::cout << "  Area:            " << std::fixed << std::setprecision(2)
                               << die_area << " mm^2/die (JEDEC density fallback)"
                               << std::endl;
@@ -5365,6 +5351,12 @@ static void runPowerAnalysis(const UnifiedConfig& config,
  * tool call -- this helper is the seam that migration will use. */
 static double computeDramDieAreaMM2(const std::string& memory_tech, bool print)
 {
+    /* 1.11.14 (#122, borders rule): the calibration MOVED INTO the CACTI
+     * fork (CACTIWrapper::getCalibratedDieArea). This is now description +
+     * a tool call: build the query the DRAM die is, ask, report. The density
+     * and generation tables went with it. The scope gate lives in the tool,
+     * where it also protects the thousands of cache/RF/TLB queries McPAT
+     * makes through the SAME library. */
     const bool is_dram = !(memory_tech == "SRAM" || memory_tech == "STT_MRAM" ||
                            memory_tech == "PCM"  || memory_tech == "RERAM");
     if (memory_tech.empty() || !is_dram) return 0.0;
@@ -5380,31 +5372,28 @@ static double computeDramDieAreaMM2(const std::string& memory_tech, bool print)
         cfg.line_size = std::max(64u, iow / 8u);
         cfg.associativity = 1;
         cfg.banks = std::max(1u, total_banks);
-        cfg.tech_node_nm = getDRAMGenClass(memory_tech).cacti_table_nm;
+        cfg.tech_node_nm = pimid::CACTIWrapper::generationTableNm(memory_tech);
         cfg.is_cache = false;
         cfg.is_main_memory = true;
         cfg.cell_type = pimid::CACTIWrapper::COMM_DRAM;
+        cfg.memory_tech = memory_tech;      // 1.11.14: opens the calibration
         cfg.output_width_bits = iow;
         cfg.page_sz_bits = 8192;
         cfg.burst_len = 8;
         cfg.int_prefetch_w = 8;
         cfg.quiet = true;
-        double density = getDRAMDieDensity(memory_tech);
-        double chip_mbit = static_cast<double>(chip_bytes) * 8.0 / (1024.0 * 1024.0);
-        double jedec_ref = (chip_mbit / density) * 1.12;
         pimid::CACTIWrapper cacti(cfg);
         cacti.initialize();
-        double raw = cacti.getArea();
-        if (!(raw > 0.0)) return jedec_ref;   // CACTI failed: vendor figure
-        double k = jedec_ref / raw;
-        double area = raw * k;
+        auto ca = cacti.getCalibratedDieArea();
+        if (ca.area_mm2 <= 0.0) return 0.0;
         if (print) {
             std::cout << "  Die area:      " << std::fixed << std::setprecision(2)
-                      << area << " mm^2/die (CACTI x k, k=" << std::setprecision(3)
-                      << k << " JEDEC-calibrated; raw CACTI " << std::setprecision(2)
-                      << raw << ")" << std::defaultfloat << std::endl;
+                      << ca.area_mm2 << " mm^2/die (CACTI x k, k="
+                      << std::setprecision(3) << ca.k
+                      << " JEDEC-calibrated; raw CACTI " << std::setprecision(2)
+                      << ca.raw_mm2 << ")" << std::defaultfloat << std::endl;
         }
-        return area;
+        return ca.area_mm2;
     } catch (const std::exception&) {
         return 0.0;
     }

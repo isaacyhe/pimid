@@ -54,6 +54,11 @@ public:
         // Output width
         uint32_t output_width_bits;  // Output width in bits
 
+        /* 1.11.14 (borders rule): the technology this array IS, so the
+         * calibration can pick its vendor density. Empty = uncalibrated,
+         * which is every SRAM/cache/RF/TLB query McPAT makes. */
+        std::string memory_tech;
+
         // Optional tag configuration
         bool specific_tag;           // Use specific tag width
         uint32_t tag_width_bits;     // Tag width if specific_tag is true
@@ -89,6 +94,7 @@ public:
             , burst_len(8)
             , int_prefetch_w(8)
             , output_width_bits(512)
+            , memory_tech("")       // 1.11.14: empty = not a calibrated DRAM query
             , specific_tag(false)
             , tag_width_bits(0)
             , obj_func_delay(0)
@@ -109,7 +115,32 @@ public:
     // Query CACTI results
     double getAccessTime() const;      // Access time in seconds
     double getCycleTime() const;       // Cycle time in seconds
-    double getArea() const;            // Area in mm^2
+    double getArea() const;            // Area in mm^2 (raw CACTI)
+
+    /* 1.11.14 (#122, borders rule): JEDEC-CALIBRATED die area, computed
+     * INSIDE the tool that owns the array model instead of by the caller.
+     *
+     * HARD SCOPE (the reason this is a method and not a transform applied to
+     * getArea()): McPAT links this same cacti7 library and issues thousands
+     * of cache, register-file and TLB queries through it. A DRAM VENDOR
+     * DENSITY factor must never touch those. The calibration therefore
+     * applies only when the query says it is a commodity-DRAM MAIN MEMORY
+     * array AND names its technology; every other query returns raw CACTI,
+     * byte-identical to before. k is reported alongside so a calibrated
+     * number can never pass as a raw tool output. */
+    struct CalibratedArea {
+        double area_mm2 = 0.0;   // calibrated (or raw, when not applicable)
+        double raw_mm2  = 0.0;
+        double k        = 1.0;
+        bool   calibrated = false;
+    };
+    CalibratedArea getCalibratedDieArea() const;
+
+    /* Vendor die density (Mbit/mm^2) and the DRAM generation class its
+     * technology implies -- the tables that used to live in main.cpp. */
+    static double vendorDieDensity(const std::string& tech);
+    static int    generationTableNm(const std::string& tech);
+    static const char* generationClass(const std::string& tech);
     double getDynamicReadEnergy() const;   // Read energy in nJ
     double getDynamicWriteEnergy() const;  // Write energy in nJ
     double getLeakagePower() const;    // Leakage power in mW
