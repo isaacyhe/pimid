@@ -1679,6 +1679,24 @@ static void InitGlobalStats() {
     ProxyStat* phaseStat = new ProxyStat();
     phaseStat->init("phase", "Simulated phases", &zinfo->numPhases);
     zinfo->rootStat->append(phaseStat);
+
+    // 1.11.7 (#85): crossing counters -> zsim.out root scalars
+    ProxyStat* xH2D = new ProxyStat();
+    xH2D->init("xingH2DBytes", "Host->device crossing payload bytes",
+               (uint64_t*)&zinfo->xing.h2dBytes);
+    zinfo->rootStat->append(xH2D);
+    ProxyStat* xD2H = new ProxyStat();
+    xD2H->init("xingD2HBytes", "Device->host crossing payload bytes",
+               (uint64_t*)&zinfo->xing.d2hBytes);
+    zinfo->rootStat->append(xD2H);
+    ProxyStat* xCnt = new ProxyStat();
+    xCnt->init("xingCount", "Discrete host<->device crossings",
+               (uint64_t*)&zinfo->xing.count);
+    zinfo->rootStat->append(xCnt);
+    ProxyStat* xFlush = new ProxyStat();
+    xFlush->init("xingFlushBytes", "Coherence-flush footprint bytes crossed",
+                 (uint64_t*)&zinfo->xing.flushBytes);
+    zinfo->rootStat->append(xFlush);
 }
 
 

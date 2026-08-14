@@ -387,6 +387,14 @@ struct ZSimParsedOutput {
     // path (runPowerAnalysis) keeps using `cycles`, so its values are unchanged.
     uint64_t host_wall_cycles = 0;
     uint64_t dev_wall_cycles = 0;
+    /* 1.11.7 (#85): host<->device crossing counters from the plugin
+     * (zinfo->xing via ProxyStats). LATCH-LAST semantics in the parser: the
+     * counters are monotonic run totals, so the final dump's value is the
+     * truth even when multiple dumps appear in one zsim.out. */
+    uint64_t xing_h2d_bytes = 0;
+    uint64_t xing_d2h_bytes = 0;
+    uint64_t xing_count = 0;
+    uint64_t xing_flush_bytes = 0;
     /* 1.9.29: per-node measured counters. Everything below this comment that is
      * NOT inside `host`/`dev` is an ALL-NODES total, kept for the device-SCOPE
      * path (runPowerAnalysis), which simulates one node and is correct as-is.
@@ -781,6 +789,10 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
                  * 1.9.29: and per node -- the all-nodes totals below cannot be
                  * split by core-count proportion without making each node's mix
                  * inconsistent with its own instruction count. */
+                else if (key == "xingH2DBytes") { out.xing_h2d_bytes = val; }
+                else if (key == "xingD2HBytes") { out.xing_d2h_bytes = val; }
+                else if (key == "xingCount") { out.xing_count = val; }
+                else if (key == "xingFlushBytes") { out.xing_flush_bytes = val; }
                 else if (key == "syntheticInstrs") {
                     out.syntheticInstrs += val; if (grp) grp->syntheticInstrs += val;
                 }
@@ -1251,6 +1263,7 @@ struct UnifiedConfig {
     double pcie_base_latency_ns = 500.0;  // per-transaction overhead
     double pcie_bandwidth_GBs = 63.0;     // peak unidirectional throughput
     int pcie_num_lanes = 16;              // lane count (also feeds McPAT num_channels)
+    double pcie_pj_per_bit_override = -1.0;  // 1.11.7: user pJ/bit for unknown link types (printed)
     std::string pcie_model = "simple";    // "simple" or "md1" for PCIe timing model
     // Host<->device link technology. Selects preset latency/BW/overhead unless
     // the user overrides them. "interposer" = 2.5D silicon interposer (UCIe-class
@@ -5324,6 +5337,50 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
             McPAT mcpat(mcfg);
             mcpat.setDeviceProfile(profile);
 
+            /* 1.11.7 (#85): crossing energy in the path co-sim actually
+             * takes. BOTH ends of the link carry a controller (audit: only
+             * the host end was ever priced, and only in the unreachable
+             * trace path); the link dynamic itself is byte-driven inside
+             * the McPAT fork from the measured plugin counters -- zero
+             * traffic prices to zero. pJ/bit from the cited per-link-type
+             * table; unknown types are a fatal config error unless the
+             * user supplies pcie_pj_per_bit_override. */
+            {
+                uint64_t xbytes = zsim_stats.xing_h2d_bytes +
+                                  zsim_stats.xing_d2h_bytes +
+                                  zsim_stats.xing_flush_bytes;
+                double pjbit = McPAT::linkEnergyPJPerBit(config.pcie_link_type);
+                if (pjbit < 0.0 && config.pcie_pj_per_bit_override > 0.0)
+                    pjbit = config.pcie_pj_per_bit_override;
+                if (pjbit < 0.0) {
+                    std::cerr << "ERROR: unknown link type '"
+                              << config.pcie_link_type << "' and no "
+                                 "power.pcie_pj_per_bit_override given. Known: "
+                                 "pcie_gen3/4/5, cxl, nvlink." << std::endl;
+                    std::exit(1);
+                }
+                McPAT::PCIeStats ps;
+                ps.number_units = 1;             // this node's end of the link
+                ps.num_channels = config.pcie_num_lanes;
+                ps.duty_cycle = 1.0;
+                ps.total_load_perc = 0.0;        // legacy path off; bytes drive it
+                ps.transferred_bytes = static_cast<double>(xbytes);
+                ps.link_pj_per_bit = pjbit;
+                ps.link_clock_mhz =
+                    (config.pcie_link_type == "pcie_gen3") ? 500 : 1000;
+                mcpat.setPCIeStats(ps);
+                if (node.role == UnifiedConfig::SystemNode::HOST) {
+                    std::cout << "  [xing] " << node.name << ": link "
+                              << config.pcie_link_type << ", " << xbytes
+                              << " B crossed (h2d " << zsim_stats.xing_h2d_bytes
+                              << " + d2h " << zsim_stats.xing_d2h_bytes
+                              << " + flush " << zsim_stats.xing_flush_bytes
+                              << "), " << zsim_stats.xing_count
+                              << " crossings, " << pjbit << " pJ/bit"
+                              << std::endl;
+                }
+            }
+
             // Avoid McPAT's homogeneous_NoCs=1 code path (number_of_NoCs == 1),
             // which CACTI 6.5-P routes through a configuration that crashes on
             // "Must have at least one port" regardless of the per-bank ports
@@ -8460,6 +8517,8 @@ int main(int argc, char** argv) {
                 config.pcie_base_latency_ns = pc["base_latency_ns"].as<double>(config.pcie_base_latency_ns);
                 config.pcie_bandwidth_GBs = pc["bandwidth_GBs"].as<double>(config.pcie_bandwidth_GBs);
                 config.pcie_num_lanes = pc["num_lanes"].as<int>(config.pcie_num_lanes);
+                config.pcie_pj_per_bit_override = pc["pj_per_bit_override"].as<double>(config.pcie_pj_per_bit_override);
+                config.pcie_link_type = pc["link_type"].as<std::string>(config.pcie_link_type);
                 config.pcie_model = pc["model"].as<std::string>(config.pcie_model);
                 if (config.pcie_model == "md1") config.pcie_model = "simple";  // backward compat
                 // Link technology + per-transaction overhead (tunable per link).

@@ -533,6 +533,15 @@ typedef struct{
 	//stats
 	double duty_cycle;
 	double total_load_perc;
+	/* PIMID 1.11.7 (#85): activity-driven link energy. transferred_bytes is
+	 * the MEASURED crossing byte count; link_pj_per_bit the per-link-type
+	 * transfer energy (selected by PIMID from its cited table: PCIe gen3/4/5,
+	 * CXL = gen5 PHY + coherence delta, NVLink, or user override). When
+	 * transferred_bytes > 0 the SerDes dynamic is bytes*8*pJ/bit -- real
+	 * activity, zero traffic = zero energy -- replacing the PCIe 2.0-era
+	 * constant-load scaling. Both default 0 = legacy behavior. */
+	double transferred_bytes;
+	double link_pj_per_bit;
 } system_pcie;
 
 typedef struct{

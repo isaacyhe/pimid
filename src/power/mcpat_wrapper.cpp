@@ -208,6 +208,15 @@ void McPATWrapper::setNoCActivity(const NoCActivityStats& stats) {
     power_computed_ = false;
 }
 
+double McPATWrapper::linkEnergyPJPerBit(const std::string& link_type) {
+    if (link_type == "pcie_gen3") return 5.0;
+    if (link_type == "pcie_gen4") return 6.0;
+    if (link_type == "pcie_gen5") return 7.0;
+    if (link_type == "cxl")       return 8.4;  // gen5 PHY + coherence delta
+    if (link_type == "nvlink")    return 1.3;
+    return -1.0;  // unknown: caller rejects or applies user override
+}
+
 void McPATWrapper::setPCIeStats(const PCIeStats& stats) {
     pcie_stats_ = stats;
     power_computed_ = false;
@@ -703,7 +712,11 @@ void McPATWrapper::extractResults() {
 
     // PCIe
     if (mcpat_processor_->pcie) {
-        component_power_[ComponentType::PCIE] = extractComponent(*mcpat_processor_->pcie);
+        /* 1.11.7 (audit blocker): read the AGGREGATED component (pcies),
+         * not the raw controller object -- the Processor multiplies by
+         * number_units x clockRate during aggregation, and reading the raw
+         * object under-reported dynamic by exactly that factor. */
+        component_power_[ComponentType::PCIE] = extractComponent(mcpat_processor_->pcies);
     }
 
     // Store areas from McPAT (um^2 -> mm^2)
@@ -861,8 +874,8 @@ void McPATWrapper::extractResults() {
     peak_dyn += peakDynamic(mcpat_processor_->noc);
     peak_leak += peakLeakage(mcpat_processor_->noc);
     if (mcpat_processor_->pcie) {
-        peak_dyn += peakDynamic(*mcpat_processor_->pcie);
-        peak_leak += peakLeakage(*mcpat_processor_->pcie);
+        peak_dyn += peakDynamic(mcpat_processor_->pcies);   // 1.11.7: aggregated
+        peak_leak += peakLeakage(mcpat_processor_->pcies);
     }
     peak_power_ = peak_dyn + peak_leak;
 }
@@ -1650,18 +1663,27 @@ std::string McPATWrapper::generateXMLConfig() const {
     xml << "      <stat name=\"total_load_perc\" value=\"0\"/>\n";
     xml << "    </component>\n";
 
-    // PCIe — active when co-sim transfers present, otherwise stub
-    xml << "    <component id=\"system.pcie\" name=\"pcie\">\n";
-    xml << "      <param name=\"type\" value=\"1\"/>\n";
-    xml << "      <param name=\"withPHY\" value=\"1\"/>\n";
-    xml << "      <param name=\"clockrate\" value=\"350\"/>\n";
-    xml << "      <param name=\"vdd\" value=\"0\"/>\n";
-    xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
-    xml << "      <param name=\"number_units\" value=\"" << pcie_stats_.number_units << "\"/>\n";
-    xml << "      <param name=\"num_channels\" value=\"" << pcie_stats_.num_channels << "\"/>\n";
-    xml << "      <stat name=\"duty_cycle\" value=\"" << pcie_stats_.duty_cycle << "\"/>\n";
-    xml << "      <stat name=\"total_load_perc\" value=\"" << pcie_stats_.total_load_perc << "\"/>\n";
-    xml << "    </component>\n";
+    // PCIe — active when co-sim transfers present, otherwise stub.
+    // 1.11.7: clock from the configured link (350 was a hardwired literal),
+    // measured bytes + per-link-type pJ/bit drive the dynamic term inside
+    // the fork (iocontrollers.cc) -- zero traffic = zero link dynamic.
+    {
+        int link_clk = (pcie_stats_.link_clock_mhz > 0)
+                           ? pcie_stats_.link_clock_mhz : 350;
+        xml << "    <component id=\"system.pcie\" name=\"pcie\">\n";
+        xml << "      <param name=\"type\" value=\"1\"/>\n";
+        xml << "      <param name=\"withPHY\" value=\"1\"/>\n";
+        xml << "      <param name=\"clockrate\" value=\"" << link_clk << "\"/>\n";
+        xml << "      <param name=\"vdd\" value=\"0\"/>\n";
+        xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
+        xml << "      <param name=\"number_units\" value=\"" << pcie_stats_.number_units << "\"/>\n";
+        xml << "      <param name=\"num_channels\" value=\"" << pcie_stats_.num_channels << "\"/>\n";
+        xml << "      <stat name=\"duty_cycle\" value=\"" << pcie_stats_.duty_cycle << "\"/>\n";
+        xml << "      <stat name=\"total_load_perc\" value=\"" << pcie_stats_.total_load_perc << "\"/>\n";
+        xml << "      <stat name=\"transferred_bytes\" value=\"" << pcie_stats_.transferred_bytes << "\"/>\n";
+        xml << "      <stat name=\"link_pj_per_bit\" value=\"" << pcie_stats_.link_pj_per_bit << "\"/>\n";
+        xml << "    </component>\n";
+    }
 
     // Flash controller — mandatory stub
     xml << "    <component id=\"system.flashc\" name=\"flashc\">\n";

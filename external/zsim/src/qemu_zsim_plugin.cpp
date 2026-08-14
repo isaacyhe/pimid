@@ -2051,8 +2051,10 @@ static void chargeCoherenceFlush(uint32_t tid) {
     uint64_t flushCyc = coherenceFlushCycles();
     if (flushCyc == 0) return;
     uint32_t fc = (uint32_t)std::min<uint64_t>(flushCyc, 0xFFFFFFFFull);
-    BblInfo* bbl = createSimpleBblInfo(fc, fc * 4);
+    BblInfo* bbl = createSimpleBblInfo(fc, 0);  // 1.11.7: no phantom fetch
     fPtrs[tid].bblPtr(tid, 0, bbl);
+    __sync_fetch_and_add(&zinfo->xing.flushBytes, zinfo->coherence.footprintBytes);
+    __sync_fetch_and_add(&zinfo->xing.count, 1);
     __sync_fetch_and_add(&zinfo->coherence.flushCount, 1);
     __sync_fetch_and_add(&zinfo->coherence.flushCyclesCharged, flushCyc);
     info("Thread %d: Case-1 coherence flush at roi_begin (footprint %llu B -> %llu cycles)",
@@ -2095,8 +2097,13 @@ static void chargeLaunchCost(uint32_t tid) {
     uint64_t launchCyc = launchCostCycles();
     if (launchCyc == 0) return;
     uint32_t lc = (uint32_t)std::min<uint64_t>(launchCyc, 0xFFFFFFFFull);
-    BblInfo* bbl = createSimpleBblInfo(lc, lc * 4);
+    BblInfo* bbl = createSimpleBblInfo(lc, 0);  // 1.11.7: no phantom fetch
     fPtrs[tid].bblPtr(tid, 0, bbl);
+    /* 1.11.7: the cmd packet crosses h2d, the ack returns d2h -- both are
+     * real crossings and count as such. */
+    __sync_fetch_and_add(&zinfo->xing.h2dBytes, (uint64_t)zinfo->launch.cmdBytes);
+    __sync_fetch_and_add(&zinfo->xing.d2hBytes, (uint64_t)zinfo->launch.ackBytes);
+    __sync_fetch_and_add(&zinfo->xing.count, 2);
     __sync_fetch_and_add(&zinfo->launch.launchCount, 1);
     __sync_fetch_and_add(&zinfo->launch.launchCyclesCharged, launchCyc);
     info("Thread %d: kernel launch cost at offload doorbell (doorbell %u + dispatch %u + bridge cmd/ack -> %llu cycles)",
@@ -2358,9 +2365,14 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
             /* PCIe/CXL offload timing: host→device transfer latency */
             uint32_t pcieLat = boundaryTransferCycles(payload_size);
             if (pcieLat > 0) {
-                BblInfo* bbl = createSimpleBblInfo(pcieLat, pcieLat * 4);
+                /* 1.11.7: timing-only BBL -- ZERO fetch bytes. The old
+                 * pcieLat*4 manufactured phantom ifetch traffic that landed
+                 * in the cache/DRAM counters energy is charged from. */
+                BblInfo* bbl = createSimpleBblInfo(pcieLat, 0);
                 fPtrs[tid].bblPtr(tid, 0, bbl);
             }
+            __sync_fetch_and_add(&zinfo->xing.h2dBytes, (uint64_t)payload_size);
+            __sync_fetch_and_add(&zinfo->xing.count, 1);
             info("Thread %d: WORK_BEGIN (device offload #%lu, %u bytes)", tid,
                  (unsigned long)cnt, payload_size);
         }
@@ -2392,9 +2404,11 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
              * charged on the host core (it pays for the return DMA wait) */
             uint32_t pcieLat = boundaryTransferCycles(payload_size);
             if (pcieLat > 0) {
-                BblInfo* bbl = createSimpleBblInfo(pcieLat, pcieLat * 4);
+                BblInfo* bbl = createSimpleBblInfo(pcieLat, 0);  // 1.11.7: no phantom fetch
                 fPtrs[tid].bblPtr(tid, 0, bbl);
             }
+            __sync_fetch_and_add(&zinfo->xing.d2hBytes, (uint64_t)payload_size);
+            __sync_fetch_and_add(&zinfo->xing.count, 1);
             info("Thread %d: WORK_END (%u bytes)", tid, payload_size);
         }
         return;
@@ -2598,9 +2612,11 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         /* PCIe/CXL offload timing: host→device transfer latency */
         uint32_t pcieLat = boundaryTransferCycles(payload_size);
         if (pcieLat > 0) {
-            BblInfo* bbl = createSimpleBblInfo(pcieLat, pcieLat * 4);
+            BblInfo* bbl = createSimpleBblInfo(pcieLat, 0);  // 1.11.7: no phantom fetch
             fPtrs[tid].bblPtr(tid, 0, bbl);
         }
+        __sync_fetch_and_add(&zinfo->xing.h2dBytes, (uint64_t)payload_size);
+        __sync_fetch_and_add(&zinfo->xing.count, 1);
         info("Thread %d: WORK_BEGIN (device offload #%lu, %u bytes)", tid,
              (unsigned long)cnt, payload_size);
         return;
@@ -2622,9 +2638,11 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         /* PCIe/CXL return timing: device→host transfer latency */
         uint32_t pcieLat = boundaryTransferCycles(payload_size);
         if (pcieLat > 0) {
-            BblInfo* bbl = createSimpleBblInfo(pcieLat, pcieLat * 4);
+            BblInfo* bbl = createSimpleBblInfo(pcieLat, 0);  // 1.11.7: no phantom fetch
             fPtrs[tid].bblPtr(tid, 0, bbl);
         }
+        __sync_fetch_and_add(&zinfo->xing.d2hBytes, (uint64_t)payload_size);
+        __sync_fetch_and_add(&zinfo->xing.count, 1);
         info("Thread %d: WORK_END (%u bytes)", tid, payload_size);
         return;
     } else {

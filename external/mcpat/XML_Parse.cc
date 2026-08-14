@@ -1363,6 +1363,9 @@ void ParseXML::parse(char* filepath)
 			{ //get all items of stat in system.mendirectory
 				if (strcmp(xNode3.getChildNode("stat",k).getAttribute("name"),"duty_cycle")==0) {sys.pcie.duty_cycle=atof(xNode3.getChildNode("stat",k).getAttribute("value"));continue;}
 				if (strcmp(xNode3.getChildNode("stat",k).getAttribute("name"),"total_load_perc")==0) {sys.pcie.total_load_perc=atof(xNode3.getChildNode("stat",k).getAttribute("value"));continue;}
+				/* PIMID 1.11.7: measured crossing activity + per-link-type energy */
+				if (strcmp(xNode3.getChildNode("stat",k).getAttribute("name"),"transferred_bytes")==0) {sys.pcie.transferred_bytes=atof(xNode3.getChildNode("stat",k).getAttribute("value"));continue;}
+				if (strcmp(xNode3.getChildNode("stat",k).getAttribute("name"),"link_pj_per_bit")==0) {sys.pcie.link_pj_per_bit=atof(xNode3.getChildNode("stat",k).getAttribute("value"));continue;}
 			}
 		}
 		else{
@@ -1831,6 +1834,8 @@ void ParseXML::initialize() //Initialize all
 	sys.pcie.withPHY = false;
 	sys.pcie.duty_cycle =1;
 	sys.pcie.total_load_perc=1;
+	sys.pcie.transferred_bytes=0;   /* PIMID 1.11.7: 0 = legacy load-scaled path */
+	sys.pcie.link_pj_per_bit=0;
 	//system_flash_controller
 	sys.flashc.mc_clock =1;
 	sys.flashc.number_mcs=1;

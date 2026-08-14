@@ -7,6 +7,33 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.7 -- crossings are counted, and the link is priced from them
+
+#85, co-sim half -- the audit's largest sheet (10 blockers). The plugin now
+COUNTS every host<->device crossing at the moment it happens, bytes in hand:
+WORK_BEGIN/END payloads, launch cmd/ack packets, and the coherence-flush
+footprint, exported through zsim's stats tree (xingH2DBytes/xingD2HBytes/
+xingCount/xingFlushBytes in zsim.out) and parsed latch-last (robust to
+multi-dump files). McPAT's PCIe component -- kept per the model-borders rule
+and made real: the fork's iocontrollers gains transferred_bytes +
+link_pj_per_bit inputs, and runtime link dynamic is computed FROM the
+transfer (bytes x 8 x pJ/bit, exact through the Processor's units x
+clockRate aggregation; zero traffic = zero dynamic natively). Per-link-type
+pJ/bit table (pcie_gen3/4/5, cxl = gen5 PHY + coherence delta, nvlink;
+unknown types fatal unless power.pcie.pj_per_bit_override is given,
+printed). Both ends of the link now carry a controller (the device end was
+never priced); the readout reads the AGGREGATED pcies component (raw-object
+read under-reported dynamic by units x clockRate); the link clock comes
+from the configured link type, not a hardwired 350 MHz. All of it wired
+into runPerNodePowerAnalysis -- the path a real co-simulation executes,
+where interface energy was previously unreachable. And the synthetic
+timing BBLs (WORK/launch/flush) no longer manufacture phantom instruction
+fetch (bytes = 4 x cycles): co-sim timing and cache/DRAM traffic move with
+this release BY DESIGN -- that traffic never existed.
+
+DATA IMPACT: all co-sim cells (crossing energy now real; phantom fetch
+removed from timing and counters). Device-scope cells untouched.
+
 ## 1.11.6 -- audit hotfix 2: CACTI's temperature rows are Kelvin-minus-300
 
 Round 3 of the audit caught the 1.11.4 hotfix's own error: CACTI's I_off

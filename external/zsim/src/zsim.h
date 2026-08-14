@@ -402,6 +402,20 @@ struct GlobSimInfo {
         volatile uint64_t flushCyclesCharged = 0;
     } coherence;
 
+    /* 1.11.7 (#85): host<->device crossing counters. The QEMU plugin is the
+     * only layer that sees each crossing WITH its byte size, so it counts
+     * them here; ProxyStats in init.cpp export them to zsim.out; the power
+     * path prices them inside the McPAT fork (per-link-type table). Every
+     * crossing type flows through the same counters -- launch/ack packets,
+     * coherence-flush footprint, explicit DMA payloads -- so zero traffic
+     * of a kind simply contributes zero (no residency assumption). */
+    struct {
+        volatile uint64_t h2dBytes = 0;    // host->device payload bytes
+        volatile uint64_t d2hBytes = 0;    // device->host payload bytes
+        volatile uint64_t count = 0;       // discrete crossings (all types)
+        volatile uint64_t flushBytes = 0;  // coherence-flush footprint bytes
+    } xing;
+
     // Kernel LAUNCH cost tree (1.7.3, HANDOFF ISSUE 2). The host launches a
     // device kernel at the offload doorbell (co-sim roi_begin / WORK_BEGIN).
     // Real launch overhead = a user-mode doorbell write + cmd-packet formation

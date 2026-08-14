@@ -103,7 +103,25 @@ public:
         int num_channels = 0;
         double duty_cycle = 0.0;
         double total_load_perc = 0.0;
+        /* 1.11.7 (#85): measured crossing activity + link description.
+         * transferred_bytes drives McPAT's byte-based link dynamic;
+         * link_clock_mhz replaces the hardwired 350; link_pj_per_bit is
+         * chosen from linkEnergyPJPerBit() (cited per-link-type table). */
+        double transferred_bytes = 0.0;
+        double link_pj_per_bit = 0.0;
+        int    link_clock_mhz = 0;   // 0 = legacy 350
     };
+
+    /* 1.11.7: per-link-type transfer energy, pJ/bit, PHY/link share only
+     * (McPAT's ctrl term prices the controller logic separately -- no
+     * double count). Sources are ballpark figures from published PHY
+     * surveys and vendor claims, flagged for the bounds gate:
+     *   pcie_gen3 5.0   pcie_gen4 6.0   pcie_gen5 7.0
+     *   cxl       8.4   (gen5 PHY + ~20% coherence-controller delta)
+     *   nvlink    1.3   (NVIDIA NVLink4 per-bit claim)
+     * Unknown types return -1: caller must reject loudly or use the
+     * user override knob (printed k-style). */
+    static double linkEnergyPJPerBit(const std::string& link_type);
 
     /**
      * Device profile: controls core microarchitecture type in McPAT XML.

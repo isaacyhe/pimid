@@ -321,6 +321,27 @@ void PCIeController::computeEnergy(bool is_tdp)
     {
     	rt_power = power_t;
     	rt_power.readOp.dynamic *= pciep.perc_load;
+    	/* PIMID 1.11.7 (#85): activity-driven link energy. When PIMID
+    	 * supplies measured crossing bytes and a per-link-type pJ/bit
+    	 * (PCIe gen3/4/5, CXL, NVLink -- selected and cited PIMID-side),
+    	 * runtime dynamic is computed FROM the transfer: total joules =
+    	 * bytes*8*pJ/bit, expressed as energy-per-cycle so the Processor's
+    	 * (number_units x clockRate) aggregation restores watts exactly.
+    	 * Zero traffic therefore reports zero link dynamic. The legacy
+    	 * perc_load scaling above remains for inputs without measurement. */
+    	if (XML->sys.pcie.transferred_bytes > 0 &&
+    	    XML->sys.pcie.link_pj_per_bit > 0 &&
+    	    XML->sys.total_cycles > 0 && XML->sys.target_core_clockrate > 0)
+    	{
+    		double execTimeSec = XML->sys.total_cycles /
+    		                     (XML->sys.target_core_clockrate * 1e6);
+    		double joules = XML->sys.pcie.transferred_bytes * 8.0 *
+    		                XML->sys.pcie.link_pj_per_bit * 1e-12;
+    		double units = (XML->sys.pcie.number_units > 0) ?
+    		               (double)XML->sys.pcie.number_units : 1.0;
+    		double denom = units * ((pciep.clockRate > 0) ? pciep.clockRate : 1.0);
+    		rt_power.readOp.dynamic = joules / execTimeSec / denom;
+    	}
     }
 }
 
