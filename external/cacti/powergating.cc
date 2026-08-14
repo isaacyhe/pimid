@@ -80,9 +80,17 @@ Sleep_tx::Sleep_tx(
     width = active_Isat/(perf_with_sleep_tx*mobility*c_ox*(vdd-vt_circuit)*(vdd-vt_sleep_tx))*g_ip->F_sz_um;//W/L uses physical numbers
     width /= num_sleep_tx;
 
+    /* PIMID 1.11.15: guard degenerate inputs -- zero/NaN width (device
+     * params absent for this cell class) or a cell too narrow to fold a
+     * transistor into. A zero-area sleep network is the honest result. */
+    if (!(width > 0) || !(cell.w > 0)) {
+        area.set_h(0); area.set_w(0);
+        compute_penalty();
+        return;
+    }
     raw_area   = compute_gate_area(INV, 1, width, p_to_n_sz_ratio*width, cell.w*2)/2; //Only single device, assuming device is laide on the side
     raw_width = cell.w;
-    raw_hight  = raw_area/cell.w;
+    raw_hight  = (raw_area > 0 && cell.w > 0) ? raw_area/cell.w : 0;
     area.set_h(raw_hight);
     area.set_w(raw_width);
 

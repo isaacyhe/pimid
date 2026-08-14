@@ -209,12 +209,20 @@ void McPATWrapper::setNoCActivity(const NoCActivityStats& stats) {
 }
 
 double McPATWrapper::linkEnergyPJPerBit(const std::string& link_type) {
-    if (link_type == "pcie_gen3") return 5.0;
-    if (link_type == "pcie_gen4") return 6.0;
-    if (link_type == "pcie_gen5") return 7.0;
-    if (link_type == "cxl")       return 8.4;  // gen5 PHY + coherence delta
-    if (link_type == "nvlink")    return 1.3;
-    return -1.0;  // unknown: caller rejects or applies user override
+    /* 1.11.15 (audit): match the TIMING side's vocabulary by family --
+     * cxl_2_0/cxl_3_0, nvlink_3_0/4_0/c2c and interposer are accepted link
+     * types that this table rejected, aborting completed co-sims at
+     * power-analysis time. Family prefix match; interposer is the
+     * silicon-interposer parallel link (HBM-class, no SerDes), published
+     * ballpark ~0.5 pJ/bit. ualink and other unknowns return -1: the caller
+     * warns and prices the transfer at zero rather than killing the run. */
+    if (link_type.rfind("pcie_gen3", 0) == 0) return 5.0;
+    if (link_type.rfind("pcie_gen4", 0) == 0) return 6.0;
+    if (link_type.rfind("pcie_gen5", 0) == 0) return 7.0;
+    if (link_type.rfind("cxl", 0)    == 0) return 8.4;  // gen5 PHY + coherence delta
+    if (link_type.rfind("nvlink", 0) == 0) return 1.3;
+    if (link_type.rfind("interposer", 0) == 0) return 0.5;
+    return -1.0;
 }
 
 void McPATWrapper::setPCIeStats(const PCIeStats& stats) {
@@ -493,13 +501,31 @@ void McPATWrapper::computePower() {
                 /* 1.11.4: block weights carry the family core-power ratio so
                  * the printed split is consistent with the scaled core total
                  * (audit: they were captured unscaled). */
-                double br = fam_core_power_ratio_;
-                blob.core_ifu_w    = w(c0.ifu) * br;
-                blob.core_lsu_w    = w(c0.lsu) * br;
-                blob.core_mmu_w    = w(c0.mmu) * br;
-                blob.core_exu_w    = w(c0.exu) * br;
-                blob.core_pipe_w   = w(c0.corepipe) * br;
-                blob.core_undiff_w = w(c0.undiffCore) * br;
+                /* 1.11.15 (audit): fam_core_power_ratio_ lost its assignment
+                 * in the 1.11.12 migration, so the blocks printed logic-priced
+                 * values under a family-priced total. Scale each block's
+                 * dynamic and leakage by the family factors DIRECTLY -- the
+                 * per-core sub-objects are not transformed by processor.cc's
+                 * applyFam (it works on the Processor-level aggregates). */
+                double fdW = 1.0, flW = 1.0;
+                if (config_.process_family == 1) {
+                    fdW = (config_.dram_periph_table_nm == 32) ? 0.66 : 0.82;
+                    flW = (config_.dram_periph_table_nm == 32) ? 3.1e-6 : 1.0e-5;
+                }
+                auto wf = [&](const Component* p) -> double {
+                    if (!p) return 0.0;
+                    double dyn = p->rt_power.readOp.dynamic;
+                    double leak = p->rt_power.readOp.leakage;
+                    if (!std::isfinite(dyn)) dyn = 0.0;
+                    if (!std::isfinite(leak)) leak = 0.0;
+                    return dyn * fdW + leak * flW;
+                };
+                blob.core_ifu_w    = wf(c0.ifu);
+                blob.core_lsu_w    = wf(c0.lsu);
+                blob.core_mmu_w    = wf(c0.mmu);
+                blob.core_exu_w    = wf(c0.exu);
+                blob.core_pipe_w   = wf(c0.corepipe);
+                blob.core_undiff_w = wf(c0.undiffCore);
             }
 
             std::fwrite(&blob, sizeof(blob), 1, f);
@@ -756,7 +782,18 @@ void McPATWrapper::extractResults() {
             double gated  = pm.power_gated_leakage;
             /* 1.11.12: no family rescale here -- McPAT already returned
              * family-priced endpoints, active AND gated alike. */
-            if (gated > active) gated = active;   // never a PG penalty
+            if (gated > active) {
+                /* 1.11.15 (audit): a gated endpoint above the active one means
+                 * the two are on different bases (the family no-op defect
+                 * class). Clamp so no PG penalty is charged, but say so --
+                 * the silent pin was hiding exactly that inversion. */
+                std::cout << "  [pg] WARNING: gated leakage (" << gated
+                          << " W) exceeds active (" << active
+                          << " W) -- endpoints on different bases; clamping, "
+                             "no savings credited for this component."
+                          << std::endl;
+                gated = active;
+            }
             double eff = active * (1.0 - r) + gated * r;
             double scale = (active > 0.0) ? eff / active : 1.0;
             pm.subthreshold_leakage *= scale;
@@ -1348,6 +1385,43 @@ std::string McPATWrapper::generateXMLConfig() const {
         if (mix_measured) {
             uint64_t mi = (meas_int_ + meas_mul_) / ncores;
             uint64_t mf = meas_fp_ / ncores;
+            /* 1.11.15 (audit): when the census is measured, its BRANCH class
+             * replaces the core counter -- the decoder classifies ALL control
+             * transfers (call/ret/jmp/indirect) while the core counter is
+             * conditional-only, and the difference was silently priced at
+             * zero execution energy. With census branches the classes sum to
+             * the census total by construction, so the check becomes
+             * SYMMETRIC: any deficit against retired instructions is printed,
+             * and a deficit above 5% rejects the measurement. */
+            if (meas_mix_br_ > 0) {
+                br_per_core = meas_mix_br_ / ncores;
+                if (br_per_core > inst_per_core) br_per_core = inst_per_core;
+                nonbr = inst_per_core - br_per_core;
+            }
+            uint64_t classified = mi + mf + br_per_core;
+            if (classified < inst_per_core) {
+                uint64_t deficit = inst_per_core - classified;
+                if (deficit * 20 > inst_per_core) {   // >5%
+                    if (!warned_mix_) {
+                        warned_mix_ = true;
+                        std::cout << "  [Activity] measured mix rejected: "
+                                  << deficit << "/" << inst_per_core
+                                  << " retired instructions per core are in NO "
+                                     "class (>5%) -- census and retirement "
+                                     "disagree; using documented fractions."
+                                  << std::endl;
+                    }
+                    mi = 0; mf = 0;   // falls through to fraction path below
+                } else if (deficit > 0 && !warned_mix_) {
+                    warned_mix_ = true;
+                    std::cout << "  [Activity] mix census covers "
+                              << classified << "/" << inst_per_core
+                              << " per core (deficit " << deficit
+                              << ", <5%); residual priced as integer."
+                              << std::endl;
+                    mi += deficit;    // conservative: residual as int-class
+                }
+            }
             if (mi + mf > nonbr) {
                 /* More classified instructions than retired ones means the two
                  * counters are on different bases -- the 1.9.28/1.11.9 defect
@@ -1634,7 +1708,15 @@ std::string McPATWrapper::generateXMLConfig() const {
 
     // Memory controller — uses actual mc_reads_/mc_writes_ and mc_tech_ params
     xml << "    <component id=\"system.mc\" name=\"mc\">\n";
-    xml << "      <param name=\"type\" value=\"0\"/>\n";
+    /* 1.11.15 (audit): McPAT builds an MCPHY -- a per-bit OFF-CHIP I/O
+     * driver charge on every access -- whenever type==0. An on-die element
+     * MC drives no DQ pins, and that charge double-counted the interface on
+     * top of the termination term while being placement-blind. On-die MCs
+     * are emitted as type=1 (embedded class) with no PHY. */
+    xml << "      <param name=\"type\" value=\""
+        << (config_.mc_offchip_phy ? 0 : 1) << "\"/>\n";
+    if (!config_.mc_offchip_phy)
+        xml << "      <param name=\"withPHY\" value=\"0\"/>\n";
     xml << "      <param name=\"mc_clock\" value=\"" << static_cast<int>(config_.mc_clock_mhz) << "\"/>\n";
     xml << "      <param name=\"vdd\" value=\"0\"/>\n";
     xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";

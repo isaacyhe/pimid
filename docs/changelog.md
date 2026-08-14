@@ -7,6 +7,74 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.15 -- the train audits itself, and fixes what it finds
+
+A 30-agent, 5-round adversarial audit of everything 1.11.2-1.11.14 shipped
+returned 200 findings (14 blockers). The blockers, all fixed here:
+
+POWER GATING WAS STILL DEAD END TO END. CACTI's error_checking()
+unconditionally overwrote the power_gating enable with five sub-flags
+nothing ever sets, so the enable emitted since 1.11.8 never survived into
+any array: every gated endpoint was zero (an ideal 100%-savings model on
+caches), and on family components the logic-priced gated value exceeded
+the family-priced active one, so the clamp silently pinned savings to
+ZERO. The 1118 gate misread the byte-identical areas as "area model does
+not engage" -- they were proof the enable never arrived. Fixed: the flag
+is honored (OR, not overwrite); applyFam scales the gated endpoints with
+the same family transform; the clamp prints the inversion it used to
+hide; setPGSpec now also fires in system scope.
+
+THE MIX CENSUS WAS DEAD ON THE DEFAULT ELEMENT. Decode was gated on an
+OOO/InOrder core existing, so alu_core -- the corpus default -- never
+filled the census: the counted mix silently reverted to fractions and the
+FP-without-FPU report could never fire, on exactly the cells 1.11.10 and
+1.11.11 were built for. Decode is now always on (PIMID_NODECODE escape
+hatch); ALU timing is untouched (it consumes instrs and bytes, which the
+decoded block carries identically). The census also gains its BRANCH
+class end-to-end, replacing the conditional-only core counter, and the
+consistency check becomes symmetric: a >5% classified deficit rejects the
+measurement loudly, a smaller one is priced as integer and printed --
+nothing is silently charged zero execution energy any more.
+
+CROSSING ENERGY OVER-CHARGED THREE WAYS. The coherence flush -- 99.999%
+of counted bytes -- is a host writeback to MEMORY and is now charged as
+line writebacks on the host-visible array, not as PCIe traffic. The link
+is priced ONCE (host end carries the bytes; the device end keeps its
+controller with zero transfer) instead of once per endpoint. And McPAT's
+MCPHY -- a per-bit off-chip I/O driver on the same accesses the
+termination term prices -- is no longer built for on-die element MCs,
+which drive no DQ pins (type=1 embedded, no PHY).
+
+THE LINK VOCABULARY NO LONGER KILLS FINISHED RUNS. cxl_2_0/cxl_3_0,
+nvlink_3_0/4_0/c2c and interposer now resolve by family; unknown types
+warn and price the transfer at zero instead of exiting after the
+simulation completed; the override sentinel accepts 0.0 (an interposer
+user can say "free").
+
+Also: fam_core_power_ratio_ lost its assignment in 1.11.12, so the
+CoreBreakdown printed logic-priced blocks under a family-priced total --
+the blocks are now transformed directly (dynamic x fd, leakage x fl).
+And the PE-MI locality counters were parsed at ROOT scope while zsim
+emits them under pe-mi (MEM scope): always zero, report never printed.
+Moved; a run with 698,189 remote accesses on disk now reports them.
+
+Gate 1125 (mi100): ALU timing bit-equal under decode-always (10,164,688
+both); census alive on the ALU cell (mixInt 172,842 where 1.11.14
+measured zero); PG leakage 5.8e-6 -> 1.2e-6 W at 93% idle, and the
+arithmetic back-solves to a gated endpoint of 8.7e-7 W -- a 15%
+sleep-transistor residual, i.e. a REAL tool-computed endpoint where the
+audit proved a 0% ideal; sleep-tx area now engages; no inversion
+warnings; repeats to the digit. Two more never-executed-code faults were
+flushed out by the resurrected enable: CACTI's Sleep_tx asserted on
+degenerate cells (the 1-entry pure-RAM istore is too narrow to fold a
+transistor into) -- both sites now degrade to a zero-area sleep network
+in CACTI's own early-return style instead of killing the McPAT child.
+
+DATA IMPACT: broad and intended -- PG becomes real, the counted mix
+reaches the default element, crossing energy stops triple-counting.
+The remaining 101 defects and 34 risks are triaged in
+_1115audit/DIGEST.md (local) for the checkpoint discussion.
+
 ## 1.11.14 -- the calibration moves into the tool it calibrates
 
 The border cleanup. The JEDEC k-calibration (1.11.1) was computed by the

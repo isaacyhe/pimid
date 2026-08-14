@@ -2266,11 +2266,16 @@ bool InputParameter::error_checking()
     return false;
   }
 
-  power_gating = (array_power_gated
-				  || bitline_floating
-				  || wl_power_gated
-				  || cl_power_gated
-				  || interconect_power_gated)?true:false;
+  /* PIMID 1.11.15 (audit): this line OVERWROTE the caller's power_gating
+   * with five sub-flags nobody in the McPAT path ever sets, so the enable
+   * emitted since 1.11.8 never survived error_checking and every
+   * power_gated_leakage endpoint stayed zero. Honor the incoming flag. */
+  power_gating = power_gating
+                 || array_power_gated
+                 || bitline_floating
+                 || wl_power_gated
+                 || cl_power_gated
+                 || interconect_power_gated;
 
   return true;
 }

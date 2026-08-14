@@ -104,8 +104,17 @@ double Component::compute_gate_area(
 
   w_folded_pmos  = (h_tr_region - g_tp.MIN_GAP_BET_P_AND_N_DIFFS) * ratio_p_to_n;
   w_folded_nmos  = (h_tr_region - g_tp.MIN_GAP_BET_P_AND_N_DIFFS) * (1 - ratio_p_to_n);
-  
-  assert(w_folded_pmos > 0);
+
+  /* PIMID 1.11.15: a transistor region smaller than the minimum diffusion
+   * gap is a DEGENERATE cell (e.g. a 1-entry pure-RAM store), not a fatal
+   * condition -- the function already returns 0.0 for degenerate P/N
+   * ratios three lines up. The assert here aborted the whole McPAT child
+   * the first time power gating genuinely reached CACTI (the enable was
+   * dead until this release, so this path had never executed). */
+  if (w_folded_pmos <= 0 || w_folded_nmos <= 0)
+  {
+    return 0.0;
+  }
 
   num_folded_pmos = (int) (ceil(w_pmos / w_folded_pmos));
   num_folded_nmos = (int) (ceil(w_nmos / w_folded_nmos));

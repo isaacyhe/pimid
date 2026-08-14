@@ -269,6 +269,12 @@ public:
         // 1.11.3: which CACTI table the DRAM generation class maps to (22 or
         // 32); selects the per-class hp/comm-dram factor set.
         int dram_periph_table_nm = 22;
+        /* 1.11.15 (audit): whether this node's memory controllers drive
+         * off-chip DQ pins. On-die element MCs (subarray..chip placements)
+         * do not, so McPAT's MCPHY -- a per-bit off-chip I/O driver charge
+         * on the same accesses the termination term prices -- must not be
+         * built for them. */
+        bool mc_offchip_phy = true;
 
         // McPAT system-level parameters (exposed for architecture exploration)
         int device_type;                    // 0=HP, 1=LSTP, 2=LOP
@@ -344,9 +350,10 @@ public:
      * falls back to the previous fraction, so a core model without a decoder
      * behaves exactly as before. */
     void setMeasuredMix(uint64_t nInt, uint64_t nMul, uint64_t nFp,
-                        uint64_t nLd, uint64_t nSt) {
+                        uint64_t nLd, uint64_t nSt, uint64_t nBr = 0) {
         meas_int_ = nInt; meas_mul_ = nMul; meas_fp_ = nFp;
-        meas_ld_ = nLd;   meas_st_ = nSt;   power_computed_ = false;
+        meas_ld_ = nLd;   meas_st_ = nSt;   meas_mix_br_ = nBr;
+        power_computed_ = false;
     }
 
     void setTotalInstructions(uint64_t instructions);
@@ -432,7 +439,7 @@ private:
     uint64_t meas_uops_ = 0;         // 1.9.28: 0 => fall back to fractions
     uint64_t meas_branches_ = 0;
     uint64_t meas_int_ = 0, meas_mul_ = 0, meas_fp_ = 0,
-             meas_ld_ = 0, meas_st_ = 0;   // 1.11.10
+             meas_ld_ = 0, meas_st_ = 0, meas_mix_br_ = 0;   // 1.11.10/.15
     uint64_t meas_mispred_ = 0;
     /* 1.9.29: the measured counters are used only when self-consistent against
      * the instruction count (see the mix construction in the XML writer). This

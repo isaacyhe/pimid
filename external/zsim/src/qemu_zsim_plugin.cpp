@@ -3172,9 +3172,22 @@ int qemu_plugin_install(qemu_plugin_id_t id,
         if (zinfo->cores[i]->asOOOCore()) g_ooo_present = true;
         if (zinfo->cores[i]->asInOrderCore()) g_inorder_present = true;
     }
-    /* Decode when either engine wants the DynUop stream (and is not disabled). */
-    g_decode_enabled = (g_ooo_present && !g_ooo_decode_disabled) ||
-                       (g_inorder_present && !g_inorder_decode_disabled);
+    /* 1.11.15 (audit): decode ALWAYS -- the instruction-class census
+     * (1.11.10) needs it, and gating it on OOO/InOrder presence left the
+     * census identically zero on alu/simple/null cores, i.e. on the default
+     * device element and most of the corpus: the counted mix silently fell
+     * back to fractions and the FP-without-FPU report could never fire.
+     * ALU-core timing is untouched (it consumes instrs and bytes, which the
+     * decoded BblInfo carries identically); the cost is decode work at
+     * translation time, once per basic block. PIMID_NODECODE=1 restores the
+     * old gating as an escape hatch. */
+    if (getenv("PIMID_NODECODE")) {
+        g_decode_enabled = (g_ooo_present && !g_ooo_decode_disabled) ||
+                           (g_inorder_present && !g_inorder_decode_disabled);
+    } else {
+        g_decode_enabled = !(g_ooo_present && g_ooo_decode_disabled) &&
+                           !(g_inorder_present && g_inorder_decode_disabled);
+    }
     if (g_ooo_present) {
         info("[ZSim] OOO core present: x86 decode -> DynUops enabled (real out-of-order path)%s",
              g_ooo_decode_disabled ? " [DISABLED via PIMID_OOO_NODECODE]" : "");

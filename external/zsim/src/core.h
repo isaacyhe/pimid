@@ -114,15 +114,16 @@ class Core : public GlobAlloc {
          * core type reports the same five stats and the parser needs one
          * rule. ROI-rebased alongside instrs (see markRoiBegin overrides). */
         uint64_t mixInt = 0, mixMul = 0, mixFp = 0, mixLd = 0, mixSt = 0;
+        uint64_t mixBr = 0;   // 1.11.15: decoder-classified control transfers
         uint64_t roiBaseMixInt = 0, roiBaseMixMul = 0, roiBaseMixFp = 0,
-                 roiBaseMixLd = 0, roiBaseMixSt = 0;
+                 roiBaseMixLd = 0, roiBaseMixSt = 0, roiBaseMixBr = 0;
         inline void mixAdd(const BblInfo* b) {
             mixInt += b->nInt; mixMul += b->nMul; mixFp += b->nFp;
-            mixLd  += b->nLoad; mixSt += b->nStore;
+            mixLd  += b->nLoad; mixSt += b->nStore; mixBr += b->nBr;
         }
         inline void mixMarkRoi() {
             roiBaseMixInt = mixInt; roiBaseMixMul = mixMul; roiBaseMixFp = mixFp;
-            roiBaseMixLd  = mixLd;  roiBaseMixSt  = mixSt;
+            roiBaseMixLd  = mixLd;  roiBaseMixSt  = mixSt;  roiBaseMixBr = mixBr;
         }
         inline void mixInitStats(AggregateStat* coreStat) {
             struct M { const char* n; const char* d; uint64_t* v; };
@@ -143,6 +144,7 @@ class Core : public GlobAlloc {
             add("mixFp",  "FP/vector-class instructions (measured)", &mixFp, &roiBaseMixFp);
             add("mixLd",  "Load uops (measured)", &mixLd, &roiBaseMixLd);
             add("mixSt",  "Store uops (measured)", &mixSt, &roiBaseMixSt);
+            add("mixBr",  "Branch-class instructions (measured)", &mixBr, &roiBaseMixBr);
         }
 
         explicit Core(g_string& _name) : lastUpdateCycles(0), lastUpdateInstrs(0), name(_name) {}

@@ -438,6 +438,14 @@ Processor::Processor(ParseXML *XML_interface)
           c.rt_power.readOp.leakage                     = plainLeak * fl;
           c.rt_power.readOp.longer_channel_leakage      = plainLeak * fl;
           c.rt_power.readOp.gate_leakage               *= fl;
+          /* 1.11.15 (audit): the GATED endpoints must ride the same family
+           * transform, or power gating on a periphery component compares a
+           * family-priced active value against a logic-priced gated one and
+           * the interpolation collapses to a no-op. */
+          c.power.readOp.power_gated_leakage                       *= fl;
+          c.power.readOp.power_gated_with_long_channel_leakage     *= fl;
+          c.rt_power.readOp.power_gated_leakage                    *= fl;
+          c.rt_power.readOp.power_gated_with_long_channel_leakage  *= fl;
           if (scaleArea) c.area.set_area(c.area.get_area() * fa);
       };
       /* AREA vs DEVICE factors are not the same claim. The dynamic and
