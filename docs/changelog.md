@@ -7,6 +7,44 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.9 -- co-simulation reports what it measured
+
+#86 and its audit sheet (six blockers). (1) System scope HARD-ABORTED on a
+decoupled co-simulation -- host DDR5 plus device HBM3, the standard PIM
+configuration -- because a 1.9.42 guard insisted the system had exactly one
+memory. Each node's memory is now charged with ITS OWN technology and ITS
+OWN counters, which is what the timing side has done since 1.1.0; a shared
+memory (device IS the host's memory) names one technology and is priced
+once, so those runs are unchanged. (2) The parser accumulated across EVERY
+stats dump in zsim.out: zsim appends a full monotonic dump per write, so a
+run with a periodic dump plus the final one reported double its accesses.
+Only the final dump is read now, and multi-dump files announce themselves.
+(3) cCycles was left absolute while cycles was ROI-windowed, and
+host_wall_cycles summed the two -- cCycles is now rebased on the same
+window. (4) The memory die's AREA never appeared in system scope, so a
+co-simulated system's total silicon omitted its largest piece; it is
+computed with the same JEDEC-calibrated CACTI model as device scope and
+summed in. (5) The PE-MI locality split has been emitted since 1.5.3 and
+read by nobody -- the one measurement that says whether a placement kept
+its accesses local; it is now parsed and reported. (6) HOST_MC placement
+produces no device memory group BY CONSTRUCTION (the elements sit at the
+host controller); the report says so instead of printing a bare zero.
+
+And the root cause of a mystery the code itself documented as "not yet
+understood" (1.9.28): the parser latched instrs from the FIRST core while
+uops, branches and syntheticInstrs were all-core sums. Measured on a 16-PE
+HBM3 cell, that is 51,660 against a true 512,788 -- McPAT, which divides by
+the core count, modelled every PE as doing a tenth of its work, and the
+mix-consistency gate then rejected the measured instruction mix and fell
+back to documented fractions. instrs is now summed like every other
+activity counter. Cycles remain first-core: a duration, not work.
+
+DATA IMPACT: device-scope core dynamic power rises where instruction-driven
+terms dominate (the counter was ~10x low on a 16-PE cell); co-sim runs gain
+memory area, per-node memory energy, and locality reporting; any run whose
+zsim.out held more than one dump loses the multiplied counts. Timing
+untouched.
+
 ## 1.11.8 -- power gating: one flag per component, physics per technology
 
 #84, to the spec converged interactively (v7): NO global switch, NO

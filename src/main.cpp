@@ -403,6 +403,11 @@ struct ZSimParsedOutput {
     uint64_t pg_hostmc_active = 0;
     uint64_t pg_devmc_active = 0;
     uint64_t phases = 0;
+    /* 1.11.9 (#86, audit): the PE-MI locality split has been EMITTED since
+     * 1.5.3 and parsed by nobody -- the one measurement that says whether a
+     * placement actually kept its accesses local. */
+    uint64_t pemi_local_acc = 0;
+    uint64_t pemi_remote_acc = 0;
     /* 1.9.29: per-node measured counters. Everything below this comment that is
      * NOT inside `host`/`dev` is an ALL-NODES total, kept for the device-SCOPE
      * path (runPowerAnalysis), which simulates one node and is correct as-is.
@@ -562,6 +567,42 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
     std::ifstream f(path);
     if (!f.is_open()) return out;
 
+    /* 1.11.9 (#86, audit blocker): zsim appends a FULL stats dump, terminated
+     * by "===", every time stats are written -- periodic dumps, a final dump,
+     * and (in multi-process system runs) one set per QEMU process. The parser
+     * accumulated across all of them, so every counter was multiplied by the
+     * dump count: a run with one periodic dump plus the final dump reported
+     * double the accesses it made. zsim's counters are MONOTONIC RUN TOTALS,
+     * so the last dump alone is the truth. Read only the final dump segment.
+     * If more than one dump is present the count is announced, because a
+     * multi-PROCESS file (disjoint groups per process) needs the operator to
+     * know that only the last process's groups are being read -- that
+     * topology is out of scope for this build and must not pass silently. */
+    std::vector<std::string> all_lines;
+    {
+        std::string l;
+        while (std::getline(f, l)) all_lines.push_back(l);
+    }
+    std::vector<size_t> dump_ends;
+    for (size_t i = 0; i < all_lines.size(); i++)
+        if (all_lines[i] == "===") dump_ends.push_back(i);
+    size_t start_idx = 0, end_idx = all_lines.size();
+    if (dump_ends.size() >= 2) {
+        // dump_ends[0] is the header separator; the final dump lies between
+        // the last two "===" lines.
+        start_idx = dump_ends[dump_ends.size() - 2] + 1;
+        end_idx   = dump_ends[dump_ends.size() - 1];
+        size_t n_dumps = dump_ends.size() - 1;
+        if (n_dumps > 1) {
+            std::cout << "  [stats] " << n_dumps << " stats dumps in "
+                      << path << "; reading the LAST (counters are monotonic "
+                         "run totals -- accumulating across dumps would "
+                         "multiply every counter by " << n_dumps << ")"
+                      << std::endl;
+        }
+    }
+    size_t line_cursor = start_idx;
+
     // Scope tracking: which cache/MC are we inside?
     enum class Scope { NONE, ROOT, L1D, L1I, L2, L3, MEM };
     Scope scope = Scope::NONE;
@@ -623,7 +664,8 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
     };
 
     std::string line;
-    while (std::getline(f, line)) {
+    while (line_cursor < end_idx) {
+        line = all_lines[line_cursor++];
         if (line.empty() || line[0] == '#' || line == "===") continue;
 
         int indent = getIndent(line);
@@ -789,9 +831,20 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
             // Top-level stats
             if (scope == Scope::NONE || scope == Scope::ROOT) {
                 if (key == "cycles" && out.cycles == 0) out.cycles = val;
-                else if (key == "instrs" && out.instrs == 0) out.instrs = val;
-                /* 1.9.28: accumulate per group as well as the legacy first-core value */
+                /* 1.11.9 (#86, audit): instrs is SUMMED across cores, like every
+                 * other activity counter. It used to latch the FIRST core's
+                 * value while uops/bbls/branches/syntheticInstrs were all-core
+                 * sums -- THE unexplained "different bases" the 1.9.28 mix gate
+                 * documented and could not account for. Measured on a 16-PE
+                 * HBM3 cell: first core 51,660 vs true total 512,788, so McPAT
+                 * (which divides by num_cores to get its per-core figure) was
+                 * modelling each PE as doing a tenth of its actual work, and
+                 * the self-consistency guard then rejected the measured mix and
+                 * fell back to documented fractions. Cycles stay first-core:
+                 * they are a DURATION, not work, and summing them would be the
+                 * mirror-image error. */
                 if (key == "instrs") {
+                    out.instrs += val;
                     if (grp) { grp->instrs += val; grp->seen = true; }
                 }
                 /* 1.9.28: accumulate measured activity across cores.
@@ -802,6 +855,8 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
                 else if (key == "xingD2HBytes") { out.xing_d2h_bytes = val; }
                 else if (key == "xingCount") { out.xing_count = val; }
                 else if (key == "xingFlushBytes") { out.xing_flush_bytes = val; }
+                else if (key == "localAcc")  { out.pemi_local_acc += val; }
+                else if (key == "remoteAcc") { out.pemi_remote_acc += val; }
                 else if (key == "pgAnyCoreActivePhases") { out.pg_anycore_active = val; }
                 else if (key == "pgSharedCacheActivePhases") { out.pg_sharedcache_active = val; }
                 else if (key == "pgNocActivePhases") { out.pg_noc_active = val; }
@@ -5211,6 +5266,63 @@ static void runPowerAnalysis(const UnifiedConfig& config,
  * device-scope path already, and it is inherited constant rather than measured
  * (tracked separately), so adding it in a second place would compound an
  * approximation instead of a measurement. */
+/* 1.11.9 (#86, audit): the memory die's AREA never appeared in system scope,
+ * so a co-simulated system's "System Total" area silently omitted the memory
+ * -- the largest piece of silicon in a PIM system. Same JEDEC-calibrated CACTI
+ * model as device scope (1.11.1): k = JEDEC(preset org) / CACTI(preset org),
+ * area = CACTI(effective) x k, k printed.
+ *
+ * NOTE (borders rule): this duplicates the device-scope block's logic rather
+ * than relocating it, so that path stays bit-identical here. 1.11.14 migrates
+ * the calibration INTO the CACTI fork and both call sites collapse onto one
+ * tool call -- this helper is the seam that migration will use. */
+static double computeDramDieAreaMM2(const std::string& memory_tech, bool print)
+{
+    const bool is_dram = !(memory_tech == "SRAM" || memory_tech == "STT_MRAM" ||
+                           memory_tech == "PCM"  || memory_tech == "RERAM");
+    if (memory_tech.empty() || !is_dram) return 0.0;
+    try {
+        pimid::RamulatorWrapper ram_oracle("", memory_tech);
+        ram_oracle.initialize();
+        uint64_t chip_bytes = ram_oracle.getChipSizeMB() * 1024ULL * 1024ULL;
+        uint32_t total_banks = ram_oracle.getBanksPerBankGroup()
+                             * ram_oracle.getBankGroupsPerChip();
+        pimid::CACTIWrapper::SRAMConfig cfg;
+        cfg.capacity_bytes = chip_bytes;
+        uint32_t iow = static_cast<uint32_t>(std::max(8, ram_oracle.getChipIOBits()));
+        cfg.line_size = std::max(64u, iow / 8u);
+        cfg.associativity = 1;
+        cfg.banks = std::max(1u, total_banks);
+        cfg.tech_node_nm = getDRAMGenClass(memory_tech).cacti_table_nm;
+        cfg.is_cache = false;
+        cfg.is_main_memory = true;
+        cfg.cell_type = pimid::CACTIWrapper::COMM_DRAM;
+        cfg.output_width_bits = iow;
+        cfg.page_sz_bits = 8192;
+        cfg.burst_len = 8;
+        cfg.int_prefetch_w = 8;
+        cfg.quiet = true;
+        double density = getDRAMDieDensity(memory_tech);
+        double chip_mbit = static_cast<double>(chip_bytes) * 8.0 / (1024.0 * 1024.0);
+        double jedec_ref = (chip_mbit / density) * 1.12;
+        pimid::CACTIWrapper cacti(cfg);
+        cacti.initialize();
+        double raw = cacti.getArea();
+        if (!(raw > 0.0)) return jedec_ref;   // CACTI failed: vendor figure
+        double k = jedec_ref / raw;
+        double area = raw * k;
+        if (print) {
+            std::cout << "  Die area:      " << std::fixed << std::setprecision(2)
+                      << area << " mm^2/die (CACTI x k, k=" << std::setprecision(3)
+                      << k << " JEDEC-calibrated; raw CACTI " << std::setprecision(2)
+                      << raw << ")" << std::defaultfloat << std::endl;
+        }
+        return area;
+    } catch (const std::exception&) {
+        return 0.0;
+    }
+}
+
 static void reportSharedMemoryArrayEnergy(const std::string& memory_tech,
                                           uint64_t mem_rd, uint64_t mem_wr)
 {
@@ -5246,7 +5358,7 @@ static void reportSharedMemoryArrayEnergy(const std::string& memory_tech,
         std::cout << "  Technology:    " << memory_tech
                   << " (Ramulator2 energy model)" << std::endl;
         std::cout << "  Accesses:      " << (mem_rd + mem_wr)
-                  << " total on ONE array (host and device share it)" << std::endl;
+                  << " on this node's memory" << std::endl;
         std::cout << "  Per-access:    read=" << std::fixed << std::setprecision(3)
                   << rd_nj << " nJ, write=" << wr_nj << " nJ (incl act+col)"
                   << std::endl;
@@ -5256,6 +5368,7 @@ static void reportSharedMemoryArrayEnergy(const std::string& memory_tech,
                   << (total_rd_mj + total_wr_mj) << " mJ (rd=" << total_rd_mj
                   << " + wr=" << total_wr_mj << ")"
                   << std::defaultfloat << std::endl;
+        computeDramDieAreaMM2(memory_tech, /*print=*/true);  // 1.11.9
     } catch (const std::exception& e) {
         std::cerr << "  [Memory array] Ramulator2 query failed: " << e.what()
                   << std::endl;
@@ -5723,29 +5836,101 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
      * what the memory is, that is a topology this build does not model and it
      * stops, rather than charging one of them and silently dropping the other.
      * Several memories is 2.1. */
+    /* 1.11.9 (#86, audit blocker): the 1.9.42 one-memory check hard-aborted
+     * on DECOUPLED co-sim -- host DDR5 + device HBM3 is the STANDARD
+     * configuration, and the timing side has priced each node's accesses
+     * with its own local technology since 1.1.0. The energy side now does
+     * the same: each node's memory is charged with ITS OWN technology and
+     * ITS OWN group counters (has_activity() guards unmeasured groups,
+     * 1.9.35). Nodes sharing one memory (device IS the host memory) simply
+     * name the same technology and their charges land on it separately --
+     * the sum is identical to the old single-tech path (gate invariant).
+     * The audit's rd/wr-polarity blocker is contained by the same change:
+     * counters are no longer summed ACROSS sides before charging. */
+    /* 1.11.9 (#86, audit): report the measured locality split, and say
+     * explicitly when a placement produces no device memory group at all
+     * (HOST_MC: the elements sit at the host controller, so their accesses
+     * are host-memory accesses BY CONSTRUCTION -- a structural zero, not a
+     * missing measurement, and the report must distinguish the two). */
+    if (zsim_stats.pemi_local_acc + zsim_stats.pemi_remote_acc > 0) {
+        uint64_t tot = zsim_stats.pemi_local_acc + zsim_stats.pemi_remote_acc;
+        std::cout << "  [locality] PE-MI accesses: "
+                  << zsim_stats.pemi_local_acc << " local + "
+                  << zsim_stats.pemi_remote_acc << " remote ("
+                  << std::fixed << std::setprecision(1)
+                  << (100.0 * static_cast<double>(zsim_stats.pemi_local_acc) / tot)
+                  << "% local at this placement)" << std::defaultfloat << std::endl;
+    }
+    if (config.pe_hierarchy_level == -1 && !zsim_stats.dev.has_activity()) {
+        std::cout << "  [mem] HOST_MC placement: the elements share the host "
+                     "memory controller, so their accesses ARE host-memory "
+                     "accesses -- no separate device memory group exists by "
+                     "construction (structural zero, not a missing counter)"
+                  << std::endl;
+    }
+
+    double mem_area_total = 0.0;   // 1.11.9: memory silicon, summed into the system total
     {
-        std::string mem_tech, tech_owner;
+        /* COUPLED vs DECOUPLED. When the device IS the host's memory
+         * (resolveMemoryTopology copies the device tech onto the host), both
+         * nodes name ONE piece of silicon: its accesses are the sum of both
+         * sides and it is charged ONCE -- byte-for-byte the pre-1.11.9
+         * behaviour, so coupled runs (the whole existing corpus) are
+         * unchanged. Only genuinely decoupled systems -- host with its own
+         * memory block, device with another technology, the case that used
+         * to abort -- charge per node. */
+        std::string h_tech, d_tech;
         for (const auto& node : config.system_nodes) {
             if (node.memory_tech.empty()) continue;
-            if (mem_tech.empty()) { mem_tech = node.memory_tech; tech_owner = node.name; }
-            else if (node.memory_tech != mem_tech) {
-                std::cerr << "[power] FATAL: nodes '" << tech_owner << "' and '"
-                          << node.name << "' name different memory technologies ("
-                          << mem_tech << " vs " << node.memory_tech << "). This build "
-                          << "models ONE memory -- either the processing device IS the "
-                          << "host's memory, or the run is host-only with a plain one. "
-                          << "Charging one of these and ignoring the other would "
-                          << "misprice the system silently, so this refuses instead.\n";
-                std::exit(2);
+            if (node.role == UnifiedConfig::SystemNode::HOST && h_tech.empty())
+                h_tech = node.memory_tech;
+            if (node.role == UnifiedConfig::SystemNode::DEVICE && d_tech.empty())
+                d_tech = node.memory_tech;
+        }
+        const bool coupled = (h_tech.empty() || d_tech.empty() || h_tech == d_tech);
+        if (coupled) {
+            std::string tech = d_tech.empty() ? h_tech : d_tech;
+            uint64_t all_rd = 0, all_wr = 0;
+            if (zsim_stats.host.has_activity()) { all_rd += zsim_stats.host.mem_rd; all_wr += zsim_stats.host.mem_wr; }
+            if (zsim_stats.dev.has_activity())  { all_rd += zsim_stats.dev.mem_rd;  all_wr += zsim_stats.dev.mem_wr;  }
+            if (!tech.empty()) {
+                std::cout << "  [mem] one memory (" << tech
+                          << "): host and device accesses land on the same "
+                             "silicon and are charged once" << std::endl;
+                reportSharedMemoryArrayEnergy(tech, all_rd, all_wr);
+                mem_area_total += computeDramDieAreaMM2(tech, false);
+            }
+        } else {
+        bool host_done = false, dev_done = false;
+        std::set<std::string> priced_techs;
+        std::cout << "  [mem] decoupled system: host " << h_tech
+                  << " + device " << d_tech
+                  << " -- each charged with its own technology" << std::endl;
+        for (const auto& node : config.system_nodes) {
+            if (node.memory_tech.empty()) continue;
+            if (node.role == UnifiedConfig::SystemNode::HOST && !host_done &&
+                zsim_stats.host.has_activity()) {
+                std::cout << "  [mem] " << node.name << " (" << node.memory_tech
+                          << "): host-side array energy" << std::endl;
+                reportSharedMemoryArrayEnergy(node.memory_tech,
+                                              zsim_stats.host.mem_rd,
+                                              zsim_stats.host.mem_wr);
+                if (priced_techs.insert(node.memory_tech).second)
+                    mem_area_total += computeDramDieAreaMM2(node.memory_tech, false);
+                host_done = true;
+            } else if (node.role == UnifiedConfig::SystemNode::DEVICE && !dev_done &&
+                       zsim_stats.dev.has_activity()) {
+                std::cout << "  [mem] " << node.name << " (" << node.memory_tech
+                          << "): device-side array energy" << std::endl;
+                reportSharedMemoryArrayEnergy(node.memory_tech,
+                                              zsim_stats.dev.mem_rd,
+                                              zsim_stats.dev.mem_wr);
+                if (priced_techs.insert(node.memory_tech).second)
+                    mem_area_total += computeDramDieAreaMM2(node.memory_tech, false);
+                dev_done = true;
             }
         }
-        /* has_activity() distinguishes "did no work" from "was never measured"
-         * (1.9.35), so an unmeasured group contributes nothing rather than a
-         * fabricated zero. */
-        uint64_t all_rd = 0, all_wr = 0;
-        if (zsim_stats.host.has_activity()) { all_rd += zsim_stats.host.mem_rd; all_wr += zsim_stats.host.mem_wr; }
-        if (zsim_stats.dev.has_activity())  { all_rd += zsim_stats.dev.mem_rd;  all_wr += zsim_stats.dev.mem_wr;  }
-        reportSharedMemoryArrayEnergy(mem_tech, all_rd, all_wr);
+        }
     }
 
     // System totals
@@ -5761,6 +5946,11 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
     std::cout << "\n--- System Total ---" << std::endl;
     std::cout << "  Power: " << std::fixed << std::setprecision(2)
               << sys_power << " W (" << sys_dyn << " dyn + " << sys_leak << " leak)" << std::endl;
+    /* 1.11.9 (#86, audit): the memory die is silicon too -- omitting it made
+     * a co-simulated PIM system's area smaller than the same configuration
+     * reported in device scope. Shared memory is counted ONCE (a device that
+     * IS the host's memory names one technology and is priced once). */
+    sys_area += mem_area_total;
     std::cout << "  Area:  " << sys_area << " mm^2";
     /* 1.11: the aggregate alone hides the number that matters for a PIM
      * add-on: how much silicon the device ADDS to a host that already
@@ -5773,7 +5963,9 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
             std::cout << (first ? "  (" : " + ") << r.name << " " << r.area;
             first = false;
         }
-        if (!first) std::cout << " per node)";
+        if (mem_area_total > 0.0)
+            std::cout << (first ? "  (" : " + ") << "memory die " << mem_area_total;
+        if (!first || mem_area_total > 0.0) std::cout << " per node)";
     }
     std::cout << std::defaultfloat << std::endl;
 }

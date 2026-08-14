@@ -103,7 +103,10 @@ void OOOCore::initStats(AggregateStat* parentStat) {
     LambdaStat<decltype(x)>* cyclesStat = new LambdaStat<decltype(x)>(x);
     cyclesStat->init("cycles", "Simulated unhalted cycles");
 
-    auto y = [this]() { return cRec.getContentionCycles(); };
+    auto y = [this]() -> uint64_t {
+        uint64_t c = cRec.getContentionCycles();
+        return (c > roiBaseCCycles) ? (c - roiBaseCCycles) : 0;  // 1.11.9: ROI-windowed
+    };
     LambdaStat<decltype(y)>* cCyclesStat = new LambdaStat<decltype(y)>(y);
     cCyclesStat->init("cCycles", "Cycles due to contention stalls");
 

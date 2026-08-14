@@ -540,6 +540,7 @@ class OOOCore : public Core {
          * 649,332 and uops 4,247,062, implying more basic blocks than
          * instructions. Same base, same window, or the ratio means nothing. */
         uint64_t roiBaseUops     = 0;
+        uint64_t roiBaseCCycles  = 0;  // 1.11.9
         uint64_t roiBaseBbls     = 0;
         uint64_t roiBaseBranches = 0;
         uint64_t roiBaseMispred  = 0;
@@ -605,6 +606,10 @@ class OOOCore : public Core {
             roiBaseUops = uops; roiBaseBbls = bbls;
             roiBaseBranches = branches; roiBaseMispred = mispredBranches;
             roiBaseSyntheticInstrs = syntheticInstrs;  // 1.9.33
+            /* 1.11.9 (audit): cCycles was "left absolute as diagnostic", but
+             * the parser SUMS it with ROI-windowed cycles for
+             * host_wall_cycles -- mixing bases. Rebase it like the rest. */
+            roiBaseCCycles = cRec.getContentionCycles();
         }
 
     private:
