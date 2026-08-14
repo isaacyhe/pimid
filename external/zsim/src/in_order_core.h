@@ -181,6 +181,7 @@ class InOrderCore : public Core {
         uint64_t roiBaseBranches = 0;
         uint64_t roiBaseMispred  = 0;
         uint64_t roiBaseCycle  = 0;
+        uint64_t roiBaseCCycles = 0;   // 1.11.17: contention-cycle ROI base (parity with OOO 1.11.9)
 
     public:
         // _issueWidth: in-order superscalar issue width (YAML pim.pe.issue_width,
@@ -216,6 +217,7 @@ class InOrderCore : public Core {
             roiBaseInstrs = instrs; roiBaseCycle = getCycles();  // adjusted clock: pre-ROI phantom excluded
             roiBaseUops = uops; roiBaseBbls = bbls;              // 1.9.33
             roiBaseBranches = branches; roiBaseMispred = mispredBranches;
+            roiBaseCCycles = cRec.getContentionCycles();         // 1.11.17: like OOO (1.11.9)
             mixMarkRoi();   // 1.11.10
         }
 

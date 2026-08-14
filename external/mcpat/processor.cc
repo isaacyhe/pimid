@@ -335,7 +335,17 @@ Processor::Processor(ParseXML *XML_interface)
 		  }
 		  else
 		  {//Bus based interconnect
-			  nocs.push_back(new NoC(XML,i, &interface_ip, 1, sqrt(area.get_area()*XML->sys.NoC[i].chip_coverage)));
+			  /* PIMID 1.11.17 (audit go-through): the bus length spans the
+			   * DIE, and under the DRAM-periphery family the die's
+			   * transistor-dominated components are reported dram_periph_area
+			   * times larger by applyFam AFTER this constructor ran -- so the
+			   * wire was sized for a die the run then reports bigger. Length
+			   * scales as sqrt(area): apply the same factor here. (The
+			   * fabric's own AREA is wire-dominated and stays unscaled by
+			   * applyFam -- length and area are different claims.) */
+			  double bus_len_scale = (XML->sys.dram_periph_family == 1)
+			      ? sqrt(XML->sys.dram_periph_area) : 1.0;
+			  nocs.push_back(new NoC(XML,i, &interface_ip, 1, sqrt(area.get_area()*XML->sys.NoC[i].chip_coverage)*bus_len_scale));
 			  if (procdynp.homoNOC){
 				  noc.area.set_area(noc.area.get_area() + nocs[i]->area.get_area()*procdynp.numNOC);
 				  area.set_area(area.get_area() + noc.area.get_area());

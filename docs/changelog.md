@@ -7,6 +7,52 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.17 -- the mechanical half of the 200-finding go-through
+
+The FIX-NOW class of the full-audit triage (the mechanical defects; the 34
+model decisions are queued for discussion). Highlights:
+
+- ONE node authority: getCacheLatencyCycles routed through the positive-list
+  validator -- an invalid node no longer prices cache TIMING at a silently
+  clamped 22 nm while the power path fatally rejects it.
+- The printed periphery area factor is the one APPLIED (fa x pitch), and a
+  non-hp corner says so when it is applied, not only when refused.
+- System-scope device nodes get the same corner refusal/application, area
+  band, UPMEM clock guard and device_type wiring as device scope -- the
+  per-node path was a divergent copy where power.device_corner was silently
+  ignored.
+- CHANNEL placement follows the LOCKED per-tech ladder: on channel-centric
+  LPDDR/GDDR/HBM the channel tier lives on the DRAM die and is now priced
+  DRAM-periphery (DDR-class channel = buffer die stays logic).
+- Bus-NoC wire length under the family rides sqrt(dram_periph_area) -- the
+  bus was sized for a logic-process die the run then reported 2.44x larger.
+- FP-without-FPU report: one shared copy, DEVICE-group census (the host's FP
+  stream is no longer pinned on the FPU-less elements), and it prints with
+  --no-power too (the timing charge fires either way).
+- HOST_MC structural-zero explanation now keyed on the device MEMORY group
+  (the core-group flag made it unreachable on exactly the runs it explains);
+  co-sim host [Activity] prints the real_instrs McPAT is priced on (raw +
+  synth shown).
+- Shared-cache PG residency guard matches system-scope "<node>_l2*" names
+  (the 1.9.29 node-prefix class, re-made); in-order cCycles is ROI-rebased
+  like the OOO core (1.11.9 parity).
+- vendorDieDensity: units stated (MB/mm^2; the "8x" comment contradiction
+  was bits-vs-bytes) -- the array-region-vs-full-die question is flagged for
+  the go-through with a per-row sourcing requirement.
+- Docs: the yaml reference states the 22/32/45/65/90 positive list and stops
+  demonstrating 7 nm; power.md stops claiming the memory-process penalty is
+  missing (it shipped in 1.11.2/1.11.12).
+
+Reclassified FIX-NOW -> DISCUSS with evidence (VERIFY_1126_DISCUSS D11-D14):
+vendor density absolute values, termination scheme factors, DRAM background
+population (device/rank/stack -- MC release #100), and the Core-layout
+invariant (cross-binary +/-6-cycle drift measured on identical source; BSS
+migration would not restore cross-version bit-identity).
+
+Data impact: channel-placement cells on LPDDR/GDDR/HBM re-price (family);
+family cells' bus-NoC dynamic/leakage shifts (wire length x ~1.56 at 22nm
+class); logic cells and defaults unchanged.
+
 ## 1.11.16 -- the audit's fixes are audited, and three of them fall
 
 Seven adversarial verifiers (one per 1.11.15 fix claim + a fresh sweep of the

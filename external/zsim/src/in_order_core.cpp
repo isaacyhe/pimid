@@ -112,7 +112,13 @@ void InOrderCore::initStats(AggregateStat* parentStat) {
     cyclesStat->init("cycles", "Simulated unhalted cycles");
     coreStat->append(cyclesStat);
 
-    auto y = [this]() { return cRec.getContentionCycles(); };
+    /* 1.11.17 (audit go-through): ROI-rebased like the OOO core (1.11.9
+     * blocker 3) -- this copy still reported absolute contention cycles
+     * against ROI-windowed cycles/instrs. */
+    auto y = [this]() {
+        uint64_t c = cRec.getContentionCycles();
+        return (c > roiBaseCCycles) ? (c - roiBaseCCycles) : 0;
+    };
     LambdaStat<decltype(y)>* cCyclesStat = new LambdaStat<decltype(y)>(y);
     cCyclesStat->init("cCycles", "Cycles due to contention stalls");
     coreStat->append(cCyclesStat);

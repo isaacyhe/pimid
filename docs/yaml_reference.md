@@ -466,9 +466,17 @@ power:
 power flows are bit-identical at default). The host node, when not given its own
 value, inherits the device node so a single `power.tech_node_nm` yields a uniform
 iso-process study. A per-node YAML `tech_node_nm` under `system.hosts[]` /
-`system.devices[]` still wins over these `power.*` knobs. McPAT/CACTI clamp any
-resolved node to a >=22nm floor (the linked CACTI does not model below 22nm);
-sub-22nm McPAT-only scaling and per-tech node scaling remain future work.
+`system.devices[]` still wins over these `power.*` knobs.
+
+**Valid nodes (since 1.11.2): 22, 32, 45, 65, 90 nm -- a positive list.** These
+are the nodes every linked tool evaluates from real, calibrated tables; 22 nm is
+the finest. Any other value is a FATAL configuration error (the old behavior --
+silently clamping sub-22 requests to 22 -- is removed; CACTI's 16nm table is a
+stub, so the reject guards a live failure mode). DRAM memory domains carry no
+free node at all: their periphery class is derived from the memory technology
+and printed. `power.device_corner` (`hp` default, `lstp`, `lop`) selects the
+CACTI device column for LOGIC-family components; it is refused, with a printed
+reason, for DRAM-periphery components (one commodity-DRAM column per table).
 
 ### McPAT Overrides
 
@@ -567,7 +575,7 @@ system:
       core_type: ooo_core
       num_cores: 4
       frequency_mhz: 3000
-      tech_node_nm: 7
+      tech_node_nm: 22   # valid: 22/32/45/65/90 (positive list, fatal otherwise)
       memory:
         technology: DDR5
       cache:
@@ -586,7 +594,7 @@ system:
 | `system.hosts[].core_type` | string | `"ooo_core"` | Host core type. |
 | `system.hosts[].num_cores` | int | `4` | Number of host cores. |
 | `system.hosts[].frequency_mhz` | double | `3000.0` | Host frequency. |
-| `system.hosts[].tech_node_nm` | int | `7` | Host technology node. |
+| `system.hosts[].tech_node_nm` | int | inherits device (`22`) | Host technology node. Valid: 22/32/45/65/90 positive list -- any other value is a fatal error (see Process-node resolution). |
 | `system.hosts[].memory.technology` | string | `"DDR4"` | Host memory technology. Under `is_default_mem: true` (default) it is forced = the device tech; under `false` it is set from `host.mem.technology`. |
 | `system.hosts[].memory.bandwidth_mbs` | int | `-1` | Per-channel host memory bandwidth (MB/s). `-1` = auto from tech. |
 | `system.hosts[].memory.channels` | int | `-1` | Host memory channel (MC) count. `-1` = auto from tech (DDR5 c=1, HBM3 c=16). |

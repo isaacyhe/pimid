@@ -329,14 +329,26 @@ double CACTIWrapper::getArea() const {
  * be nonsense. So calibration requires BOTH a commodity-DRAM main-memory
  * query AND a named technology, and anything else returns raw CACTI
  * unchanged. */
+/* 1.11.17 (audit go-through): UNITS STATED -- values are MB/mm^2 (bytes,
+ * not bits; the old comments quoted Gb over mm^2 and read 8x off unless
+ * the bit->byte conversion was inferred). Arithmetic per row:
+ * DDR3 2Gb=256MB over ~5.5mm^2 -> ~46; DDR4 8Gb=1024MB over ~11mm^2 ->
+ * ~93; DDR5 16Gb=2048MB over ~12mm^2 -> ~171. LPDDR5/GDDR6/HBM2/HBM3
+ * carry no per-row provenance -- class estimates on the same basis.
+ * OPEN QUESTION (flagged for the go-through, feeds the CAL area
+ * deliverable): the implied die areas are ARRAY-REGION figures, several
+ * times denser than full-die photos (a 16Gb DDR5 die is ~65-75mm^2 in
+ * silicon, ~29MB/mm^2 full-die); whether the k-calibration wants the
+ * array-region or full-die density must be settled with a cited source
+ * per row before the numbers are quoted in the manuscript. */
 double CACTIWrapper::vendorDieDensity(const std::string& tech) {
-    if (tech == "DDR3")   return 45.0;   // 2Gb/~5.5mm^2
-    if (tech == "DDR4")   return 90.0;   // 8Gb/~11mm^2
-    if (tech == "DDR5")   return 165.0;  // 16Gb/~12mm^2
-    if (tech == "LPDDR5") return 180.0;
-    if (tech == "GDDR6")  return 200.0;
-    if (tech == "HBM2")   return 350.0;
-    if (tech == "HBM3")   return 450.0;
+    if (tech == "DDR3")   return 45.0;   // MB/mm^2 (2Gb=256MB / ~5.5mm^2)
+    if (tech == "DDR4")   return 90.0;   // MB/mm^2 (8Gb=1024MB / ~11mm^2)
+    if (tech == "DDR5")   return 165.0;  // MB/mm^2 (16Gb=2048MB / ~12mm^2)
+    if (tech == "LPDDR5") return 180.0;  // MB/mm^2 (class estimate)
+    if (tech == "GDDR6")  return 200.0;  // MB/mm^2 (class estimate)
+    if (tech == "HBM2")   return 350.0;  // MB/mm^2 (class estimate)
+    if (tech == "HBM3")   return 450.0;  // MB/mm^2 (class estimate)
     return 90.0;                          // default: DDR4-class
 }
 

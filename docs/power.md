@@ -39,10 +39,16 @@ calibrated against, and the one a memory-die element belongs to.
 
 **It does not claim in-memory logic is cheap.** The literature is consistent that
 logic built in a memory process is slower and larger than the same logic in a
-logic process. That penalty is a separate, still-missing term: elements are
-priced in a logic process today while a memory-process clock is already assumed
-for them. The two halves disagree about which fab built the element, and the
-correction runs opposite to the reference-class one.
+logic process. Since 1.11.2/1.11.12 that penalty is MODELLED: the placement x
+technology matrix selects a DRAM-periphery process family for elements that
+live on DRAM silicon (subarray..chip on DRAM technologies, and the channel
+tier on channel-centric LPDDR/GDDR/HBM), and McPAT itself applies the family
+factors -- area x2.44 (22nm class; x2.46 at the 32nm DDR3 class), dynamic
+x0.82/x0.66 and the comm-dram leakage rebase -- derived from CACTI's own
+hp vs comm-dram device columns at 350K. Rank/channel placements on DDR-class
+parts and the HBM base die keep the logic family (their logic sits on a
+buffer or base die), as do all SRAM/NVM technologies (BEOL over logic CMOS).
+The applied factor and its uncertainty band are printed by every run.
 
 ## The element
 

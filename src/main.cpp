@@ -226,20 +226,16 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
  * @param default_cycles Fallback latency if CACTI fails
  * @return Cache access latency in cycles
  */
+static int validateTechNodeNm(int node_nm, const char* what);  // 1.11.17: single node authority
+
 static int getCacheLatencyCycles(int size_kb, int ways, int line_size,
                                   double frequency_mhz, int tech_node_nm,
                                   int default_cycles) {
-    // CACTI 7.0 supports 22-180nm; clamp and warn if outside range
-    int cacti_tech = tech_node_nm;
-    if (cacti_tech < 22) {
-        static bool warned = false;
-        if (!warned) {
-            std::cerr << "Warning: CACTI does not support " << tech_node_nm
-                      << "nm. Clamping to 22nm for cache timing.\n";
-            warned = true;
-        }
-        cacti_tech = 22;
-    }
+    /* 1.11.17 (audit go-through): this CACTI query used to keep the exact
+     * bottom-only clamp 1.11.2 removed everywhere else -- an invalid node
+     * silently priced cache TIMING at 22 nm while the power path fatally
+     * rejected the same node. One authority for the node surface. */
+    int cacti_tech = validateTechNodeNm(tech_node_nm, "cache-latency query");
     pimid::CACTIWrapper::SRAMConfig cfg;
     cfg.capacity_bytes = static_cast<uint64_t>(size_kb) * 1024;
     cfg.associativity = ways;
@@ -4378,6 +4374,34 @@ static std::vector<pimid::McPATWrapper::NoCLevelConfig> buildNoCLevelsForMcPAT(
     return levels;
 }
 
+/* 1.11.17 (audit go-through): the FP-without-FPU contradiction report, ONE
+ * copy. Two defects in the old shape: (1) it lived only inside the two
+ * power-analysis paths, so --no-power hid the contradiction while the
+ * timing charge still fired; (2) it used the ALL-NODE mix_fp, so in a
+ * co-simulation the HOST's FP stream was attributed to the FPU-less device
+ * elements. The device group's own census is used when the dump carries
+ * one. */
+static void reportFpWithoutFpu(const UnifiedConfig& config,
+                               const ZSimParsedOutput& zsim_stats) {
+    if (config.pe_has_fp) return;
+    uint64_t dev_fp = zsim_stats.dev.has_activity() ? zsim_stats.dev.mix_fp
+                                                    : zsim_stats.mix_fp;
+    if (dev_fp == 0) return;
+    std::cout << "  [fp] " << dev_fp
+              << " FP-class instructions executed on an element declared "
+                 "WITHOUT an FP unit";
+    if (config.pe_fp_emul_cycles > 0) {
+        std::cout << "; charged " << config.pe_fp_emul_cycles
+                  << " cycles each as soft-float emulation ("
+                  << (dev_fp * (uint64_t)config.pe_fp_emul_cycles)
+                  << " cycles total)" << std::endl;
+    } else {
+        std::cout << "; charged NOTHING (pim.pe.fp_emulation_cycles=0) -- "
+                     "the reported time is for hardware this element does "
+                     "not have" << std::endl;
+    }
+}
+
 /**
  * Run McPAT power analysis using simulation stats.
  * Called after successful simulation in exec/trace/MPI modes.
@@ -4394,25 +4418,8 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     // YAML overrides for McPAT derived parameters
     const std::map<std::string, double>& overrides = config.mcpat_overrides;
 
-    /* 1.11.11 (#113): device scope reports the FP-without-FPU contradiction
-     * too -- the system-scope copy of this report is in
-     * runPerNodePowerAnalysis; a device-scope run is the common case and was
-     * the one the gate caught missing. */
-    if (!config.pe_has_fp && zsim_stats.mix_fp > 0) {
-        std::cout << "  [fp] " << zsim_stats.mix_fp
-                  << " FP-class instructions executed on an element declared "
-                     "WITHOUT an FP unit";
-        if (config.pe_fp_emul_cycles > 0) {
-            std::cout << "; charged " << config.pe_fp_emul_cycles
-                      << " cycles each as soft-float emulation ("
-                      << (zsim_stats.mix_fp * (uint64_t)config.pe_fp_emul_cycles)
-                      << " cycles total)" << std::endl;
-        } else {
-            std::cout << "; charged NOTHING (pim.pe.fp_emulation_cycles=0) -- "
-                         "the reported time is for hardware this element does "
-                         "not have" << std::endl;
-        }
-    }
+    /* 1.11.11 (#113) / 1.11.17: shared report (see reportFpWithoutFpu). */
+    reportFpWithoutFpu(config, zsim_stats);
 
     /* 1.11.16 (verification audit): the PE-MI locality report existed only
      * in runPerNodePowerAnalysis (system scope), but the placement corpus --
@@ -4425,7 +4432,8 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                   << zsim_stats.pemi_remote_acc << " remote ("
                   << std::fixed << std::setprecision(1)
                   << (100.0 * static_cast<double>(zsim_stats.pemi_local_acc) / tot)
-                  << "% local at this placement)" << std::defaultfloat << std::endl;
+                  << "% local at this placement)" << std::defaultfloat
+                  << std::setprecision(6) << std::endl;   // 1.11.17: precision must not leak
     }
 
     /* 1.11.8 (#84): per-component PG residencies from the run's measured
@@ -4483,8 +4491,19 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         bool dram_family_tech =
             !(config.memory_tech == "SRAM" || config.memory_tech == "STT_MRAM" ||
               config.memory_tech == "PCM"  || config.memory_tech == "RERAM");
+        /* 1.11.17 (audit go-through): CHANNEL placement follows the LOCKED
+         * per-tech ladder. DDR-class is rank-centric -- its channel tier is
+         * a DIMM/buffer die, LOGIC. LPDDR/GDDR/HBM are channel-centric: the
+         * channel tier lives ON the DRAM die (there is no buffer die to put
+         * it on), so a channel-placed PE there is DRAM-periphery silicon.
+         * Pricing only; the DQ/PHY predicates are separate claims. */
+        bool channel_centric =
+            config.memory_tech.rfind("LPDDR", 0) == 0 ||
+            config.memory_tech.rfind("GDDR", 0) == 0 ||
+            config.memory_tech.rfind("HBM", 0) == 0;
         bool on_dram_silicon = dram_family_tech &&
-            config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3;
+            ((config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3) ||
+             (config.pe_hierarchy_level == 5 && channel_centric));
         /* 1.11.16 (verification audit): the MCPHY question is PLACEMENT, not
          * process family. An on-die element MC (subarray..chip) drives no
          * off-chip DQ pins whatever the bitcell technology -- an SRAM or PCM
@@ -4582,13 +4601,31 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                              "device." << std::endl;
                 corner = 0;
             }
+            /* 1.11.17 (audit go-through): report the factor actually APPLIED
+             * -- the emitted XML carries fa x subarray_pitch_factor, and the
+             * old print showed fa alone, so at SUBARRAY placement the
+             * reported factor was not the one in use. */
             double fa = (mcfg.dram_periph_table_nm == 32) ? 2.46 : 2.44;
+            double pitch = (mcfg.subarray_pitch_factor > 0.0)
+                               ? mcfg.subarray_pitch_factor : 1.0;
             std::cout << "  [tech] periphery area factor " << fa
-                      << "x (linear l_phy ratio) -- uncertainty band ["
-                      << fa << ", " << (fa * fa)
+                      << "x (linear l_phy ratio)";
+            if (pitch != 1.0)
+                std::cout << " x pitch " << pitch << " = " << (fa * pitch)
+                          << "x applied";
+            std::cout << " -- uncertainty band ["
+                      << (fa * pitch) << ", " << (fa * fa * pitch)
                       << "]: the squared ratio is the pessimistic end, the "
                          "linear one the conservative end, and the UPMEM die is "
                          "the only silicon anchor between them." << std::endl;
+        } else if (corner != 0) {
+            /* 1.11.17: say when a corner is APPLIED, not only when refused --
+             * 1.11.13's own stated defect ("priced hp without saying so")
+             * survived for every non-hp logic run. */
+            std::cout << "  [tech] device corner " << config.device_corner
+                      << " applied to logic components (CACTI "
+                      << (corner == 1 ? "lstp" : "lop") << " device column)."
+                      << std::endl;
         }
         mcfg.device_type = ov_get_int("device_type", corner);
     }
@@ -4919,7 +4956,12 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                                                hgrp.mispredBranches);
             host_mcpat.setMeasuredMix(hgrp.mix_int, hgrp.mix_mul, hgrp.mix_fp,
                                       hgrp.mix_ld, hgrp.mix_st, hgrp.mix_br);  // 1.11.10/.15
-            std::cout << "  [Activity] host: measured -- instrs=" << hgrp.instrs
+            /* 1.11.17: print the number McPAT is PRICED on (real_instrs =
+             * retired minus injected timing charges), not the raw counter --
+             * in an offload ROI the two differ by the whole charge. */
+            std::cout << "  [Activity] host: measured -- instrs=" << hgrp.real_instrs()
+                      << " (raw " << hgrp.instrs << ", synth "
+                      << hgrp.syntheticInstrs << ")"
                       << " cycles=" << host_cycles
                       << " uops=" << hgrp.uops
                       << " l1d=" << (hgrp.l1d_total_reads() + hgrp.l1d_total_writes())
@@ -5579,8 +5621,15 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
              * site) -- on-die element MCs drive no DQ pins on any tech. */
             if (config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3)
                 mcfg.mc_offchip_phy = false;
+            /* 1.11.17: channel-centric ladder parity with the device-scope
+             * site (LPDDR/GDDR/HBM channel tier lives on the DRAM die). */
+            bool channel_centric =
+                node.memory_tech.rfind("LPDDR", 0) == 0 ||
+                node.memory_tech.rfind("GDDR", 0) == 0 ||
+                node.memory_tech.rfind("HBM", 0) == 0;
             if (dram_family_tech &&
-                config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3) {
+                ((config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3) ||
+                 (config.pe_hierarchy_level == 5 && channel_centric))) {
                 mcfg.process_family = 1;
                 mcfg.subarray_pitch_factor =
                     (config.pe_hierarchy_level == 0) ? config.subarray_pitch_factor : 1.0;
@@ -5592,6 +5641,47 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                           << ", class " << ngc.cls << "; factors from CACTI "
                           << ngc.cacti_table_nm << "nm hp/comm-dram columns)"
                           << std::endl;
+            }
+            /* 1.11.17 (audit go-through): the system-scope path was a
+             * divergent copy -- power.device_corner was silently ignored,
+             * and neither 1.11.13's refusal, the area band, nor 1.11.2's
+             * UPMEM frequency guard ever ran for a system-scope device
+             * node. Same behavior as the device-scope site, per node. */
+            {
+                int corner = (config.device_corner == "lstp") ? 1
+                           : (config.device_corner == "lop")  ? 2 : 0;
+                if (mcfg.process_family == 1) {
+                    if (corner != 0) {
+                        std::cout << "  [tech] " << node.name
+                                  << ": power.device_corner=" << config.device_corner
+                                  << " refused for DRAM-periphery components "
+                                     "(one comm-dram column per table); priced "
+                                     "at the single available device." << std::endl;
+                        corner = 0;
+                    }
+                    double fa = (mcfg.dram_periph_table_nm == 32) ? 2.46 : 2.44;
+                    double pitch = (mcfg.subarray_pitch_factor > 0.0)
+                                       ? mcfg.subarray_pitch_factor : 1.0;
+                    std::cout << "  [tech] " << node.name
+                              << ": periphery area factor " << (fa * pitch)
+                              << "x applied -- uncertainty band ["
+                              << (fa * pitch) << ", " << (fa * fa * pitch)
+                              << "]" << std::endl;
+                    if (node.frequency_mhz > 700) {
+                        std::cout << "  [tech] WARNING: " << node.name << " at "
+                                  << node.frequency_mhz
+                                  << " MHz in DRAM periphery exceeds the "
+                                     "plausible band (UPMEM DPU: 350-466 MHz). "
+                                     "Power is reported at the requested clock; "
+                                     "the clock itself is the hypothesis."
+                                  << std::endl;
+                    }
+                } else if (corner != 0) {
+                    std::cout << "  [tech] " << node.name << ": device corner "
+                              << config.device_corner
+                              << " applied to logic components." << std::endl;
+                }
+                mcfg.device_type = corner;
             }
         }
 
@@ -6075,25 +6165,9 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
      * (HOST_MC: the elements sit at the host controller, so their accesses
      * are host-memory accesses BY CONSTRUCTION -- a structural zero, not a
      * missing measurement, and the report must distinguish the two). */
-    /* 1.11.11 (#113): an FPU-less element that executed FP-class code is a
-     * configuration describing a machine that cannot run its workload. The
-     * counted mix makes it visible; say so with the number, whether or not
-     * the emulation was priced. */
-    if (!config.pe_has_fp && zsim_stats.mix_fp > 0) {
-        std::cout << "  [fp] " << zsim_stats.mix_fp
-                  << " FP-class instructions executed on an element declared "
-                     "WITHOUT an FP unit";
-        if (config.pe_fp_emul_cycles > 0) {
-            std::cout << "; charged " << config.pe_fp_emul_cycles
-                      << " cycles each as soft-float emulation ("
-                      << (zsim_stats.mix_fp * (uint64_t)config.pe_fp_emul_cycles)
-                      << " cycles total)" << std::endl;
-        } else {
-            std::cout << "; charged NOTHING (pim.pe.fp_emulation_cycles=0) -- "
-                         "the reported time is for hardware this element does "
-                         "not have" << std::endl;
-        }
-    }
+    /* 1.11.11 (#113) / 1.11.17: shared report; uses the DEVICE group's own
+     * census so the host's FP stream is not pinned on the elements. */
+    reportFpWithoutFpu(config, zsim_stats);
     if (zsim_stats.pemi_local_acc + zsim_stats.pemi_remote_acc > 0) {
         uint64_t tot = zsim_stats.pemi_local_acc + zsim_stats.pemi_remote_acc;
         std::cout << "  [locality] PE-MI accesses: "
@@ -6101,9 +6175,15 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                   << zsim_stats.pemi_remote_acc << " remote ("
                   << std::fixed << std::setprecision(1)
                   << (100.0 * static_cast<double>(zsim_stats.pemi_local_acc) / tot)
-                  << "% local at this placement)" << std::defaultfloat << std::endl;
+                  << "% local at this placement)" << std::defaultfloat
+                  << std::setprecision(6) << std::endl;   // 1.11.17: precision must not leak
     }
-    if (config.pe_hierarchy_level == -1 && !zsim_stats.dev.has_activity()) {
+    /* 1.11.17 (audit go-through): the old guard tested dev.has_activity(),
+     * a CORE-group flag -- HOST_MC elements retire instructions, so the
+     * flag was true and this message was unreachable on exactly the runs
+     * it explains. The structural zero is the device MEMORY group. */
+    if (config.pe_hierarchy_level == -1 &&
+        (zsim_stats.dev.mem_rd + zsim_stats.dev.mem_wr) == 0) {
         std::cout << "  [mem] HOST_MC placement: the elements share the host "
                      "memory controller, so their accesses ARE host-memory "
                      "accesses -- no separate device memory group exists by "
@@ -10308,6 +10388,11 @@ int main(int argc, char** argv) {
                 // Power analysis
                 if (config.enable_power) {
                     runPowerAnalysis(config, zsim_stats, output_dir);
+                } else {
+                    /* 1.11.17: the FP-without-FPU timing charge fires with
+                     * or without power analysis -- the contradiction report
+                     * must too. */
+                    reportFpWithoutFpu(config, zsim_stats);
                 }
             }
 
@@ -11515,6 +11600,8 @@ int main(int argc, char** argv) {
             if (config.enable_power &&
                 (sys_stats.cycles > 0 || sys_stats.instrs > 0)) {
                 runPerNodePowerAnalysis(config, sys_stats, output_dir);
+            } else {
+                reportFpWithoutFpu(config, sys_stats);  // 1.11.17: visible sans power
             }
 
             success = (status == 0);

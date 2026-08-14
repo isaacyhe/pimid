@@ -61,9 +61,18 @@ void Cache::initCacheStats(AggregateStat* cacheStat) {
 uint64_t Cache::access(MemReq& req) {
     /* 1.11.8 PG residency: mark the shared-cache tracker for L2+/LLC
      * instances only (private L1s ride their core's tracker). Name-based
-     * level test matches this repo's cache naming (l2-*, l3-*, llc*). */
-    if (name.size() >= 2 && (name[0]=='l' && (name[1]=='2' || name[1]=='3')))
-        zinfo->pgres.sharedCache.touch(zinfo->numPhases);
+     * level test matches this repo's cache naming (l2-*, l3-*, llc*).
+     * 1.11.17 (audit go-through): system-scope caches are named
+     * "<node>_l2-0" etc., which the bare prefix test could never match --
+     * the 1.9.29 node-prefix parser bug, re-made here. Match the level
+     * token anywhere after an optional node prefix. */
+    {
+        size_t p = name.find('_');
+        const char* base = (p != g_string::npos && p + 2 < name.size())
+                               ? name.c_str() + p + 1 : name.c_str();
+        if (base[0] == 'l' && (base[1] == '2' || base[1] == '3'))
+            zinfo->pgres.sharedCache.touch(zinfo->numPhases);
+    }
     uint64_t respCycle = req.cycle;
     bool skipAccess = cc->startAccess(req); //may need to skip access due to races (NOTE: may change req.type!)
     if (likely(!skipAccess)) {

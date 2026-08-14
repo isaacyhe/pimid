@@ -107,6 +107,15 @@ inline double terminationNJ(const std::string& tech, double term_override_pJ_per
     return e_per_bit_pJ * 512.0 / 1000.0;
 }
 
+/* 1.11.17 (audit go-through) -- KNOWN BOUNDARY, deliberately not patched
+ * here: these standby quantities are PER-DEVICE by convention everywhere
+ * (the report labels them mW/device), so an HBM stack's 8-16 channels are
+ * charged as one device's background -- but so is a DDR rank's 8 chips.
+ * IDDSpec::channels was declared for the HBM aggregation and is still
+ * unread; scaling HBM alone would fix one technology inside an unsettled
+ * system-wide device-vs-rank-vs-stack convention. The whole background
+ * population model is settled in ONE place in the memory-controller
+ * release (#100). */
 inline double refreshMW(const std::string& tech) {
     IDDSpec s = iddFor(tech);
     return s.vdd * (s.idd5 - s.idd3n) * (s.trfc_ns / s.trefi_ns);
@@ -130,7 +139,7 @@ inline double backgroundEffectiveMW(const std::string& tech, double r_idle) {
     IDDSpec s = iddFor(tech);
     const double kHysteresisDerate = 0.99;
     double r = r_idle * kHysteresisDerate;
-    double standby_mw  = s.vdd * s.idd3n;
+    double standby_mw  = s.vdd * s.idd3n;   // per-device (see boundary note above)
     double pd_mw       = s.vdd * s.idd2p;
     return standby_mw * (1.0 - r) + pd_mw * r + refreshMW(tech);
 }
