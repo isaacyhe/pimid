@@ -447,7 +447,13 @@ void PCMModel::initializeNVSim() {
         // Create NVSim configuration for PCM
         NVSimWrapper::NVMConfig nvsim_config;
         nvsim_config.capacity_bytes = pcm_config_.capacity;
-        nvsim_config.word_width_bits = 64;
+        /* 1.11.25: the run's access width when supplied, else the model
+
+         * default. Mismatching this selects a different pregenerated
+
+         * cache entry and characterizes a different access. */
+
+        nvsim_config.word_width_bits = (access_width_bits_ > 0) ? access_width_bits_ : 64;
         nvsim_config.nvm_type = NVSimWrapper::NVMType::PCRAM;  // PCM type
         nvsim_config.process_node_nm = pcm_config_.tech_node_nm;
         nvsim_config.temperature_k = 350;  // ~77°C typical operating temp
@@ -539,6 +545,20 @@ std::string PCMModel::tierLatencySource(Tier tier, Op op) const {
                   : (op == Op::READ)  ? "NVSim read path"
                                       : "NVSim FunctionUnit::setLatency";
     return std::string(q) + " @ " + tierName(tier);
+}
+
+
+/* 1.11.25: characterize the array the RUN configures, not the model's
+ * compiled-in default. Must be called before initialize(). */
+void PCMModel::setArrayCapacityBytes(uint64_t bytes) {
+    if (bytes > 0) pcm_config_.capacity = bytes;
+}
+
+
+/* 1.11.25: characterize the access the RUN performs. Must precede
+ * initialize(). 0 keeps the model default. */
+void PCMModel::setAccessWidthBits(uint32_t bits) {
+    if (bits >= 8 && bits <= 1024) access_width_bits_ = bits;
 }
 
 } // namespace pimid

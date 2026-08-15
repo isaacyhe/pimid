@@ -7,6 +7,62 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.25 -- placement reaches the array, and the tier gap turns out to be 2.4%
+
+The plugin contract from 1.11.24 is now wired: main.cpp asks the technology's
+own model for the tier the PE sits at. Adding a memory technology is
+"implement the contract, bind your tool" -- no edit in main.cpp.
+
+- **Placement had never reached the array.** getMemoryLatencyCycles() took no
+  placement argument, so a subarray-placed PE and a chip-placed PE were
+  charged the SAME 64 KB per-bank access. All of Figure 2's NVM/SRAM tier
+  separation came from the network path and none from the array.
+
+- **A correction to 1.11.23, and to what this release first claimed.** The
+  subarray tier was built on getDecoderDelay() and four siblings, described in
+  the code as NVSim component delays. They are not: they return INVENTED
+  percentages of mat.readLatency (10/20/45/15/5, summing to 0.95). Composing
+  them replaced an invented x1.2 with an invented x0.95. NVSim resolves the
+  real thing -- SubArray derives from FunctionUnit, Mat holds a SubArray -- so
+  bank->mat.subarray.readLatency is now read directly.
+
+- **The ladder had to go into the CACHE, not just the result tree.** NVSim
+  characterization costs minutes, so the set is PREGENERATED and a normal run
+  never touches NVSim. A field not stored in the cache does not exist for the
+  corpus. subarray_latency_s and mat_latency_s are now captured at
+  characterization and carried through the XML. Absent (older cache) leaves
+  them at -1 and the tier reports UNSOURCEABLE rather than being filled.
+
+- **Three configuration mismatches, each caught by an arm.** The plugin path
+  must be configured identically to the path it replaces or it characterizes a
+  different device: technology string ("STT_MRAM" fell through
+  parseMemoryTechnology to UNKNOWN -- two vocabularies that had drifted apart);
+  capacity (the model defaults to 256 MB against the live path's 64 KB
+  per-bank unit -- 148x apart in read latency); access width (64 b against
+  512 b, which selects a different pregenerated cache entry). Fixed with
+  setArrayCapacityBytes()/setAccessWidthBits() on the contract.
+
+MEASURED, and it is the headline. With the regenerated cache:
+    tech        bank(read)    subarray      mat
+    STT-MRAM    3.29773 ns    3.21832 ns    3.29773 ns
+    PCM         2.83215 ns    2.76921 ns    2.83215 ns
+    ReRAM       3.48713 ns    3.39796 ns    3.48713 ns
+Bank latency EQUALS mat latency in all three: a 64 KB array is a single mat,
+so there is no bank-level H-tree above it. The subarray is 97.6% of the mat.
+So at the per-bank granularity the corpus uses, subarray and bank placement
+differ by 2.4% in array access -- not the 20% the old x1.2 asserted, an ~8x
+overstatement of the tier separation. The separation visible in Figure 2 comes
+from the network, which is correct; the array contributes almost nothing at
+this granularity, and now says so.
+
+DATA IMPACT: NVM/SRAM cells re-price by the array-side tier delta (~2.4%
+subarray vs bank). DRAM is unchanged -- gate 1134 U4 holds HBM3@BANK at
+10164680 cycles. Gate 1134: 6/6.
+
+NVSim cache: the three 64 KB/512 b entries were regenerated to carry the
+ladder; the other 12 entries are untouched and still work (their tiers report
+unsourceable until regenerated). Backup at ~/.cache/pimid/nvsim.bak.pre-1.11.25.
+
 ## 1.11.24 -- a memory technology becomes a plugin, and 322 invented numbers die
 
 User decision: PIMID needs a general memory plugin interface driving all

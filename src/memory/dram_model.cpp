@@ -515,4 +515,13 @@ std::string DRAMModel::tierLatencySource(Tier tier, Op op) const {
     }
 }
 
+
+/* 1.11.25: DRAM is sized by Ramulator's JEDEC organization, so an external
+ * array capacity does not apply -- accepted and ignored, deliberately. */
+void DRAMModel::setArrayCapacityBytes(uint64_t /*bytes*/) {}
+
+
+/* 1.11.25: DRAM access width is fixed by the JEDEC organization. */
+void DRAMModel::setAccessWidthBits(uint32_t /*bits*/) {}
+
 } // namespace pimid

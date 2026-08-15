@@ -404,4 +404,18 @@ std::string SRAMModel::tierLatencySource(Tier tier, Op op) const {
     }
 }
 
+
+/* 1.11.25: characterize the array the RUN configures, not the model's
+ * compiled-in default. Must be called before initialize(). */
+void SRAMModel::setArrayCapacityBytes(uint64_t bytes) {
+    if (bytes > 0) sram_config_.capacity = bytes;
+}
+
+
+/* 1.11.25: characterize the access the RUN performs. Must precede
+ * initialize(). 0 keeps the model default. */
+void SRAMModel::setAccessWidthBits(uint32_t bits) {
+    if (bits >= 8 && bits <= 1024) access_width_bits_ = bits;
+}
+
 } // namespace pimid

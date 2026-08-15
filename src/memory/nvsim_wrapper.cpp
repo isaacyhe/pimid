@@ -335,6 +335,15 @@ namespace {
     struct NVMCacheVal {
         double read_latency_s, write_latency_s, read_energy_nj,
                write_energy_nj, leakage_mw, area_mm2;
+        /* 1.11.25: the sub-bank ladder. NVSim resolves subarray and mat
+         * latency, and the tier model needs them -- but characterization is
+         * slow, so the results are PREGENERATED and a run normally reads this
+         * cache rather than NVSim. If the ladder is not in the cache it is
+         * not available at all, which is why it lives here and not only in
+         * the result tree. Default -1 = absent, e.g. an older cache file:
+         * the tier is then reported unsourceable, never filled. */
+        double subarray_latency_s = -1.0;
+        double mat_latency_s = -1.0;
     };
     static std::map<NVMCacheKey, NVMCacheVal> g_nvsim_cache;
 
@@ -372,12 +381,22 @@ namespace {
             try { out = std::stod(xml.substr(a, b - a)); } catch (...) { return false; }
             return true;
         };
-        return get("read_latency_s", v.read_latency_s)
+        const bool core = get("read_latency_s", v.read_latency_s)
             && get("write_latency_s", v.write_latency_s)
             && get("read_energy_nj", v.read_energy_nj)
             && get("write_energy_nj", v.write_energy_nj)
             && get("leakage_mw", v.leakage_mw)
             && get("area_mm2", v.area_mm2);
+        if (!core) return false;
+        /* 1.11.25: the sub-bank ladder is OPTIONAL on read. A cache written
+         * before this release does not carry it, and re-characterizing every
+         * pregenerated cell to obtain it would cost minutes per cell. Absent
+         * leaves the fields at -1 and the subarray/mat tiers are reported
+         * unsourceable -- the run still works, it simply cannot price those
+         * placements until the cache is regenerated. Never fabricated. */
+        if (!get("subarray_latency_s", v.subarray_latency_s)) v.subarray_latency_s = -1.0;
+        if (!get("mat_latency_s", v.mat_latency_s)) v.mat_latency_s = -1.0;
+        return true;
     }
     static void nvsimDiskStore(const NVMCacheKey& k, const NVMCacheVal& v) {
         std::string dir = nvsimCacheDir();
@@ -403,6 +422,8 @@ namespace {
           << "  <write_energy_nj>" << v.write_energy_nj << "</write_energy_nj>\n"
           << "  <leakage_mw>" << v.leakage_mw << "</leakage_mw>\n"
           << "  <area_mm2>" << v.area_mm2 << "</area_mm2>\n"
+          << "  <subarray_latency_s>" << v.subarray_latency_s << "</subarray_latency_s>\n"
+          << "  <mat_latency_s>" << v.mat_latency_s << "</mat_latency_s>\n"
           << "</nvsim_characterization>\n";
     }
 }
@@ -428,6 +449,8 @@ void NVSimWrapper::runNVSim() {
             cached_ = true;
             cached_read_latency_s_  = v.read_latency_s;
             cached_write_latency_s_ = v.write_latency_s;
+            cached_subarray_latency_s_ = v.subarray_latency_s;
+            cached_mat_latency_s_ = v.mat_latency_s;
             cached_read_energy_nj_  = v.read_energy_nj;
             cached_write_energy_nj_ = v.write_energy_nj;
             cached_leakage_mw_      = v.leakage_mw;
@@ -592,9 +615,20 @@ void NVSimWrapper::runNVSim() {
             std::cout << "[NVSimWrapper] NVSim found " << numSolution << " valid design points" << std::endl;
             // Populate both caches so identical future configs (the power path of
             // this run, and every other sweep process) skip the expensive search.
+            /* 1.11.25: capture the sub-bank ladder too. This is the ONLY
+             * moment it is available -- characterization is slow and every
+             * later run reads the cache, so a field not stored here does not
+             * exist for the corpus. Read from the result tree directly (the
+             * accessors would consult the not-yet-populated cache members). */
             NVMCacheVal v{ getReadLatency(), getWriteLatency(),
                            getReadDynamicEnergy(), getWriteDynamicEnergy(),
                            getLeakagePower(), getArea() };
+            if (nvsim_result_ && nvsim_result_->bank) {
+                const double sub = nvsim_result_->bank->mat.subarray.readLatency;
+                const double mat = nvsim_result_->bank->mat.readLatency;
+                v.subarray_latency_s = (sub > 0.0) ? sub : -1.0;
+                v.mat_latency_s      = (mat > 0.0) ? mat : -1.0;
+            }
             // Persist only when the warehouse mode permits writing (RW/WO).
             // The in-memory map is process-local but gated too for consistency.
             if (pimid::cache::writeEnabled()) {
@@ -650,6 +684,21 @@ double NVSimWrapper::getWriteLatency() const {
 }
 /* 1.11.23: the SET/RESET split, read from NVSim's own bank result rather than
  * asserted as a fraction of the write latency. */
+/* 1.11.25: real sub-bank latencies, straight from NVSim's result tree. */
+double NVSimWrapper::getSubarrayLatency() const {
+    if (cached_) return cached_subarray_latency_s_;   // -1 when the cache predates it
+    if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return -1.0;
+    double v = nvsim_result_->bank->mat.subarray.readLatency;
+    return (v > 0.0) ? v : -1.0;
+}
+
+double NVSimWrapper::getMatLatency() const {
+    if (cached_) return cached_mat_latency_s_;
+    if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return -1.0;
+    double v = nvsim_result_->bank->mat.readLatency;
+    return (v > 0.0) ? v : -1.0;
+}
+
 double NVSimWrapper::getSetLatency() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return -1.0;
     double v = nvsim_result_->bank->setLatency;

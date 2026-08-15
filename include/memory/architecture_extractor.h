@@ -274,10 +274,17 @@ inline std::unique_ptr<STTMRAMArchitecture> extractSTTMRAMArchitecture(
      * chip_* is left at the bank value here and RAISED by the caller once the
      * network term is known; a caller that never supplies it reports
      * chip == bank, which is the correct floor rather than a guess. */
-    const double stt_sub_read_ns =
-        (nvsim_wrapper.getDecoderDelay() + nvsim_wrapper.getWordlineDelay() +
-         nvsim_wrapper.getBitlineDelay() + nvsim_wrapper.getSenseAmpDelay() +
-         nvsim_wrapper.getColumnDecoderDelay()) * 1e9;
+    /* 1.11.25 CORRECTION: this was the sum of five wrapper accessors that look
+     * like NVSim reads and are not -- getDecoderDelay() and friends return
+     * INVENTED percentages of mat.readLatency (10/20/45/15/5, summing to
+     * 0.95). Summing them replaced one invented multiplier with another.
+     * NVSim resolves the subarray directly (SubArray derives from
+     * FunctionUnit; Mat holds one), so read it. <0 means unavailable --
+     * notably on a cache hit, since the pregenerated NVSim cache predates
+     * these fields -- and the tier is then reported unsourceable, not
+     * filled. */
+    const double stt_sub_s = nvsim_wrapper.getSubarrayLatency();
+    const double stt_sub_read_ns = (stt_sub_s > 0.0) ? stt_sub_s * 1e9 : -1.0;
     arch->timing.bank_read_ns  = nvsim_wrapper.getReadLatency()  * 1e9;
     arch->timing.bank_write_ns = nvsim_wrapper.getWriteLatency() * 1e9;
     arch->timing.subarray_read_ns = stt_sub_read_ns;
@@ -504,10 +511,17 @@ inline std::unique_ptr<PCMArchitecture> extractPCMArchitecture(
      * plus ONE configured network hop, raised by the caller (PCM is not
      * DRAM-like: bank groups and ranks collapse to 1 and the chip-level
      * network is ours to specify). 1.25 and 1.5 were assertions. */
-    const double pcm_sub_read_ns =
-        (nvsim_wrapper.getDecoderDelay() + nvsim_wrapper.getWordlineDelay() +
-         nvsim_wrapper.getBitlineDelay() + nvsim_wrapper.getSenseAmpDelay() +
-         nvsim_wrapper.getColumnDecoderDelay()) * 1e9;
+    /* 1.11.25 CORRECTION: this was the sum of five wrapper accessors that look
+     * like NVSim reads and are not -- getDecoderDelay() and friends return
+     * INVENTED percentages of mat.readLatency (10/20/45/15/5, summing to
+     * 0.95). Summing them replaced one invented multiplier with another.
+     * NVSim resolves the subarray directly (SubArray derives from
+     * FunctionUnit; Mat holds one), so read it. <0 means unavailable --
+     * notably on a cache hit, since the pregenerated NVSim cache predates
+     * these fields -- and the tier is then reported unsourceable, not
+     * filled. */
+    const double pcm_sub_s = nvsim_wrapper.getSubarrayLatency();
+    const double pcm_sub_read_ns = (pcm_sub_s > 0.0) ? pcm_sub_s * 1e9 : -1.0;
     arch->timing.bank_read_ns     = read_latency_ns;
     arch->timing.subarray_read_ns = pcm_sub_read_ns;
     arch->timing.chip_read_ns     = read_latency_ns;
@@ -730,10 +744,17 @@ inline std::unique_ptr<ReRAMArchitecture> extractReRAMArchitecture(
     double read_latency_ns = nvsim_wrapper.getReadLatency() * 1e9;
     if (read_latency_ns <= 0) read_latency_ns = 5.0;  // ReRAM typical
     /* 1.11.23: same tier correction (see the STT-MRAM block). */
-    const double rer_sub_read_ns =
-        (nvsim_wrapper.getDecoderDelay() + nvsim_wrapper.getWordlineDelay() +
-         nvsim_wrapper.getBitlineDelay() + nvsim_wrapper.getSenseAmpDelay() +
-         nvsim_wrapper.getColumnDecoderDelay()) * 1e9;
+    /* 1.11.25 CORRECTION: this was the sum of five wrapper accessors that look
+     * like NVSim reads and are not -- getDecoderDelay() and friends return
+     * INVENTED percentages of mat.readLatency (10/20/45/15/5, summing to
+     * 0.95). Summing them replaced one invented multiplier with another.
+     * NVSim resolves the subarray directly (SubArray derives from
+     * FunctionUnit; Mat holds one), so read it. <0 means unavailable --
+     * notably on a cache hit, since the pregenerated NVSim cache predates
+     * these fields -- and the tier is then reported unsourceable, not
+     * filled. */
+    const double rer_sub_s = nvsim_wrapper.getSubarrayLatency();
+    const double rer_sub_read_ns = (rer_sub_s > 0.0) ? rer_sub_s * 1e9 : -1.0;
     arch->timing.bank_read_ns     = read_latency_ns;
     arch->timing.subarray_read_ns = rer_sub_read_ns;
     arch->timing.chip_read_ns     = read_latency_ns;

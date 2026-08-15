@@ -26,9 +26,23 @@ MemoryTechnology parseMemoryTechnology(const std::string& dram_type) {
     if (dram_type == "HBM2") return MemoryTechnology::HBM2;
     if (dram_type == "HBM3") return MemoryTechnology::HBM3;
     if (dram_type == "SRAM") return MemoryTechnology::SRAM;
-    if (dram_type == "STT-MRAM" || dram_type == "STTMRAM" || dram_type == "MRAM")
+    /* 1.11.25: accept the CANONICAL spellings this codebase actually uses.
+     * canonicalMemTech() normalises to STT_MRAM / RERAM / PCM, and every
+     * config and string comparison in main.cpp uses those -- but this parser
+     * accepted only STT-MRAM/STTMRAM/MRAM, so "STT_MRAM" fell through to
+     * UNKNOWN. Two vocabularies that disagreed, silently: the memory plugin
+     * factory then refused a technology the rest of the simulator handles
+     * fine. Caught by gate 1134, which reported the reason rather than
+     * substituting a value.
+     *
+     * Kept minimal ON PURPOSE (user): canonicalMemTech() normalises the alias
+     * spellings (STTMRAM/MRAM -> STT_MRAM, PCRAM/3DXPOINT -> PCM,
+     * RESISTIVE/MEMRISTOR -> RERAM) before anything reaches here, so this
+     * parser needs the CANONICAL forms only. Duplicating the alias list in a
+     * second place is how the two vocabularies drifted apart to begin with. */
+    if (dram_type == "STT_MRAM" || dram_type == "STT-MRAM")
         return MemoryTechnology::STT_MRAM;
-    if (dram_type == "PCM" || dram_type == "PRAM") return MemoryTechnology::PCM;
+    if (dram_type == "PCM") return MemoryTechnology::PCM;
     if (dram_type == "ReRAM" || dram_type == "RERAM") return MemoryTechnology::ReRAM;
     return MemoryTechnology::UNKNOWN;
 }

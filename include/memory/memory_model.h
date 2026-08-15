@@ -66,6 +66,25 @@ public:
     // latency and a reason; callers REFUSE rather than substitute. This is
     // the vendorArrayFraction() discipline applied to timing.
     //=========================================================================
+    /* 1.11.25: the ARRAY the model must characterize. Without this a model
+     * built through the factory uses its own compiled-in default -- STTMRAMModel
+     * defaults to 256 MB -- while the live path deliberately characterizes the
+     * 64 KB per-bank unit a PE actually owns ("each PE reads/writes its OWN
+     * local 64KB bank"). Those differ by 148x in read latency on our own
+     * cached characterization, so a tier ladder taken from an unconfigured
+     * model describes a different device than the one being simulated.
+     * 0 = leave the model's default. */
+    virtual void setArrayCapacityBytes(uint64_t /*bytes*/) {}
+
+    /* 1.11.25: and the ACCESS GEOMETRY. Capacity alone was not enough -- the
+     * models default to a 64-bit word while the live path characterizes a
+     * 512-bit access ("one full 64 B line per access, matching the CACTI/SRAM
+     * path"), which selects a DIFFERENT pregenerated cache entry and a
+     * different latency. Two knobs, one lesson: a model reached through the
+     * factory must be configured identically to the path it replaces, or the
+     * ladder describes a device nobody is simulating. 0 = keep the default. */
+    virtual void setAccessWidthBits(uint32_t /*bits*/) {}
+
     enum class Tier { SUBARRAY, BANK, BANKGROUP, CHIP, RANK, CHANNEL };
     enum class Op   { READ, WRITE, SET, RESET };
 

@@ -114,6 +114,16 @@ public:
      * (FunctionUnit::setLatency/resetLatency). They were never exposed, so the
      * extractor asserted reset = write * 0.3. Returns <0 when the underlying
      * result does not carry them, so callers refuse rather than substitute. */
+    /* 1.11.25: the REAL sub-bank ladder. NVSim resolves it -- SubArray derives
+     * from FunctionUnit (readLatency/writeLatency) and Mat contains a SubArray
+     * -- but this wrapper never exposed it. Instead getDecoderDelay() and its
+     * four siblings returned INVENTED percentages of mat.readLatency (10/20/
+     * 45/15/5, summing to 0.95), which read as tool output and are not. Those
+     * are deprecated by these two.
+     * Return <0 when unavailable (notably on a cache hit -- the pregenerated
+     * cache predates these fields), so callers refuse rather than substitute. */
+    double getSubarrayLatency() const;      // bank->mat.subarray.readLatency, s
+    double getMatLatency() const;           // bank->mat.readLatency, s
     double getSetLatency() const;           // SET path latency, s; <0 unknown
     double getResetLatency() const;         // RESET path latency, s; <0 unknown
     double getCellArea() const;             // Cell area in um^2
@@ -206,6 +216,10 @@ private:
     bool cached_ = false;
     double cached_read_latency_s_ = 0.0;
     double cached_write_latency_s_ = 0.0;
+    /* 1.11.25: the sub-bank ladder, carried through the pregenerated
+     * cache. -1 = this cache file predates the fields. */
+    double cached_subarray_latency_s_ = -1.0;
+    double cached_mat_latency_s_ = -1.0;
     double cached_read_energy_nj_ = 0.0;
     double cached_write_energy_nj_ = 0.0;
     double cached_leakage_mw_ = 0.0;

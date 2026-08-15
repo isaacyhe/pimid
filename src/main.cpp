@@ -57,6 +57,7 @@
 #include "util/cache_warehouse.h"
 #include "memory/cacti_wrapper.h"
 #include "memory/ramulator_wrapper.h"
+#include "memory/memory_model.h"
 #include "memory/internal_dram_network.h"
 #include "sparse_htree.h"
 #include "pimid_noc_shm.h"
@@ -115,9 +116,36 @@ struct UnifiedConfig;
  * @param yaml_latency_ns Latency from YAML (only used if use_yaml_override is true)
  * @return Memory access latency in cycles
  */
+/* 1.11.25: placement now reaches the ARRAY, not just the network.
+ *
+ * Until now this function took no placement argument, so a subarray-placed PE
+ * and a chip-placed PE were charged the SAME array access -- one 64 KB
+ * per-bank characterization for every tier. The whole of Figure 2's NVM/SRAM
+ * tier separation therefore came from the network path (fewer hierarchy
+ * levels traversed), and none of it from the array. That is incomplete: a PE
+ * at the subarray genuinely sees a shorter array path than one at the chip.
+ *
+ * pe_hierarchy_level (0 SUBARRAY, 1 BANK, 2 BANK_GROUP, 3 CHIP, 4 RANK,
+ * -1 HOST_MC) now selects the tier, and the number comes from the memory
+ * plugin contract added in 1.11.24 -- so it is the technology's own tool
+ * answering, not a multiplier. A tier the technology does not have, or one
+ * the tool cannot source, returns <0 and we fall back to the flat
+ * characterization with a stated reason rather than inventing a value. */
+static pimid::MemoryModel::Tier tierForPlacement(int pe_hierarchy_level) {
+    switch (pe_hierarchy_level) {
+        case 0:  return pimid::MemoryModel::Tier::SUBARRAY;
+        case 1:  return pimid::MemoryModel::Tier::BANK;
+        case 2:  return pimid::MemoryModel::Tier::BANKGROUP;
+        case 3:  return pimid::MemoryModel::Tier::CHIP;
+        case 4:  return pimid::MemoryModel::Tier::RANK;
+        default: return pimid::MemoryModel::Tier::CHANNEL;   // 5/6/-1: host-side
+    }
+}
+
 static int getMemoryLatencyCycles(const std::string& memory_tech, double frequency_mhz,
                                    bool use_yaml_override = false, double yaml_latency_ns = -1.0,
-                                   uint64_t array_capacity_bytes = 0) {
+                                   uint64_t array_capacity_bytes = 0,
+                                   int pe_hierarchy_level = -999) {
     double latency_ns = 0.0;
 
     // Normalize technology name for comparison
@@ -142,6 +170,53 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
     if (use_yaml_override && yaml_latency_ns > 0.0) {
         // User provided COMPLETE memory params in YAML - use their values
         latency_ns = yaml_latency_ns;
+    }
+    /* 1.11.25: the plugin path. Ask the technology's own model for the tier
+     * the PE actually sits at. This is the single place a memory technology
+     * is priced, so adding one is "implement the contract + bind your tool",
+     * with no edit here. */
+    else if (pe_hierarchy_level != -999) {
+        double tier_ns = -1.0;
+        std::string prov;
+        try {
+            pimid::MemoryTechnology mt = pimid::parseMemoryTechnology(memory_tech);
+            auto model = pimid::MemoryModelFactory::createMemoryModel(mt, "");
+            if (model) {
+                /* 1.11.25: characterize the SAME array the flat path does --
+                 * the 64 KB per-bank unit a PE owns. Without this the model
+                 * uses its compiled-in default (STT-MRAM: 256 MB) and the
+                 * ladder describes a different device: 148x apart in read
+                 * latency on our own cached characterization. */
+                model->setArrayCapacityBytes(PER_BANK_BYTES);
+                model->setAccessWidthBits(512);   // one 64 B line, as the flat path
+                model->initialize();
+                const auto tier = tierForPlacement(pe_hierarchy_level);
+                if (model->hasTier(tier)) {
+                    tier_ns = model->getTierLatencyNs(tier, pimid::MemoryModel::Op::READ);
+                    prov = model->tierLatencySource(tier, pimid::MemoryModel::Op::READ);
+                }
+                if (tier_ns > 0.0) {
+                    std::cout << "  [mem] " << memory_tech << " @ "
+                              << pimid::MemoryModel::tierName(tier) << " placement: "
+                              << tier_ns << " ns (" << prov << ")" << std::endl;
+                } else {
+                    std::cout << "  [mem] " << memory_tech << " has no sourceable "
+                              << pimid::MemoryModel::tierName(tier)
+                              << " tier; using the flat characterization"
+                              << std::endl;
+                }
+            }
+        } catch (const std::exception& e) {
+            std::cout << "  [mem] plugin path unavailable (" << e.what()
+                      << "); using the flat characterization" << std::endl;
+        }
+        if (tier_ns > 0.0) {
+            latency_ns = tier_ns;
+        } else {
+            latency_ns = getMemoryLatencyCycles(memory_tech, frequency_mhz,
+                                                false, -1.0, array_capacity_bytes)
+                         * 1000.0 / frequency_mhz;
+        }
     }
     else {
         // DEFAULT: Query external models for timing
@@ -6681,10 +6756,14 @@ public:
             // access latency reflects the configured organization (matches the
             // energy model). DRAM ignores this (sized by Ramulator JEDEC org).
             uint64_t array_cap = static_cast<uint64_t>(std::max(1, config_.num_banks)) * 64ULL * 1024ULL;
+            /* 1.11.25: pass the PLACEMENT. This is the device path -- the PE
+             * sits at config_.pe_hierarchy_level, so the array access it sees
+             * is that tier's, not a flat per-bank number for every tier. */
             mem_latency = getMemoryLatencyCycles(config_.memory_tech, config_.frequency_mhz,
                                                   config_.use_yaml_memory_params,
                                                   config_.memory_params.read_latency_ns,
-                                                  array_cap);
+                                                  array_cap,
+                                                  config_.pe_hierarchy_level);
         }
 
         // Cache latencies: YAML override > CACTI > defaults
