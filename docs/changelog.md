@@ -7,6 +7,39 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.26 -- LPDDR5 terminates, and it terminates to ground
+
+The termination table declared LPDDR5 "unterminated by design" and returned
+exactly 0. Micron's own datasheets say otherwise, in the feature list:
+"Programmable VSS on-die termination (ODT)", "Interface-LVSTL 0.5/0.3",
+"VDDQ = 0.50V ... 0.30V TYP (ODT off)", RON = 40 ohm
+(misc/MICT-S-A0025741931-1.pdf, misc/315b-441b-561b-y52q-*.pdf).
+
+- **LVSTL is a THIRD topology, not the absence of one.** POD terminates to
+  VDDQ, SSTL to a VDDQ/2 mid-rail, LVSTL to VSS. Current flows while the
+  driver holds the line HIGH -- the mirror of POD -- so duty ~0.5 for unbiased
+  data across a loop of driver pull-up plus terminator. Added as its own
+  scheme rather than folded into POD, because the conducting state is the
+  opposite one.
+
+- **Measured: 0.06975 pJ/bit = 0.0357 nJ per 64 B access**, where the model
+  previously charged nothing. Small in absolute terms -- the 0.5 V rail is
+  4.8x less V^2 than DDR5's 1.1 V before resistance divides -- but it is a
+  real term that was missing, and LPDDR5 is a low-power technology precisely
+  because of choices like this one, so reporting it as zero misrepresented
+  the reason it wins.
+
+- **RESIDUAL, stated in the code**: Rtt = 240 ohm (RZQ, the LPDDR4/5 ODT
+  reference) is the one unsourced input. The part datasheet defers its ohm
+  table to Micron's separate "General LPDDR5 Specifications 2: AC/DC and
+  Interface", which we do not have. D12's IDD4R/IDD4W calibration can pin it,
+  and those IDD tables ARE in hand.
+
+DATA IMPACT: LPDDR5 cells at RANK/HOST_MC placement gain 0.036 nJ per access
+of termination energy (on-die placements are unaffected -- termination is
+placement-gated since 1.11.5). No other technology moves: gate 1136 holds
+DDR5 at 0.733 and DDR3 at 2.432 nJ/64B, and HBM at exactly 0. Gate 1136 4/4.
+
 ## 1.11.25 -- placement reaches the array, and the tier gap turns out to be 2.4%
 
 The plugin contract from 1.11.24 is now wired: main.cpp asks the technology's

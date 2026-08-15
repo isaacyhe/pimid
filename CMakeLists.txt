@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(PIMID VERSION 1.11.25 LANGUAGES CXX)
+project(PIMID VERSION 1.11.26 LANGUAGES CXX)
 
 # The reported version is taken FROM the project version, so the two cannot
 # drift apart again (see release 1.10.2).
@@ -288,6 +288,13 @@ set_target_properties(pimid_mpi PROPERTIES
 # Main PIMID binary - unified entry point for all simulation modes
 # Supports: standalone, host, device, and host/device co-simulation
 add_executable(pimid src/main.cpp)
+
+# 1.11.25: NVSim cache warmer. The pregenerated set is what runs actually read,
+# so a cache schema change must be followed by re-characterization or the new
+# fields never exist for the corpus. Drives NVSimWrapper for an explicit
+# (type, capacity, node, width) tuple -- the cache key itself.
+add_executable(nvsim_warm tools/nvsim_warm.cpp)
+target_link_libraries(nvsim_warm pimid_lib)
 target_link_libraries(pimid pimid_lib)
 if(BUILD_PLUGINS)
     target_link_libraries(pimid pimid_plugin)

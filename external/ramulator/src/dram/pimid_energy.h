@@ -123,15 +123,22 @@ inline double arrayWriteNJ(const std::string& tech, double tRC, double tRAS,
  *        VDDQ/2, DVM: -5/+5 %". That row IS the v_term = VDDQ/2 below; it is
  *        not an inference from the SSTL name.
  *
- *  LVSTL (LPDDR5): unterminated by design -> 0. OPEN, and deliberately
- *    marked so: this is the ONE scheme in the table with no normative text
- *    in hand (LVSTL is defined inside JESD209-5, which we do not have; the
- *    JESD8-xx family here covers POD only). A third-party walkthrough of
- *    JESD209-5C cl.2.3 states DVFSQ is capped at 3200 Mbps and that ODT is
- *    absent WHEN DVFSQ IS ENABLED -- which implies LPDDR5 does have an ODT
- *    mode above that rate, i.e. 0 may be right only for the low-rate corner.
- *    Do not promote this row to "sourced" until JESD209-5 is read; the D12
- *    IDD cross-check should flag it if the zero is wrong.
+ *  LVSTL (LPDDR5): GROUND-REFERENCED, and it DOES terminate. This row
+ *    returned 0 until 1.11.26 on the claim "unterminated by design". Micron's
+ *    LPDDR5 datasheets say otherwise, in the feature list itself:
+ *    "Programmable VSS on-die termination (ODT)", "Interface-LVSTL 0.5/0.3",
+ *    "VDDQ = 0.50V or 0.45V TYP; 0.30V TYP (ODT off)", RON = 40 ohm
+ *    (misc/MICT-S-A0025741931-1.pdf; misc/315b-441b-561b-y52q-*.pdf).
+ *    So it is a THIRD topology: POD terminates to VDDQ, SSTL to a VDDQ/2
+ *    mid-rail, LVSTL to VSS. Current flows while the driver holds the line
+ *    HIGH -- the mirror of POD -- duty ~0.5 for unbiased data, loop = driver
+ *    pull-up + terminator. The 0.5 V rail is what makes it cheap: against
+ *    DDR5's 1.1 V that is 4.8x less V^2 before resistance divides.
+ *    RESIDUAL, stated: Rtt = 240 ohm (RZQ, the LPDDR4/5 ODT reference) is the
+ *    one UNSOURCED input. The part datasheet defers its ohm table to Micron's
+ *    separate "General LPDDR5 Specifications 2: AC/DC and Interface", which we
+ *    do not have. D12's IDD4R/IDD4W calibration can pin it -- the IDD tables
+ *    ARE in hand (misc/MICT-S-A0025741931-1.pdf).
  *  HBM: 0, and now with a normative citation rather than physics reasoning:
  *    JESD238B.01 cl.9.1 measures HBM3 read-burst current with "IOUT = 0mA;
  *    Ctotal = 2.5 pF" -- an unterminated capacitive load.
@@ -146,7 +153,14 @@ inline double terminationNJ(const std::string& tech, double term_override_pJ_per
     if (term_override_pJ_per_bit >= 0.0)
         return term_override_pJ_per_bit * 512.0 / 1000.0;
 
-    enum Scheme { POD, SSTL, NONE };
+    /* 1.11.26: LVSTL is a THIRD topology, not an absence of one. Micron's
+     * LPDDR5 datasheets state "Programmable VSS on-die termination (ODT)" with
+     * VDDQ = 0.50 V nominal ODT-on and 0.30 V ODT-off, RON = 40 ohm
+     * (misc/MICT-S-A0025741931-1.pdf, misc/315b-441b-561b-y52q-*.pdf). It
+     * terminates to GROUND -- the mirror image of POD, which terminates to
+     * VDDQ. So current flows while the driver holds the line HIGH, duty ~0.5
+     * for random data, across a loop of driver pull-up plus terminator. */
+    enum Scheme { POD, SSTL, LVSTL, NONE };
     Scheme sch; double vddq, rtt, rpd, mtps;
     if      (tech=="DDR3")   {sch=SSTL; vddq=1.5;  rtt=40;  rpd=34;  mtps=1600;}   // SSTL-15; JESD79-3D T41
                                                                                    // (RTT40=RZQ/6) + T38
@@ -155,14 +169,30 @@ inline double terminationNJ(const std::string& tech, double term_override_pJ_per
     else if (tech=="DDR5")   {sch=POD;  vddq=1.1;  rtt=48;  rpd=40;  mtps=4800;}   // POD11  (same family)
     else if (tech=="GDDR6")  {sch=POD;  vddq=1.35; rtt=60;  rpd=40;  mtps=14000;}  // POD135 (JESD8-21C, Cl.D:
                                                                                    // RTT programmable 48/60 via MR6)
-    else if (tech=="LPDDR5") {sch=NONE; vddq=0.5;  rtt=240; rpd=40;  mtps=6400;}   // LVSTL, unterminated
+    /* 1.11.26: was NONE ("LVSTL, unterminated") -- wrong. LPDDR5 does
+     * terminate; it terminates to VSS. VDDQ 0.5 V is the ODT-ON rail
+     * (0.30 V is the ODT-off rail), RON 40 ohm from the same datasheets.
+     * RTT: the datasheet defers the ohm table to Micron's separate
+     * "General LPDDR5 Specifications 2: AC/DC and Interface" document, which
+     * we do not have -- so 240 ohm (RZQ, the LPDDR4/5 ODT reference) is the
+     * one UNSOURCED input here and is flagged as such below. */
+    else if (tech=="LPDDR5") {sch=LVSTL; vddq=0.5; rtt=240; rpd=40; mtps=6400;}
     else if (tech.substr(0,3)=="HBM") return 0.0;                                  // interposer (JESD238B cl.9.1)
     else                     {sch=POD;  vddq=1.2;  rtt=48;  rpd=40;  mtps=3200;}
     if (sch == NONE) return 0.0;
 
     const double t_bit_s = 1.0 / (mtps * 1e6);
     double e_per_bit_pJ;
-    if (sch == POD) {
+    if (sch == LVSTL) {
+        /* Ground-referenced: the loop conducts while the line is HIGH, so the
+         * duty is the complement of POD's but numerically the same 0.5 for
+         * unbiased data. Loop = driver pull-up + terminator to VSS.
+         * The low rail is what makes this cheap: 0.5 V against DDR5's 1.1 V
+         * is a 4.8x reduction in V^2 before the resistance divides. */
+        const double kHighDuty = 0.5;
+        e_per_bit_pJ = kHighDuty * (vddq * vddq) / (rpd + rtt) * t_bit_s * 1e12;
+    }
+    else if (sch == POD) {
         // current only while LOW; loop = driver pull-down + terminator
         const double kLowDuty = 0.5;
         e_per_bit_pJ = kLowDuty * (vddq * vddq) / (rpd + rtt) * t_bit_s * 1e12;
