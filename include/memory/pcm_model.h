@@ -122,6 +122,11 @@ private:
     std::map<uint32_t, uint64_t> bank_write_counts_;
     std::unordered_map<uint64_t, uint64_t> page_write_counts_;
     std::unordered_map<uint64_t, uint64_t> cell_write_counts_;
+
+    //=== 1.11.24: the memory plugin contract (see MemoryModel) ===============
+    double getTierLatencyNs(Tier tier, Op op) const override;
+    bool hasTier(Tier tier) const override;
+    std::string tierLatencySource(Tier tier, Op op) const override;
 };
 
 } // namespace pimid

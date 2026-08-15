@@ -110,6 +110,12 @@ public:
     // Cell-level metrics
     double getCellReadLatency() const;      // Cell read latency in seconds
     double getCellWriteLatency() const;     // Cell write latency in seconds
+    /* 1.11.23: NVSim resolves the PCM/ReRAM SET and RESET paths separately
+     * (FunctionUnit::setLatency/resetLatency). They were never exposed, so the
+     * extractor asserted reset = write * 0.3. Returns <0 when the underlying
+     * result does not carry them, so callers refuse rather than substitute. */
+    double getSetLatency() const;           // SET path latency, s; <0 unknown
+    double getResetLatency() const;         // RESET path latency, s; <0 unknown
     double getCellArea() const;             // Cell area in um^2
 
     // Memory organization

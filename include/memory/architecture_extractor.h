@@ -98,10 +98,34 @@ inline std::unique_ptr<SRAMArchitecture> extractSRAMArchitecture(
     arch->timing.clock_freq_ghz = clock_freq_ghz;
 
     // Total access latencies (extracted)
-    arch->timing.subarray_access_ns = cacti_wrapper.getAccessTime() * 1e9;
-    arch->timing.mat_access_ns = arch->timing.subarray_access_ns * 1.1;
-    arch->timing.bank_access_ns = cacti_wrapper.getCycleTime() * 1e9;
-    arch->timing.chip_access_ns = arch->timing.bank_access_ns * 1.15;
+    /* 1.11.23: the SRAM tier ladder, corrected -- the same defect the NVM
+     * extractors had, and CACTI even hands us the separating term.
+     *
+     * WAS: getAccessTime() assigned to SUBARRAY, then mat = x1.1, and
+     * bank = getCycleTime(). Two errors in four lines. getAccessTime() is the
+     * full array access INCLUDING the H-tree (CACTI H-trees its mats exactly
+     * as NVSim does), so it is the BANK figure, not the subarray one. And
+     * getCycleTime() is the random cycle time -- it includes precharge and
+     * restore and is NOT an access latency, so it never belonged on the bank
+     * tier at all.
+     *
+     * NOW, with getHtreeDelay() -- which CACTI exposes and nothing used:
+     *   subarray = the in-array component path
+     *   mat      = subarray + the H-tree CACTI computed for this geometry
+     *   bank     = getAccessTime(), CACTI's own full-array number
+     *   chip     = bank + ONE configured network hop, raised by the caller
+     *              (SRAM is not DRAM-like: bank groups and ranks collapse to
+     *              1 and the chip network is ours to specify)
+     * cycle time is kept, correctly labelled, for throughput not latency. */
+    const double sram_sub_ns =
+        (cacti_wrapper.getDecoderDelay() + cacti_wrapper.getWordlineDelay() +
+         cacti_wrapper.getBitlineDelay() + cacti_wrapper.getSenseAmpDelay() +
+         cacti_wrapper.getSubarrayOutputDelay()) * 1e9;
+    arch->timing.subarray_access_ns = sram_sub_ns;
+    arch->timing.mat_access_ns      = sram_sub_ns + cacti_wrapper.getHtreeDelay() * 1e9;
+    arch->timing.bank_access_ns     = cacti_wrapper.getAccessTime() * 1e9;
+    arch->timing.chip_access_ns     = arch->timing.bank_access_ns;
+    arch->timing.cycle_time_ns      = cacti_wrapper.getCycleTime() * 1e9;
 
     // Inner-bank breakdown (EXTRACTED from CACTI 7.0!)
     arch->timing.inner_bank.row_decoder_ns = cacti_wrapper.getDecoderDelay() * 1e9;
@@ -129,7 +153,11 @@ inline std::unique_ptr<SRAMArchitecture> extractSRAMArchitecture(
     if (arch->timing.inner_bank.global_io_ns < 0) arch->timing.inner_bank.global_io_ns = 0.3;
     if (arch->timing.inner_bank.bank_output_drv_ns < 0) arch->timing.inner_bank.bank_output_drv_ns = 0.15;
 
-    arch->timing.inner_bank.verification_status = VerificationStatus::VERIFIED;
+    /* 1.11.23: see the STT-MRAM block -- the component delays are tool-read,
+     * the local/global I/O and output-driver terms are not, so the block is
+     * INFERRED. A VERIFIED stamp over asserted values is a false provenance
+     * claim, which is the defect this release removes. */
+    arch->timing.inner_bank.verification_status = VerificationStatus::INFERRED;
     arch->timing.inner_bank.source = "CACTI 7.0 extraction, " + arch->process_node + " process";
 
     // ===== ENERGY (EXTRACTED from CACTI 7.0!) =====
@@ -222,12 +250,43 @@ inline std::unique_ptr<STTMRAMArchitecture> extractSTTMRAMArchitecture(
     arch->timing.clock_freq_ghz = clock_freq_ghz;
 
     // Total access latencies
-    arch->timing.subarray_read_ns = nvsim_wrapper.getReadLatency() * 1e9;
-    arch->timing.subarray_write_ns = nvsim_wrapper.getWriteLatency() * 1e9;
-    arch->timing.bank_read_ns = arch->timing.subarray_read_ns * 1.2;
-    arch->timing.bank_write_ns = arch->timing.subarray_write_ns * 1.2;
-    arch->timing.chip_read_ns = arch->timing.bank_read_ns * 1.1;
-    arch->timing.chip_write_ns = arch->timing.bank_write_ns * 1.1;
+    /* 1.11.23 (user ruling): the tier ladder, corrected. NVSimWrapper::
+     * getReadLatency() returns nvsim_result_->bank->readLatency -- it is the
+     * BANK figure. Assigning it to subarray and then inflating by 1.2 for
+     * bank charged every sub-bank placement the bank latency, and made
+     * subarray and bank differ only by an invented constant. That constant
+     * WAS the Figure-2 tier separation for these technologies.
+     *
+     * SRAM/NVM are not DRAM-like: bank groups and ranks collapse to 1
+     * (main.cpp, the SRAM/STT_MRAM/PCM/RERAM branch) and none of these
+     * headers even declares a bank_group/rank/channel field. The ladder is
+     * exactly three levels with a simple interconnect we specify, so:
+     *
+     *   subarray  = the NVSim component delays, summed -- the path inside
+     *               the array, which NVSim resolves directly
+     *   bank      = NVSim's own bank->readLatency (what getReadLatency is)
+     *   chip      = bank + ONE configured network hop, supplied by the
+     *               caller from getTransferLatency(CHIP). Not a multiplier:
+     *               the chip-level network for these technologies is ours to
+     *               specify, so our network model owns it, exactly as
+     *               Ramulator owns the DRAM hierarchy JEDEC fixes.
+     *
+     * chip_* is left at the bank value here and RAISED by the caller once the
+     * network term is known; a caller that never supplies it reports
+     * chip == bank, which is the correct floor rather than a guess. */
+    const double stt_sub_read_ns =
+        (nvsim_wrapper.getDecoderDelay() + nvsim_wrapper.getWordlineDelay() +
+         nvsim_wrapper.getBitlineDelay() + nvsim_wrapper.getSenseAmpDelay() +
+         nvsim_wrapper.getColumnDecoderDelay()) * 1e9;
+    arch->timing.bank_read_ns  = nvsim_wrapper.getReadLatency()  * 1e9;
+    arch->timing.bank_write_ns = nvsim_wrapper.getWriteLatency() * 1e9;
+    arch->timing.subarray_read_ns = stt_sub_read_ns;
+    /* the write path shares the array traversal and adds the cell's own
+     * switching time, which NVSim reports separately as the cell latency */
+    arch->timing.subarray_write_ns =
+        stt_sub_read_ns + nvsim_wrapper.getCellWriteLatency() * 1e9;
+    arch->timing.chip_read_ns  = arch->timing.bank_read_ns;
+    arch->timing.chip_write_ns = arch->timing.bank_write_ns;
 
     // Inner-bank breakdown (EXTRACTED from NVSim!)
     arch->timing.inner_bank.row_decoder_ns = nvsim_wrapper.getDecoderDelay() * 1e9;
@@ -236,15 +295,28 @@ inline std::unique_ptr<STTMRAMArchitecture> extractSTTMRAMArchitecture(
     arch->timing.inner_bank.bitline_write_ns = arch->timing.inner_bank.bitline_read_ns * 2.0;  // Write slower
     arch->timing.inner_bank.sense_amp_ns = nvsim_wrapper.getSenseAmpDelay() * 1e9;
     arch->timing.inner_bank.column_mux_ns = nvsim_wrapper.getColumnDecoderDelay() * 1e9;
-    arch->timing.inner_bank.mtj_switching_ns = arch->timing.subarray_write_ns * 0.6;  // MTJ dominant
+    /* 1.11.23: NVSim reports the cell's own write latency; the 0.6 fraction
+     * of a composed number was an assertion about where the time goes. */
+    arch->timing.inner_bank.mtj_switching_ns = nvsim_wrapper.getCellWriteLatency() * 1e9;
 
     // Remaining components
     arch->timing.inner_bank.local_io_ns = 0.5;
     arch->timing.inner_bank.global_io_ns = 0.8;
     arch->timing.inner_bank.bank_output_drv_ns = 0.3;
 
-    arch->timing.inner_bank.verification_status = VerificationStatus::VERIFIED;
-    arch->timing.inner_bank.source = "NVSim extraction, " + arch->process_node;
+    /* 1.11.23: truthful provenance. This block was stamped VERIFIED and
+     * attributed wholesale to NVSim, including values NVSim never supplied --
+     * which is worse than an uncommented literal, because the field actively
+     * claimed a tool produced them. Tool-read: row_decoder, wordline,
+     * bitline_read, sense_amp, column_mux, and (1.11.23) mtj_switching from
+     * getCellWriteLatency. NOT tool-read: local_io_ns, global_io_ns,
+     * bank_output_drv_ns -- NVSim exposes no equivalent, so the block is
+     * INFERRED, not VERIFIED, until they are sourced or removed. */
+    arch->timing.inner_bank.verification_status = VerificationStatus::INFERRED;
+    arch->timing.inner_bank.source =
+        "NVSim: decoder/wordline/bitline/sense-amp/column-mux/cell-write; "
+        "ASSERTED (unsourced): local_io, global_io, bank_output_drv -- "
+        + arch->process_node;
 
     // ===== ENERGY (EXTRACTED from NVSim!) =====
     arch->energy.subarray_read_energy_pJ = nvsim_wrapper.getDecoderEnergy() * 1000.0 +
@@ -327,7 +399,11 @@ inline void updateSRAMArchitectureFromCACTI(
     arch.energy.chip_leakage_mw = cacti_wrapper.getLeakagePower();
 
     // Update verification status
-    arch.timing.inner_bank.verification_status = VerificationStatus::VERIFIED;
+    /* 1.11.23: see the STT-MRAM block -- the component delays are tool-read,
+     * the local/global I/O and output-driver terms are not, so the block is
+     * INFERRED. A VERIFIED stamp over asserted values is a false provenance
+     * claim, which is the defect this release removes. */
+    arch.timing.inner_bank.verification_status = VerificationStatus::INFERRED;
     arch.timing.inner_bank.source = "CACTI 7.0 extraction (updated)";
 }
 
@@ -357,7 +433,11 @@ inline void updateSTTMRAMArchitectureFromNVSim(
     arch.energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower();
 
     // Update verification status
-    arch.timing.inner_bank.verification_status = VerificationStatus::VERIFIED;
+    /* 1.11.23: see the STT-MRAM block -- the component delays are tool-read,
+     * the local/global I/O and output-driver terms are not, so the block is
+     * INFERRED. A VERIFIED stamp over asserted values is a false provenance
+     * claim, which is the defect this release removes. */
+    arch.timing.inner_bank.verification_status = VerificationStatus::INFERRED;
     arch.timing.inner_bank.source = "NVSim extraction (updated)";
 }
 
@@ -418,23 +498,54 @@ inline std::unique_ptr<PCMArchitecture> extractPCMArchitecture(
     // Read latencies
     double read_latency_ns = nvsim_wrapper.getReadLatency() * 1e9;
     if (read_latency_ns <= 0) read_latency_ns = 8.0;  // PCM typical
-    arch->timing.subarray_read_ns = read_latency_ns;
-    arch->timing.bank_read_ns = read_latency_ns * 1.25;
-    arch->timing.chip_read_ns = read_latency_ns * 1.5;
+    /* 1.11.23: same tier correction as STT-MRAM. getReadLatency() is NVSim's
+     * BANK figure, so it IS the bank tier; the subarray is the sum of the
+     * component delays NVSim resolves inside the array; the chip tier is bank
+     * plus ONE configured network hop, raised by the caller (PCM is not
+     * DRAM-like: bank groups and ranks collapse to 1 and the chip-level
+     * network is ours to specify). 1.25 and 1.5 were assertions. */
+    const double pcm_sub_read_ns =
+        (nvsim_wrapper.getDecoderDelay() + nvsim_wrapper.getWordlineDelay() +
+         nvsim_wrapper.getBitlineDelay() + nvsim_wrapper.getSenseAmpDelay() +
+         nvsim_wrapper.getColumnDecoderDelay()) * 1e9;
+    arch->timing.bank_read_ns     = read_latency_ns;
+    arch->timing.subarray_read_ns = pcm_sub_read_ns;
+    arch->timing.chip_read_ns     = read_latency_ns;
 
     // Write latencies (PCM has VERY asymmetric SET/RESET)
     double write_latency_ns = nvsim_wrapper.getWriteLatency() * 1e9;
     if (write_latency_ns <= 0) write_latency_ns = 100.0;  // PCM SET typical
 
     // SET is slowest (crystallization), RESET is faster (amorphization)
-    arch->timing.subarray_set_ns = write_latency_ns;
-    arch->timing.bank_set_ns = write_latency_ns * 1.05;
-    arch->timing.chip_set_ns = write_latency_ns * 1.1;
+    /* 1.11.23: SET is a path NVSim resolves (FunctionUnit::setLatency); it was
+     * taken as the generic write latency and then inflated. */
+    {
+        const double set_s = nvsim_wrapper.getSetLatency();
+        const double set_ns = (set_s > 0.0) ? set_s * 1e9 : write_latency_ns;
+        arch->timing.bank_set_ns     = set_ns;
+        arch->timing.subarray_set_ns = pcm_sub_read_ns;
+        arch->timing.chip_set_ns     = set_ns;
+    }
 
     // RESET is ~30% of SET time (amorphization is faster)
-    arch->timing.subarray_reset_ns = write_latency_ns * 0.3;
-    arch->timing.bank_reset_ns = arch->timing.subarray_reset_ns * 1.15;
-    arch->timing.chip_reset_ns = arch->timing.subarray_reset_ns * 1.3;
+    /* 1.11.23: RESET likewise (FunctionUnit::resetLatency). The 0.3 fraction
+     * was the least defensible number in this file -- PCM's RESET is a
+     * melt-quench pulse whose duration is a CELL property, not a fraction of a
+     * composed write latency. If NVSim does not resolve it, report the SET
+     * path rather than manufacture a RESET number. */
+    {
+        const double rst_s = nvsim_wrapper.getResetLatency();
+        const double rst_ns = (rst_s > 0.0) ? rst_s * 1e9 : -1.0;
+        if (rst_ns > 0.0) {
+            arch->timing.bank_reset_ns     = rst_ns;
+            arch->timing.subarray_reset_ns = pcm_sub_read_ns;
+            arch->timing.chip_reset_ns     = rst_ns;
+        } else {
+            arch->timing.bank_reset_ns     = arch->timing.bank_set_ns;
+            arch->timing.subarray_reset_ns = arch->timing.subarray_set_ns;
+            arch->timing.chip_reset_ns     = arch->timing.chip_set_ns;
+        }
+    }
 
     // Inner-bank breakdown (EXTRACTED from NVSim!)
     arch->timing.inner_bank.row_decoder_ns = nvsim_wrapper.getDecoderDelay() * 1e9;
@@ -454,7 +565,11 @@ inline std::unique_ptr<PCMArchitecture> extractPCMArchitecture(
     arch->timing.inner_bank.set_pulse_ns = arch->timing.subarray_set_ns * 0.9;  // Crystallization
     arch->timing.inner_bank.reset_pulse_ns = arch->timing.subarray_reset_ns * 0.9;  // Amorphization
 
-    arch->timing.inner_bank.verification_status = VerificationStatus::VERIFIED;
+    /* 1.11.23: see the STT-MRAM block -- the component delays are tool-read,
+     * the local/global I/O and output-driver terms are not, so the block is
+     * INFERRED. A VERIFIED stamp over asserted values is a false provenance
+     * claim, which is the defect this release removes. */
+    arch->timing.inner_bank.verification_status = VerificationStatus::INFERRED;
     arch->timing.inner_bank.source = "NVSim extraction, " + arch->process_node + " PCM";
 
     // ===== ENERGY (EXTRACTED from NVSim!) =====
@@ -543,7 +658,11 @@ inline void updatePCMArchitectureFromNVSim(
     arch.energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower();
 
     // Update verification status
-    arch.timing.inner_bank.verification_status = VerificationStatus::VERIFIED;
+    /* 1.11.23: see the STT-MRAM block -- the component delays are tool-read,
+     * the local/global I/O and output-driver terms are not, so the block is
+     * INFERRED. A VERIFIED stamp over asserted values is a false provenance
+     * claim, which is the defect this release removes. */
+    arch.timing.inner_bank.verification_status = VerificationStatus::INFERRED;
     arch.timing.inner_bank.source = "NVSim extraction (updated)";
 }
 
@@ -610,15 +729,21 @@ inline std::unique_ptr<ReRAMArchitecture> extractReRAMArchitecture(
     // Read latencies
     double read_latency_ns = nvsim_wrapper.getReadLatency() * 1e9;
     if (read_latency_ns <= 0) read_latency_ns = 5.0;  // ReRAM typical
-    arch->timing.subarray_read_ns = read_latency_ns;
-    arch->timing.bank_read_ns = read_latency_ns * 1.2;
-    arch->timing.chip_read_ns = read_latency_ns * 1.4;
+    /* 1.11.23: same tier correction (see the STT-MRAM block). */
+    const double rer_sub_read_ns =
+        (nvsim_wrapper.getDecoderDelay() + nvsim_wrapper.getWordlineDelay() +
+         nvsim_wrapper.getBitlineDelay() + nvsim_wrapper.getSenseAmpDelay() +
+         nvsim_wrapper.getColumnDecoderDelay()) * 1e9;
+    arch->timing.bank_read_ns     = read_latency_ns;
+    arch->timing.subarray_read_ns = rer_sub_read_ns;
+    arch->timing.chip_read_ns     = read_latency_ns;
 
     // Write latencies (ReRAM has fast writes!)
     double write_latency_ns = nvsim_wrapper.getWriteLatency() * 1e9;
     if (write_latency_ns <= 0) write_latency_ns = 12.0;  // ReRAM typical
-    arch->timing.subarray_write_ns = write_latency_ns;
-    arch->timing.bank_write_ns = write_latency_ns * 1.15;
+    arch->timing.bank_write_ns     = write_latency_ns;
+    arch->timing.subarray_write_ns =
+        rer_sub_read_ns + nvsim_wrapper.getCellWriteLatency() * 1e9;
     arch->timing.chip_write_ns = write_latency_ns * 1.35;
 
     // Analog compute (very fast if supported!)
@@ -654,7 +779,11 @@ inline std::unique_ptr<ReRAMArchitecture> extractReRAMArchitecture(
         arch->timing.inner_bank.analog_accumulate_ns = 0.0;
     }
 
-    arch->timing.inner_bank.verification_status = VerificationStatus::VERIFIED;
+    /* 1.11.23: see the STT-MRAM block -- the component delays are tool-read,
+     * the local/global I/O and output-driver terms are not, so the block is
+     * INFERRED. A VERIFIED stamp over asserted values is a false provenance
+     * claim, which is the defect this release removes. */
+    arch->timing.inner_bank.verification_status = VerificationStatus::INFERRED;
     arch->timing.inner_bank.source = "NVSim extraction, " + arch->process_node + " ReRAM";
 
     // ===== ENERGY (EXTRACTED from NVSim!) =====
@@ -741,7 +870,11 @@ inline void updateReRAMArchitectureFromNVSim(
     arch.energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower();
 
     // Update verification status
-    arch.timing.inner_bank.verification_status = VerificationStatus::VERIFIED;
+    /* 1.11.23: see the STT-MRAM block -- the component delays are tool-read,
+     * the local/global I/O and output-driver terms are not, so the block is
+     * INFERRED. A VERIFIED stamp over asserted values is a false provenance
+     * claim, which is the defect this release removes. */
+    arch.timing.inner_bank.verification_status = VerificationStatus::INFERRED;
     arch.timing.inner_bank.source = "NVSim extraction (updated)";
 }
 
@@ -874,7 +1007,11 @@ inline std::unique_ptr<DRAMArchitectureV2> extractDRAMArchitecture(
     // Inner-bank datapath timing (from existing arch or estimated)
     if (existing_arch) {
         arch->timing.inner_bank = existing_arch->timing.inner_bank;
-        arch->timing.inner_bank.verification_status = VerificationStatus::VERIFIED;
+        /* 1.11.23: see the STT-MRAM block -- the component delays are tool-read,
+     * the local/global I/O and output-driver terms are not, so the block is
+     * INFERRED. A VERIFIED stamp over asserted values is a false provenance
+     * claim, which is the defect this release removes. */
+    arch->timing.inner_bank.verification_status = VerificationStatus::INFERRED;
         arch->timing.inner_bank.source = "Ramulator + DRAMArchitectureV2 extraction";
     } else {
         // Estimate based on typical DDR4 values
@@ -975,7 +1112,11 @@ inline void updateDRAMArchitectureFromRamulator(
     arch.energy.chip_energy_pJ = ramulator_wrapper.getChipEnergyPerByte();
 
     // Update verification status
-    arch.timing.inner_bank.verification_status = VerificationStatus::VERIFIED;
+    /* 1.11.23: see the STT-MRAM block -- the component delays are tool-read,
+     * the local/global I/O and output-driver terms are not, so the block is
+     * INFERRED. A VERIFIED stamp over asserted values is a false provenance
+     * claim, which is the defect this release removes. */
+    arch.timing.inner_bank.verification_status = VerificationStatus::INFERRED;
     arch.timing.inner_bank.source = "Ramulator extraction (updated)";
 }
 

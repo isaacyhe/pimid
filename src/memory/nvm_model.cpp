@@ -2,6 +2,7 @@
 #include "memory/nvsim_wrapper.h"
 #include "memory/architecture_extractor.h"
 #include <iostream>
+#include <stdexcept>
 #include <cmath>
 #include <algorithm>
 #include <fstream>
@@ -92,24 +93,20 @@ void NVMModel::initialize() {
     }
 #endif
 
-    // Factory fallbacks if extraction failed
-    if (is_sttmram && !sttmram_arch_) {
-        if (nvm_config_.capacity <= 512 * 1024 * 1024) {
-            sttmram_arch_ = memory::createSTTMRAM_Everspin_256Mb();
-        } else {
-            sttmram_arch_ = memory::createSTTMRAM_8MB_22nm();
-        }
-        std::cout << "[NVMModel] Using factory default STT-MRAM architecture" << std::endl;
-    } else if (is_pcm && !pcm_arch_) {
-        pcm_arch_ = memory::createPCM_16MB_90nm();
-        std::cout << "[NVMModel] Using factory default PCM architecture" << std::endl;
-    } else if (is_reram && !reram_arch_) {
-        if (nvm_config_.is_pim_enabled) {
-            reram_arch_ = memory::createReRAM_2MB_32nm_Analog();
-        } else {
-            reram_arch_ = memory::createReRAM_8MB_22nm_Digital();
-        }
-        std::cout << "[NVMModel] Using factory default ReRAM architecture" << std::endl;
+    /* 1.11.24: factory fallbacks REMOVED. They filled the architecture with
+     * hand-written specs when NVSim characterization failed, and nothing
+     * downstream could tell the difference between those and a real tool
+     * read -- the run simply reported numbers. 678 literal assignments across
+     * 19 create*() factories, none derivable from anything. A technology
+     * whose tool binding fails must REFUSE. */
+    if ((is_sttmram && !sttmram_arch_) || (is_pcm && !pcm_arch_) ||
+        (is_reram && !reram_arch_)) {
+        throw std::runtime_error(
+            "[NVMModel] NVSim characterization failed and there is no "
+            "fallback. The hand-written default architectures were removed "
+            "in 1.11.24 because they were unsourced and indistinguishable "
+            "from tool output. Fix the NVSim configuration rather than "
+            "pricing this run from invented numbers.");
     }
 
     // Set energy values from architecture if available, otherwise use defaults

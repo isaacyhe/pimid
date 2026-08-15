@@ -487,4 +487,32 @@ bool DRAMModel::supportsSubarrayPIM() const {
     return true;
 }
 
+
+/* 1.11.24: the memory plugin contract. DRAM is the DRAM-like case: it has
+ * every tier. Values come from RamulatorWrapper, which since 1.11.23 composes
+ * them from the JEDEC timing rather than returning a hand-written literal. */
+double DRAMModel::getTierLatencyNs(Tier tier, Op op) const {
+    if (op != Op::READ && op != Op::WRITE) return -1.0;   // no SET/RESET in DRAM
+    switch (tier) {
+        case Tier::SUBARRAY: return getSubarrayAccessLatency();
+        case Tier::BANK:     return getBankAccessLatency();
+        case Tier::CHIP:     return getChipAccessLatency();
+        default:             return -1.0;   // bankgroup/rank/channel: see below
+    }
+}
+bool DRAMModel::hasTier(Tier tier) const {
+    return tier == Tier::SUBARRAY || tier == Tier::BANK ||
+           tier == Tier::BANKGROUP || tier == Tier::CHIP ||
+           tier == Tier::RANK || tier == Tier::CHANNEL;
+}
+std::string DRAMModel::tierLatencySource(Tier tier, Op op) const {
+    if (getTierLatencyNs(tier, op) < 0.0) return "";
+    switch (tier) {
+        case Tier::SUBARRAY: return "Ramulator tRCD+tCAS";
+        case Tier::BANK:     return "Ramulator tRP+tRCD+tCAS";
+        case Tier::CHIP:     return "Ramulator bank+tBurst";
+        default:             return "";
+    }
+}
+
 } // namespace pimid

@@ -3,6 +3,7 @@
 #include "memory/pcm_architecture.h"
 #include "memory/architecture_extractor.h"
 #include <iostream>
+#include <stdexcept>
 #include <cmath>
 #include <algorithm>
 #include <map>
@@ -65,16 +66,42 @@ void PCMModel::initialize() {
 
         if (pcm_arch_) {
             std::cout << "[PCMModel] Architecture EXTRACTED from NVSim" << std::endl;
+            /* 1.11.23: surface the tier ladder with its provenance. Nothing in
+             * the log used to say where a latency came from, so a ladder built
+             * from invented multipliers was indistinguishable from a tool-read
+             * one -- which is how reset = write * 0.3 survived. The residual
+             * between subarray and bank IS the intra-bank H-tree (NVSim runs
+             * with routingMode = h_tree). */
+            {
+                const auto& t = pcm_arch_->timing;
+                std::cout << "  [tier] subarray " << t.subarray_read_ns
+                          << " ns (NVSim components) | bank " << t.bank_read_ns
+                          << " ns (NVSim bank->readLatency) | H-tree residual "
+                          << (t.bank_read_ns - t.subarray_read_ns) << " ns"
+                          << std::endl;
+            }
         } else {
             std::cerr << "[PCMModel] NVSim extraction failed, using factory defaults" << std::endl;
         }
     }
 #endif
 
-    // Fallback to factory defaults if extraction failed
+    /* 1.11.24: the hand-written factory defaults are GONE. They were a
+     * fallback for "tool extraction failed", and that fallback is exactly
+     * what let fabricated numbers reach a result while looking tool-sourced:
+     * 678 literal assignments across 19 create*() factories, none of them
+     * derivable from anything. A technology whose tool binding fails must
+     * REFUSE, not quietly report invented specs.
+     *
+     * This is the vendorArrayFraction() discipline applied to a whole
+     * model: absence is reported, never filled. */
     if (!pcm_arch_) {
-        pcm_arch_ = memory::createPCM_16MB_90nm();
-        std::cout << "[PCMModel] Using factory 16MB 90nm specs (hard-coded)" << std::endl;
+        throw std::runtime_error(
+            "[PCMModel] NVSim characterization failed and there is no fallback. "
+            "The hand-written default specs were removed in 1.11.24 because "
+            "they were unsourced and indistinguishable from tool output. "
+            "Fix the NVSim configuration rather than pricing this run from "
+            "invented numbers.");
     }
 
     std::cout << "[PCMModel] Inner-bank read latency: "
@@ -468,6 +495,50 @@ void PCMModel::initializeNVSim() {
 #else
     std::cout << "[PCMModel] NVSim not available, using architecture-based values" << std::endl;
 #endif
+}
+
+
+/* 1.11.24: PCM under the plugin contract. It is the ONE technology whose
+ * write splits into SET and RESET, and the contract carries that rather than
+ * flattening it -- 1.11.23 found RESET being asserted as write * 0.3 when
+ * NVSim resolves FunctionUnit::setLatency/resetLatency separately.
+ * Op::WRITE maps to SET, the slower and conservative path. */
+double PCMModel::getTierLatencyNs(Tier tier, Op op) const {
+    switch (op) {
+        case Op::READ:
+            switch (tier) {
+                case Tier::SUBARRAY: return getSubarrayReadLatency();
+                case Tier::BANK:     return getBankReadLatency();
+                case Tier::CHIP:     return getChipReadLatency();
+                default:             return -1.0;
+            }
+        case Op::SET:
+        case Op::WRITE:
+            switch (tier) {
+                case Tier::SUBARRAY: return getSubarraySetWriteLatency();
+                case Tier::BANK:     return getBankSetWriteLatency();
+                case Tier::CHIP:     return getChipSetWriteLatency();
+                default:             return -1.0;
+            }
+        case Op::RESET:
+            switch (tier) {
+                case Tier::SUBARRAY: return getSubarrayResetWriteLatency();
+                case Tier::BANK:     return getBankResetWriteLatency();
+                case Tier::CHIP:     return getChipResetWriteLatency();
+                default:             return -1.0;
+            }
+    }
+    return -1.0;
+}
+bool PCMModel::hasTier(Tier tier) const {
+    return tier == Tier::SUBARRAY || tier == Tier::BANK || tier == Tier::CHIP;
+}
+std::string PCMModel::tierLatencySource(Tier tier, Op op) const {
+    if (getTierLatencyNs(tier, op) < 0.0) return "";
+    const char* q = (op == Op::RESET) ? "NVSim FunctionUnit::resetLatency"
+                  : (op == Op::READ)  ? "NVSim read path"
+                                      : "NVSim FunctionUnit::setLatency";
+    return std::string(q) + " @ " + tierName(tier);
 }
 
 } // namespace pimid

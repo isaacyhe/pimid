@@ -4,6 +4,7 @@
 #include "memory/architecture_extractor.h"
 #include "config/config_parser.h"
 #include <iostream>
+#include <stdexcept>
 #include <cmath>
 #include <algorithm>
 #include <fstream>
@@ -123,15 +124,22 @@ void SRAMModel::initialize() {
     }
 #endif
 
-    // Fallback to factory defaults if extraction failed
+    /* 1.11.24: the hand-written factory defaults are GONE. They were a
+     * fallback for "tool extraction failed", and that fallback is exactly
+     * what let fabricated numbers reach a result while looking tool-sourced:
+     * 678 literal assignments across 19 create*() factories, none of them
+     * derivable from anything. A technology whose tool binding fails must
+     * REFUSE, not quietly report invented specs.
+     *
+     * This is the vendorArrayFraction() discipline applied to a whole
+     * model: absence is reported, never filled. */
     if (!sram_arch_) {
-        if (sram_config_.capacity <= 512 * 1024) {
-            sram_arch_ = memory::createSRAM_L3_8MB_22nm();
-            std::cout << "[SRAMModel] Using factory 8MB L3 22nm specs (hard-coded)" << std::endl;
-        } else {
-            sram_arch_ = memory::createSRAM_LLC_16MB_14nm();
-            std::cout << "[SRAMModel] Using factory 16MB LLC 14nm specs (hard-coded)" << std::endl;
-        }
+        throw std::runtime_error(
+            "[SRAMModel] CACTI characterization failed and there is no fallback. "
+            "The hand-written default specs were removed in 1.11.24 because "
+            "they were unsourced and indistinguishable from tool output. "
+            "Fix the CACTI configuration rather than pricing this run from "
+            "invented numbers.");
     }
 
     std::cout << "[SRAMModel] Inner-bank datapath latency: "
@@ -368,6 +376,32 @@ bool SRAMModel::supportsBankPIM() const {
 bool SRAMModel::supportsSubarrayPIM() const {
     // SRAM supports subarray-level PIM (fast local operations)
     return true;
+}
+
+
+/* 1.11.24: SRAM is NOT DRAM-like -- no bank groups, no ranks, no channels.
+ * Reporting those as absent is the point: a tier that does not exist must not
+ * be collapsed onto its neighbour or filled from a multiplier. */
+double SRAMModel::getTierLatencyNs(Tier tier, Op op) const {
+    if (op != Op::READ && op != Op::WRITE) return -1.0;
+    switch (tier) {
+        case Tier::SUBARRAY: return getSubarrayReadLatency();
+        case Tier::BANK:     return getBankReadLatency();
+        case Tier::CHIP:     return getChipReadLatency();
+        default:             return -1.0;
+    }
+}
+bool SRAMModel::hasTier(Tier tier) const {
+    return tier == Tier::SUBARRAY || tier == Tier::BANK || tier == Tier::CHIP;
+}
+std::string SRAMModel::tierLatencySource(Tier tier, Op op) const {
+    if (getTierLatencyNs(tier, op) < 0.0) return "";
+    switch (tier) {
+        case Tier::SUBARRAY: return "CACTI component delays";
+        case Tier::BANK:     return "CACTI getAccessTime";
+        case Tier::CHIP:     return "CACTI getAccessTime + configured net hop";
+        default:             return "";
+    }
 }
 
 } // namespace pimid

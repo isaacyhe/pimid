@@ -3,6 +3,7 @@
 #include "memory/reram_architecture.h"
 #include "memory/architecture_extractor.h"
 #include <iostream>
+#include <stdexcept>
 #include <cmath>
 #include <algorithm>
 #include <map>
@@ -67,6 +68,20 @@ void ReRAMModel::initialize() {
 
         if (reram_arch_) {
             std::cout << "[ReRAMModel] Architecture EXTRACTED from NVSim" << std::endl;
+            /* 1.11.23: surface the tier ladder with its provenance. Nothing in
+             * the log used to say where a latency came from, so a ladder built
+             * from invented multipliers was indistinguishable from a tool-read
+             * one -- which is how reset = write * 0.3 survived. The residual
+             * between subarray and bank IS the intra-bank H-tree (NVSim runs
+             * with routingMode = h_tree). */
+            {
+                const auto& t = reram_arch_->timing;
+                std::cout << "  [tier] subarray " << t.subarray_read_ns
+                          << " ns (NVSim components) | bank " << t.bank_read_ns
+                          << " ns (NVSim bank->readLatency) | H-tree residual "
+                          << (t.bank_read_ns - t.subarray_read_ns) << " ns"
+                          << std::endl;
+            }
             if (reram_config_.analog_capable) {
                 std::cout << "[ReRAMModel] ANALOG COMPUTE ENABLED!" << std::endl;
             }
@@ -76,16 +91,22 @@ void ReRAMModel::initialize() {
     }
 #endif
 
-    // Fallback to factory defaults if extraction failed
+    /* 1.11.24: the hand-written factory defaults are GONE. They were a
+     * fallback for "tool extraction failed", and that fallback is exactly
+     * what let fabricated numbers reach a result while looking tool-sourced:
+     * 678 literal assignments across 19 create*() factories, none of them
+     * derivable from anything. A technology whose tool binding fails must
+     * REFUSE, not quietly report invented specs.
+     *
+     * This is the vendorArrayFraction() discipline applied to a whole
+     * model: absence is reported, never filled. */
     if (!reram_arch_) {
-        if (reram_config_.analog_capable) {
-            reram_arch_ = memory::createReRAM_2MB_32nm_Analog();
-            std::cout << "[ReRAMModel] Using factory 2MB 32nm Analog specs (hard-coded)" << std::endl;
-            std::cout << "[ReRAMModel] ANALOG COMPUTE ENABLED!" << std::endl;
-        } else {
-            reram_arch_ = memory::createReRAM_8MB_22nm_Digital();
-            std::cout << "[ReRAMModel] Using factory 8MB 22nm Digital specs (hard-coded)" << std::endl;
-        }
+        throw std::runtime_error(
+            "[ReRAMModel] NVSim characterization failed and there is no fallback. "
+            "The hand-written default specs were removed in 1.11.24 because "
+            "they were unsourced and indistinguishable from tool output. "
+            "Fix the NVSim configuration rather than pricing this run from "
+            "invented numbers.");
     }
 
     std::cout << "[ReRAMModel] Inner-bank read latency: "
@@ -479,6 +500,42 @@ void ReRAMModel::initializeNVSim() {
 #else
     std::cout << "[ReRAMModel] NVSim not available, using architecture-based values" << std::endl;
 #endif
+}
+
+
+/* 1.11.24: ReRAMModel under the plugin contract. NVM is not DRAM-like: subarray,
+ * bank and chip only. The subarray/bank separation is the intra-bank H-tree
+ * NVSim builds (routingMode = h_tree), not a multiplier -- see 1.11.23. */
+double ReRAMModel::getTierLatencyNs(Tier tier, Op op) const {
+    if (op == Op::READ) {
+        switch (tier) {
+            case Tier::SUBARRAY: return getSubarrayReadLatency();
+            case Tier::BANK:     return getBankReadLatency();
+            case Tier::CHIP:     return getChipReadLatency();
+            default:             return -1.0;
+        }
+    }
+    if (op == Op::WRITE) {
+        switch (tier) {
+            case Tier::SUBARRAY: return getSubarrayWriteLatency();
+            case Tier::BANK:     return getBankWriteLatency();
+            case Tier::CHIP:     return getChipWriteLatency();
+            default:             return -1.0;
+        }
+    }
+    return -1.0;   // SET/RESET are a PCM distinction
+}
+bool ReRAMModel::hasTier(Tier tier) const {
+    return tier == Tier::SUBARRAY || tier == Tier::BANK || tier == Tier::CHIP;
+}
+std::string ReRAMModel::tierLatencySource(Tier tier, Op op) const {
+    if (getTierLatencyNs(tier, op) < 0.0) return "";
+    switch (tier) {
+        case Tier::SUBARRAY: return "NVSim component delays";
+        case Tier::BANK:     return "NVSim bank->readLatency (incl. H-tree)";
+        case Tier::CHIP:     return "NVSim bank + configured net hop";
+        default:             return "";
+    }
 }
 
 } // namespace pimid

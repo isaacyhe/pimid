@@ -34,6 +34,15 @@
 namespace pimid {
 namespace memory {
 
+/* 1.11.24: the hand-written create*() default factories that used to
+ * live in this header are DELETED. They existed only as a fallback for
+ * "tool characterization failed", and that fallback let unsourced specs
+ * reach a result indistinguishable from a real CACTI/NVSim read. The
+ * model now REFUSES when its tool binding fails. The structs below are
+ * the plugin CONTRACT -- what a memory technology must report -- and
+ * are filled by the extractor from the tool, never by hand. */
+
+
 //=============================================================================
 // Verification Status (same as DRAM)
 //=============================================================================
@@ -173,6 +182,13 @@ struct SRAMTiming {
     double bank_access_ns;        // Access within bank
     double chip_access_ns;        // Cross-bank access
 
+    /* 1.11.23: CACTI's cycle time is the RANDOM CYCLE TIME -- it includes
+     * precharge and restore and is a throughput bound, not an access latency.
+     * It was previously assigned to bank_access_ns, where it does not belong.
+     * Kept here, correctly named, so the number is still available without
+     * being mistaken for a latency. */
+    double cycle_time_ns = 0.0;
+
     // Inner-bank breakdown
     SRAMInnerBankTiming inner_bank;
 };
@@ -254,167 +270,11 @@ public:
 // Example: 8MB L3 Cache (22nm)
 //=============================================================================
 
-inline std::unique_ptr<SRAMArchitecture> createSRAM_L3_8MB_22nm() {
-    auto arch = std::make_unique<SRAMArchitecture>("SRAM-L3-8MB", "SRAM");
-    arch->process_node = "22nm";
-
-    // ===== ORGANIZATION =====
-
-    arch->organization.banks_per_chip = 8;
-    arch->organization.chip_size_mb = 8;
-    arch->organization.bank_size_kb = 1024;  // 1MB per bank
-
-    arch->organization.mats_per_bank_rows = 4;
-    arch->organization.mats_per_bank_cols = 4;  // 4x4 = 16 mats
-    arch->organization.mat_size_kb = 64;  // 1024 / 16
-
-    arch->organization.subarrays_per_mat = 4;  // CACTI standard
-    arch->organization.subarray_size_kb = 16;  // 64 / 4
-
-    arch->organization.rows_per_subarray = 512;
-    arch->organization.cols_per_subarray = 256;
-
-    // ===== TIMING (CACTI-derived, 22nm) =====
-
-    arch->timing.clock_freq_ghz = 3.0;  // Typical CPU frequency
-
-    // Total access latencies
-    arch->timing.subarray_access_ns = 2.5;   // Fast!
-    arch->timing.mat_access_ns = 3.0;
-    arch->timing.bank_access_ns = 3.5;
-    arch->timing.chip_access_ns = 4.0;
-
-    // Inner-bank breakdown (CACTI 6.5)
-    arch->timing.inner_bank.row_decoder_ns = 0.20;
-    arch->timing.inner_bank.wordline_ns = 0.30;
-    arch->timing.inner_bank.bitline_ns = 0.40;
-    arch->timing.inner_bank.sense_amp_ns = 0.20;
-    arch->timing.inner_bank.column_mux_ns = 0.15;
-    arch->timing.inner_bank.subarray_output_drv_ns = 0.12;
-    arch->timing.inner_bank.local_io_ns = 0.22;
-    arch->timing.inner_bank.htree_horizontal_ns = 0.35;
-    arch->timing.inner_bank.htree_vertical_ns = 0.35;
-    arch->timing.inner_bank.global_io_ns = 0.30;
-    arch->timing.inner_bank.bank_output_drv_ns = 0.15;
-
-    arch->timing.inner_bank.verification_status = VerificationStatus::INFERRED;
-    arch->timing.inner_bank.source =
-        "CACTI 6.5 analytical model (external/mcpat/cacti/), "
-        "22nm process, 8MB L3 cache configuration";
-
-    // Total: ~2.74ns inner-bank (matches 2.5-3.0ns access time)
-
-    // ===== ENERGY (CACTI-derived) =====
-
-    arch->energy.subarray_energy_pJ = 0.5;
-    arch->energy.mat_energy_pJ = 0.8;
-    arch->energy.bank_energy_pJ = 1.2;
-    arch->energy.chip_energy_pJ = 2.0;
-
-    arch->energy.subarray_energy_per_byte = 0.1;  // Very low!
-    arch->energy.bank_energy_per_byte = 0.2;
-    arch->energy.chip_energy_per_byte = 0.3;
-
-    arch->energy.subarray_leakage_mw = 0.5;
-    arch->energy.bank_leakage_mw = 8.0;   // 16 mats × 4 subarrays
-    arch->energy.chip_leakage_mw = 64.0;  // 8 banks
-
-    arch->energy.energy_source = "CACTI 6.5, 22nm process";
-
-    // ===== DATAPATH =====
-
-    arch->datapath.subarray_local_io_bits = 128;  // Wide local I/O
-    arch->datapath.mat_io_bits = 64;
-    arch->datapath.bank_io_bits = 64;
-    arch->datapath.chip_io_bits = 512;   // Wide chip-level (to CPU)
-
-    arch->datapath.verification_status = VerificationStatus::INFERRED;
-    arch->datapath.source = "CACTI 6.5 cache modeling";
-
-    return arch;
-}
 
 //=============================================================================
 // Example: 16MB LLC (14nm)
 //=============================================================================
 
-inline std::unique_ptr<SRAMArchitecture> createSRAM_LLC_16MB_14nm() {
-    auto arch = std::make_unique<SRAMArchitecture>("SRAM-LLC-16MB", "SRAM");
-    arch->process_node = "14nm";
-
-    // ===== ORGANIZATION =====
-
-    arch->organization.banks_per_chip = 16;
-    arch->organization.chip_size_mb = 16;
-    arch->organization.bank_size_kb = 1024;
-
-    arch->organization.mats_per_bank_rows = 4;
-    arch->organization.mats_per_bank_cols = 4;
-    arch->organization.mat_size_kb = 64;
-
-    arch->organization.subarrays_per_mat = 4;
-    arch->organization.subarray_size_kb = 16;
-
-    arch->organization.rows_per_subarray = 512;
-    arch->organization.cols_per_subarray = 256;
-
-    // ===== TIMING (14nm - faster than 22nm) =====
-
-    arch->timing.clock_freq_ghz = 3.5;
-
-    arch->timing.subarray_access_ns = 2.0;   // Faster process
-    arch->timing.mat_access_ns = 2.4;
-    arch->timing.bank_access_ns = 2.8;
-    arch->timing.chip_access_ns = 3.2;
-
-    // Inner-bank breakdown (14nm, scaled from 22nm)
-    arch->timing.inner_bank.row_decoder_ns = 0.15;
-    arch->timing.inner_bank.wordline_ns = 0.25;
-    arch->timing.inner_bank.bitline_ns = 0.32;
-    arch->timing.inner_bank.sense_amp_ns = 0.16;
-    arch->timing.inner_bank.column_mux_ns = 0.12;
-    arch->timing.inner_bank.subarray_output_drv_ns = 0.10;
-    arch->timing.inner_bank.local_io_ns = 0.18;
-    arch->timing.inner_bank.htree_horizontal_ns = 0.28;
-    arch->timing.inner_bank.htree_vertical_ns = 0.28;
-    arch->timing.inner_bank.global_io_ns = 0.24;
-    arch->timing.inner_bank.bank_output_drv_ns = 0.12;
-
-    arch->timing.inner_bank.verification_status = VerificationStatus::INFERRED;
-    arch->timing.inner_bank.source =
-        "CACTI 6.5 scaled to 14nm process, 16MB LLC configuration";
-
-    // Total: ~2.20ns inner-bank
-
-    // ===== ENERGY (14nm - lower than 22nm) =====
-
-    arch->energy.subarray_energy_pJ = 0.3;
-    arch->energy.mat_energy_pJ = 0.5;
-    arch->energy.bank_energy_pJ = 0.8;
-    arch->energy.chip_energy_pJ = 1.5;
-
-    arch->energy.subarray_energy_per_byte = 0.08;
-    arch->energy.bank_energy_per_byte = 0.15;
-    arch->energy.chip_energy_per_byte = 0.25;
-
-    arch->energy.subarray_leakage_mw = 0.3;
-    arch->energy.bank_leakage_mw = 5.0;
-    arch->energy.chip_leakage_mw = 80.0;  // More banks but better process
-
-    arch->energy.energy_source = "CACTI 6.5, 14nm process";
-
-    // ===== DATAPATH =====
-
-    arch->datapath.subarray_local_io_bits = 128;
-    arch->datapath.mat_io_bits = 64;
-    arch->datapath.bank_io_bits = 64;
-    arch->datapath.chip_io_bits = 512;
-
-    arch->datapath.verification_status = VerificationStatus::INFERRED;
-    arch->datapath.source = "CACTI 6.5 cache modeling, 14nm";
-
-    return arch;
-}
 
 } // namespace memory
 } // namespace pimid

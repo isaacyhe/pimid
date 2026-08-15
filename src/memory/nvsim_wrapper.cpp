@@ -648,6 +648,20 @@ double NVSimWrapper::getWriteLatency() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
     return nvsim_result_->bank->writeLatency;  // seconds
 }
+/* 1.11.23: the SET/RESET split, read from NVSim's own bank result rather than
+ * asserted as a fraction of the write latency. */
+double NVSimWrapper::getSetLatency() const {
+    if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return -1.0;
+    double v = nvsim_result_->bank->setLatency;
+    return (v > 0.0) ? v : -1.0;
+}
+
+double NVSimWrapper::getResetLatency() const {
+    if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return -1.0;
+    double v = nvsim_result_->bank->resetLatency;
+    return (v > 0.0) ? v : -1.0;
+}
+
 
 double NVSimWrapper::getReadDynamicEnergy() const {
     if (cached_) return cached_read_energy_nj_;

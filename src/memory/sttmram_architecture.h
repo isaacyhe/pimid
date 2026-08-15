@@ -35,6 +35,15 @@
 namespace pimid {
 namespace memory {
 
+/* 1.11.24: the hand-written create*() default factories that used to
+ * live in this header are DELETED. They existed only as a fallback for
+ * "tool characterization failed", and that fallback let unsourced specs
+ * reach a result indistinguishable from a real CACTI/NVSim read. The
+ * model now REFUSES when its tool binding fails. The structs below are
+ * the plugin CONTRACT -- what a memory technology must report -- and
+ * are filled by the extractor from the tool, never by hand. */
+
+
 // VerificationStatus is defined in sram_architecture.h
 
 //=============================================================================
@@ -285,193 +294,11 @@ public:
 // Example: 8MB STT-MRAM Cache (22nm)
 //=============================================================================
 
-inline std::unique_ptr<STTMRAMArchitecture> createSTTMRAM_8MB_22nm() {
-    auto arch = std::make_unique<STTMRAMArchitecture>("STT-MRAM-8MB", "STT-MRAM");
-    arch->process_node = "22nm";
-
-    // ===== ORGANIZATION =====
-
-    arch->organization.banks_per_chip = 64;  // 8x8 grid
-    arch->organization.bank_rows = 8;
-    arch->organization.bank_cols = 8;
-    arch->organization.chip_size_mb = 8;
-    arch->organization.bank_size_kb = 128;  // 8MB / 64
-
-    arch->organization.subarrays_per_bank = 8;
-    arch->organization.subarray_size_kb = 16;  // 128 / 8
-
-    arch->organization.wordlines_per_subarray = 512;
-    arch->organization.bitlines_per_subarray = 256;
-
-    // ===== TIMING (NVSim-derived, 22nm) =====
-
-    arch->timing.clock_freq_ghz = 1.0;  // Lower than SRAM
-
-    // READ latencies
-    arch->timing.subarray_read_ns = 5.0;
-    arch->timing.bank_read_ns = 6.0;
-    arch->timing.chip_read_ns = 7.0;
-
-    // WRITE latencies (much higher!)
-    arch->timing.subarray_write_ns = 18.0;  // MTJ switching!
-    arch->timing.bank_write_ns = 20.0;
-    arch->timing.chip_write_ns = 22.0;
-
-    // Inner-bank breakdown (READ)
-    arch->timing.inner_bank.row_decoder_ns = 0.45;
-    arch->timing.inner_bank.wordline_ns = 0.65;
-    arch->timing.inner_bank.bitline_read_ns = 1.10;  // MTJ resistance
-    arch->timing.inner_bank.sense_amp_ns = 0.75;     // Small signal
-    arch->timing.inner_bank.column_mux_ns = 0.30;
-    arch->timing.inner_bank.subarray_output_drv_ns = 0.22;
-    arch->timing.inner_bank.local_io_ns = 0.28;
-    arch->timing.inner_bank.htree_horizontal_ns = 0.45;
-    arch->timing.inner_bank.htree_vertical_ns = 0.45;
-    arch->timing.inner_bank.global_io_ns = 0.52;
-    arch->timing.inner_bank.bank_output_drv_ns = 0.22;
-
-    // WRITE-specific
-    arch->timing.inner_bank.bitline_write_ns = 2.0;   // Apply write voltage
-    arch->timing.inner_bank.mtj_switching_ns = 12.0;  // MTJ switching (SLOW!)
-    arch->timing.inner_bank.write_verify_ns = 4.0;    // Read-back verify
-
-    arch->timing.inner_bank.verification_status = VerificationStatus::INFERRED;
-    arch->timing.inner_bank.source =
-        "NVSim (external/nvsim/), STT-MRAM configuration, "
-        "SMART STT-MRAM paper (MEMSYS 2019)";
-
-    // Total READ: ~5.39ns, Total WRITE: ~18.65ns
-
-    // ===== ENERGY (NVSim-derived) =====
-
-    arch->energy.subarray_read_energy_pJ = 0.8;
-    arch->energy.bank_read_energy_pJ = 1.5;
-    arch->energy.chip_read_energy_pJ = 3.0;
-
-    arch->energy.subarray_write_energy_pJ = 15.0;  // Much higher!
-    arch->energy.bank_write_energy_pJ = 20.0;
-    arch->energy.chip_write_energy_pJ = 35.0;
-
-    arch->energy.read_energy_per_byte = 0.15;
-    arch->energy.write_energy_per_byte = 3.0;  // 20x higher!
-
-    arch->energy.subarray_leakage_mw = 0.01;  // Very low (non-volatile)
-    arch->energy.bank_leakage_mw = 0.1;
-    arch->energy.chip_leakage_mw = 6.4;
-
-    arch->energy.energy_source = "NVSim, 22nm STT-MRAM";
-
-    // ===== ENDURANCE =====
-
-    arch->endurance.write_cycles = 1e14;  // 10^14 cycles
-    arch->endurance.retention_years = 10.0;
-    arch->endurance.ecc_required = true;
-    arch->endurance.endurance_source = "STT-MRAM literature";
-
-    // ===== DATAPATH =====
-
-    arch->datapath.subarray_local_io_bits = 64;
-    arch->datapath.bank_io_bits = 64;
-    arch->datapath.chip_io_bits = 128;  // LPDDR3-like interface
-
-    arch->datapath.verification_status = VerificationStatus::INFERRED;
-    arch->datapath.source = "NVSim STT-MRAM modeling";
-
-    return arch;
-}
 
 //=============================================================================
 // Example: Everspin 256Mb STT-MRAM (40nm)
 //=============================================================================
 
-inline std::unique_ptr<STTMRAMArchitecture> createSTTMRAM_Everspin_256Mb() {
-    auto arch = std::make_unique<STTMRAMArchitecture>("Everspin-256Mb", "STT-MRAM");
-    arch->process_node = "40nm";
-
-    // ===== ORGANIZATION (Everspin-like) =====
-
-    arch->organization.banks_per_chip = 32;  // Conservative estimate
-    arch->organization.bank_rows = 8;
-    arch->organization.bank_cols = 4;
-    arch->organization.chip_size_mb = 32;  // 256Mb = 32MB
-    arch->organization.bank_size_kb = 1024;
-
-    arch->organization.subarrays_per_bank = 16;
-    arch->organization.subarray_size_kb = 64;
-
-    arch->organization.wordlines_per_subarray = 1024;
-    arch->organization.bitlines_per_subarray = 512;
-
-    // ===== TIMING (40nm, slower than 22nm) =====
-
-    arch->timing.clock_freq_ghz = 0.8;
-
-    arch->timing.subarray_read_ns = 7.0;   // Slower process
-    arch->timing.bank_read_ns = 8.5;
-    arch->timing.chip_read_ns = 10.0;
-
-    arch->timing.subarray_write_ns = 25.0;  // Even slower
-    arch->timing.bank_write_ns = 27.0;
-    arch->timing.chip_write_ns = 30.0;
-
-    // Inner-bank (scaled for 40nm)
-    arch->timing.inner_bank.row_decoder_ns = 0.60;
-    arch->timing.inner_bank.wordline_ns = 0.90;
-    arch->timing.inner_bank.bitline_read_ns = 1.50;
-    arch->timing.inner_bank.sense_amp_ns = 1.00;
-    arch->timing.inner_bank.column_mux_ns = 0.42;
-    arch->timing.inner_bank.subarray_output_drv_ns = 0.30;
-    arch->timing.inner_bank.local_io_ns = 0.38;
-    arch->timing.inner_bank.htree_horizontal_ns = 0.60;
-    arch->timing.inner_bank.htree_vertical_ns = 0.60;
-    arch->timing.inner_bank.global_io_ns = 0.70;
-    arch->timing.inner_bank.bank_output_drv_ns = 0.30;
-
-    arch->timing.inner_bank.bitline_write_ns = 3.0;
-    arch->timing.inner_bank.mtj_switching_ns = 18.0;  // Slower process
-    arch->timing.inner_bank.write_verify_ns = 6.0;
-
-    arch->timing.inner_bank.verification_status = VerificationStatus::ESTIMATED;
-    arch->timing.inner_bank.source =
-        "Estimated from Everspin datasheets and NVSim 40nm scaling";
-
-    // ===== ENERGY =====
-
-    arch->energy.subarray_read_energy_pJ = 1.2;
-    arch->energy.bank_read_energy_pJ = 2.0;
-    arch->energy.chip_read_energy_pJ = 4.0;
-
-    arch->energy.subarray_write_energy_pJ = 20.0;
-    arch->energy.bank_write_energy_pJ = 30.0;
-    arch->energy.chip_write_energy_pJ = 50.0;
-
-    arch->energy.read_energy_per_byte = 0.20;
-    arch->energy.write_energy_per_byte = 4.0;
-
-    arch->energy.subarray_leakage_mw = 0.02;
-    arch->energy.bank_leakage_mw = 0.32;
-    arch->energy.chip_leakage_mw = 10.0;
-
-    arch->energy.energy_source = "Everspin datasheets, 40nm";
-
-    // ===== ENDURANCE =====
-
-    arch->endurance.write_cycles = 1e12;  // Lower than advanced processes
-    arch->endurance.retention_years = 20.0;  // Excellent retention
-    arch->endurance.ecc_required = true;
-    arch->endurance.endurance_source = "Everspin specifications";
-
-    // ===== DATAPATH =====
-
-    arch->datapath.subarray_local_io_bits = 64;
-    arch->datapath.bank_io_bits = 64;
-    arch->datapath.chip_io_bits = 16;  // x16 interface
-
-    arch->datapath.verification_status = VerificationStatus::INFERRED;
-    arch->datapath.source = "Everspin product specifications";
-
-    return arch;
-}
 
 } // namespace memory
 } // namespace pimid

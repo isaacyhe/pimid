@@ -7,6 +7,60 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.24 -- a memory technology becomes a plugin, and 322 invented numbers die
+
+User decision: PIMID needs a general memory plugin interface driving all
+technologies and the figures. The pieces were already there -- MemoryModel is
+a genuine abstract interface with a factory covering every technology -- and
+were never wired. This release builds the missing contract and clears what
+blocked wiring it. NO BEHAVIOUR CHANGE: gate 1133 is bit-equal to 1.11.23.
+
+- **The uniform tier contract.** Every model already resolved subarray/bank/
+  chip, but under incompatible names and arities: getSubarrayAccessLatency
+  (DRAM) against getSubarrayReadLatency (SRAM/NVM), with PCM alone carrying
+  SET/RESET. main.cpp therefore could not ask a MemoryModel for a placement
+  latency without knowing which technology it held -- which is precisely what
+  a factory exists to avoid, and why the factory was never called. Added to
+  the base interface:
+      double getTierLatencyNs(Tier, Op)   -- <0 when unsourceable, never faked
+      bool   hasTier(Tier)
+      string tierLatencySource(Tier, Op)  -- provenance, per tier and op
+  Implemented for all five technologies, each delegating to its own tool:
+  DRAM->Ramulator, SRAM->CACTI, STT-MRAM/PCM/ReRAM->NVSim.
+
+- **hasTier() carries the not-DRAM-like ruling structurally.** SRAM and NVM
+  report SUBARRAY/BANK/CHIP only; DRAM reports all six. A tier that does not
+  exist is now reportable as ABSENT rather than collapsed onto its neighbour
+  or filled from a multiplier -- which is what 1.11.23 found and removed.
+
+- **Tool failure REFUSES.** All five models threw out their "extraction
+  failed, use factory defaults" path. That fallback is what let unsourced
+  specs reach a result indistinguishable from a real CACTI/NVSim read.
+
+- **322 invented literal assignments DELETED**, with the seven orphaned
+  factories that held them: createSTTMRAM_Everspin_256Mb (46),
+  createSTTMRAM_8MB_22nm (46), createPCM_16MB_90nm (50),
+  createReRAM_2MB_32nm_Analog (50), createReRAM_8MB_22nm_Digital (50),
+  createSRAM_L3_8MB_22nm (40), createSRAM_LLC_16MB_14nm (40). Not sourced --
+  REMOVED, because nothing could derive them. The structs stay: they are the
+  plugin contract, filled from the tool, never by hand.
+
+- **The DRAM factories are NOT deleted, and must not be.** They are LIVE:
+  RamulatorWrapper::initialize() calls createHBM3_Verified()/
+  createDDR4_2400_Verified(), and getTRCD() reads dram_arch_->timing.tRCD_ns
+  -- HBM3's JESD238-cited 16.0. Those carry real cited JEDEC timing and need
+  REPLACING with reads of the Ramulator timing preset the wrapper already
+  names, not removing. Tracked as the 1.11.23 residual.
+
+DATA IMPACT: none, by construction and by measurement. Gate 1133 4/4: HBM3
+bit-equal (10164680 cycles, 0.0499058 W), all six technologies rc=0, and no
+refusal fired -- confirming no removed fallback was load-bearing.
+
+NEXT (1.11.25): wire main.cpp:150-190 to MemoryModelFactory. That is the
+behaviour change -- NVM and SRAM latency becomes a real subarray/bank/chip
+ladder instead of one flat tool number per technology, re-pricing every NVM
+and SRAM cell and moving Figure 2's tier separation. Gated separately.
+
 ## 1.11.23 -- the DRAM latency accessors stop asking themselves
 
 Four accessors were CIRCULAR: each returned the architecture field that

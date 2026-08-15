@@ -108,6 +108,11 @@ private:
     Cycle calculateLatency(const MemoryRequest& req);
     void updateRowBuffer(Address addr);
     bool isRowHit(Address addr) const;
+
+    //=== 1.11.24: the memory plugin contract (see MemoryModel) ===============
+    double getTierLatencyNs(Tier tier, Op op) const override;
+    bool hasTier(Tier tier) const override;
+    std::string tierLatencySource(Tier tier, Op op) const override;
 };
 
 } // namespace pimid
