@@ -301,22 +301,46 @@ static bool cactiRow(int table_nm, const char* tag, double col[5], int temp = -1
  * lp-dram. That column is ALL ZERO at 22 nm and fully populated at 32/45 nm,
  * so the refusal is a populated-column CHECK per node, not a blanket rule
  * justified by a 22 nm-only fact. */
-static bool periphFamilyFactors(int table_nm, int baseline_device, int temp_k,
+/* 1.11.22: the ratio spans TWO tables, and both ends are now named.
+ *
+ * 1.11.21 derived the factors but read numerator AND denominator from the
+ * DRAM table. McPAT does not price there: it prices the component at
+ * tech_node_nm (the logic node), while dram_table_nm comes from the memory
+ * TECHNOLOGY (DDR3 -> 32, everything else -> 22). When they differ, the
+ * denominator was hp at the DRAM table's node while McPAT had priced at hp of
+ * the logic node -- l_phy(hp) is 0.009 at 22 nm and 0.013 at 32 nm, so the
+ * product was neither node's comm-dram. Same defect class as E1, one level
+ * up: a within-table ratio multiplied across tables.
+ *
+ * Inert for the current corpus (non-DDR3 maps to 22 and the fleet runs
+ * tech_node_nm=22, so the tables coincide and it cancels). It bites DDR3 at
+ * any node, and every technology at a non-22 nm logic node -- both of which
+ * the 300-cell fleet contains.
+ *
+ *   numerator   comm-dram column @ dram_table_nm   (what the PE becomes)
+ *   denominator baseline column  @ logic_node_nm   (what McPAT priced) */
+static bool periphFamilyFactors(int dram_table_nm, int logic_node_nm,
+                                int baseline_device, int temp_k,
                                 double& fa, double& fd, double& fl) {
-    double lphy[5], cg[5], cf[5], vdd[5], ioff[5];
-    if (!cactiRow(table_nm, "-l_phy", lphy) ||
-        !cactiRow(table_nm, "-C_g_ideal", cg) ||
-        !cactiRow(table_nm, "-C_fringe", cf) ||
-        !cactiRow(table_nm, "-Vdd", vdd)) return false;
+    double lp_d[5], cg_d[5], cf_d[5], vd_d[5], io_d[5];   // DRAM table
+    double lp_l[5], cg_l[5], cf_l[5], vd_l[5], io_l[5];   // logic table
+    if (!cactiRow(dram_table_nm, "-l_phy", lp_d) ||
+        !cactiRow(dram_table_nm, "-C_g_ideal", cg_d) ||
+        !cactiRow(dram_table_nm, "-C_fringe", cf_d) ||
+        !cactiRow(dram_table_nm, "-Vdd", vd_d)) return false;
+    if (!cactiRow(logic_node_nm, "-l_phy", lp_l) ||
+        !cactiRow(logic_node_nm, "-C_g_ideal", cg_l) ||
+        !cactiRow(logic_node_nm, "-C_fringe", cf_l) ||
+        !cactiRow(logic_node_nm, "-Vdd", vd_l)) return false;
     if (baseline_device < 0 || baseline_device > 4) return false;
     const int B = baseline_device, CD = 4;
-    if (!(vdd[B] > 0.0) || !(lphy[B] > 0.0)) return false;   // column unpopulated
-    if (!(vdd[CD] > 0.0) || !(lphy[CD] > 0.0)) return false;
+    if (!(vd_l[B] > 0.0) || !(lp_l[B] > 0.0)) return false;   // column unpopulated
+    if (!(vd_d[CD] > 0.0) || !(lp_d[CD] > 0.0)) return false;
 
-    fa = lphy[CD] / lphy[B];
-    const double c_base = cg[B] + cf[B], c_cd = cg[CD] + cf[CD];
+    fa = lp_d[CD] / lp_l[B];
+    const double c_base = cg_l[B] + cf_l[B], c_cd = cg_d[CD] + cf_d[CD];
     if (!(c_base > 0.0)) return false;
-    const double vr = vdd[CD] / vdd[B];
+    const double vr = vd_d[CD] / vd_l[B];
     fd = (c_cd / c_base) * vr * vr;
 
     /* nearest tabulated 10 C step to the configured temperature */
@@ -324,22 +348,25 @@ static bool periphFamilyFactors(int table_nm, int baseline_device, int temp_k,
     int t_row = ((t_c + 5) / 10) * 10;
     if (t_row < 0) t_row = 0;
     if (t_row > 100) t_row = 100;
-    if (!cactiRow(table_nm, "-I_off_n", ioff, t_row)) return false;
-    if (!(ioff[B] > 0.0)) return false;
-    fl = (ioff[CD] / ioff[B]) * vr;
+    if (!cactiRow(dram_table_nm, "-I_off_n", io_d, t_row)) return false;
+    if (!cactiRow(logic_node_nm, "-I_off_n", io_l, t_row)) return false;
+    if (!(io_l[B] > 0.0)) return false;
+    fl = (io_d[CD] / io_l[B]) * vr;
     return true;
 }
 
-bool McPATWrapper::periphFactorsFor(int table_nm, int baseline_device,
-                                    int temp_k, double& fa, double& fd, double& fl) {
-    return periphFamilyFactors(table_nm, baseline_device, temp_k, fa, fd, fl);
+bool McPATWrapper::periphFactorsFor(int dram_table_nm, int logic_node_nm,
+                                    int baseline_device, int temp_k,
+                                    double& fa, double& fd, double& fl) {
+    return periphFamilyFactors(dram_table_nm, logic_node_nm, baseline_device,
+                               temp_k, fa, fd, fl);
 }
 
 /* In-tree callers price at hp and at the configured temperature. A table that
  * cannot be read is a hard stop, not a silent fallback to the old literals:
  * the literals are exactly what this release removed. */
 static void periphFamilyFactors(int table_nm, double& fa, double& fd, double& fl) {
-    if (!periphFamilyFactors(table_nm, 0, 350, fa, fd, fl)) {
+    if (!periphFamilyFactors(table_nm, table_nm, 0, 350, fa, fd, fl)) {
         std::cerr << "[power] FATAL: cannot read the " << table_nm
                   << " nm CACTI table for the DRAM-periphery factors.\n";
         std::exit(2);

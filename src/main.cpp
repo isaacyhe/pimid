@@ -4686,8 +4686,8 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         if (mcfg.process_family == 1) {
             double fa_c = 0, fd_c = 0, fl_c = 0;
             const bool coherent = pimid::McPATWrapper::periphFactorsFor(
-                mcfg.dram_periph_table_nm, baseline, mcfg.temperature_k,
-                fa_c, fd_c, fl_c);
+                mcfg.dram_periph_table_nm, mcfg.tech_node_nm, baseline,
+                mcfg.temperature_k, fa_c, fd_c, fl_c);
             if (!coherent) {
                 std::cerr << "[config] FATAL: DRAM-periphery components cannot be "
                              "priced at device column " << baseline
@@ -4716,8 +4716,9 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             double fa = fa_c;
             double pitch = (mcfg.subarray_pitch_factor > 0.0)
                                ? mcfg.subarray_pitch_factor : 1.0;
-            std::cout << "  [tech] periphery factors READ from "
-                      << mcfg.dram_periph_table_nm << "nm.dat at "
+            std::cout << "  [tech] periphery factors READ: comm-dram from "
+                      << mcfg.dram_periph_table_nm << "nm.dat / baseline from "
+                      << mcfg.tech_node_nm << "nm.dat at "
                       << (mcfg.temperature_k - 273) << "C: area " << fa
                       << "x, dynamic " << fd_c << "x, leakage " << fl_c << "x";
             if (pitch != 1.0)

@@ -7,6 +7,44 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.22 -- the factor ratio names both of its tables
+
+A correctness hole in 1.11.21, found while investigating E3 and fixed before
+it could reach a result.
+
+- **The periphery factors are a ratio across TWO tables, and 1.11.21 read
+  both ends from one.** The numerator (comm-dram) belongs to
+  dram_periph_table_nm, which comes from the memory TECHNOLOGY: DDR3 -> 32 nm,
+  everything else -> 22 nm. The denominator is the column McPAT actually
+  priced at, which is tech_node_nm, the user's logic node from the positive
+  list {22,32,45,65,90}. They are independent. 1.11.21 took both from the DRAM
+  table, so whenever they differed the denominator was hp at the wrong node --
+  l_phy(hp) is 0.009 at 22 nm and 0.013 at 32 nm. The same defect class as
+  E1, one level up: a within-table ratio multiplied across tables.
+
+    fa = l_phy(comm-dram @ dram_table_nm) / l_phy(base @ tech_node_nm)
+
+  and identically for fd (capacitance + Vdd^2) and fl (I_off at the
+  configured temperature).
+
+- **Measured impact.** DDR3 at the fleet's 22 nm logic node: the area factor
+  is 0.032/0.009 = 3.5556, not the 0.032/0.013 = 2.4615 that 1.11.21
+  computed. DDR3 was priced 1.44x too low. The dynamic factor changes sign
+  relative to unity as well (1.2476, not sub-1): a 32 nm DRAM device against a
+  22 nm logic baseline has MORE gate capacitance, which is only visible once
+  both ends are named.
+
+- Inert wherever the two nodes coincide, which is every non-DDR3 cell at
+  tech_node_nm=22 -- i.e. most of the corpus. It bites DDR3 at any node and
+  every technology at a non-22 nm node, both of which the 300-cell fleet
+  contains.
+
+The provenance line now names both tables:
+  [tech] periphery factors READ: comm-dram from 32nm.dat / baseline from
+         22nm.dat at 77C: area 3.55556x, dynamic 1.24758x, leakage 3.07677e-06x
+
+Gate 1131: 10/10, including R6 which asserts the cross-node ratio directly.
+
 ## 1.11.21 -- the process factors stop being constants
 
 E1 and E2 of the DISCUSS go-through, ruled by the user with "I want

@@ -152,7 +152,8 @@ public:
      * composition would be incoherent: an unpopulated column at that node
      * (lp-dram at 22 nm), or a non-hp baseline, for which fd/fl have no
      * derivation. Callers REFUSE on false -- they must not price from it. */
-    static bool periphFactorsFor(int table_nm, int baseline_device, int temp_k,
+    static bool periphFactorsFor(int dram_table_nm, int logic_node_nm,
+                                 int baseline_device, int temp_k,
                                  double& fa, double& fd, double& fl);
 
     /**
