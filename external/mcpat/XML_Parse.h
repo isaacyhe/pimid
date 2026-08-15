@@ -500,6 +500,7 @@ typedef struct{
 	int databus_width;
 	int addressbus_width;
 	bool LVDS;
+	int phy_class;   /* PIMID 1.11.19 (D2/D3): 0=off-package DDR, 1=interposer/TSV */
 	double vdd;
 	double power_gating_vcc;
 

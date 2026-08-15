@@ -279,12 +279,18 @@ public:
         // 1.11.3: which CACTI table the DRAM generation class maps to (22 or
         // 32); selects the per-class hp/comm-dram factor set.
         int dram_periph_table_nm = 22;
-        /* 1.11.15 (audit): whether this node's memory controllers drive
-         * off-chip DQ pins. On-die element MCs (subarray..chip placements)
-         * do not, so McPAT's MCPHY -- a per-bit off-chip I/O driver charge
-         * on the same accesses the termination term prices -- must not be
-         * built for them. */
-        bool mc_offchip_phy = true;
+        /* 1.11.19 (user decisions D2+D3): what this node's memory
+         * controllers actually DRIVE. The backend cost model is the same
+         * for all three (McPAT's full-MC fit), so the placement ladder
+         * stays iso-model; only the driver differs.
+         *   NONE       on-die element MC (subarray..chip): no pins at all
+         *   INTERPOSER HBM base die / channel tier: TSVs + microbumps
+         *   OFFCHIP    rank+/host MC: off-package DQ with ODT
+         * Supersedes the 1.11.15 boolean, which could only express
+         * "off-chip or embedded" and reached "no PHY" by switching McPAT to
+         * a different backend curve entirely. */
+        enum class MCPhyTier { NONE, INTERPOSER, OFFCHIP };
+        MCPhyTier mc_phy_tier = MCPhyTier::OFFCHIP;
 
         // McPAT system-level parameters (exposed for architecture exploration)
         int device_type;                    // 0=HP, 1=LSTP, 2=LOP

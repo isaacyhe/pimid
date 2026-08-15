@@ -471,8 +471,13 @@ double RamulatorWrapper::getRefreshPowerMW() const {
 double RamulatorWrapper::getBackgroundPowerMW() const {
     return Ramulator::pimid_energy::backgroundMW(dram_type_);
 }
-double RamulatorWrapper::getBackgroundEffectiveMW(double r_idle) const {
-    return Ramulator::pimid_energy::backgroundEffectiveMW(dram_type_, r_idle);  // 1.11.8
+int RamulatorWrapper::getBackgroundUnits(const std::string& device_width) const {
+    return Ramulator::pimid_energy::backgroundUnits(dram_type_, device_width);  // 1.11.20 D13
+}
+double RamulatorWrapper::getBackgroundSystemMW(double r_idle, bool pg_enabled,
+                                               const std::string& device_width) const {
+    return Ramulator::pimid_energy::backgroundSystemMW(dram_type_, r_idle,
+                                                       pg_enabled, device_width);  // D13+D15
 }
 
 void RamulatorWrapper::updateEnergyMetrics() const {

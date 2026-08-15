@@ -329,27 +329,89 @@ double CACTIWrapper::getArea() const {
  * be nonsense. So calibration requires BOTH a commodity-DRAM main-memory
  * query AND a named technology, and anything else returns raw CACTI
  * unchanged. */
-/* 1.11.17 (audit go-through): UNITS STATED -- values are MB/mm^2 (bytes,
- * not bits; the old comments quoted Gb over mm^2 and read 8x off unless
- * the bit->byte conversion was inferred). Arithmetic per row:
- * DDR3 2Gb=256MB over ~5.5mm^2 -> ~46; DDR4 8Gb=1024MB over ~11mm^2 ->
- * ~93; DDR5 16Gb=2048MB over ~12mm^2 -> ~171. LPDDR5/GDDR6/HBM2/HBM3
- * carry no per-row provenance -- class estimates on the same basis.
- * OPEN QUESTION (flagged for the go-through, feeds the CAL area
- * deliverable): the implied die areas are ARRAY-REGION figures, several
- * times denser than full-die photos (a 16Gb DDR5 die is ~65-75mm^2 in
- * silicon, ~29MB/mm^2 full-die); whether the k-calibration wants the
- * array-region or full-die density must be settled with a cited source
- * per row before the numbers are quoted in the manuscript. */
+/* 1.11.19 (user decision D11): FULL-DIE density, one published measurement
+ * per row. "mm^2/die" now means what a reviewer assumes and can check
+ * against a die photo.
+ *
+ * The previous table was ARRAY-REGION and wrong in two independent ways,
+ * both confirmed against published measurements (2026-08-15):
+ *   MAGNITUDE  every row was 2.4x-22x denser than silicon.
+ *   ORDERING   it ranked HBM the DENSEST technology; in silicon HBM is the
+ *              LEAST dense -- TSVs and a very wide interface cost area, and
+ *              SK Hynix's own D1z DDR4 is ~85% denser than their HBM3.
+ *              Since reported area = CACTI x k with k calibrated here, that
+ *              inversion systematically flattered HBM.
+ *     measured: LPDDR5 > DDR5 > DDR4 > GDDR6 > HBM3
+ *     old:      HBM3   > GDDR6 > LPDDR5 > DDR5 > DDR4
+ *
+ * Values are MB/mm^2 = (Gb/mm^2) x 128. Each row states the part, the
+ * capacity, the die area and the source. Rows we could NOT source are
+ * marked and reported at runtime rather than quietly invented. */
 double CACTIWrapper::vendorDieDensity(const std::string& tech) {
-    if (tech == "DDR3")   return 45.0;   // MB/mm^2 (2Gb=256MB / ~5.5mm^2)
-    if (tech == "DDR4")   return 90.0;   // MB/mm^2 (8Gb=1024MB / ~11mm^2)
-    if (tech == "DDR5")   return 165.0;  // MB/mm^2 (16Gb=2048MB / ~12mm^2)
-    if (tech == "LPDDR5") return 180.0;  // MB/mm^2 (class estimate)
-    if (tech == "GDDR6")  return 200.0;  // MB/mm^2 (class estimate)
-    if (tech == "HBM2")   return 350.0;  // MB/mm^2 (class estimate)
-    if (tech == "HBM3")   return 450.0;  // MB/mm^2 (class estimate)
-    return 90.0;                          // default: DDR4-class
+    // DDR4: SK Hynix D1z, 0.296 Gb/mm^2 (SemiAnalysis/TechInsights)
+    if (tech == "DDR4")   return 0.296 * 128.0;   // 37.9
+    // DDR5: Micron D1a, 8 Gb / 25.41 mm^2 = 0.315 Gb/mm^2 (TechInsights)
+    if (tech == "DDR5")   return 0.315 * 128.0;   // 40.3
+    // LPDDR5: Samsung D1z, 16 Gb / 43.98 mm^2 (TechInsights)
+    if (tech == "LPDDR5") return (16.0 / 43.98) * 128.0;   // 46.6
+    // GDDR6: Samsung K4Z80165BC D1z, 8 Gb / 37.03 mm^2 whole die
+    // (TechInsights floorplan analysis; NOTE the part is 8 Gb -- one
+    // secondary article labels it 16 Gb, which would double the density)
+    if (tech == "GDDR6")  return (8.0 / 37.03) * 128.0;    // 27.7
+    // HBM3: SK Hynix, 0.16 Gb/mm^2 (SemiAnalysis)
+    if (tech == "HBM3")   return 0.160 * 128.0;   // 20.5
+    // DDR3: SK Hynix 23nm 4 Gb DDR3 SDRAM, 30.9 mm^2 -- ISSCC 2012 Paper 2.3
+    // ("Hynix demonstrates the smallest 23nm 30.9mm2 4Gb DDR3 SDRAM by using
+    //  an open bitline architecture with 6F2 cell", ISSCC 2012 press kit).
+    // This is the densest DDR3 generation shipped; our class map puts DDR3 at
+    // 3x/2x nm, and 23 nm is that 2x end.
+    if (tech == "DDR3")   return (4.0 / 30.9) * 128.0;   // 16.6
+    /* HBM2: Samsung 20nm HBM Gen2 core die. Two statements from the SAME
+     * paper, in both its versions:
+     *   die area  "The HBM chip is fabricated using a 20nm DRAM process and
+     *              the chip size is 12x8mm2"       -> 96 mm^2
+     *   capacity  "each core die has 8 Gb DRAM cell array with additional
+     *              1 Gb [for ECC]"                 -> 8 Gb user capacity
+     * K. Sohn et al., ISSCC 2016, paper 18.2; and the journal version,
+     * IEEE JSSC vol.52 no.1 pp.250-260, Jan 2017 (misc/sohn2016.pdf,
+     * misc/sohn2017.pdf).
+     *
+     * 8 Gb / 96 mm^2 = 0.0833 Gb/mm^2. USER capacity is the numerator, to
+     * match every other row here (vendors advertise HBM2 stack capacity
+     * excluding the ECC bits); counting the full 9 Gb cell array instead
+     * would give 12.0 MB/mm^2.
+     *
+     * The 12x8 is rounded in the source -- it sits within a few percent of
+     * the JEDEC HBM package outline, which for HBM is nearly the die
+     * footprint. Treat as +/-5%; it does not move any conclusion.
+     *
+     * This replaces the 1.11.19 placeholder (HBM3 x 0.70 = 14.3), which was
+     * 34% too dense. HBM2 is now the LEAST dense row in the table by a wide
+     * margin -- about 4x less dense than LPDDR5. */
+    if (tech == "HBM2")   return (8.0 / 96.0) * 128.0;   // 10.7
+    return 0.296 * 128.0;                 // default: DDR4-class
+}
+
+/* 1.11.19 (D11): does this row rest on a published measurement? Rows that
+ * do not are printed as DERIVED wherever the die area is reported, so a
+ * number can never be cited as sourced when it is not. */
+bool CACTIWrapper::vendorDieDensitySourced(const std::string& tech) {
+    /* 2026-08-15: HBM2 joined this list -- Sohn et al. ISSCC 2016 18.2 /
+     * JSSC Jan 2017. Every row in vendorDieDensity() now rests on a
+     * published measurement; there are no derived rows left. */
+    return tech == "DDR3" || tech == "DDR4" || tech == "DDR5" ||
+           tech == "LPDDR5" || tech == "GDDR6" ||
+           tech == "HBM2" || tech == "HBM3";
+}
+
+/* 1.11.19 (D11): the ARRAY fraction of a full die -- what the derived
+ * "of which array ~Y mm^2" line reports. Returns <0 when unknown, and the
+ * line is then omitted rather than guessed: cell-array efficiency is a
+ * per-design figure we have not sourced per technology, and the whole point
+ * of D11 is that the array and the die are different quantities. */
+double CACTIWrapper::vendorArrayFraction(const std::string& tech) {
+    (void)tech;
+    return -1.0;   // not sourced yet; see docs/power.md
 }
 
 int CACTIWrapper::generationTableNm(const std::string& tech) {
@@ -379,9 +441,17 @@ CACTIWrapper::CalibratedArea CACTIWrapper::getCalibratedDieArea() const {
         config_.memory_tech.empty()) {
         return out;
     }
-    double chip_mbit = static_cast<double>(config_.capacity_bytes) * 8.0
-                     / (1024.0 * 1024.0);
-    double jedec_ref = (chip_mbit / vendorDieDensity(config_.memory_tech)) * 1.12;
+    /* 1.11.19 (gate 1129 P1): UNITS. vendorDieDensity() returns MEGABYTES
+     * per mm^2 (its rows are Gb/mm^2 x 128). The capacity fed to it was in
+     * MEGABITS -- the old local was even named chip_mbit -- so every die
+     * area came out 8x too large. It went unnoticed because the pre-1.11.19
+     * density table was itself ~4-5x too dense, and the two errors partly
+     * cancelled; correcting only the density (D11) exposed the factor of 8
+     * as a 22x jump that breached the reticle limit on HBM3. Both halves are
+     * fixed now: MB divided by MB/mm^2. */
+    double chip_mbyte = static_cast<double>(config_.capacity_bytes)
+                      / (1024.0 * 1024.0);
+    double jedec_ref = (chip_mbyte / vendorDieDensity(config_.memory_tech)) * 1.12;
     if (!(jedec_ref > 0.0)) return out;
     out.k = jedec_ref / out.raw_mm2;
     out.area_mm2 = out.raw_mm2 * out.k;

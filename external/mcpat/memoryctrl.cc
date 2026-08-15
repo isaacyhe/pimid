@@ -199,10 +199,37 @@ void MCPHY::compute()
 	  if (mcp.type == 0)
 	  {
 		  power_per_gb_per_s = mcp.LVDS? 0.01:0.04;
+		  /* PIMID 1.11.19 (user decision D2): INTERPOSER interface class.
+		   * An HBM base die / channel-tier controller drives TSVs and
+		   * microbumps, not off-package DQ with ODT -- our own Ramulator
+		   * model already returns zero termination for HBM "by physics
+		   * (interposer)" and our link table prices an interposer at
+		   * 0.5 pJ/bit against PCIe-gen5's 7.0. Charging it McPAT's
+		   * off-package driver contradicted both in the same run.
+		   *
+		   * The constant is BACK-SOLVED from that same cited 0.5 pJ/bit at
+		   * the reference condition this formula evaluates (22nm, Vdd 0.8):
+		   *   X * sqrt(0.022/0.09) * (0.8/1.2)^2 = 0.5e-3 W/(Gb/s)
+		   *   X * 0.4944 * 0.4444 = 0.5e-3  ->  X = 2.28e-3
+		   * so the SAME scaling laws still apply across nodes/voltages.
+		   * The off-package LVDS constant (0.01) yields 2.2 pJ/bit there,
+		   * i.e. the interposer driver is ~4.4x cheaper -- the ratio the
+		   * two cited per-bit figures already imply.
+		   *
+		   * AREA follows the same ratio: a PHY's area is dominated by its
+		   * output drivers and their ESD, and a microbump driver is far
+		   * smaller than an off-package one. That is a STATED scaling, not
+		   * a measured die photo -- flagged as such in docs/power.md. */
+		  const double kInterposerPHY = 2.28e-3;   // 0.5 pJ/bit @22nm/0.8V
+		  double phy_area_scale = 1.0;
+		  if (mcp.phy_class == 1) {
+			  phy_area_scale = kInterposerPHY / (mcp.LVDS ? 0.01 : 0.04);
+			  power_per_gb_per_s = kInterposerPHY;
+		  }
 		  //Based on die photos from Niagara 1 and 2.
 		  //TODO merge this into undifferentiated core.PHY only achieves square root of the ideal scaling.
 		  //area = (6.4323*log(peakDataTransferRate)-34.76)*memDataWidth/128.0*(l_ip.F_sz_um/0.09);
-		  area.set_area((6.4323*log(mcp.peakDataTransferRate*2)-48.134)*mcp.dataBusWidth/128.0*(l_ip.F_sz_um/0.09)*mcp.num_channels*1e6/2);//TODO:/2
+		  area.set_area((6.4323*log(mcp.peakDataTransferRate*2)-48.134)*mcp.dataBusWidth/128.0*(l_ip.F_sz_um/0.09)*mcp.num_channels*1e6/2*phy_area_scale);//TODO:/2  (PIMID 1.11.19: phy_area_scale=1 off-package, <1 interposer)
 		  //This is from curve fitting based on Niagara 1 and 2's PHY die photo.
 		  //This is power not energy, 10mw/Gb/s @90nm for each channel and scaling down
 		  //power.readOp.dynamic = 0.02*memAccesses*llcBlocksize*8;//change from Bytes to bits.
@@ -544,7 +571,14 @@ MemoryController::MemoryController(ParseXML *XML_interface,InputParameter* inter
   area.set_area(area.get_area()+ frontend->area.get_area());
   transecEngine = new MCBackend(&interface_ip, mcp, mc_type);
   area.set_area(area.get_area()+ transecEngine->area.get_area());
-  if (mcp.type==0 || (mcp.type==1&&mcp.withPHY))
+  /* PIMID 1.11.19 (user decision D3): withPHY is HONORED for type=0 too.
+   * It used to be ignored there ("type==0 ||"), so an on-die element
+   * controller could not drop its off-chip driver without also switching to
+   * type=1 -- which silently swapped the BACKEND cost model (Cadence
+   * full-MC fit -> embedded DDR3-Lite fit, ~15x area drop at 22nm). The
+   * backend basis must stay uniform across the placement ladder, so the
+   * driver is now the only thing that varies. */
+  if (mcp.withPHY)
   {
 	  PHY = new MCPHY(&interface_ip, mcp, mc_type);
 	  area.set_area(area.get_area()+ PHY->area.get_area());
@@ -596,14 +630,26 @@ void MemoryController::computeEnergy(bool is_tdp)
 
 	frontend->computeEnergy(is_tdp);
 	transecEngine->computeEnergy(is_tdp);
-	if (mcp.type==0 || (mcp.type==1&&mcp.withPHY))
+	if (mcp.withPHY)   /* PIMID 1.11.19 fix: MUST match the constructor's
+	                    * allocation guard. The constructor now allocates PHY
+	                    * on withPHY alone (D3); leaving these four consumers
+	                    * on the old 'type==0 ||' form dereferenced a null PHY
+	                    * for exactly the new case -- type=0 with withPHY=false,
+	                    * i.e. an on-die element MC. Gate 1129 caught it as a
+	                    * SIGSEGV in the McPAT child. */
 	{
 		PHY->computeEnergy(is_tdp);
 	}
 	if (is_tdp)
 	{
 		power = power + frontend->power + transecEngine->power;
-		if (mcp.type==0 || (mcp.type==1&&mcp.withPHY))
+		if (mcp.withPHY)   /* PIMID 1.11.19 fix: MUST match the constructor's
+	                    * allocation guard. The constructor now allocates PHY
+	                    * on withPHY alone (D3); leaving these four consumers
+	                    * on the old 'type==0 ||' form dereferenced a null PHY
+	                    * for exactly the new case -- type=0 with withPHY=false,
+	                    * i.e. an on-die element MC. Gate 1129 caught it as a
+	                    * SIGSEGV in the McPAT child. */
 		{
 			power = power + PHY->power;
 		}
@@ -611,7 +657,13 @@ void MemoryController::computeEnergy(bool is_tdp)
 	else
 	{
 		rt_power = rt_power + frontend->rt_power + transecEngine->rt_power;
-		if (mcp.type==0 || (mcp.type==1&&mcp.withPHY))
+		if (mcp.withPHY)   /* PIMID 1.11.19 fix: MUST match the constructor's
+	                    * allocation guard. The constructor now allocates PHY
+	                    * on withPHY alone (D3); leaving these four consumers
+	                    * on the old 'type==0 ||' form dereferenced a null PHY
+	                    * for exactly the new case -- type=0 with withPHY=false,
+	                    * i.e. an on-die element MC. Gate 1129 caught it as a
+	                    * SIGSEGV in the McPAT child. */
 		{
 			rt_power = rt_power + PHY->rt_power;
 		}
@@ -660,7 +712,13 @@ void MemoryController::displayEnergy(uint32_t indent,int plevel,bool is_tdp)
 		cout << indent_str_next << "Gate Leakage = " << transecEngine->power.readOp.gate_leakage << " W" << endl;
 		cout << indent_str_next << "Runtime Dynamic = " << transecEngine->rt_power.readOp.dynamic/mcp.executionTime << " W" << endl;
 		cout <<endl;
-		if (mcp.type==0 || (mcp.type==1&&mcp.withPHY))
+		if (mcp.withPHY)   /* PIMID 1.11.19 fix: MUST match the constructor's
+	                    * allocation guard. The constructor now allocates PHY
+	                    * on withPHY alone (D3); leaving these four consumers
+	                    * on the old 'type==0 ||' form dereferenced a null PHY
+	                    * for exactly the new case -- type=0 with withPHY=false,
+	                    * i.e. an on-die element MC. Gate 1129 caught it as a
+	                    * SIGSEGV in the McPAT child. */
 		{
 			cout << indent_str << "PHY:" << endl;
 			cout << indent_str_next << "Area = " << PHY->area.get_area()*1e-6<< " mm^2" << endl;
@@ -713,6 +771,7 @@ void MemoryController::set_mc_param()
 		mcp.LVDS = XML->sys.mc.LVDS;
 		mcp.type = XML->sys.mc.type;
 		mcp.withPHY = XML->sys.mc.withPHY;
+		mcp.phy_class = XML->sys.mc.phy_class;   // PIMID 1.11.19 (D2/D3)
 
 		if ( XML->sys.mc.vdd>0)
 		{

@@ -7,6 +7,105 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.20 -- the memory system's background, and the host's own gate
+
+Second half of the settled model decisions, plus the last sourcing gap in the
+area table.
+
+- **D13, population.** Standby and refresh were reported PER UNIT and never
+  multiplied up: an HBM stack's 8-16 channels and a DDR rank's 8 chips were
+  each charged as one device. `backgroundUnits()` now supplies the count from
+  technology and JEDEC device width. It deliberately does NOT read
+  `hierarchy_chips_per_rank`, which holds the same numbers but is degenerated
+  to 1 for HOST_MC placement, where it is an address-mapping fanout -- reading
+  it would have zeroed the correction for exactly the baseline placement.
+- **D15, state.** An idle DRAM device sits at PRECHARGE standby (IDD2N), not
+  active standby (IDD3N): an idle controller closes its pages whether or not
+  power management exists. 1.11.18 identified this and left the baseline at
+  IDD3N to preserve pg-off bit-identity, which meant the baseline stayed
+  knowingly wrong. The baseline is fixed instead; `pim.mc.pg` now only decides
+  whether the descent continues to IDD2P. The tXP slice that cannot reach
+  power-down rests at IDD2N, not IDD3N.
+- **Unarmed-counter refusal.** If a run has memory traffic but the device-MC
+  phase counter never advanced, the residency would come out 1.0 -- the whole
+  memory reported idle. The run now says the residency is unavailable and
+  reports active standby, instead of printing a number from a dead counter.
+- **D6, one background per machine.** System scope reports the same
+  population-scaled, state-aware background device scope does.
+- **D16.** The SRAM periphery share is derived from a second CACTI query
+  (1 - array-only leakage / total leakage) instead of the declared 0.30.
+- **D7, the host gates as one piece.** The per-node PG block was DEVICE-only,
+  so no system-scope host could gate anything. `hosts[].pg` (default false)
+  gates host cores and the host MC together, per the one-piece decree. The
+  union of the two activity signals is not counted, so the conservative
+  max(core, mc) is used and printed as such: it under-credits, never over.
+- **D14, the invariant says what we actually guarantee.** The fixed-BSS
+  comment claimed bit-identity ACROSS versions. Measured: identical 1.11.15
+  source built in two trees gives 10164688 vs 10164694 cycles. The guarantee
+  is same-binary determinism; gates compare within-build pairs. Written down
+  rather than restored, because restoring it would not deliver what it
+  claimed.
+- **HBM2 die density is now measured.** 8 Gb / 96 mm^2 = 10.7 MB/mm^2, from
+  Sohn et al., ISSCC 2016 paper 18.2 and IEEE JSSC 52(1):250-260, Jan 2017
+  ("the chip size is 12x8mm2"; "each core die has 8 Gb DRAM cell array with
+  additional 1 Gb"). This replaces the 1.11.19 placeholder (HBM3 x 0.70),
+  which was 34% too dense. Every row in the density table now rests on a
+  published measurement.
+
+DATA IMPACT, measured by gate 1130 rather than predicted:
+
+- The background line moves by the POPULATION factor and nothing else:
+  16x for HBM3 (26.366 -> 421.858 mW/stack), 8x for a DDR-class rank.
+- D15's state descent is INERT across our benchmark suite. It multiplies the
+  measured idle fraction, and that fraction is exactly zero: the device-MC
+  phase counter reads 1017 active out of a 1017-phase ROI window on
+  stream_triad, and the same on gemv. Our kernels are memory-bound, so the
+  controller is busy in every phase. D15 is correct and will engage on a
+  workload with idle windows; it changes no number in the corpus today. An
+  earlier draft of this entry claimed every cell re-prices "in BOTH
+  directions" -- the gate refuted that half, and the gate is right.
+- pg-off is deliberately NOT bit-identical for the DRAM background line. That
+  is D15's point, and gate 1130 Q2 FAILS if the line comes out unchanged --
+  the inverse of every previous gate arm.
+- Total energy is unaffected (0.4 mJ, identical): the background is reported,
+  not integrated into the energy total.
+- HBM2 die area moves by 1.34x from the density correction.
+
+## 1.11.19 -- the die area stops being a stack of two errors
+
+Folded into the 1.11.20 commit (1.11.19 was gated but never shipped
+separately). The area/energy-basis decisions, and the two defects the gate
+found while validating them.
+
+- **D11, full-die density.** The vendor density table was rewritten on a
+  full-die basis with a per-row citation, and its ORDERING was inverted: we
+  ranked HBM densest, silicon says it is least dense. DDR4 is ~85% denser
+  than HBM3.
+- **The k-calibration divided megabits by megabytes.** `vendorDieDensity()`
+  returns MB/mm^2; the capacity fed to it was in Mbit. Every DRAM die area was
+  8x too large. It stayed invisible because the old density table was itself
+  ~4-5x too dense and the two errors partly cancelled -- correcting only the
+  density exposed it as a 22x jump that breached the reticle limit. Both
+  halves are fixed: HBM3 lands at 112 mm^2 (real 16 Gb HBM3 die ~100), DDR5 at
+  7.1 mm^2 for a 2 Gb die.
+- **A null PHY crashed McPAT.** D3 made the memory controller allocate its PHY
+  on `withPHY` alone, but four consumers still tested the old
+  `type==0 || (type==1 && withPHY)`. For the new case -- an on-die element MC,
+  type 0 with no PHY -- they dereferenced a null pointer and the McPAT child
+  died on SIGSEGV, taking the whole power report with it. All five guards now
+  match.
+- **D2, D3: MC interface tiers.** `withPHY` is honored for type=0, so an
+  on-die controller can drop its off-chip driver without switching the backend
+  cost model. The interposer PHY constant is corroborated by NVIDIA's measured
+  HBM2 breakdown (O'Connor et al., MICRO-50 2017, Table 3: interposer I/O
+  0.3 pJ/bit at application toggle rates, 0.80 at 50%).
+- **D4** coherence flush charges a per-rank slice; **D8** the timing link type
+  is authoritative for power; **D1** ualink_1_0 is priced; **D10** LVDS is
+  emitted explicitly rather than inherited from a McPAT default.
+
+DATA IMPACT: every reported DRAM die area changes. Timing is untouched --
+the 1-PE ALU cell is bit-equal to 1.11.18.
+
 ## 1.11.18 -- power gating measures what it claims to measure
 
 The PG-correctness cluster of the pre-fleet triage, plus a units defect

@@ -76,9 +76,15 @@ public:
     double getTerminationEnergyNJ() const;   // ODT/termination per 64B (DDR-class; HBM=0)
     // Override termination energy (pJ/bit; <0 = model default, 0 = force no termination).
     void setTerminationOverridePJPerBit(double v) { energy_term_override_pJ_per_bit_ = v; }
-    double getBackgroundPowerMW() const;
-    double getBackgroundEffectiveMW(double r_idle) const;  // 1.11.8: power-down descent     // per-device active standby + refresh
-    double getRefreshPowerMW() const;        // per-device refresh component only
+    double getBackgroundPowerMW() const;     // per-unit active standby + refresh
+    double getRefreshPowerMW() const;        // per-unit refresh component only
+    /* 1.11.20 (D13+D15): the memory system's background. Population-scaled
+     * (one DDR chip / one HBM channel is the IDD unit) and state-aware
+     * (IDD3N busy, IDD2N idle, IDD2P idle-with-pg). device_width is the
+     * JEDEC x4/x8/x16 string; "" means the x8 default. */
+    int    getBackgroundUnits(const std::string& device_width = "") const;
+    double getBackgroundSystemMW(double r_idle, bool pg_enabled,
+                                 const std::string& device_width = "") const;
 
     // Configuration queries
     uint64_t getCapacity() const { return capacity_; }

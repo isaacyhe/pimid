@@ -387,6 +387,10 @@ static bool thread_initialized[MAX_THREADS];            // false until ensureThr
  * getenv; false in per-rank trace-gen processes (PIMID_MPI_RANK set), which
  * keep process-mode semantics. */
 static bool g_mpi_thread_mode = false;
+/* 1.11.19 (D4): emulated MPI rank count, resolved once at install.
+ * The coherence flush charges footprint/ranks per rank so the TOTAL is
+ * the working set once, independent of rank count. */
+static uint32_t g_mpi_rank_count = 1;
 
 /* 1.8.4 co-sim ROI window (defect #14): population of device workers in the
  * CURRENT window, and whether the window has been closed by the opener's
@@ -2060,7 +2064,16 @@ static void chargeCoherenceFlush(uint32_t tid) {
     uint32_t fc = (uint32_t)std::min<uint64_t>(flushCyc, 0xFFFFFFFFull);
     BblInfo* bbl = createSimpleBblInfo(fc, 0, true);  // 1.11.7: no phantom fetch; 1.11.16: injected charge
     fPtrs[tid].bblPtr(tid, 0, bbl);
-    __sync_fetch_and_add(&zinfo->xing.flushBytes, zinfo->coherence.footprintBytes);
+    /* 1.11.19 (user decision D4): charge THIS RANK'S SLICE of the working
+     * set, not the whole footprint. chargeCoherenceFlush runs once per rank,
+     * so the old form booked N x footprint for a single shared working set
+     * -- and since 1.11.16 reattributed the flush to memory writebacks, that
+     * N-fold term landed directly in the array energy CAL reads. Worse, it
+     * gave a FIXED working set an energy slope in N, aimed straight at the
+     * pecount sweep. The slices now sum to the footprint exactly once. */
+    uint64_t flushSlice = zinfo->coherence.footprintBytes /
+                          ((g_mpi_rank_count > 0) ? g_mpi_rank_count : 1u);
+    __sync_fetch_and_add(&zinfo->xing.flushBytes, flushSlice);
     __sync_fetch_and_add(&zinfo->xing.count, 1);
     __sync_fetch_and_add(&zinfo->coherence.flushCount, 1);
     __sync_fetch_and_add(&zinfo->coherence.flushCyclesCharged, flushCyc);
@@ -3293,6 +3306,11 @@ int qemu_plugin_install(qemu_plugin_id_t id,
         const char* mpi_ranks_env = getenv("PIMID_MPI_RANKS");
         g_mpi_thread_mode = (mpi_ranks_env && atoi(mpi_ranks_env) > 1 &&
                              !getenv("PIMID_MPI_RANK"));
+        /* 1.11.19 (user decision D4): remember the rank count so the
+         * coherence flush can charge each rank its OWN SLICE of the working
+         * set instead of the whole footprint (see chargeCoherenceFlush). */
+        int nr = mpi_ranks_env ? atoi(mpi_ranks_env) : 1;
+        g_mpi_rank_count = (nr > 0) ? (uint32_t)nr : 1u;
     }
     if (g_mpi_thread_mode) {
         info("[ZSim] MPI: emulated ranks in-process (deterministic serial weave)");

@@ -87,35 +87,99 @@ inline double arrayWriteNJ(const std::string& tech, double tRC, double tRAS,
  * the array term. The genuinely ADDITIONAL off-chip energy is termination
  * (below), which was computed and never charged. */
 
-// ODT/termination per 64B, per I/O standard. term_override_pJ_per_bit >= 0 = user knob.
-// termination_enable=false forces 0. HBM = 0 by physics (interposer microbumps).
+/* ODT/termination per 64B, per I/O standard. term_override_pJ_per_bit >= 0 =
+ * user knob; termination_enable=false forces 0.
+ *
+ * 1.11.22 (user decision D12) -- DERIVED FROM THE JEDEC I/O STANDARDS the
+ * technologies actually cite, replacing a per-scheme fudge factor whose
+ * values the 1.11.15 audit showed were transposed. Two independent errors
+ * were confirmed, both from normative text:
+ *
+ *  POD (DDR4 = POD12/JESD8-24, DDR5 = POD11, GDDR6 = POD135/JESD8-21C):
+ *    "The POD driver uses a 40/60 Ohm output impedance that drives into a
+ *     60 Ohm equivalent terminator tied to VDDQ" and "the terminator is
+ *     disabled when the output driver is enabled" (JESD8-21C.01 cl.3);
+ *    "signals ... are not generally expected to pull to VSS ... pull-up-only
+ *     parallel input termination" (JESD8-25 cl.1).
+ *    => driving HIGH the line sits at VDDQ and NO DC current flows; driving
+ *       LOW the loop is the driver pull-down IN SERIES with the terminator.
+ *       So duty ~0.5 for random data (we had 1.0), and the loop resistance
+ *       is Rpd+Rtt (we used Rtt alone -- a further 100/60 = 1.67x). Combined
+ *       we overstated GDDR6 termination by 3.33x.
+ *
+ *  SSTL (DDR3 = SSTL-15): terminated to VTT = VDDQ/2, so current flows in
+ *    BOTH states (duty 1.0 -- we had 0.5) but the voltage ACROSS the
+ *    terminated loop is VDDQ/2, not VDDQ. The two corrections partly cancel,
+ *    which is why the transposition was not obvious in the totals.
+ *    Every DDR3 constant below is normative, from JESD79-3D:
+ *      Rpd = 34 Ohm: Table 38 "Output Driver DC Electrical Characteristics",
+ *        RON34Pd/RON34Pu = RZQ/7 with RZQ = 240 Ohm; selected by MR1{A5,A1}
+ *        = {0,1} (Figure 10). The other legal strength is RZQ/6 = 40 Ohm.
+ *      Rtt = 40 Ohm: Table 41 "ODT DC Electrical Characteristics", RTT40 =
+ *        RZQ/6, selected by MR1{A9,A6,A2} = {0,1,1} (Figure 10).
+ *      Mid-rail: the SAME Table 41 row builds RTT40 from RTT40Pu80 and
+ *        RTT40Pd80, each RZQ/3 = 80 Ohm, i.e. a split pull-up/pull-down pair
+ *        whose Thevenin point is specified as "Deviation of VM w.r.t.
+ *        VDDQ/2, DVM: -5/+5 %". That row IS the v_term = VDDQ/2 below; it is
+ *        not an inference from the SSTL name.
+ *
+ *  LVSTL (LPDDR5): unterminated by design -> 0. OPEN, and deliberately
+ *    marked so: this is the ONE scheme in the table with no normative text
+ *    in hand (LVSTL is defined inside JESD209-5, which we do not have; the
+ *    JESD8-xx family here covers POD only). A third-party walkthrough of
+ *    JESD209-5C cl.2.3 states DVFSQ is capped at 3200 Mbps and that ODT is
+ *    absent WHEN DVFSQ IS ENABLED -- which implies LPDDR5 does have an ODT
+ *    mode above that rate, i.e. 0 may be right only for the low-rate corner.
+ *    Do not promote this row to "sourced" until JESD209-5 is read; the D12
+ *    IDD cross-check should flag it if the zero is wrong.
+ *  HBM: 0, and now with a normative citation rather than physics reasoning:
+ *    JESD238B.01 cl.9.1 measures HBM3 read-burst current with "IOUT = 0mA;
+ *    Ctotal = 2.5 pF" -- an unterminated capacitive load.
+ *
+ * BOUNDARY (stated, not hidden): the 0.5 POD duty assumes an unbiased bit
+ * stream. DBIac is enabled during JEDEC IDD measurement and deliberately
+ * skews the LOW fraction, so the true duty is data-dependent; D12's IDD
+ * cross-check is what pins that residual. */
 inline double terminationNJ(const std::string& tech, double term_override_pJ_per_bit,
                             bool termination_enable = true) {
     if (!termination_enable) return 0.0;
     if (term_override_pJ_per_bit >= 0.0)
         return term_override_pJ_per_bit * 512.0 / 1000.0;
-    double vddq, rtt, mtps, scheme = 1.0;
-    if      (tech=="DDR3")   {vddq=1.5;  rtt=40;  mtps=1600;  scheme=0.5;}  // SSTL-15 -> VTT mid-rail
-    else if (tech=="DDR4")   {vddq=1.2;  rtt=48;  mtps=3200;  scheme=1.0;}  // POD12
-    else if (tech=="DDR5")   {vddq=1.1;  rtt=48;  mtps=4800;  scheme=1.0;}  // POD11
-    else if (tech=="GDDR6")  {vddq=1.35; rtt=50;  mtps=14000; scheme=1.0;}  // POD135
-    else if (tech=="LPDDR5") {vddq=0.5;  rtt=240; mtps=6400;  scheme=0.0;}  // LVSTL, unterminated
-    else if (tech.substr(0,3)=="HBM") return 0.0;                          // interposer
-    else {vddq=1.2; rtt=48; mtps=3200; scheme=1.0;}
-    double t_bit_s = 1.0 / (mtps * 1e6);
-    double e_per_bit_pJ = scheme * ((vddq * vddq) / rtt) * t_bit_s * 1e12;
+
+    enum Scheme { POD, SSTL, NONE };
+    Scheme sch; double vddq, rtt, rpd, mtps;
+    if      (tech=="DDR3")   {sch=SSTL; vddq=1.5;  rtt=40;  rpd=34;  mtps=1600;}   // SSTL-15; JESD79-3D T41
+                                                                                   // (RTT40=RZQ/6) + T38
+                                                                                   // (RON34=RZQ/7), RZQ=240
+    else if (tech=="DDR4")   {sch=POD;  vddq=1.2;  rtt=48;  rpd=40;  mtps=3200;}   // POD12  (JESD8-24)
+    else if (tech=="DDR5")   {sch=POD;  vddq=1.1;  rtt=48;  rpd=40;  mtps=4800;}   // POD11  (same family)
+    else if (tech=="GDDR6")  {sch=POD;  vddq=1.35; rtt=60;  rpd=40;  mtps=14000;}  // POD135 (JESD8-21C, Cl.D:
+                                                                                   // RTT programmable 48/60 via MR6)
+    else if (tech=="LPDDR5") {sch=NONE; vddq=0.5;  rtt=240; rpd=40;  mtps=6400;}   // LVSTL, unterminated
+    else if (tech.substr(0,3)=="HBM") return 0.0;                                  // interposer (JESD238B cl.9.1)
+    else                     {sch=POD;  vddq=1.2;  rtt=48;  rpd=40;  mtps=3200;}
+    if (sch == NONE) return 0.0;
+
+    const double t_bit_s = 1.0 / (mtps * 1e6);
+    double e_per_bit_pJ;
+    if (sch == POD) {
+        // current only while LOW; loop = driver pull-down + terminator
+        const double kLowDuty = 0.5;
+        e_per_bit_pJ = kLowDuty * (vddq * vddq) / (rpd + rtt) * t_bit_s * 1e12;
+    } else {
+        // SSTL: VTT = VDDQ/2 across the loop, drawn in both states
+        const double v_term = vddq * 0.5;
+        e_per_bit_pJ = (v_term * v_term) / (rpd + rtt) * t_bit_s * 1e12;
+    }
     return e_per_bit_pJ * 512.0 / 1000.0;
 }
 
-/* 1.11.17 (audit go-through) -- KNOWN BOUNDARY, deliberately not patched
- * here: these standby quantities are PER-DEVICE by convention everywhere
- * (the report labels them mW/device), so an HBM stack's 8-16 channels are
- * charged as one device's background -- but so is a DDR rank's 8 chips.
- * IDDSpec::channels was declared for the HBM aggregation and is still
- * unread; scaling HBM alone would fix one technology inside an unsettled
- * system-wide device-vs-rank-vs-stack convention. The whole background
- * population model is settled in ONE place in the memory-controller
- * release (#100). */
+/* All three quantities below are PER IDD-BEARING UNIT: one DDR-class chip,
+ * or one HBM channel. That is the unit the JEDEC IDD tables are written
+ * against. Multiplying up to the memory system is backgroundUnits() and is
+ * done once, in backgroundSystemMW(). (Before 1.11.20 there was no
+ * multiplication at all: an HBM stack's 8-16 channels and a DDR rank's 8
+ * chips were each reported as a single device's background.) */
 inline double refreshMW(const std::string& tech) {
     IDDSpec s = iddFor(tech);
     return s.vdd * (s.idd5 - s.idd3n) * (s.trfc_ns / s.trefi_ns);
@@ -125,37 +189,90 @@ inline double backgroundMW(const std::string& tech) {
     return s.vdd * s.idd3n + refreshMW(tech);
 }
 
-/* 1.11.8 (#84): background power under power-down descent. During measured
- * no-traffic residency r_idle the device sits in precharge power-down
- * (IDD2P, CKE low) instead of active standby; refresh continues in ALL
- * states (DRAM must retain). A tXP-scale hysteresis discount derates the
- * idle fraction so few-cycle gaps are not credited: phases are 10k cycles,
- * tXP is ~10ns, so entry/exit overhead within a genuinely idle phase is
- * <1% -- the derate factor 0.99 states it rather than ignoring it.
- * r_idle=0 reproduces backgroundMW exactly (PG-off invariant). */
-inline double backgroundEffectiveMW(const std::string& tech, double r_idle) {
-    if (r_idle <= 0.0) return backgroundMW(tech);
+/* 1.11.20 (user decision D13): POPULATION. How many IDD-bearing units the
+ * memory system presents behind one channel.
+ *
+ * Deliberately derived from technology + JEDEC device width and NOT from
+ * config.hierarchy_chips_per_rank, even though that field holds the same
+ * numbers: the hierarchy field is degenerated to 1 for HOST_MC placement
+ * (main.cpp, the PEs-share-the-host-MC path), because it is an address-
+ * mapping fanout there. The number of chips physically drawing standby
+ * current does not depend on where the PEs sit, so reading that field would
+ * have silently zeroed the correction for exactly the baseline placement.
+ *
+ *   HBM2/HBM3   channels per stack (8 / 16), from IDDSpec::channels, which
+ *               was declared in 1.11.8 for this purpose and never read.
+ *               JESD238B.01 cl.9.1 specifies HBM IDD per channel.
+ *   DDR3/4/5    chips per rank for a 64-bit channel: x4 -> 16, x8 -> 8,
+ *               x16 -> 4. Mirrors the device-width table in main.cpp.
+ *   LPDDR5      1: an x16 die serves its own channel.
+ *   GDDR6       1: point-to-point, one device per channel.
+ *   SRAM/NVM    1 (they do not reach this path; the fallthrough is DDR4). */
+inline int backgroundUnits(const std::string& tech,
+                           const std::string& device_width = "") {
+    if (tech.substr(0, 3) == "HBM") {
+        int ch = iddFor(tech).channels;
+        return ch > 0 ? ch : 1;
+    }
+    if (tech == "DDR3" || tech == "DDR4" || tech == "DDR5") {
+        if (device_width == "x4")  return 16;
+        if (device_width == "x16") return 4;
+        return 8;                       // x8, the default 64-bit rank
+    }
+    return 1;
+}
+
+/* 1.11.20 (user decision D15): STATE. Background power for ONE unit, given
+ * the measured no-traffic residency r_idle. Three JEDEC states, not two:
+ *
+ *   busy  (1 - r_idle)  ACTIVE STANDBY, IDD3N -- a row is open.
+ *   idle, pg off        PRECHARGE STANDBY, IDD2N. An idle controller closes
+ *                       its pages; that descent is PAGE POLICY and happens
+ *                       whether or not a power-management feature exists.
+ *                       1.11.18 identified this correctly but left the
+ *                       baseline at IDD3N to preserve pg-off bit-identity,
+ *                       which meant the baseline stayed knowingly wrong.
+ *                       D15 fixes the baseline instead.
+ *   idle, pg on         PRECHARGE POWER-DOWN, IDD2P (CKE low).
+ *
+ * Refresh continues in ALL states -- DRAM must retain -- so it is added
+ * unconditionally.
+ *
+ * tXP hysteresis: entry/exit overhead means a small slice of the idle time
+ * cannot reach power-down. Phases are 10k cycles and tXP is ~10 ns, so that
+ * slice is <1%; the 0.99 factor states it rather than ignoring it. The slice
+ * that fails to reach IDD2P sits at IDD2N, not at IDD3N -- it is still idle.
+ *
+ * DELIBERATE BASELINE CHANGE: r_idle > 0 with pg OFF no longer reproduces
+ * backgroundMW(). That was the point of D15, and it is why the 1.11.20 gate
+ * asserts a stated delta for DRAM cells rather than bit-equality. */
+inline double backgroundUnitMW(const std::string& tech, double r_idle,
+                               bool pg_enabled) {
+    if (r_idle < 0.0) r_idle = 0.0;
     if (r_idle > 1.0) r_idle = 1.0;
     IDDSpec s = iddFor(tech);
     const double kHysteresisDerate = 0.99;
-    double r = r_idle * kHysteresisDerate;
-    double standby_mw  = s.vdd * s.idd3n;   // per-device (see boundary note above)
-    /* 1.11.18 (audit go-through): the credit is the POWER-DOWN delta, taken
-     * from PRECHARGE STANDBY (IDD2N), not from active standby (IDD3N).
-     * Entering IDD2P requires all banks precharged, and an idle controller
-     * closes its pages whether or not a power-down feature exists -- so the
-     * IDD3N->IDD2N step is page policy, which this model does not track, and
-     * attributing it to pim.mc.pg over-credited the saving by 1.4x (HBM3)
-     * to 2.0x (GDDR6) on our own IDD table. The baseline is deliberately
-     * left at IDD3N so PG-OFF results are unchanged; the effect is that PG
-     * now under-credits rather than over-credits. (Whether the baseline
-     * itself should descend to IDD2N on idle is a page-policy modelling
-     * question, parked for the memory-controller release.) */
-    double pd_delta_mw  = s.vdd * (s.idd2n - s.idd2p);
-    if (pd_delta_mw < 0.0) pd_delta_mw = 0.0;   // guard odd rows
-    double pd_mw       = standby_mw - pd_delta_mw;
-    if (pd_mw < 0.0) pd_mw = 0.0;
-    return standby_mw * (1.0 - r) + pd_mw * r + refreshMW(tech);
+    const double active_mw = s.vdd * s.idd3n;   // IDD3N, row open
+    const double pre_mw    = s.vdd * s.idd2n;   // IDD2N, banks precharged
+    double pd_mw           = s.vdd * s.idd2p;   // IDD2P, CKE low
+    if (pd_mw > pre_mw) pd_mw = pre_mw;         // guard odd rows: never a penalty
+    double idle_mw;
+    if (pg_enabled) {
+        const double r_pd = r_idle * kHysteresisDerate;
+        idle_mw = pd_mw * r_pd + pre_mw * (r_idle - r_pd);
+    } else {
+        idle_mw = pre_mw * r_idle;
+    }
+    return active_mw * (1.0 - r_idle) + idle_mw + refreshMW(tech);
+}
+
+/* The memory system's background: population x per-unit state-aware power.
+ * This is the only function the report should call. */
+inline double backgroundSystemMW(const std::string& tech, double r_idle,
+                                 bool pg_enabled,
+                                 const std::string& device_width = "") {
+    return backgroundUnitMW(tech, r_idle, pg_enabled) *
+           static_cast<double>(backgroundUnits(tech, device_width));
 }
 
 } // namespace pimid_energy

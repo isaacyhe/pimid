@@ -232,6 +232,14 @@ double McPATWrapper::linkEnergyPJPerBit(const std::string& link_type) {
     if (link_type.rfind("cxl", 0)    == 0) return 8.4;  // gen5 PHY + coherence delta
     if (link_type.rfind("nvlink", 0) == 0) return 1.3;
     if (link_type.rfind("interposer", 0) == 0) return 0.5;
+    /* 1.11.19 (user decision D1): ualink_1_0 is a fully preset-supported
+     * link on the TIMING side (main.cpp link vocabulary + preset table), so
+     * a run could complete and report exactly 0 J of link energy with only
+     * a stderr note. UALink 1.0 rides 200G-class SerDes -- the same PHY
+     * generation as PCIe gen6/CXL 3.x -- so it is priced in that band
+     * rather than left unpriceable. Flagged with the other per-link
+     * figures as a published-ballpark constant, not a measurement. */
+    if (link_type.rfind("ualink", 0) == 0) return 8.0;
     return -1.0;
 }
 
@@ -1789,20 +1797,22 @@ std::string McPATWrapper::generateXMLConfig() const {
 
     // Memory controller — uses actual mc_reads_/mc_writes_ and mc_tech_ params
     xml << "    <component id=\"system.mc\" name=\"mc\">\n";
-    /* 1.11.15 (audit): McPAT builds an MCPHY -- a per-bit OFF-CHIP I/O
-     * driver charge on every access -- whenever type==0. An on-die element
-     * MC drives no pins at all, so no off-chip driver model applies to it;
-     * on-die MCs are emitted as type=1 (embedded class) with no PHY.
-     * (1.11.16 correction to the recorded rationale: at the on-die
-     * placements the termination term was ALREADY zero, so the MCPHY was a
-     * single wrong-in-kind charge, not a double count. At RANK+ the PHY
-     * driver and the ODT termination are genuinely distinct charges and
-     * both belong -- do NOT "complete" this fix by stripping the PHY there.
-     * The redundant conditional withPHY emission was deleted: line below
-     * already emits withPHY=0 unconditionally, and McPAT ignores withPHY
-     * for type=0 anyway.) */
-    xml << "      <param name=\"type\" value=\""
-        << (config_.mc_offchip_phy ? 0 : 1) << "\"/>\n";
+    /* 1.11.19 (user decisions D2+D3): ONE BACKEND MODEL, THREE INTERFACE
+     * TIERS. The backend is always type=0 -- McPAT's Cadence full-MC fit --
+     * so every placement on the ladder is priced on the same basis and the
+     * placement study stays iso-model. Only the DRIVER varies with where
+     * the controller physically sits:
+     *
+     *   subarray..chip (on-die)  withPHY=0            no driver at all
+     *   logic-die / channel      withPHY=1, class=1   interposer/TSV
+     *   rank+ / host MC          withPHY=1, class=0   off-package DDR
+     *
+     * This REPLACES the 1.11.15/1.11.16 shape, which expressed "no PHY" as
+     * type=1 -- that also silently swapped the BACKEND cost model (embedded
+     * DDR3-Lite fit, ~15x area drop at 22nm), so an on-die MC was compared
+     * against a rank MC on two different curves. memoryctrl.cc now honors
+     * withPHY for type=0 (it used to ignore it there). */
+    xml << "      <param name=\"type\" value=\"0\"/>\n";
     xml << "      <param name=\"mc_clock\" value=\"" << static_cast<int>(config_.mc_clock_mhz) << "\"/>\n";
     xml << "      <param name=\"vdd\" value=\"0\"/>\n";
     xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
@@ -1811,7 +1821,18 @@ std::string McPATWrapper::generateXMLConfig() const {
     xml << "      <param name=\"number_mcs\" value=\"" << mc_tech_.number_mcs << "\"/>\n";
     xml << "      <param name=\"memory_channels_per_mc\" value=\"1\"/>\n";
     xml << "      <param name=\"number_ranks\" value=\"" << mc_tech_.number_ranks << "\"/>\n";
-    xml << "      <param name=\"withPHY\" value=\"0\"/>\n";
+    /* 1.11.19: the interface tier (see the type comment above). */
+    xml << "      <param name=\"withPHY\" value=\""
+        << (config_.mc_phy_tier == SystemConfig::MCPhyTier::NONE ? 0 : 1) << "\"/>\n";
+    xml << "      <param name=\"phy_class\" value=\""
+        << (config_.mc_phy_tier == SystemConfig::MCPhyTier::INTERPOSER ? 1 : 0) << "\"/>\n";
+    /* 1.11.19 (user decision D10): state the interface class explicitly
+     * instead of riding McPAT's default. XML_Parse defaults LVDS=true, which
+     * is why the code path yields ~2.2 pJ/bit while docs/changelog.md:2088
+     * cited ~9 (the non-LVDS branch). A differential memory PHY is the
+     * right class for every DDR-family part we model, so the value is the
+     * same -- but it is now SAID, and the cited figure is reproducible. */
+    xml << "      <param name=\"LVDS\" value=\"1\"/>\n";
     xml << "      <param name=\"req_window_size_per_channel\" value=\"32\"/>\n";
     xml << "      <param name=\"IO_buffer_size_per_channel\" value=\"32\"/>\n";
     xml << "      <param name=\"databus_width\" value=\"" << mc_tech_.databus_width << "\"/>\n";

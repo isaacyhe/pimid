@@ -94,13 +94,30 @@ class EventRecorder;
 
 /* 1.8.7 co-sim MPI post-ROI protocol-tail RECEIPT, indexed by GLOBAL CORE INDEX
  * (== ALUCore::srcId_ == the plugin's cid). Kept in a FIXED file-scope array
- * rather than a Core member ON PURPOSE: adding a field to Core changes every
- * core object's size and shifts heap layout, which perturbs the contention
- * sim's address-ordered tie-breaking and made device-scope runs diverge ~10K on
- * one PE (benign, but broke device-scope bit-identity vs the 1.6/1.8.6 baseline).
- * A fixed BSS array leaves Core's layout byte-identical. Written by the plugin's
+ * rather than a Core member: adding a field to Core changes every core object's
+ * size and shifts heap layout, which perturbs the contention sim's
+ * address-ordered tie-breaking. Written by the plugin's
  * recordProtocolTailStats() (co-sim MPI only; stays 0 otherwise) and read by the
- * per-PE 'protocolTail' LambdaStat in ALUCore::initStats. Never alters 'cycles'. */
+ * per-PE 'protocolTail' LambdaStat in ALUCore::initStats. Never alters 'cycles'.
+ *
+ * 1.11.20 (user decision D14) -- THE GUARANTEE THIS BUYS, STATED HONESTLY.
+ * The original comment claimed the BSS array preserved bit-identity "vs the
+ * 1.6/1.8.6 baseline", i.e. ACROSS versions. It does not, and 1.11.10 proved
+ * it: adding pgAct/mix members to Core for power gating changed the layout
+ * anyway. What we actually provide, and what every gate actually asserts:
+ *
+ *   SAME BINARY + same config          -> bit-identical, always.
+ *   DIFFERENT BUILD of the same source -> may drift a few cycles.
+ *
+ * Measured: identical 1.11.15 source built in two trees gave 10164688 vs
+ * 10164694 cycles on the deterministic 1-PE cell -- a 6-cycle cross-binary
+ * drift with no source difference at all. Gates therefore always compare a
+ * within-build NEW/REF pair, which is existing practice, now written down.
+ *
+ * Restoring the strict no-Core-members rule was considered and rejected: by
+ * the measurement above it would NOT deliver cross-version bit-identity, and
+ * it would churn all five core types to buy nothing. The array stays because
+ * it is still the right place for a receipt; the overclaim is what changed. */
 extern uint64_t g_mpiProtocolTailCyc[];
 
 //Generic core class

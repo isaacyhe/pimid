@@ -212,6 +212,14 @@ public:
     double frontend_duty_cycle, duty_cycle, perc_load;
     double executionTime, reads, writes;
     bool   LVDS, withPHY;
+	/* PIMID 1.11.19 (user decision D2/D3): the PHY INTERFACE CLASS, split
+	 * from the backend cost model. The backend now always uses the full-MC
+	 * (Cadence) fit so every placement is priced on one basis; only the
+	 * driver changes with where the controller sits:
+	 *   0 = off-package DDR   (rank+/host: real DQ pins, ODT)
+	 *   1 = interposer/TSV    (HBM base die, channel tier: microbumps)
+	 * withPHY=false means no driver at all (on-die element MCs). */
+	int    phy_class;
 	double vdd;
 	double power_gating_vcc;
     ~MCParam(){};

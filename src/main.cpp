@@ -1479,6 +1479,13 @@ struct UnifiedConfig {
         bool pg_pe  = false;
         bool pg_noc = false;
         bool pg_mc  = false;
+        /* 1.11.20 (user decision D7): HOST role. One flag, hosts[].pg,
+         * because the user's 2026-08-14 decree is that the host gates "as an
+         * entire piece" -- cores and host MC together, not as separately
+         * gateable components. Default false, so a config without the key is
+         * bit-identical. Device nodes keep the three-flag surface above:
+         * there the components genuinely have their own gate signals. */
+        bool pg_host = false;
         // Memory-topology knob (1.7.4, HANDOFF MEMORY-TOPOLOGY ADDENDUM).
         // DEVICE role only. true (DEFAULT): this PIM device IS the host's main
         // memory -- host tech = device tech BY CONSTRUCTION (preserves the
@@ -4553,9 +4560,35 @@ static void runPowerAnalysis(const UnifiedConfig& config,
          * PIM at BANK placement was keeping the full off-chip PHY while its
          * termination term was already placement-gated to zero. The sibling
          * crosses_dq predicate uses the same placement test with no tech
-         * condition; this now matches it. */
-        if (config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3)
-            mcfg.mc_offchip_phy = false;   // on-die element MC: no DQ pins
+         * condition; this now matches it.
+         *
+         * 1.11.19 (user decisions D2+D3): three tiers, not a boolean. The
+         * driver depends on what the controller physically reaches:
+         *   0..3 subarray..chip -> NONE       (on-die, no pins)
+         *   5,6  channel/logic-die -> INTERPOSER (TSVs + microbumps): the
+         *        HBM base die and the channel tier of channel-centric parts
+         *        drive an interposer, which our termination model already
+         *        prices at zero "by physics" and our link table at 0.5
+         *        pJ/bit -- charging them an off-package DDR driver
+         *        contradicted both in the same run.
+         *   4,-1 rank / host MC -> OFFCHIP    (real DQ pins with ODT) */
+        {
+            using Tier = McPAT::SystemConfig::MCPhyTier;
+            const int lvl = config.pe_hierarchy_level;
+            bool interposer_tier =
+                (lvl == 6) ||                       // LOGIC_DIE (HBM base die)
+                (lvl == 5 && channel_centric);      // channel tier on LPDDR/GDDR/HBM
+            if (lvl >= 0 && lvl <= 3)      mcfg.mc_phy_tier = Tier::NONE;
+            else if (interposer_tier)      mcfg.mc_phy_tier = Tier::INTERPOSER;
+            else                           mcfg.mc_phy_tier = Tier::OFFCHIP;
+            std::cout << "  [tech] element MC interface: "
+                      << (mcfg.mc_phy_tier == Tier::NONE ? "none (on-die, drives no pins)"
+                          : mcfg.mc_phy_tier == Tier::INTERPOSER
+                              ? "interposer/TSV (~0.5 pJ/bit, no ODT)"
+                              : "off-package DQ (full PHY + ODT)")
+                      << "; backend priced on the full-MC fit at every "
+                         "placement (iso-model ladder)" << std::endl;
+        }
         if (on_dram_silicon) {
             mcfg.process_family = 1;  // DRAM_PERIPHERY (per-class factors)
             mcfg.subarray_pitch_factor =
@@ -5086,21 +5119,56 @@ static void runPowerAnalysis(const UnifiedConfig& config,
              * into precharge power-down (IDD2P) during measured no-traffic
              * residency; refresh always continues. Without the flag (or with
              * zero phases) this is exactly getBackgroundPowerMW(). */
+            /* 1.11.20 (D15): the idle residency is a MEASUREMENT, and it
+             * applies with or without pim.mc.pg. An idle controller closes
+             * its pages either way, so an idle device sits at PRECHARGE
+             * standby (IDD2N); pg only decides whether the descent continues
+             * to power-down (IDD2P). Hence no config.pg_mc in this condition
+             * -- that gate is what kept the baseline knowingly at IDD3N.
+             *
+             * UNARMED-COUNTER REFUSAL: pgDevMCActivePhases is touched by
+             * every non-PUTS request through the Ramulator MC and the PE-MI
+             * (ramulator_mem_ctrl.cpp, pe_memory_interface.h). If a run has
+             * memory traffic but the counter never advanced, this machine is
+             * not driving that tracker, and r_idle would come out 1.0 -- the
+             * whole memory reported idle. Refuse the descent and say so,
+             * rather than print a number sourced from a dead counter. */
             double mc_r_idle = 0.0;
-            if (config.pg_mc && zsim_stats.pg_window() > 0) {
+            const bool devmc_armed =
+                (zsim_stats.pg_devmc_active > 0) ||
+                (zsim_stats.mem_rd + zsim_stats.mem_wr == 0);
+            if (zsim_stats.pg_window() > 0 && devmc_armed) {
                 mc_r_idle = 1.0 - std::min(1.0,
                     static_cast<double>(zsim_stats.pg_devmc_active)
                         / static_cast<double>(zsim_stats.pg_window()));
+            } else if (!devmc_armed) {
+                std::cout << "  [pg] DRAM idle residency UNAVAILABLE: the "
+                             "device-MC phase counter never advanced despite "
+                          << (zsim_stats.mem_rd + zsim_stats.mem_wr)
+                          << " accesses. Background reported at active "
+                             "standby (IDD3N); no idle descent claimed."
+                          << std::endl;
             }
-            double bg_power_mw = ram_oracle.getBackgroundEffectiveMW(mc_r_idle);
+            /* 1.11.20 (D13): population-scaled. One DDR chip / one HBM
+             * channel is the unit the JEDEC IDD table is written against. */
+            const int bg_units =
+                ram_oracle.getBackgroundUnits(config.dram_device_width);
+            double bg_power_mw = ram_oracle.getBackgroundSystemMW(
+                mc_r_idle, config.pg_mc, config.dram_device_width);
             if (mc_r_idle > 0.0) {
-                std::cout << "  [pg] DRAM power-down: idle residency "
-                          << mc_r_idle << " -> background "
-                          << ram_oracle.getBackgroundPowerMW() << " -> "
-                          << bg_power_mw << " mW/device (IDD2P descent, "
-                             "refresh always on)" << std::endl;
+                std::cout << "  [pg] DRAM idle residency " << mc_r_idle
+                          << " -> background "
+                          << ram_oracle.getBackgroundPowerMW() * bg_units
+                          << " -> " << bg_power_mw << " mW ("
+                          << (config.pg_mc ? "IDD2N page-close then IDD2P "
+                                             "power-down"
+                                           : "IDD2N page-close; pim.mc.pg off, "
+                                             "no power-down")
+                          << ", refresh always on)" << std::endl;
             }
-            double ref_energy = ram_oracle.getRefreshPowerMW();  // per-device mW
+            /* 1.11.20 (D13): scaled to the same population as the background
+             * beside it, so the two lines are the same memory system. */
+            double ref_energy = ram_oracle.getRefreshPowerMW() * bg_units;
             double leakage_mw = bg_power_mw;
 
             double total_rd_nj = rd_energy * zsim_stats.mem_rd;
@@ -5116,8 +5184,12 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                                      : "on-die placement: no DQ crossing, no termination")
                       << ")" << std::endl;
             std::cout << "  Array incl act+col in read/write terms above" << std::endl;
-            std::cout << "  Refresh:         " << ref_energy << " mW/device" << std::endl;
-            std::cout << "  Background:      " << bg_power_mw << " mW/device (standby+refresh)" << std::endl;
+            std::cout << "  Refresh:         " << ref_energy << " mW" << std::endl;
+            std::cout << "  Background:      " << bg_power_mw
+                      << " mW (standby+refresh over " << bg_units << " "
+                      << (config.memory_tech.substr(0, 3) == "HBM"
+                              ? "channels/stack" : "chips/rank")
+                      << ")" << std::endl;
             std::cout << "  Leakage:         " << leakage_mw << " mW" << std::endl;
             std::cout << "  Total dynamic:   " << std::setprecision(1)
                       << (total_rd_nj + total_wr_nj + total_act_nj + total_iface_nj) / 1e6
@@ -5209,7 +5281,10 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                     std::cout << "  Area:            " << std::fixed << std::setprecision(2)
                               << die_area << " mm^2/die (CACTI x k, k="
                               << std::setprecision(3) << ca_ref.k
-                              << " JEDEC-calibrated; raw CACTI "
+                              << " JEDEC-calibrated, FULL-DIE basis"
+                              << (pimid::CACTIWrapper::vendorDieDensitySourced(
+                                      config.memory_tech) ? "" : ", density DERIVED not measured")
+                              << "; raw CACTI "
                               << std::setprecision(2) << cacti_eff.getArea()
                               << ")" << std::endl;
                 } else {
@@ -5264,18 +5339,49 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                     static_cast<double>(zsim_stats.pg_devmc_active)
                         / static_cast<double>(zsim_stats.pg_window()));
                 if (r_idle > 0.0) {
-                    const double kPeripheryShare = 0.30;  // declared, not measured
-                    const double kSleepTxResidual = 0.35; // Vcc_min/Vdd, CACTI-class
-                    double before = leakage;
-                    double periph = leakage * kPeripheryShare;
-                    double cells  = leakage - periph;
-                    leakage = cells + periph * ((1.0 - r_idle) + kSleepTxResidual * r_idle);
-                    std::cout << "  [pg] SRAM periphery gating: idle residency "
-                              << r_idle << " -> leakage " << before << " -> "
-                              << leakage << " mW (cells stay powered: volatile; "
-                                 "periphery share " << kPeripheryShare
-                              << " declared, sleep-tx residual " << kSleepTxResidual
-                              << ")" << std::endl;
+                    /* 1.11.20 (user decision D16): DERIVE the periphery share
+                     * instead of declaring it. A second CACTI query on the same
+                     * geometry with the periphery minimised (single small bank,
+                     * one port) isolates the cell-array leakage; what the full
+                     * configuration carries above that is periphery. Replaces
+                     * the 1.11.18 declared 0.30 -- tool-sourced-everything
+                     * applies to this constant too. If the probe fails we say
+                     * so and refuse the credit rather than fall back to a
+                     * made-up number. */
+                    double periph_share = -1.0;
+                    try {
+                        pimid::CACTIWrapper::SRAMConfig cell_cfg = sram_cfg;
+                        cell_cfg.read_write_ports = 1;
+                        cell_cfg.quiet = true;
+                        pimid::CACTIWrapper cell_probe(cell_cfg);
+                        cell_probe.initialize();
+                        if (cell_probe.isValid()) {
+                            double cell_only = cell_probe.getLeakagePower() * config.num_banks;
+                            if (leakage > 0.0 && cell_only > 0.0 && cell_only < leakage)
+                                periph_share = 1.0 - (cell_only / leakage);
+                        }
+                    } catch (const std::exception&) { periph_share = -1.0; }
+
+                    if (periph_share <= 0.0) {
+                        std::cout << "  [pg] SRAM periphery gating REFUSED: the "
+                                     "array-only CACTI probe did not isolate a "
+                                     "periphery share, so there is no measured "
+                                     "split to gate on (no credit taken)."
+                                  << std::endl;
+                    } else {
+                        const double kSleepTxResidual = 0.35; // Vcc_min/Vdd, CACTI-class
+                        double before = leakage;
+                        double periph = leakage * periph_share;
+                        double cells  = leakage - periph;
+                        leakage = cells + periph * ((1.0 - r_idle) + kSleepTxResidual * r_idle);
+                        std::cout << "  [pg] SRAM periphery gating: idle residency "
+                                  << r_idle << " -> leakage " << before << " -> "
+                                  << leakage << " mW (cells stay powered: volatile; "
+                                     "periphery share " << periph_share
+                                  << " DERIVED from an array-only CACTI query, "
+                                     "sleep-tx residual " << kSleepTxResidual
+                                  << ")" << std::endl;
+                    }
                 }
             }
 
@@ -5545,7 +5651,10 @@ static double computeDramDieAreaMM2(const std::string& memory_tech, bool print)
             std::cout << "  Die area:      " << std::fixed << std::setprecision(2)
                       << ca.area_mm2 << " mm^2/die (CACTI x k, k="
                       << std::setprecision(3) << ca.k
-                      << " JEDEC-calibrated; raw CACTI " << std::setprecision(2)
+                      << " JEDEC-calibrated, FULL-DIE basis"
+                      << (pimid::CACTIWrapper::vendorDieDensitySourced(memory_tech)
+                              ? "" : ", density DERIVED not measured")
+                      << "; raw CACTI " << std::setprecision(2)
                       << ca.raw_mm2 << ")" << std::defaultfloat << std::endl;
         }
         return ca.area_mm2;
@@ -5554,8 +5663,21 @@ static double computeDramDieAreaMM2(const std::string& memory_tech, bool print)
     }
 }
 
+/* 1.11.20 (user decisions D6): system scope prices memory the way device
+ * scope does. Two things were missing here and present there, so the SAME
+ * machine reported different memory power depending on which scope ran it:
+ *   - the DRAM power-down descent under pim.mc.pg (r_idle -> IDD2P), and
+ *   - the DQ termination charge (1.11.5), which is placement-aware.
+ * Both are passed in rather than recomputed, so there is one owner of each
+ * decision. r_idle < 0 means "pg off / no counter" and reproduces the old
+ * background exactly; crosses_dq false means an on-die placement, where the
+ * accesses never reach a DQ pin. */
 static void reportSharedMemoryArrayEnergy(const std::string& memory_tech,
-                                          uint64_t mem_rd, uint64_t mem_wr)
+                                          uint64_t mem_rd, uint64_t mem_wr,
+                                          double r_idle = -1.0,
+                                          bool crosses_dq = false,
+                                          bool pg_enabled = false,
+                                          const std::string& device_width = "")
 {
     if (memory_tech.empty() || (mem_rd + mem_wr) == 0) return;
 
@@ -5580,10 +5702,21 @@ static void reportSharedMemoryArrayEnergy(const std::string& memory_tech,
          * would double-count within the array term itself. */
         const double rd_nj = ram_oracle.getArrayReadEnergyNJ();
         const double wr_nj = ram_oracle.getArrayWriteEnergyNJ();
-        const double bg_mw = ram_oracle.getBackgroundPowerMW();
+        /* 1.11.20 (D6 + D13 + D15): same background device scope reports --
+         * population-scaled and state-aware. r_idle < 0 means the residency
+         * was never measured, which is NOT the same as measured-zero: the
+         * former reports pure active standby, the latter is a real busy
+         * device. */
+        const int bg_units = ram_oracle.getBackgroundUnits(device_width);
+        const double bg_mw = ram_oracle.getBackgroundSystemMW(
+            (r_idle > 0.0 ? r_idle : 0.0), pg_enabled, device_width);
+        /* 1.11.20 (D6): DQ termination, placement-aware like 1.11.5. */
+        const double iface_nj = crosses_dq ? ram_oracle.getTerminationEnergyNJ() : 0.0;
 
         const double total_rd_mj = rd_nj * static_cast<double>(mem_rd) / 1e6;
         const double total_wr_mj = wr_nj * static_cast<double>(mem_wr) / 1e6;
+        const double total_term_mj =
+            iface_nj * static_cast<double>(mem_rd + mem_wr) / 1e6;
 
         std::cout << "\n--- Memory Array Energy (system) ---" << std::endl;
         std::cout << "  Technology:    " << memory_tech
@@ -5594,10 +5727,25 @@ static void reportSharedMemoryArrayEnergy(const std::string& memory_tech,
                   << rd_nj << " nJ, write=" << wr_nj << " nJ (incl act+col)"
                   << std::endl;
         std::cout << "  Background:    " << std::setprecision(3) << bg_mw
-                  << " mW/device (standby+refresh)" << std::endl;
+                  << " mW (standby+refresh over " << bg_units << " "
+                  << (memory_tech.substr(0, 3) == "HBM" ? "channels/stack"
+                                                        : "chips/rank")
+                  << (r_idle > 0.0
+                          ? (pg_enabled ? ", IDD2N page-close then IDD2P "
+                                          "power-down at measured idle"
+                                        : ", IDD2N page-close at measured idle")
+                          : "")
+                  << ")" << std::endl;
+        std::cout << "  Termination:   " << std::setprecision(3) << iface_nj
+                  << " nJ/access ("
+                  << (crosses_dq ? "accesses cross the DQ pins at this placement"
+                                 : "on-die placement: no DQ crossing, no termination")
+                  << ")" << std::endl;
         std::cout << "  Array dynamic: " << std::setprecision(3)
-                  << (total_rd_mj + total_wr_mj) << " mJ (rd=" << total_rd_mj
-                  << " + wr=" << total_wr_mj << ")"
+                  << (total_rd_mj + total_wr_mj + total_term_mj)
+                  << " mJ (rd=" << total_rd_mj
+                  << " + wr=" << total_wr_mj
+                  << " + term=" << total_term_mj << ")"
                   << std::defaultfloat << std::endl;
         computeDramDieAreaMM2(memory_tech, /*print=*/true);  // 1.11.9
     } catch (const std::exception& e) {
@@ -5689,16 +5837,21 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
             bool dram_family_tech =
                 !(node.memory_tech == "SRAM" || node.memory_tech == "STT_MRAM" ||
                   node.memory_tech == "PCM"  || node.memory_tech == "RERAM");
-            /* 1.11.16: MCPHY gated on PLACEMENT alone (see the device-scope
-             * site) -- on-die element MCs drive no DQ pins on any tech. */
-            if (config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3)
-                mcfg.mc_offchip_phy = false;
             /* 1.11.17: channel-centric ladder parity with the device-scope
              * site (LPDDR/GDDR/HBM channel tier lives on the DRAM die). */
             bool channel_centric =
                 node.memory_tech.rfind("LPDDR", 0) == 0 ||
                 node.memory_tech.rfind("GDDR", 0) == 0 ||
                 node.memory_tech.rfind("HBM", 0) == 0;
+            /* 1.11.19 (D2+D3): same three interface tiers as device scope. */
+            {
+                using Tier = McPAT::SystemConfig::MCPhyTier;
+                const int lvl = config.pe_hierarchy_level;
+                bool interposer_tier = (lvl == 6) || (lvl == 5 && channel_centric);
+                if (lvl >= 0 && lvl <= 3)  mcfg.mc_phy_tier = Tier::NONE;
+                else if (interposer_tier)  mcfg.mc_phy_tier = Tier::INTERPOSER;
+                else                       mcfg.mc_phy_tier = Tier::OFFCHIP;
+            }
             if (dram_family_tech &&
                 ((config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3) ||
                  (config.pe_hierarchy_level == 5 && channel_centric))) {
@@ -5884,6 +6037,38 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                               << (nps.pg_noc ? "" : " (pg off)")
                               << " mc=" << (nps.pg_mc ? nps.r_mc : 0.0)
                               << (nps.pg_mc ? "" : " (pg off)")
+                              << std::endl;
+                }
+                /* 1.11.20 (user decision D7): the HOST node had no PG surface
+                 * at all -- the branch above is DEVICE-only, so a system-scope
+                 * host could never gate anything. Per the 2026-08-14 decree the
+                 * host gates AS AN ENTIRE PIECE: cores and host MC share one
+                 * domain and one residency, rather than being credited
+                 * separately.
+                 *
+                 * The piece is idle only when NOTHING in it is busy, so the
+                 * active signal is the UNION of core-retire activity and
+                 * host-MC activity. We hold two per-phase counters but not
+                 * their union, and union >= max(a, b). Taking max() is the
+                 * CONSERVATIVE choice: it can only overstate activity, i.e.
+                 * under-credit the gating. Stated here rather than left for a
+                 * reader to infer. */
+                if (node.role == UnifiedConfig::SystemNode::HOST &&
+                    node.pg_host && zsim_stats.pg_window() > 0) {
+                    pimid::McPATWrapper::PGSpec hps;
+                    const double ph = static_cast<double>(zsim_stats.pg_window());
+                    const double act = std::max(
+                        static_cast<double>(zsim_stats.pg_anycore_active),
+                        static_cast<double>(zsim_stats.pg_hostmc_active));
+                    const double r = 1.0 - std::min(1.0, act / ph);
+                    hps.pg_core = true;  hps.r_core = r;
+                    hps.pg_mc   = true;  hps.r_mc   = r;
+                    mcpat.setPGSpec(hps);
+                    std::cout << "  [pg] " << node.name
+                              << " host gates as ONE piece (cores + host MC),"
+                              << " idle residency " << r
+                              << " (union bounded below by max(core, mc)"
+                              << " -- conservative, under-credits)"
                               << std::endl;
                 }
             }
@@ -6294,6 +6479,18 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
          * lands the charge -- the 1.11.15 shape announced the charge
          * unconditionally and then could drop it (empty tech, no host
          * activity), asserting an energy charge that was never made. */
+        /* 1.11.20 (D6): the same two inputs device scope uses, computed ONCE
+         * here and handed to every array report below, so system scope and
+         * device scope cannot drift apart again. */
+        double sys_r_idle = -1.0;
+        if (config.pg_mc && zsim_stats.pg_window() > 0) {
+            sys_r_idle = 1.0 - std::min(1.0,
+                static_cast<double>(zsim_stats.pg_devmc_active)
+                    / static_cast<double>(zsim_stats.pg_window()));
+        }
+        const bool sys_crosses_dq = (config.pe_hierarchy_level >= 4 ||
+                                     config.pe_hierarchy_level == -1);
+
         uint64_t line_b = (config.cache_line_size > 0)
                               ? static_cast<uint64_t>(config.cache_line_size) : 64;
         uint64_t flush_wr = zsim_stats.xing_flush_bytes / line_b;
@@ -6317,7 +6514,10 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                           << "): host and device accesses land on the same "
                              "silicon and are charged once" << std::endl;
                 sayFlushCharged("the shared array");
-                reportSharedMemoryArrayEnergy(tech, all_rd, all_wr);
+                reportSharedMemoryArrayEnergy(tech, all_rd, all_wr,
+                                              sys_r_idle, sys_crosses_dq,
+                                              config.pg_mc,                 // 1.11.20 D15
+                                              config.dram_device_width);    // 1.11.20 D13
                 mem_area_total += computeDramDieAreaMM2(tech, false);
             }
         } else {
@@ -6335,7 +6535,10 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 sayFlushCharged("the host-side array");
                 reportSharedMemoryArrayEnergy(node.memory_tech,
                                               zsim_stats.host.mem_rd,
-                                              zsim_stats.host.mem_wr + flush_wr);  // 1.11.15
+                                              zsim_stats.host.mem_wr + flush_wr,  // 1.11.15
+                                              sys_r_idle, sys_crosses_dq,         // 1.11.20
+                                              config.pg_mc,
+                                              config.dram_device_width);
                 if (priced_techs.insert(node.memory_tech).second)
                     mem_area_total += computeDramDieAreaMM2(node.memory_tech, false);
                 host_done = true;
@@ -6345,7 +6548,10 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                           << "): device-side array energy" << std::endl;
                 reportSharedMemoryArrayEnergy(node.memory_tech,
                                               zsim_stats.dev.mem_rd,
-                                              zsim_stats.dev.mem_wr);
+                                              zsim_stats.dev.mem_wr,
+                                              sys_r_idle, sys_crosses_dq,         // 1.11.20
+                                              config.pg_mc,
+                                              config.dram_device_width);
                 if (priced_techs.insert(node.memory_tech).second)
                     mem_area_total += computeDramDieAreaMM2(node.memory_tech, false);
                 dev_done = true;
@@ -7368,7 +7574,7 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
     // the synchronous-offload (WORK_BEGIN/END) transfer. Derive those fields
     // from the first host↔device link so the chosen link_type (pcie/cxl/
     // interposer) also drives the offload transfer cost, not only hop latency.
-    if (!config.pcie_timing_configured) {
+    {
         for (const auto& lnk : config.system_network.links) {
             bool host_dev = false;
             for (const auto& n : config.system_nodes) {
@@ -7377,13 +7583,31 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
             }
             if (!host_dev) continue;
             if (lnk.base_latency_ns <= 0.0 || lnk.bandwidth_GBs <= 0.0) continue;
-            config.pcie_timing_configured = true;
-            config.pcie_enabled = true;
-            config.pcie_base_latency_ns = lnk.base_latency_ns;
-            config.pcie_bandwidth_GBs = lnk.bandwidth_GBs;
-            config.pcie_header_bytes = lnk.header_bytes;
-            config.pcie_coherence_extra_ns = lnk.coherence_extra_ns;
+            /* 1.11.19 (user decision D8): the TIMING link type is
+             * AUTHORITATIVE for energy. This sync used to be skipped whenever
+             * a power.pcie block existed, so a config could time an
+             * interposer while pricing PCIe-gen5 -- a 14x skew between two
+             * views of one wire. The link TYPE now always comes from the
+             * declared topology; power.pcie keeps only its pJ/bit override
+             * (a real override since 1.11.17). Disagreement is impossible by
+             * construction rather than validated after the fact. */
+            if (config.pcie_timing_configured &&
+                config.pcie_link_type != lnk.link_type) {
+                std::cout << "  [xing] link type from the declared topology: "
+                          << lnk.link_type << " (power.pcie said '"
+                          << config.pcie_link_type
+                          << "'; the timing view wins -- one wire, one type)"
+                          << std::endl;
+            }
             config.pcie_link_type = lnk.link_type;
+            if (!config.pcie_timing_configured) {
+                config.pcie_timing_configured = true;
+                config.pcie_enabled = true;
+                config.pcie_base_latency_ns = lnk.base_latency_ns;
+                config.pcie_bandwidth_GBs = lnk.bandwidth_GBs;
+                config.pcie_header_bytes = lnk.header_bytes;
+                config.pcie_coherence_extra_ns = lnk.coherence_extra_ns;
+            }
             break;
         }
     }
@@ -9370,6 +9594,7 @@ int main(int argc, char** argv) {
                         UnifiedConfig::SystemNode node;
                         node.name = h["name"].as<std::string>("host" + std::to_string(config.system_nodes.size()));
                         node.role = UnifiedConfig::SystemNode::HOST;
+                        node.pg_host = h["pg"].as<bool>(node.pg_host);  // 1.11.20 (D7)
                         node.core_type = normalizeCoreType(h["core_type"].as<std::string>("ooo_core"));
                         node.num_cores = h["num_cores"].as<int>(4);
                         node.frequency_mhz = h["frequency_mhz"].as<double>(3000.0);

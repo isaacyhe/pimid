@@ -36,6 +36,30 @@
 
 #define PIMID_PAGE_BYTES 4096u
 
+/* 1.9.23: HOST parallelism vs DEVICE parallelism.
+ *
+ * These are different quantities and may differ: the host phase (data
+ * generation) runs on host CORES, the device phase runs on PEs. A kernel that
+ * sizes its host phase by the PE count oversubscribes a smaller host (16 ranks
+ * on a 1-core host); one that leaves it serial under-uses a larger one.
+ *
+ * pimid_host_cores() reports the host core count PIMID exported, falling back
+ * to 1 when unset (device-only runs, or a legacy launcher). Use it for the
+ * HOST phase; keep using dev.num_pes for per-PE placement and the ROI. */
+static inline int pimid_host_cores(void) {
+    const char* e = getenv("PIMID_HOST_CORES");
+    int v = e ? atoi(e) : 0;
+    return (v > 0) ? v : 1;
+}
+
+/* The device PE count as PIMID sees it. Prefer dev.num_pes from --pes when you
+ * already have a pimid_devorg_t; this is for code that only needs the count. */
+static inline int pimid_device_pes(void) {
+    const char* e = getenv("PIMID_DEVICE_PES");
+    int v = e ? atoi(e) : 0;
+    return (v > 0) ? v : 1;
+}
+
 /* placement levels, matching the simulator's pe_hierarchy_level */
 enum {
     PIMID_LVL_SUBARRAY = 0,

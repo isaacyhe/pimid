@@ -139,6 +139,13 @@ public:
     /* Vendor die density (Mbit/mm^2) and the DRAM generation class its
      * technology implies -- the tables that used to live in main.cpp. */
     static double vendorDieDensity(const std::string& tech);
+    /* 1.11.19 (D11): is that row a published measurement, or derived
+     * from a neighbour? Reported wherever a die area is printed, so a
+     * derived number can never be quoted as a sourced one. */
+    static bool   vendorDieDensitySourced(const std::string& tech);
+    /* 1.11.19 (D11): array share of the full die; <0 = not sourced,
+     * in which case the derived array line is omitted, not guessed. */
+    static double vendorArrayFraction(const std::string& tech);
     static int    generationTableNm(const std::string& tech);
     static const char* generationClass(const std::string& tech);
     double getDynamicReadEnergy() const;   // Read energy in nJ
