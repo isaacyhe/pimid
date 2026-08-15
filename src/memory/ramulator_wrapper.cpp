@@ -1029,33 +1029,47 @@ double RamulatorWrapper::getChannelEnergyPerByte() const {
     return 15.0;  // 15 pJ/byte DDR4 default
 }
 
+/* 1.11.23: these four were CIRCULAR. Each returned the architecture field
+ * that architecture_extractor.h assigns FROM it, so the "primary" branch was
+ * a no-op that handed back a hand-written literal, while the real derivation
+ * sat unreachable in the dram_arch_==null fallback. The fallback was the
+ * correct path all along.
+ *
+ * Derived now, from the JEDEC timing Ramulator2 already parses and the energy
+ * model already consumes -- no literal, no fallback asymmetry:
+ *   subarray  tRCD + tCAS            row activate + column access
+ *   bank      tRP + tRCD + tCAS      the row-miss path
+ *   bankgroup bank                  floor: the real term is tCCD_L - tCCD_S,
+ *                                    which this wrapper does not expose
+ *   chip      bank + tBurst          the burst leaves through the chip I/O
+ *
+ * RESIDUAL, stated: the per-tech tRCD/tCAS/tRP values these compose from are
+ * JEDEC speed-bin figures TRANSCRIBED into getTRCD()/getTCAS()/getTRP() with
+ * citations (JESD250 for GDDR6, JESD209-5 tRCDpb for LPDDR5, DDR3-1600K,
+ * DDR4-2400 CL17) rather than read from the Ramulator2 timing preset this
+ * wrapper already names ("DDR4_2400R", "DDR3_1600H", ...). Sourced, but
+ * transcribed; reading the preset directly is the follow-up. */
 double RamulatorWrapper::getSubarrayAccessLatency() const {
-    if (dram_arch_) {
-        return dram_arch_->timing.subarray_access_ns;
-    }
-    return getTRCD() + getTCAS();  // Approximate
+    return getTRCD() + getTCAS();
 }
 
 double RamulatorWrapper::getBankAccessLatency() const {
-    if (dram_arch_) {
-        return dram_arch_->timing.bank_access_ns;
-    }
-    return getTRP() + getTRCD() + getTCAS();  // Row miss latency
+    return getTRP() + getTRCD() + getTCAS();
 }
 
 double RamulatorWrapper::getBankGroupAccessLatency() const {
-    if (dram_arch_) {
-        // Bank group adds small overhead over bank access
-        return dram_arch_->timing.bank_access_ns * 1.1;
-    }
-    return 50.0;  // Typical DDR4
+    /* The bank-group tier's only real cost is the longer same-group
+     * column-to-column delay, tCCD_L - tCCD_S. This wrapper does not expose
+     * tCCD, so that term is NOT AVAILABLE -- and the previous code covered
+     * the gap with a 1.1 multiplier, i.e. asserted a 10% penalty with no
+     * source, charged even to technologies that have no bank groups at all.
+     * Report the bank latency, which is the correct FLOOR, rather than
+     * manufacture a penalty. Wiring tCCD through is the follow-up. */
+    return getBankAccessLatency();
 }
 
 double RamulatorWrapper::getChipAccessLatency() const {
-    if (dram_arch_) {
-        return dram_arch_->timing.chip_access_ns;
-    }
-    return 60.0;  // Typical DDR4
+    return getBankAccessLatency() + getTBurst();
 }
 
 double RamulatorWrapper::getRankAccessLatency() const {

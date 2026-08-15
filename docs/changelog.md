@@ -7,6 +7,53 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.23 -- the DRAM latency accessors stop asking themselves
+
+Four accessors were CIRCULAR: each returned the architecture field that
+architecture_extractor.h assigns FROM it, so the "primary" branch handed back
+a hand-written literal while the real derivation sat unreachable in the
+dram_arch_==null fallback. The fallback was the correct path all along.
+
+  getSubarrayAccessLatency()  -> tRCD + tCAS
+  getBankAccessLatency()      -> tRP + tRCD + tCAS
+  getBankGroupAccessLatency() -> bank (floor; see below)
+  getChipAccessLatency()      -> bank + tBurst
+
+- **The bank-group multiplier is gone.** It was `bank * 1.1`: a 10% penalty
+  with no source, charged even to technologies that have no bank groups. The
+  real term is tCCD_L - tCCD_S, which this wrapper does not expose, so the
+  bank latency is reported as the correct FLOOR rather than a manufactured
+  penalty. Wiring tCCD through is the follow-up.
+- **getChipAccessLatency had no derivation at all** in either branch: a
+  literal, or `60.0 // Typical DDR4`. It now composes bank + tBurst.
+- **HBM3's hand-written ladder contradicts its own cited timing.** The header
+  carries tRCD 16.0 and tCAS 16.0, both cited JESD238, next to
+  subarray_access_ns = 20.0 -- but tRCD + tCAS is 32.0. Likewise
+  bank_access_ns = 30.0 against tRP + tRCD + tCAS = 42.0. A 12 ns
+  disagreement at both tiers, between numbers three lines apart. The
+  de-circularised accessors compose from the cited values, so the ladder is
+  now consistent with the JEDEC timing it claims to be built on.
+
+DATA IMPACT, measured: the 1-PE HBM3 ALU cell moves 10164714 -> 10164680
+cycles (-34, faster) and 0.0498939 -> 0.0499058 W. The direction is the
+bank-group multiplier removal dominating on a cell that touches that tier on
+every access. Gate 1132: all five technologies complete, rc=0.
+
+SCOPE NOTE, and the reason this release is smaller than intended: the same
+defect class was found and fixed in the NVM and SRAM architecture extractors
+(NVSim's BANK latency assigned to the SUBARRAY tier, then x1.2 for bank and
+x1.1 for chip; PCM reset asserted as write x 0.3 when NVSim resolves
+FunctionUnit::setLatency/resetLatency; the whole block stamped VERIFIED and
+attributed to NVSim including values NVSim never supplied). That work is NOT
+in this release, because the path is DEAD: MemoryModel -- and therefore
+SRAMModel/STTMRAMModel/PCMModel/ReRAMModel, the only callers of those
+extractors -- is never constructed. main.cpp references MemoryModel zero
+times, and a gated STT_MRAM run initialises NVSim and never prints a single
+model line. The LIVE NVM/SRAM path (main.cpp:150-190) calls the tools
+directly: CACTI getAccessTime() for SRAM, NVSim getReadLatency() for
+STT_MRAM/PCM/ReRAM. So no invented multiplier has ever reached a result.
+Reviving or deleting that parallel model is a decision, not a patch.
+
 ## 1.11.22 -- the factor ratio names both of its tables
 
 A correctness hole in 1.11.21, found while investigating E3 and fixed before
