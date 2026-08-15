@@ -213,9 +213,137 @@ void McPATWrapper::setNoCActivity(const NoCActivityStats& stats) {
  * which is exactly the aggregate-vs-parts drift trap 1.11.12 removed by
  * moving the transform into the tool -- a future edit to the emitted factors
  * would have left the printed core split scaled by stale numbers. */
+/* 1.11.21 (user ruling E1+E2, "I want CORRECTNESS"): the AREA factor is not
+ * a constant. It is a RATIO between two columns of the SAME CACTI table --
+ * l_phy(comm-dram) / l_phy(BASELINE) -- and mcfg.device_type is what names
+ * the baseline. Shipping it as a literal meant the number was the hp ratio
+ * and only the hp ratio, while device_type could move the baseline out from
+ * under it. From the tables themselves:
+ *
+ *   l_phy (um)   hp      lstp    lop     lp-dram   comm-dram
+ *     22 nm      0.009   0.014   0.011   0         0.022
+ *     32 nm      0.013   0.020   0.016   0.056     0.032
+ *
+ *   comm-dram/hp   = 2.444 (22) / 2.462 (32)  <- the old 2.44 / 2.46
+ *   comm-dram/lstp = 1.571 (22) / 1.600 (32)  <- what the override silently
+ *                                                kept reporting as 2.44
+ *
+ * so the literal hid a 1.55x error on any non-hp baseline. Read the row.
+ *
+ * Note lp-dram is ALL ZERO at 22 nm and fully populated at 32/45 nm. That is
+ * the fact the 1.11.13 refusal cites, and it is node-specific -- so it is
+ * CHECKED here against the table rather than asserted for every node. */
+/* Read one parameter row from a CACTI technology table. The five columns are
+ * hp, lstp, lop, lp-dram, comm-dram in that order. temp >= 0 selects the
+ * temperature-indexed variant (I_off_n), where the first number on the line is
+ * the temperature in Celsius and the five columns follow it. */
+static bool cactiRow(int table_nm, const char* tag, double col[5], int temp = -1) {
+#ifndef CACTI_DATA_DIR
+    (void)table_nm; (void)tag; (void)col; (void)temp; return false;
+#else
+    std::string path = std::string(CACTI_DATA_DIR) + "/tech_params/" +
+                       std::to_string(table_nm) + "nm.dat";
+    std::ifstream f(path);
+    if (!f) return false;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.rfind(tag, 0) != 0) continue;
+        std::vector<double> n;
+        std::istringstream is(line);
+        std::string tok;
+        while (is >> tok) {
+            try { size_t used = 0; double v = std::stod(tok, &used);
+                  if (used == tok.size()) n.push_back(v); }
+            catch (...) { /* the tag and its "(unit)" */ }
+        }
+        if (temp < 0) {
+            if (n.size() < 5) continue;
+            for (int i = 0; i < 5; ++i) col[i] = n[i];
+            return true;
+        }
+        if (n.size() < 6 || static_cast<int>(n[0] + 0.5) != temp) continue;
+        for (int i = 0; i < 5; ++i) col[i] = n[i + 1];
+        return true;
+    }
+    return false;
+#endif
+}
+
+/* 1.11.21 (user rulings E1+E2): the DRAM-periphery family factors are all
+ * THREE derived from the CACTI table the run is already using. None is a
+ * constant. Each reproduces the literal it replaces, at the literal's own
+ * conditions -- which is how we know the derivations are the ones the
+ * original numbers came from:
+ *
+ *   fa = l_phy(comm-dram) / l_phy(base)
+ *        22nm hp 2.4444 (was 2.44)      32nm hp 2.4615 (was 2.46)
+ *   fd = [(C_g_ideal + C_fringe)(cd) / (...)(base)] * (Vdd_cd/Vdd_base)^2
+ *        22nm hp 0.8241 (was 0.82)      32nm hp 0.6646 (was 0.66)
+ *        The Vdd^2 term is NOT a double count: applyFam multiplies McPAT's
+ *        already-computed dynamic (processor.cc:443), and McPAT computed it
+ *        at the BASE column's Vdd, so the conversion to the comm-dram rail
+ *        has to happen here.
+ *   fl = [I_off_n(cd,T) / I_off_n(base,T)] * (Vdd_cd/Vdd_base)
+ *        22nm hp @50C 1.035e-5 (was 1.0e-5)   32nm hp @50C 3.119e-6 (was 3.1e-6)
+ *
+ * TEMPERATURE, and a defect the derivation exposed: the leakage literals
+ * reproduce the table at 50 C, but temperature_k defaults to 350 K = 77 C and
+ * that is what every run configures. Leakage is strongly temperature
+ * dependent -- at 22nm the derived factor is 1.035e-5 at 50 C and 7.0e-6 at
+ * 70 C, a 30% difference -- so the shipped constant was evaluated at a
+ * temperature no run uses. fl now reads the row for the CONFIGURED
+ * temperature, snapped to the nearest tabulated 10 C step.
+ *
+ * BASELINE, and the corner axis (E2): for a DRAM-periphery component the
+ * low-power device is lp-dram, NOT logic lstp -- the low-power variant of a
+ * DRAM periphery transistor is the one the DRAM table carries. So on a
+ * periphery placement power.device_corner maps hp -> hp and lstp|lop ->
+ * lp-dram. That column is ALL ZERO at 22 nm and fully populated at 32/45 nm,
+ * so the refusal is a populated-column CHECK per node, not a blanket rule
+ * justified by a 22 nm-only fact. */
+static bool periphFamilyFactors(int table_nm, int baseline_device, int temp_k,
+                                double& fa, double& fd, double& fl) {
+    double lphy[5], cg[5], cf[5], vdd[5], ioff[5];
+    if (!cactiRow(table_nm, "-l_phy", lphy) ||
+        !cactiRow(table_nm, "-C_g_ideal", cg) ||
+        !cactiRow(table_nm, "-C_fringe", cf) ||
+        !cactiRow(table_nm, "-Vdd", vdd)) return false;
+    if (baseline_device < 0 || baseline_device > 4) return false;
+    const int B = baseline_device, CD = 4;
+    if (!(vdd[B] > 0.0) || !(lphy[B] > 0.0)) return false;   // column unpopulated
+    if (!(vdd[CD] > 0.0) || !(lphy[CD] > 0.0)) return false;
+
+    fa = lphy[CD] / lphy[B];
+    const double c_base = cg[B] + cf[B], c_cd = cg[CD] + cf[CD];
+    if (!(c_base > 0.0)) return false;
+    const double vr = vdd[CD] / vdd[B];
+    fd = (c_cd / c_base) * vr * vr;
+
+    /* nearest tabulated 10 C step to the configured temperature */
+    int t_c = static_cast<int>(temp_k) - 273;
+    int t_row = ((t_c + 5) / 10) * 10;
+    if (t_row < 0) t_row = 0;
+    if (t_row > 100) t_row = 100;
+    if (!cactiRow(table_nm, "-I_off_n", ioff, t_row)) return false;
+    if (!(ioff[B] > 0.0)) return false;
+    fl = (ioff[CD] / ioff[B]) * vr;
+    return true;
+}
+
+bool McPATWrapper::periphFactorsFor(int table_nm, int baseline_device,
+                                    int temp_k, double& fa, double& fd, double& fl) {
+    return periphFamilyFactors(table_nm, baseline_device, temp_k, fa, fd, fl);
+}
+
+/* In-tree callers price at hp and at the configured temperature. A table that
+ * cannot be read is a hard stop, not a silent fallback to the old literals:
+ * the literals are exactly what this release removed. */
 static void periphFamilyFactors(int table_nm, double& fa, double& fd, double& fl) {
-    if (table_nm == 32) { fa = 2.46; fd = 0.66; fl = 3.1e-6; }
-    else                { fa = 2.44; fd = 0.82; fl = 1.0e-5; }
+    if (!periphFamilyFactors(table_nm, 0, 350, fa, fd, fl)) {
+        std::cerr << "[power] FATAL: cannot read the " << table_nm
+                  << " nm CACTI table for the DRAM-periphery factors.\n";
+        std::exit(2);
+    }
 }
 
 double McPATWrapper::linkEnergyPJPerBit(const std::string& link_type) {

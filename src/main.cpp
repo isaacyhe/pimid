@@ -4667,25 +4667,59 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     {
         int corner = (config.device_corner == "lstp") ? 1
                    : (config.device_corner == "lop")  ? 2 : 0;
+        /* 1.11.21 (user ruling E1+E2): the BASELINE McPAT will actually price
+         * at -- override included. The refusal below tests THIS, not the
+         * corner alone, because power.mcpat_overrides.device_type used to be
+         * applied AFTER the refusal and silently reinstated what was refused. */
+        int baseline = ov_get_int("device_type", corner);
+        /* 1.11.21 (E2): on a DRAM-periphery placement the low-power device is
+         * lp-dram (CACTI column 3), not logic lstp/lop. The corner names an
+         * intent; the family decides which column carries it. */
+        if (mcfg.process_family == 1 && !overrides.count("device_type") &&
+            (baseline == 1 || baseline == 2)) {
+            std::cout << "  [tech] power.device_corner=" << config.device_corner
+                      << " on a DRAM-periphery placement maps to the lp-dram "
+                         "column: the low-power variant of a DRAM periphery "
+                         "device is lp-dram, not logic lstp/lop." << std::endl;
+            baseline = 3;
+        }
         if (mcfg.process_family == 1) {
-            if (corner != 0) {
-                std::cout << "  [tech] power.device_corner=" << config.device_corner
-                          << " refused for DRAM-periphery components: each CACTI "
-                             "table carries ONE commodity-DRAM device column, so "
-                             "no corner can be derived for it (lp-dram is "
-                             "all-zero at 22 nm). Priced at the single available "
-                             "device." << std::endl;
-                corner = 0;
+            double fa_c = 0, fd_c = 0, fl_c = 0;
+            const bool coherent = pimid::McPATWrapper::periphFactorsFor(
+                mcfg.dram_periph_table_nm, baseline, mcfg.temperature_k,
+                fa_c, fd_c, fl_c);
+            if (!coherent) {
+                std::cerr << "[config] FATAL: DRAM-periphery components cannot be "
+                             "priced at device column " << baseline
+                          << " (power.device_corner=" << config.device_corner
+                          << (overrides.count("device_type")
+                                  ? ", overridden by power.mcpat_overrides.device_type"
+                                  : "")
+                          << ").\n"
+                             "  All three family factors are ratios against "
+                             "that column in the "
+                          << mcfg.dram_periph_table_nm << " nm table, and the "
+                             "column is not populated there (lp-dram is all-zero "
+                             "at 22 nm; it is real data at 32 and 45 nm). "
+                             "Deriving a factor from an empty column would "
+                             "produce a number with no referent.\n"
+                             "  Either run this placement at 32/45 nm, drop the "
+                             "corner, or move the PE to a LOGIC placement.\n";
+                std::exit(2);
             }
+            corner = baseline;
             /* 1.11.17 (audit go-through): report the factor actually APPLIED
              * -- the emitted XML carries fa x subarray_pitch_factor, and the
              * old print showed fa alone, so at SUBARRAY placement the
              * reported factor was not the one in use. */
-            double fa = (mcfg.dram_periph_table_nm == 32) ? 2.46 : 2.44;
+            /* 1.11.21: the value in USE, read from the table, not a literal. */
+            double fa = fa_c;
             double pitch = (mcfg.subarray_pitch_factor > 0.0)
                                ? mcfg.subarray_pitch_factor : 1.0;
-            std::cout << "  [tech] periphery area factor " << fa
-                      << "x (linear l_phy ratio)";
+            std::cout << "  [tech] periphery factors READ from "
+                      << mcfg.dram_periph_table_nm << "nm.dat at "
+                      << (mcfg.temperature_k - 273) << "C: area " << fa
+                      << "x, dynamic " << fd_c << "x, leakage " << fl_c << "x";
             if (pitch != 1.0)
                 std::cout << " x pitch " << pitch << " = " << (fa * pitch)
                           << "x applied";
@@ -4703,7 +4737,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                       << (corner == 1 ? "lstp" : "lop") << " device column)."
                       << std::endl;
         }
-        mcfg.device_type = ov_get_int("device_type", corner);
+        mcfg.device_type = corner;   // 1.11.21: override already folded in above
     }
     mcfg.longer_channel_device = ov_get_int("longer_channel_device", 1);
     mcfg.number_hardware_threads = ov_get_int("number_hardware_threads", 1);

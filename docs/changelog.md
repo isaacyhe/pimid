@@ -7,6 +7,44 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.21 -- the process factors stop being constants
+
+E1 and E2 of the DISCUSS go-through, ruled by the user with "I want
+CORRECTNESS". Both turned out to be one defect seen from two sides.
+
+- **The DRAM-periphery factors are ratios, not constants, and are now read
+  from the CACTI table the run is already using.** Each derivation reproduces
+  the literal it replaces to six figures, which is how we know it is the one
+  the original number came from:
+    fa = l_phy(comm-dram)/l_phy(base)                 22nm hp 2.444444 (2.44)
+    fd = (C_g+C_fringe) ratio x (Vdd ratio)^2         22nm hp 0.824128 (0.82)
+    fl = I_off_n(T) ratio x Vdd ratio                 22nm hp @50C 1.035e-5 (1.0e-5)
+  The Vdd^2 in fd is not a double count: applyFam multiplies McPAT's
+  already-computed dynamic, and McPAT computed it at the BASE column's Vdd.
+- **The leakage factor was evaluated at a temperature no run uses.** The
+  literal reproduces the table at 50 C; temperature_k defaults to 350 K =
+  77 C. Reading the correct row gives 6.814e-6 against the shipped 1.0e-5 --
+  the constant was 47% too high. Not one of the 200 audit findings; it
+  surfaced only because deriving the factor forced the question "at what
+  temperature". fl now reads the row for the configured temperature.
+- **The corner refusal was defeated by an override, and justified by a
+  22 nm-only fact at every node.** power.mcpat_overrides.device_type was
+  applied AFTER the refusal, so a run printed "refused" and then priced at
+  the refused column anyway, keeping an hp-derived factor over a moved
+  baseline -- a 1.55x error in fa, silently. With the factors derived, the
+  override is no longer a hole: the factor tracks the baseline, so it is
+  accepted and produces comm-dram/lstp = 1.5714 with matching fd and fl.
+- **A DRAM-periphery low-power corner is lp-dram, not logic lstp.** On a
+  periphery placement power.device_corner maps hp -> hp and lstp|lop ->
+  lp-dram, the low-power variant the DRAM table actually carries. That column
+  is all-zero at 22 nm and real data at 32/45 nm, so the refusal is a
+  populated-column CHECK per node rather than a blanket rule.
+
+DATA IMPACT: default cell cycles and DRAM background bit-identical; total
+power +0.502%, which is exactly fd's +0.503% correction on a
+dynamic-dominated cell. Any run that sets a non-default corner or override
+re-prices, correctly, for the first time. Gate 1131: 9/9.
+
 ## 1.11.20 -- the memory system's background, and the host's own gate
 
 Second half of the settled model decisions, plus the last sourcing gap in the

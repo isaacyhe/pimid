@@ -146,6 +146,14 @@ public:
      * Unknown types return -1: caller must reject loudly or use the
      * user override knob (printed k-style). */
     static double linkEnergyPJPerBit(const std::string& link_type);
+    /* 1.11.21 (E1+E2): the DRAM-periphery AREA factor is a ratio between two
+     * columns of one CACTI table, and baseline_device names the denominator
+     * (0 hp, 1 lstp, 2 lop, 3 lp-dram, 4 comm-dram). Returns false when the
+     * composition would be incoherent: an unpopulated column at that node
+     * (lp-dram at 22 nm), or a non-hp baseline, for which fd/fl have no
+     * derivation. Callers REFUSE on false -- they must not price from it. */
+    static bool periphFactorsFor(int table_nm, int baseline_device, int temp_k,
+                                 double& fa, double& fd, double& fl);
 
     /**
      * Device profile: controls core microarchitecture type in McPAT XML.
