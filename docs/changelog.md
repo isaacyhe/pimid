@@ -7,6 +7,54 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.42 -- the link controller clock is derived (E21)
+
+The link controller clock was a two-valued literal: gen3 got 500 MHz,
+EVERYTHING else -- gen4, gen5, CXL, NVLink, UCIe, UALink -- got 1000. The clock
+cancels out of the SerDes and byte-driven terms (energy-per-cycle in, watts
+out), but it linearly scales the controller digital dynamic that 1.11.41's E20
+completion made live, so the literal scaled real reported power for every
+non-gen3 link.
+
+It is now derived from specification primitives:
+    clock_MHz = lane_rate_GT/s * 1000 / PIPE_datapath_width
+The PIPE width is an implementation choice the PIPE spec bounds (8/16/32-bit
+per lane; Intel PIPE Architecture Spec rev 7.1); the 32-bit configuration is
+the stated CONVENTION, not passed off as a per-generation constant. Under it:
+    gen3       250 MHz   (the literal's 500 was 2x HIGH -- the audit's
+                          assumption that gen3 was the correct case was wrong)
+    gen4       500 MHz   (literal 2x high)
+    gen5/CXL  1000 MHz   (literal coincidentally right -- and this is the
+                          whole corpus, so no existing number moves)
+Non-PIPE families (NVLink, UALink, UCIe) have no sourced controller clock:
+they WARN and carry 1000 labelled ASSUMED instead of a silent default.
+
+Gate 1157d. gen5 controller dynamic unchanged (0.015 W); a gen4 cell gives
+0.008 W where the literal would have produced the same 0.015 -- the arm that
+proves the derivation is live rather than silently dead.
+
+**Found by that gate's first run, logged as N10:** the declared
+system.network.links type is SILENTLY IGNORED when the entry omits src/dst --
+the host_dev test skips it without warning and the pcie_gen5 default rides
+along. The reference config has been in that state throughout; it matched the
+default, so nothing ever looked wrong. Defeats D8's "disagreement is impossible
+by construction" for exactly those configs. Not fixed here; the gate cell now
+declares src/dst.
+
+**E22 closed as fixed-by-1.11.15/16, verified against current code AND the
+user's criterion that both host and device mixes rest on real instruction
+traces.** Verified per node: the host mix comes from its own decoded stream
+(hgrp.mix_*; 10 real instructions in the co-sim ROI -- the true trace of a
+host blocked on the offload, scaling an equally tiny term) and the device from
+its own (3830 int+mul, 1707 fp, 1147 branch per core x 8 = 53,472 of 53,479
+retired; 462,267 classified on device-scope cells). Across 75 recent run logs
+the fallback fractions are never in force. Two comment corrections ride along:
+the "not yet understood" base mismatch is marked historical (it does not
+reproduce -- co-sim measures instrs=10 vs uops=11, same base), and the
+"documented" 87.5/12.5 stand-in is relabelled UNSOURCED -- its only
+documentation was PIMID citing itself, and changelog 1.11.10 had already
+measured the assumption wrong.
+
 ## 1.11.41 -- CACTI-IO covers five of seven memory technologies (N8)
 
 **Also in this release -- pim.mc.pg is split into three flags (user ruling).**

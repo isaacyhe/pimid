@@ -128,6 +128,17 @@ public:
     static double dramRateMTs(const std::string& tech);
     static int    dramChannelWidthBits(const std::string& tech);
 
+    /* Link CONTROLLER clock from specification primitives (1.11.42, E21):
+     *     clock_MHz = rate_GT/s * 1000 / pipe_width_bits
+     * The PIPE datapath width is bounded by the PIPE spec (8/16/32-bit per
+     * lane; Intel PIPE Architecture Spec rev 7.1) and 32-bit is the common
+     * configuration for gen3+ -- an implementation CONVENTION, stated, not a
+     * per-generation constant pretending to be one. Returns <0 for link
+     * families that do not use PIPE (NVLink, UALink, UCIe) -- their controller
+     * clocks have no sourced basis here and the caller must say so rather
+     * than defaulting. */
+    static double linkControllerClockMHz(const std::string& link_type);
+
     /* Bandwidth from specification primitives, replacing pcie_bandwidth_GBs.
      * lanes x rate x encoding efficiency / 8. Returns <0 for unknown types. */
     static double linkBandwidthGBs(const std::string& link_type, int num_lanes);

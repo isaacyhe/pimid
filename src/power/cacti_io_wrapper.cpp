@@ -82,6 +82,19 @@ double CactiIOWrapper::linkEncodingEfficiency(const std::string& link_type) {
     return static_cast<double>(s.enc_num) / static_cast<double>(s.enc_den);
 }
 
+double CactiIOWrapper::linkControllerClockMHz(const std::string& link_type) {
+    LinkSpec s;
+    if (!specFor(link_type, s)) return -1.0;
+    /* PIPE applies to the PCIe electrical family only. NVLink, UALink and
+     * UCIe have their own (unpublished-here) controller clocking; refusing
+     * beats a 1000 MHz default that silently scales their controller power. */
+    const bool pipe_family = (link_type.rfind("pcie_gen", 0) == 0) ||
+                             (link_type.rfind("cxl", 0) == 0);
+    if (!pipe_family) return -1.0;
+    const double kPipeWidthBits = 32.0;   // stated convention, PIPE rev 7.1
+    return s.rate_gt_s * 1000.0 / kPipeWidthBits;
+}
+
 double CactiIOWrapper::linkBandwidthGBs(const std::string& link_type,
                                         int num_lanes) {
     LinkSpec s;

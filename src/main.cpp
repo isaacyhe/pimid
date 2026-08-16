@@ -1055,6 +1055,7 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
 // Full model integration happens through runtime configuration
 #include "common/types.h"
 #include "power/mcpat_wrapper.h"
+#include "power/cacti_io_wrapper.h"   // 1.11.42 (E21): derived link clock
 
 // YAML parsing (if available)
 #ifdef HAVE_YAML_CPP
@@ -6693,8 +6694,31 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 ps.transferred_bytes =
                     charge_here ? static_cast<double>(xbytes) : 0.0;   // link priced once
                 ps.link_pj_per_bit = pjbit;
-                ps.link_clock_mhz =
-                    (config.pcie_link_type == "pcie_gen3") ? 500 : 1000;
+                /* 1.11.42 (audit E21): DERIVED, was a two-valued literal
+                 * (gen3 500, everything else 1000). The clock cancels out of
+                 * the SerDes and byte-driven terms but linearly scales the
+                 * controller digital dynamic E20 made live, so the literal
+                 * scaled real power for every non-gen3 link. Under the stated
+                 * 32-bit PIPE convention: gen3 250 (the literal's 500 was 2x
+                 * high), gen4 500 (literal 2x high), gen5/CXL 1000 (literal
+                 * correct). Non-PIPE families (NVLink/UALink/UCIe) have no
+                 * sourced controller clock: WARN and keep 1000, labelled
+                 * ASSUMED, rather than pretending a derivation exists. */
+                {
+                    double clk = PIMID::CactiIOWrapper::linkControllerClockMHz(
+                                     config.pcie_link_type);
+                    if (clk > 0.0) {
+                        ps.link_clock_mhz = static_cast<int>(clk + 0.5);
+                    } else {
+                        ps.link_clock_mhz = 1000;
+                        std::cerr << "[power] WARNING: no sourced controller "
+                                     "clock for link type '"
+                                  << config.pcie_link_type
+                                  << "' (non-PIPE family); using 1000 MHz "
+                                     "ASSUMED -- controller dynamic scales "
+                                     "with it." << std::endl;
+                    }
+                }
                 ps.link_type_name = config.pcie_link_type;   // 1.11.29: name it
                 mcpat.setPCIeStats(ps);
                 if (charge_here) {

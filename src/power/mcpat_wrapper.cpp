@@ -1763,12 +1763,26 @@ std::string McPATWrapper::generateXMLConfig() const {
          * invented-but-plausible mix for a measured-but-impossible one, and the
          * A/B did not catch it because a degenerate mix barely moves the total.
          *
-         * WHY THIS IS A GATE AND NOT A CORRECTION: the reason instrs sits on a
-         * different base is not yet understood, and scaling it by a factor
-         * chosen to make the ratio look right would be exactly the class of
-         * invented constant this release train exists to remove. So the measured
-         * set is used ONLY when it is self-consistent, and otherwise the
-         * documented fractions are used and the output says so. */
+         * WHY THIS IS A GATE AND NOT A CORRECTION: scaling counters on
+         * different bases by a factor chosen to make the ratio look right
+         * would be exactly the class of invented constant this release train
+         * exists to remove. So the measured set is used ONLY when it is
+         * self-consistent, and otherwise the stand-in fractions are used and
+         * the output says so.
+         *
+         * 1.11.42 STATUS (audit E22 closure): the base mismatch described
+         * above is HISTORICAL -- it does not reproduce on current binaries.
+         * The per-node activity split gives each node counters on its own
+         * base (co-sim host measures instrs=10 against uops=11, consistent),
+         * and across 75 recent gate-run logs the rejection path is never
+         * taken: every run prints "instruction mix COUNTED". Both co-sim
+         * nodes count from their own real decoded traces (device:
+         * 3830+1707+1147 per core x 8 = 53,472 of 53,479 retired). The
+         * fractions below survive only as a warned last resort for a future
+         * counter regression -- and they are UNSOURCED stand-ins, not
+         * "documented": the only documentation was PIMID citing itself, and
+         * changelog 1.11.10 already measured the 87.5%-integer assumption
+         * wrong on FP workloads. */
         const bool meas_self_consistent =
             (meas_branches_ > 0) &&
             /* branches cannot exceed instructions retired */
@@ -1779,7 +1793,7 @@ std::string McPATWrapper::generateXMLConfig() const {
 
         uint64_t br_per_core = meas_self_consistent
             ? meas_branches_ / std::max(1, config_.num_cores)
-            : inst_per_core * 10 / 100;
+            : inst_per_core * 10 / 100;   // UNSOURCED stand-in (see E22 note)
         if (!meas_self_consistent && meas_branches_ > 0 && !warned_mix_) {
             warned_mix_ = true;
             std::cout << "  [Activity] WARNING: measured instruction mix rejected as "
