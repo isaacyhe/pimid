@@ -2328,15 +2328,21 @@ static bool dramHTreeBuilder(const std::string& tech,
  * so they can be emitted into the ZSim config file without library dependencies.
  */
 static bool sharedMemoryCoupled(const UnifiedConfig& config) {
-    std::string h_tech, d_tech;
+    /* 1.11.46 (FIX-PRE-FLEET L234/L244): coupled-vs-decoupled is the DECLARED
+     * TOPOLOGY -- device.is_default_mem, the same flag resolveMemoryTopology
+     * already enforces (false requires a host.mem block; true drives host main
+     * memory from the device technology BY CONSTRUCTION). It used to be
+     * decided by memory-technology STRING EQUALITY, whose .empty() guards were
+     * dead (memory_tech defaults to "DDR4") and which disagreed with the
+     * topology resolver the moment a decoupled system happened to name the
+     * same technology on both sides -- same tech string does not mean same
+     * silicon. E27 (1.11.45) guarantees at most one memory-bearing device. */
     for (const auto& node : config.system_nodes) {
-        if (node.memory_tech.empty()) continue;
-        if (node.role == UnifiedConfig::SystemNode::HOST && h_tech.empty())
-            h_tech = node.memory_tech;
-        if (node.role == UnifiedConfig::SystemNode::DEVICE && d_tech.empty())
-            d_tech = node.memory_tech;
+        if (node.role == UnifiedConfig::SystemNode::DEVICE &&
+            !node.memory_tech.empty())
+            return node.is_default_mem;
     }
-    return (h_tech.empty() || d_tech.empty() || h_tech == d_tech);
+    return true;   // no memory-bearing device: single-memory system, coupled
 }
 
 static void computeHierarchyLatencies(UnifiedConfig& config) {
@@ -5475,6 +5481,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         // DRAM: Ramulator2 energy model
         try {
             pimid::RamulatorWrapper ram_oracle("", config.memory_tech);
+            ram_oracle.setDeviceWidth(config.dram_device_width);   // 1.11.46 (L181)
             ram_oracle.initialize();
             // 1.9.10: use the INTENSIVE per-access accessors (the older
             // extensive pair returned 0 on a fresh oracle). getArrayReadEnergyNJ()
@@ -6052,6 +6059,82 @@ static void runPowerAnalysis(const UnifiedConfig& config,
  * than relocating it, so that path stays bit-identical here. 1.11.14 migrates
  * the calibration INTO the CACTI fork and both call sites collapse onto one
  * tool call -- this helper is the seam that migration will use. */
+/* 1.11.46 (audit, FIX-PRE-FLEET L237): HOW MANY DIES the memory system is.
+ * System Total area used to add ONE DRAM die for the whole subsystem -- a 16x
+ * understatement for the DDR5 preset (x8 chips: 8 chips/rank) and the HBM3
+ * preset (16 channels). The counts below are the JEDEC organisation the rest
+ * of the model already declares, not new assumptions:
+ *   DDR3/4/5   chips/rank from the device width (x4->16, x8->8, x16->4 for a
+ *              64-bit channel; the same table backgroundUnits() uses, D13)
+ *              x ranks/channel x channels.
+ *   HBM2/3     dies per stack, JEDEC MINIMUM: 2 channels per core die
+ *              (JESD235/238), so 8ch->4 dies, 16ch->8 dies. Taller stacks
+ *              exist; this is the LOWER BOUND and is stated as one.
+ *   LPDDR5/GDDR6  point-to-point: one die per channel x channels.
+ * Population is PHYSICAL organisation -- it does not depend on placement. */
+/* 1.11.46 (FIX-PRE-FLEET L242): non-DRAM system memory is silicon too.
+ * computeDramDieAreaMM2 correctly returns 0 for SRAM/NVM, and the system
+ * total then silently carried NO area for those memories while a DRAM system
+ * got a full (now populated) die. Priced with the LIVE tools -- the same
+ * queries the device-scope path already makes (CACTI for SRAM, NVSim
+ * pre-generated cache for the NVMs), per bank x banks. Returns 0 with a note
+ * on failure; the caller's fallback story is the note, not a guess. */
+static double computeNonDramMemAreaMM2(const std::string& tech, int banks,
+                                       int tech_node_nm, int line_size) {
+    if (banks < 1) banks = 1;
+    try {
+        if (tech == "SRAM") {
+            pimid::CACTIWrapper::SRAMConfig cfg;
+            cfg.capacity_bytes = 64 * 1024;                 // one bank
+            cfg.line_size = static_cast<uint32_t>(line_size > 0 ? line_size : 64);
+            cfg.associativity = 1;
+            cfg.banks = 1;
+            cfg.tech_node_nm = tech_node_nm > 0 ? tech_node_nm : 22;
+            cfg.is_cache = false;
+            cfg.is_main_memory = true;
+            cfg.quiet = true;
+            pimid::CACTIWrapper cacti(cfg);
+            cacti.initialize();
+            if (cacti.isValid() && cacti.getArea() > 0.0)
+                return cacti.getArea() * banks;
+        } else if (tech == "STT_MRAM" || tech == "PCM" || tech == "RERAM") {
+            pimid::NVSimWrapper::NVMConfig cfg;
+            cfg.capacity_bytes = 64 * 1024;                 // one bank
+            cfg.word_width_bits = static_cast<uint32_t>((line_size > 0 ? line_size : 64) * 8);
+            cfg.process_node_nm = tech_node_nm > 0 ? tech_node_nm : 22;
+            cfg.nvm_type = (tech == "STT_MRAM") ? pimid::NVSimWrapper::NVMType::STTRAM
+                         : (tech == "PCM")      ? pimid::NVSimWrapper::NVMType::PCRAM
+                                                : pimid::NVSimWrapper::NVMType::RERAM;
+            pimid::NVSimWrapper nvsim(cfg);
+            nvsim.initialize();
+            if (nvsim.getArea() > 0.0) return nvsim.getArea() * banks;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[area] NOTE: " << tech << " memory die area query failed ("
+                  << e.what() << "); the system total omits it, stated here."
+                  << std::endl;
+        return 0.0;
+    }
+    return 0.0;
+}
+
+static int memorySystemDieCount(const std::string& tech,
+                                const std::string& device_width,
+                                int ranks_per_channel, int channels) {
+    if (channels < 1) channels = 1;
+    if (ranks_per_channel < 1) ranks_per_channel = 1;
+    if (tech == "DDR3" || tech == "DDR4" || tech == "DDR5") {
+        int chips = 8;                          // x8 default, 64-bit rank
+        if (device_width == "x4")  chips = 16;
+        if (device_width == "x16") chips = 4;
+        return chips * ranks_per_channel * channels;
+    }
+    if (tech == "HBM2") return 4;               // 8 ch / 2 ch-per-die, min
+    if (tech == "HBM3") return 8;               // 16 ch / 2 ch-per-die, min
+    if (tech == "LPDDR5" || tech == "GDDR6") return channels;
+    return 1;
+}
+
 static double computeDramDieAreaMM2(const std::string& memory_tech, bool print,
                                     int effective_banks = 0)
 {
@@ -6086,10 +6169,23 @@ static double computeDramDieAreaMM2(const std::string& memory_tech, bool print,
         cfg.burst_len = 8;
         cfg.int_prefetch_w = 8;
         cfg.quiet = true;
+        /* 1.11.46 (L238): a failed CACTI run must NOT silently delete the
+         * memory from the system total. The vendor anchor (capacity/density)
+         * needs no CACTI; fall back to it and say so. */
+        auto jedecFallback = [&](const char* why) -> double {
+            double dens = pimid::CACTIWrapper::vendorDieDensity(memory_tech);
+            if (dens <= 0.0) return 0.0;
+            double mm2 = (static_cast<double>(chip_bytes) / (1024.0 * 1024.0)) / dens;
+            std::cerr << "[area] NOTE: CACTI could not price the " << memory_tech
+                      << " die (" << why << "); using the vendor density anchor "
+                      << mm2 << " mm^2/die directly." << std::endl;
+            return mm2;
+        };
         pimid::CACTIWrapper cacti(cfg);
         cacti.initialize();
+        if (!cacti.isValid()) return jedecFallback("query invalid");
         auto ca = cacti.getCalibratedDieArea();
-        if (ca.area_mm2 <= 0.0) return 0.0;
+        if (ca.area_mm2 <= 0.0) return jedecFallback("no calibrated area");
         /* 1.11.45 (audit E28): the single-query form was ALGEBRAICALLY the
          * JEDEC anchor -- k = jedec/raw then raw*k cancels raw, so the CACTI
          * run was decorative and a node's bank reconfiguration was silently
@@ -6102,6 +6198,15 @@ static double computeDramDieAreaMM2(const std::string& memory_tech, bool print,
             eff_cfg.banks = static_cast<uint32_t>(effective_banks);
             pimid::CACTIWrapper cacti_eff(eff_cfg);
             cacti_eff.initialize();
+            /* 1.11.46 (L256): a reconfiguration CACTI cannot solve (e.g. more
+             * banks than its 32-bank ceiling) must not delete the area line --
+             * fall through to the preset-organisation figure below and say so. */
+            if (!cacti_eff.isValid() || cacti_eff.getArea() <= 0.0) {
+                std::cerr << "[area] NOTE: CACTI cannot solve the effective "
+                             "organisation (" << effective_banks << " banks); "
+                             "reporting the preset-organisation area instead."
+                          << std::endl;
+            }
             if (cacti_eff.isValid() && cacti_eff.getArea() > 0.0) {
                 double die = cacti_eff.getArea() * ca.k;
                 if (print) {
@@ -6174,6 +6279,7 @@ static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
 
     try {
         pimid::RamulatorWrapper ram_oracle("", memory_tech);
+        ram_oracle.setDeviceWidth(device_width);   // 1.11.46 (L181)
         ram_oracle.initialize();
         /* Intensive per-access accessors. getArrayReadEnergyNJ folds activation
          * and column access, so act/pre are NOT added separately -- adding them
@@ -7150,6 +7256,8 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
 
     double mem_area_total = 0.0;   // 1.11.9: memory silicon, summed into the system total
     double mem_power_total = 0.0;  // 1.11.45 (E31): its POWER, same wall clock, same total
+    int    mem_die_count = 0;      // 1.11.46 (L237): population, for the report
+    double mem_die_mm2  = 0.0;
     {
         /* COUPLED vs DECOUPLED. When the device IS the host's memory
          * (resolveMemoryTopology copies the device tech onto the host), both
@@ -7220,7 +7328,18 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                                               config.mem_power_down,        // 1.11.45: split flag (was pg_mc)
                                               config.dram_device_width,
                                               wall_seconds);    // 1.11.20 D13
-                mem_area_total += computeDramDieAreaMM2(tech, false, config.num_banks);
+                {
+                double die = computeDramDieAreaMM2(tech, false, config.num_banks);
+                if (die <= 0.0)   // 1.11.46 (L242)
+                    mem_area_total += computeNonDramMemAreaMM2(
+                        tech, config.num_banks, config.tech_node_nm,
+                        config.cache_line_size);
+                int dies = memorySystemDieCount(tech, config.dram_device_width,
+                                                config.hierarchy_ranks_per_channel,
+                                                config.hierarchy_dram_channels);
+                mem_area_total += die * dies;   // 1.11.46 (L237): POPULATED silicon
+                mem_die_count = dies; mem_die_mm2 = die;
+            }
             }
         } else {
         bool host_done = false, dev_done = false;
@@ -7230,6 +7349,26 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                   << " -- each charged with its own technology" << std::endl;
         for (const auto& node : config.system_nodes) {
             if (node.memory_tech.empty()) continue;
+            /* 1.11.46 (FIX-PRE-FLEET L236): AREA IS STRUCTURAL. The silicon
+             * exists whether or not the workload touched it this run; only
+             * ENERGY is activity-dependent. Area was inside the activity
+             * gates below, so an idle memory vanished from System Total area. */
+            if (priced_techs.insert(node.memory_tech).second) {
+                double die = computeDramDieAreaMM2(node.memory_tech, false, node.banks);
+                if (die <= 0.0) {   // 1.11.46 (L242): non-DRAM silicon counts too
+                    mem_area_total += computeNonDramMemAreaMM2(
+                        node.memory_tech, node.banks > 0 ? node.banks : config.num_banks,
+                        config.tech_node_nm, config.cache_line_size);
+                    /* no continue: the ENERGY branches below must still run --
+                     * their reporter states its own non-DRAM scope honestly. */
+                } else {
+                int dies = memorySystemDieCount(node.memory_tech, config.dram_device_width,
+                                                config.hierarchy_ranks_per_channel,
+                                                config.hierarchy_dram_channels);
+                mem_area_total += die * dies;   // 1.11.46 (L237): populated
+                mem_die_count = dies; mem_die_mm2 = die;
+                }
+            }
             if (node.role == UnifiedConfig::SystemNode::HOST && !host_done &&
                 zsim_stats.host.has_activity()) {
                 std::cout << "  [mem] " << node.name << " (" << node.memory_tech
@@ -7242,21 +7381,21 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                                               config.mem_power_down,  // 1.11.45: split flag (1.11.41)
                                               config.dram_device_width,
                                               wall_seconds);
-                if (priced_techs.insert(node.memory_tech).second)
-                    mem_area_total += computeDramDieAreaMM2(node.memory_tech, false, node.banks);
                 host_done = true;
             } else if (node.role == UnifiedConfig::SystemNode::DEVICE && !dev_done &&
                        zsim_stats.dev.has_activity()) {
                 std::cout << "  [mem] " << node.name << " (" << node.memory_tech
                           << "): device-side array energy" << std::endl;
-                reportSharedMemoryArrayEnergy(node.memory_tech,
+                /* 1.11.46: E31 wired the host-side and coupled calls into the
+                 * total and MISSED this one -- the decoupled device memory's
+                 * power was computed, printed, and dropped from System Total. */
+                mem_power_total += reportSharedMemoryArrayEnergy(node.memory_tech,
                                               zsim_stats.dev.mem_rd,
                                               zsim_stats.dev.mem_wr,
                                               sys_r_idle, sys_crosses_dq,         // 1.11.20
                                               config.mem_power_down,  // 1.11.45: split flag (1.11.41)
-                                              config.dram_device_width);
-                if (priced_techs.insert(node.memory_tech).second)
-                    mem_area_total += computeDramDieAreaMM2(node.memory_tech, false, node.banks);
+                                              config.dram_device_width,
+                                              wall_seconds);
                 dev_done = true;
             }
         }
@@ -7312,8 +7451,11 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
             std::cout << (first ? "  (" : " + ") << r.name << " " << r.area;
             first = false;
         }
-        if (mem_area_total > 0.0)
-            std::cout << (first ? "  (" : " + ") << "memory die " << mem_area_total;
+        if (mem_area_total > 0.0) {
+            std::cout << (first ? "  (" : " + ") << "memory " << mem_area_total;
+            if (mem_die_count > 1)
+                std::cout << " [" << mem_die_count << " dies x " << mem_die_mm2 << "]";
+        }
         if (!first || mem_area_total > 0.0) std::cout << " per node)";
     }
     std::cout << std::defaultfloat << std::endl;

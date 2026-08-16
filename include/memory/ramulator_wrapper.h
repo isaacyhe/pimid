@@ -71,6 +71,7 @@ public:
     // bank energy (array) + a per-tech JEDEC IDD/VDD table (interface, background).
     // Override the IDD-derived array energy with a fixed pJ/byte (0 = use IDD default).
     void setBankEnergyOverridePJPerByte(double v) { energy_bank_override_pJ_per_byte_ = v; }
+    void setDeviceWidth(const std::string& w) { device_width_ = w; }  // 1.11.46
     double getArrayReadEnergyNJ() const;     // array rd (act+col, amortized) per 64B
     double getArrayWriteEnergyNJ() const;    // array wr per 64B
     double getTerminationEnergyNJ() const;   // ODT/termination per 64B, from CACTI-IO
@@ -229,6 +230,9 @@ private:
     // PIM Support Components
     bool pim_enabled_;
     std::string dram_type_;
+    /* 1.11.46 (L181): device width for the whole-rank array-energy basis.
+     * Empty = x8 default (the same convention backgroundUnits uses). */
+    std::string device_width_;
     std::shared_ptr<pimid::memory::DRAMArchitectureV2> dram_arch_;
     std::shared_ptr<PIMBandwidthTracker> bandwidth_tracker_;
     std::shared_ptr<InternalDRAMNetwork> internal_network_;

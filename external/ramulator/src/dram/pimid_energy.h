@@ -8,9 +8,17 @@
 // to Ramulator2, not the PIMID wrapper; the wrapper (ramulator_wrapper.cpp) is now
 // a thin reader that forwards its timing getters into these functions.
 //
-// The per-tech IDD/VDD tables here are the datasheet-class values also declared as
-// current_presets/voltage_presets in the per-impl device classes (DDR3/4/5, LPDDR5,
-// GDDR6, HBM2/3), following upstream convention. Ramulator2's own command-driven
+// The per-tech IDD/VDD tables here are PART-NUMBER-SOURCED datasheet values
+// (Micron part classes named below). 1.11.46 (FIX-PRE-FLEET L189): the claim
+// that they "mirror the per-impl current_presets" was FALSE and is withdrawn:
+// measured against the tree, DDR4.cpp's Default preset is {60,50,55,145,145,
+// IDD5B 362} vs this table's {58,35,42,140,150, IDD5 155} -- the divergence
+// lands on the IDD4W write term 1.11.5 introduced, and the upstream DDR5
+// preset is a byte-identical copy of DDR4's (generic, not a DDR5 part). The
+// upstream presets are unlabelled defaults for the command-driven extensive
+// model (drampower_enable, off in our runs); THIS table is the authoritative
+// intensive source, and IDD5 here is the average-refresh current, not
+// upstream's IDD5B burst figure -- different definitions, not a typo. Ramulator2's own command-driven
 // power model (update_powers()/s_total_*energy, gated by drampower_enable) produces
 // EXTENSIVE totals over a full simulation; this header produces the INTENSIVE
 // per-64B-access / per-device values used for analytical energy accounting. Both
@@ -55,20 +63,42 @@ inline IDDSpec iddFor(const std::string& tech) {
     return {1.2, 58,35,42,140,150,155, 350.0, 7800.0, 1, 25};  // unknown -> DDR4 class
 }
 
+/* 1.11.46 (FIX-PRE-FLEET L181): DEVICES PER ACCESS. The IDD columns are
+ * PER-DEVICE currents (the struct says so), but a 64 B access on a DDR-class
+ * 64-bit rank engages EVERY chip in the rank simultaneously -- x8 parts: 8
+ * chips each activating and bursting 8 of the 64 DQ lines. Micron TN-41-01,
+ * this file's own cited formula source, multiplies per-DRAM power by the
+ * number of DRAMs; we did not, so the array terms were per-DEVICE while the
+ * termination term (x512 bits) was whole-rank -- the two bases the audit
+ * caught being summed. HBM's IDD is per CHANNEL and an access stays in one
+ * channel; LPDDR5/GDDR6 are one die per channel. */
+inline int devicesPerAccess(const std::string& tech,
+                            const std::string& device_width = "") {
+    if (tech == "DDR3" || tech == "DDR4" || tech == "DDR5") {
+        if (device_width == "x4")  return 16;
+        if (device_width == "x16") return 4;
+        return 8;                       // x8, the default 64-bit rank
+    }
+    return 1;
+}
+
 // Array read energy per 64B (act+col, 50% row-hit collapse). bank_override_pJ_per_byte
 // > 0 forces the legacy bank-energy path (user knob); 0 = IDD default.
 inline double arrayReadNJ(const std::string& tech, double tRC, double tRAS,
-                          double tBurst, double bank_override_pJ_per_byte) {
+                          double tBurst, double bank_override_pJ_per_byte,
+                          const std::string& device_width = "") {
     if (bank_override_pJ_per_byte > 0.0)
         return bank_override_pJ_per_byte * 64.0 / 1000.0;
     IDDSpec s = iddFor(tech);
     double e_actpre_pJ = s.vdd * (s.idd0 * tRC - s.idd3n * tRAS - s.idd2n * (tRC - tRAS));
     double e_rd_pJ     = s.vdd * (s.idd4r - s.idd3n) * tBurst;
     const double ROW_MISS_FRAC = 0.5;
-    return (ROW_MISS_FRAC * e_actpre_pJ + e_rd_pJ) / 1000.0;
+    return (ROW_MISS_FRAC * e_actpre_pJ + e_rd_pJ) / 1000.0
+           * devicesPerAccess(tech, device_width);   // 1.11.46 (L181)
 }
 inline double arrayWriteNJ(const std::string& tech, double tRC, double tRAS,
-                           double tBurst, double bank_override_pJ_per_byte) {
+                           double tBurst, double bank_override_pJ_per_byte,
+                           const std::string& device_width = "") {
     /* 1.11.5 (audit): writes consult IDD4W, not read*1.2. Same shape as the
      * read term: activate/precharge share plus the write burst current. */
     if (bank_override_pJ_per_byte > 0.0)
@@ -77,7 +107,8 @@ inline double arrayWriteNJ(const std::string& tech, double tRC, double tRAS,
     double e_actpre_pJ = s.vdd * (s.idd0 * tRC - s.idd3n * tRAS - s.idd2n * (tRC - tRAS));
     double e_wr_pJ     = s.vdd * (s.idd4w - s.idd3n) * tBurst;
     const double ROW_MISS_FRAC = 0.5;
-    return (ROW_MISS_FRAC * e_actpre_pJ + e_wr_pJ) / 1000.0;
+    return (ROW_MISS_FRAC * e_actpre_pJ + e_wr_pJ) / 1000.0
+           * devicesPerAccess(tech, device_width);   // 1.11.46 (L181)
 }
 
 /* 1.11.5 (audit): interfaceNJ REMOVED. It returned vdd*(idd4r-idd3n)*tBurst
@@ -162,7 +193,12 @@ inline double terminationNJ(const std::string& tech, double term_override_pJ_per
      * for random data, across a loop of driver pull-up plus terminator. */
     enum Scheme { POD, SSTL, LVSTL, NONE };
     Scheme sch; double vddq, rtt, rpd, mtps;
-    if      (tech=="DDR3")   {sch=SSTL; vddq=1.5;  rtt=40;  rpd=34;  mtps=1600;}   // SSTL-15; JESD79-3D T41
+    /* 1.11.46 (FIX-PRE-FLEET L164): ONE PART per technology. The IDD row
+     * above is sourced from Micron 4Gb DDR3L-1600 -- a 1.35 V part -- while
+     * this line priced a 1.5 V SSTL-15 DDR3. Array and termination now
+     * describe the SAME silicon: DDR3L, SSTL-135 (JESD79-3-1, the DDR3L
+     * addendum keeps RZQ=240 and the T38/T41 RTT/RON tables at 1.35 V). */
+    if      (tech=="DDR3")   {sch=SSTL; vddq=1.35; rtt=40;  rpd=34;  mtps=1600;}   // SSTL-135; JESD79-3-1 + T38/T41
                                                                                    // (RTT40=RZQ/6) + T38
                                                                                    // (RON34=RZQ/7), RZQ=240
     else if (tech=="DDR4")   {sch=POD;  vddq=1.2;  rtt=48;  rpd=40;  mtps=3200;}   // POD12  (JESD8-24)

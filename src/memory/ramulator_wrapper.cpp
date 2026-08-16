@@ -458,11 +458,13 @@ Cycle RamulatorWrapper::getAverageLatency() const {
 // knobs into the Ramulator2-resident model. main.cpp is untouched (same API).
 double RamulatorWrapper::getArrayReadEnergyNJ() const {
     return Ramulator::pimid_energy::arrayReadNJ(
-        dram_type_, getTRC(), getTRAS(), getTBurst(), energy_bank_override_pJ_per_byte_);
+        dram_type_, getTRC(), getTRAS(), getTBurst(), energy_bank_override_pJ_per_byte_,
+        device_width_);   // 1.11.46 (L181): whole-rank basis
 }
 double RamulatorWrapper::getArrayWriteEnergyNJ() const {
     return Ramulator::pimid_energy::arrayWriteNJ(
-        dram_type_, getTRC(), getTRAS(), getTBurst(), energy_bank_override_pJ_per_byte_);
+        dram_type_, getTRC(), getTRAS(), getTBurst(), energy_bank_override_pJ_per_byte_,
+        device_width_);   // 1.11.46 (L181)
 }
 double RamulatorWrapper::getTerminationEnergyNJ() const {
     /* 1.11.40 (audit N8, user ruling: harness the model, do not table the
@@ -885,6 +887,12 @@ double RamulatorWrapper::getTCAS() const {
 }
 
 double RamulatorWrapper::getTRP() const {
+    /* 1.11.46 (L170): per-tech, same precedence as getTRCD/getTRAS -- tRC
+     * (= tRAS + tRP) feeds the array-energy activate term. Same sources as
+     * getTRAS above. */
+    if (dram_type_ == "GDDR6")  return 14.8;   // vendor spec class (single point)
+    if (dram_type_ == "LPDDR5") return 18.0;   // Micron LPDDR5-6400 tRPpb
+    if (dram_type_ == "DDR3")   return 13.75;  // JESD79-3D, DDR3-1600K
     if (dram_arch_) {
         return dram_arch_->timing.tRP_ns;
     }
@@ -892,6 +900,17 @@ double RamulatorWrapper::getTRP() const {
 }
 
 double RamulatorWrapper::getTRAS() const {
+    /* 1.11.46 (FIX-PRE-FLEET L170): the same per-tech precedence getTRCD has.
+     * DDR3/LPDDR5/GDDR6 borrow the DDR4-2400 arch struct as an ORGANIZATION
+     * proxy, but its TIMINGS fed the array-energy formulas (idd0*tRC -
+     * idd3n*tRAS ...), pricing three technologies' arrays on a fourth's
+     * clock. Values: DDR3-1600K from JESD79-3D (in hand, normative);
+     * LPDDR5-6400 from the Micron datasheets in hand (tRAS min 42 ns);
+     * GDDR6 from the same 16 Gb/s vendor-spec class getTRCD already cites --
+     * a single-point source, flagged as such. */
+    if (dram_type_ == "GDDR6")  return 28.0;   // vendor spec class (single point)
+    if (dram_type_ == "LPDDR5") return 42.0;   // Micron LPDDR5-6400, tRAS min
+    if (dram_type_ == "DDR3")   return 35.0;   // JESD79-3D, DDR3-1600K
     if (dram_arch_) {
         return dram_arch_->timing.tRAS_ns;
     }
@@ -914,6 +933,14 @@ double RamulatorWrapper::getTRC() const {
 }
 
 double RamulatorWrapper::getTBurst() const {
+    /* 1.11.46 (L170/L168): burst time is beats/rate -- specification
+     * arithmetic, not a table: DDR3-1600 BL8 -> 5.0 ns; LPDDR5-6400 BL16 ->
+     * 2.5 ns; GDDR6-14000 BL16 -> 1.14 ns. The DDR4-2400 fallback priced all
+     * three at 3.33 ns, and the SPEED BIN now matches the IDD row's part for
+     * each technology (L168). */
+    if (dram_type_ == "GDDR6")  return 16.0 * 1000.0 / 14000.0;  // 1.143 ns
+    if (dram_type_ == "LPDDR5") return 16.0 * 1000.0 / 6400.0;   // 2.5 ns
+    if (dram_type_ == "DDR3")   return  8.0 * 1000.0 / 1600.0;   // 5.0 ns
     if (dram_arch_) {
         return dram_arch_->timing.tBurst_ns;
     }

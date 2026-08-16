@@ -7,6 +7,69 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.46 -- the memory system is populated silicon, and one part per technology
+
+FIX-PRE-FLEET batches A and B (audit items L164/L168/L170/L181/L189/L234/L236/
+L237/L238/L242/L244/L256). NUMBERS MOVE substantially; every co-sim and DRAM
+figure downstream must be re-derived on this release or later.
+
+**Batch A -- the silicon that exists is the silicon that is counted.**
+- L237: System Total area adds the POPULATED memory system, not one die. The
+  organisation is the one the model already declares: DDR-class chips/rank
+  (x4->16, x8->8, x16->4) x ranks x channels; HBM at the JEDEC-minimum 2
+  channels per core die (stated lower bound); point-to-point one die per
+  channel. Reference co-sim (DDR4 x8): 1 die -> 8 dies, area 3.78 -> 27.03 mm^2
+  (= 8 x 3.38 after E29's 1/1.12; the arithmetic cross-checks exactly).
+- L238/L256: a CACTI failure or an unsolvable reconfiguration (>32 banks)
+  falls back to the vendor density anchor / the preset-organisation figure
+  WITH A PRINTED NOTE -- silently deleting the memory from the total is gone.
+- L242: SRAM/NVM system memories are priced by the live tools (CACTI, NVSim
+  pre-generated cache) instead of contributing zero silicon.
+- L236: area is STRUCTURAL -- accumulated for every memory-bearing node
+  whether or not the workload touched it; only energy is activity-gated.
+- L234/L244: coupled-vs-decoupled is the DECLARED topology
+  (device.is_default_mem), not memory-technology string equality whose
+  .empty() guards were dead against the "DDR4" default.
+- Found en route: the decoupled DEVICE-side memory power never reached System
+  Total (E31 wired host-side and coupled only). It does now, on the same wall
+  clock. Decoupled reference: memory term 0.95 W.
+
+**Batch B -- the tables describe one part, on its own clock.**
+- L164: DDR3's array term was a 1.35 V Micron DDR3L-1600 (the IDD provenance)
+  while its termination was a 1.5 V SSTL-15 part. Both are now the SAME
+  silicon: DDR3L, SSTL-135 (JESD79-3-1 keeps RZQ=240 and the T38/T41 tables
+  at 1.35 V). DDR3 termination drops by (1.35/1.5)^2 = 0.81x.
+- L170/L168: DDR3/LPDDR5/GDDR6 borrowed the DDR4-2400 arch struct and its
+  TIMINGS fed their array-energy formulas. getTRAS/getTRP/getTBurst now carry
+  the same per-tech precedence getTRCD already had: DDR3-1600K from JESD79-3D
+  (normative, in hand), LPDDR5-6400 from the Micron datasheets in hand, GDDR6
+  from the same 16 Gb/s vendor-spec class getTRCD cites (single point, flagged).
+  tBurst is specification arithmetic (beats/rate), not a table.
+- L189: the header's claim that the IDD table "mirrors the per-impl
+  current_presets" was FALSE and is withdrawn with the measured divergence
+  recorded (DDR4.cpp Default {60,50,55,145,145,IDD5B 362} vs the part-sourced
+  {58,35,42,140,150,IDD5 155}; the upstream DDR5 preset is a byte-identical
+  copy of DDR4's). This table is the authoritative intensive source; IDD5
+  here is average-refresh, not upstream's IDD5B burst figure.
+- L181: DEVICES PER ACCESS. The IDD columns are per-device currents, but a
+  64 B access on a DDR-class 64-bit rank engages every chip in the rank --
+  TN-41-01, this file's own formula source, multiplies by the device count
+  and we did not. DDR array energies rise by chips/rank (x8 parts: 8x);
+  HBM/LPDDR5/GDDR6 are per-channel and unchanged. This closes the basis
+  mismatch with the whole-rank termination term the audit caught being
+  summed with it.
+
+**N6 refinement (gate 1159 probes):** the detailed cell's nondeterminism is
+JOB-SCOPED and three-valued -- three jobs on one binary gave three distinct
+power/cycle pairs while three runs INSIDE one job are bit-identical. Gates
+comparing old-vs-new within one job remain exact; cross-job constants are
+invalid equality references, demonstrated three ways.
+
+**Triage reconciliation:** six FIX-PRE-FLEET items were already closed by the
+E-work and are now credited (E28's two-query form, E13's self-calculating
+guard, the driver-Ron term, 1.11.16's wrong-BBL fix, decode-for-every-core,
+SRAM gating).
+
 ## 1.11.45 -- die area loses its phantom 12%; the topology and the global get rules (E27-E30)
 
 **NUMBERS MOVE: every DRAM die area shrinks by exactly 1/1.12 = 10.7%.**
