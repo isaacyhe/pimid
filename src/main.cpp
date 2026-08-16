@@ -4724,8 +4724,26 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         }
         if (on_dram_silicon) {
             mcfg.process_family = 1;  // DRAM_PERIPHERY (per-class factors)
-            mcfg.subarray_pitch_factor =
-                (config.pe_hierarchy_level == 0) ? config.subarray_pitch_factor : 1.0;
+            /* 1.11.31 (E7): SAY when it is dropped. A user who sets this at
+             * BANK placement previously got silence and assumed it applied.
+             * The pitch penalty belongs to circuits laid out on the array
+             * pitch -- subarray-adjacent -- which is why it is placement-
+             * gated; per Vogelsang the on-pitch circuits are the sense-amp
+             * stripes and local wordline drivers, not the row/column logic
+             * further out. */
+            if (config.pe_hierarchy_level == 0) {
+                mcfg.subarray_pitch_factor = config.subarray_pitch_factor;
+            } else {
+                mcfg.subarray_pitch_factor = 1.0;
+                if (config.subarray_pitch_factor != 1.0) {
+                    std::cout << "  [tech] power.subarray_pitch_factor="
+                              << config.subarray_pitch_factor
+                              << " IGNORED at " << config.placement_level
+                              << " placement: the pitch penalty applies only "
+                                 "where the PE sits in the array pitch "
+                                 "(SUBARRAY). Priced at 1.0." << std::endl;
+                }
+            }
             DRAMGenClass gc = getDRAMGenClass(config.memory_tech);
             mcfg.dram_periph_table_nm = gc.cacti_table_nm;
             std::cout << "  [tech] PE process family: DRAM-periphery (placement "
@@ -6043,8 +6061,20 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 ((config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3) ||
                  (config.pe_hierarchy_level == 5 && channel_centric))) {
                 mcfg.process_family = 1;
-                mcfg.subarray_pitch_factor =
-                    (config.pe_hierarchy_level == 0) ? config.subarray_pitch_factor : 1.0;
+                /* 1.11.31 (E7): same rule as the device path -- announce the
+                 * drop rather than discarding silently. Two copies of a
+                 * placement rule is how they drift; this mirrors it exactly. */
+                if (config.pe_hierarchy_level == 0) {
+                    mcfg.subarray_pitch_factor = config.subarray_pitch_factor;
+                } else {
+                    mcfg.subarray_pitch_factor = 1.0;
+                    if (config.subarray_pitch_factor != 1.0)
+                        std::cout << "  [tech] node: power.subarray_pitch_factor="
+                                  << config.subarray_pitch_factor
+                                  << " IGNORED at " << config.placement_level
+                                  << " placement (pitch penalty is SUBARRAY-only)."
+                                  << std::endl;
+                }
                 DRAMGenClass ngc = getDRAMGenClass(node.memory_tech);
                 mcfg.dram_periph_table_nm = ngc.cacti_table_nm;
                 std::cout << "  [tech] " << node.name
@@ -9673,9 +9703,56 @@ int main(int argc, char** argv) {
                     std::exit(1);
                 }
             }
+            /* 1.11.31 (user ruling E7): validated, bounded and explained. This
+             * was the ONE knob in the 1.11 process surface with no check at
+             * all -- 0, negative and 1e9 all parsed, and a later guard quietly
+             * turned non-positive into 1.0, so a typo silently became "no
+             * penalty".
+             *
+             * WHAT IT IS: circuits placed against the memory array must be
+             * laid out ON THE ARRAY'S PITCH -- a sense amplifier cannot be
+             * wider than the bitline pair it serves, however small its
+             * transistors are. That is a LAYOUT constraint, separate from the
+             * device-size penalty the 2.44x area factor already carries.
+             * Vogelsang (MICRO 2010) names the distinction directly: on-pitch
+             * circuitry (sense-amp stripes, local wordline drivers) is limited
+             * by transistor size and number, off-pitch circuitry by wiring.
+             *
+             * FLOOR 1.0: the knob multiplies a PENALTY. Below 1 it becomes a
+             * discount, claiming the PE is DENSER than the DRAM-periphery
+             * baseline it is being measured against.
+             * CEILING 10: it compounds into the reported band [fa*p, fa^2*p];
+             * at p=10 the band top is ~60x, which no silicon supports.
+             * WARNING above 1.25, from the only silicon anchor we have:
+             * Samsung's FIMDRAM bounds a DRAM-process compute unit at
+             * ~1.5 mm^2 (ISSCC 2021 25.4 + our HBM2 density), our comparable
+             * PE prices at 0.4925 mm^2 in logic, so the TOTAL observed penalty
+             * is <= 3.05x; with fa = 2.444 that leaves <= 1.25x for pitch.
+             * Their PCU is bank-shared rather than subarray-pressed, so this
+             * is a warning and not a refusal. */
             if (yaml_cfg["power"] && yaml_cfg["power"]["subarray_pitch_factor"]) {
-                config.subarray_pitch_factor =
+                const double pf =
                     yaml_cfg["power"]["subarray_pitch_factor"].as<double>(1.0);
+                if (!std::isfinite(pf) || pf < 1.0 || pf > 10.0) {
+                    std::cerr << "ERROR: power.subarray_pitch_factor = " << pf
+                              << " is out of range. Valid: [1.0, 10.0].\n"
+                              << "  It multiplies the DRAM-periphery AREA factor, so it is a\n"
+                              << "  PENALTY for laying a PE out on the array's bitline pitch.\n"
+                              << "  Below 1.0 it would claim the PE is DENSER than the\n"
+                              << "  DRAM-periphery baseline it is measured against; above 10\n"
+                              << "  the reported band top exceeds 60x, which no silicon supports.\n";
+                    std::exit(1);
+                }
+                if (pf > 1.25) {
+                    std::cout << "  [tech] WARNING: subarray_pitch_factor=" << pf
+                              << " puts the TOTAL DRAM-process penalty at "
+                              << (pf * 2.444) << "x. Samsung's FIMDRAM (ISSCC 2021 "
+                                 "25.4) bounds a real DRAM-process compute unit at "
+                                 "~3.05x, i.e. pitch <= ~1.25 given our area factor. "
+                                 "Reported at your value; the value is the hypothesis."
+                              << std::endl;
+                }
+                config.subarray_pitch_factor = pf;
             }
 
             // McPAT derived-parameter overrides

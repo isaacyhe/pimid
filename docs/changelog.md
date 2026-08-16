@@ -7,6 +7,56 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.31 -- the pitch factor is bounded by silicon, and says when it is ignored (E7)
+
+power.subarray_pitch_factor was the one knob in the 1.11 process surface with
+NO validation: 0, negative and 1e9 all parsed, a later guard quietly turned
+non-positive into 1.0 (so a typo silently became "no penalty"), it was
+discarded without a word at any placement other than SUBARRAY, and it appeared
+in no documentation.
+
+WHAT IT IS, now written down. Circuits placed against a memory array must be
+laid out ON THE ARRAY'S PITCH -- a sense amplifier cannot be wider than the
+bitline pair it serves, however small its transistors are. That is a LAYOUT
+constraint, distinct from the device-size penalty the 2.44x area factor
+already carries. Vogelsang (MICRO 2010) draws exactly this line between
+on-pitch circuitry (sense-amp stripes, local wordline drivers) and off-pitch
+circuitry limited by wiring.
+
+- **Floor 1.0.** The knob multiplies a PENALTY; below 1 it is a discount
+  claiming the PE is denser than the baseline it is measured against.
+- **Ceiling 10.** It compounds into the reported band [fa*p, fa^2*p]; at p=10
+  the band top is ~60x, which no silicon supports.
+- **Warning above 1.25, from the FIMDRAM anchor.** Samsung's HBM-PIM bounds a
+  real DRAM-process compute unit at ~1.5 mm^2 (ISSCC 2021 25.4 + our measured
+  HBM2 density); our comparable PE prices at 0.4925 mm^2 in logic, so the
+  TOTAL observed penalty is <= 3.05x, leaving <= 1.25x for pitch once the
+  2.444x device factor is applied. Their PCU is bank-shared rather than
+  subarray-pressed, so this warns rather than refuses.
+- **Announced when dropped.** Setting it at BANK placement now prints that it
+  was ignored and why, at both construction sites, instead of vanishing.
+- **Documented** in yaml_reference.md, along with power.interconnect_projection
+  from 1.11.30, which was also undocumented.
+
+DATA IMPACT: NONE. Default behaviour is bit-identical to 1.11.30 -- 0.0499777 W
+and 10164680 cycles -- and a factor set at a non-SUBARRAY placement produces
+exactly the default number, now with a line saying so. Gate 1142: 6/6.
+
+RAISED DURING THIS RULING, logged as N1-N3 in the DISCUSS queue rather than
+folded in here:
+  N1 PITCH and DEVICE FAMILY are conflated -- pitch lives inside the family-1
+     branch, so it can never apply to SRAM/NVM, whose PEs are logic-family but
+     whose subarray-placed circuits are pressed against an array pitch just the
+     same. Two different claims.
+  N2 tech_node_nm is a meaningless degree of freedom for a DRAM-placed PE: the
+     logic node CANCELS for area (proved -- 2.4615 x 1.4444 = 3.5556), which is
+     an accidental validation of 1.11.22. Whether fd and fl cancel likewise is
+     unchecked.
+  N3 A derived pitch factor must come off the DRAM GENERATION ladder, not
+     CACTI's logic-node tables: CACTI carries ONE comm-dram cell per table and
+     would hand the same pitch to technologies our density table shows differ
+     by 4.4x.
+
 ## 1.11.30 -- one die, one metal stack (E5)
 
 User ruling on E5: the interconnect projection must MATCH between the two

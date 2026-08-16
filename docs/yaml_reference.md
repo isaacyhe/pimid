@@ -478,6 +478,38 @@ and printed. `power.device_corner` (`hp` default, `lstp`, `lop`) selects the
 CACTI device column for LOGIC-family components; it is refused, with a printed
 reason, for DRAM-periphery components (one commodity-DRAM column per table).
 
+`power.interconnect_projection` (`conservative` default, `aggressive`) selects
+the ITRS wire projection, and feeds BOTH CACTI and McPAT so one die is modelled
+with one metal stack. Conservative is the default on physics, not caution: the
+aggressive column sets copper barrier thickness to zero at every node, which no
+process can build, and holds the scattering coefficient at 1.00, which
+measurement contradicts once wire dimensions approach the electron mean free
+path. An invalid value is a FATAL configuration error.
+
+`power.subarray_pitch_factor` (default `1.0`, range `[1.0, 10.0]`) is an
+additional AREA penalty for a PE laid out on the memory array's bitline pitch.
+It is distinct from the DRAM-periphery area factor: that one prices the
+DEVICE (a DRAM-process transistor is larger), this one prices the LAYOUT (a
+circuit pressed against the array cannot be wider than the pitch it sits on,
+however small its transistors are). Vogelsang (MICRO 2010) draws the same
+distinction between on-pitch circuitry -- sense-amp stripes, local wordline
+drivers -- and off-pitch circuitry limited by wiring.
+
+It applies ONLY at `SUBARRAY` placement on a DRAM technology, and setting it
+anywhere else prints that it was ignored rather than discarding it silently.
+Values below 1.0 are refused: the knob multiplies a penalty, so below 1 it
+would claim the PE is denser than the baseline it is measured against. Values
+above 1.25 are accepted with a warning, because Samsung's FIMDRAM (ISSCC 2021,
+paper 25.4) bounds a real DRAM-process compute unit at about 3.05x its
+logic-process area, which leaves roughly 1.25x for pitch once the 2.44x device
+factor is applied. Their unit is bank-shared rather than subarray-pressed, so
+this is a warning and not a refusal.
+
+SRAM and NVM technologies never take this factor: their PEs are LOGIC-family
+(SRAM is a logic process; MRAM/PCM/ReRAM place their storage element in the
+metal stack above conventional logic transistors), so no periphery transform
+is applied at all.
+
 ### McPAT Overrides
 
 Override auto-derived McPAT architectural parameters:
