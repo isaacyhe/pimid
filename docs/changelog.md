@@ -7,6 +7,58 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.29 -- the link controller is reported, and harnessed to our interconnect model
+
+User ruling: instantiate the link controller, report components and totals,
+and let the USER's system definition decide the report's shape.
+
+- **E8, as refined: report what was configured.** The family rebuild's
+  processor rollup listed core+l2+l3+noc+mcs by hand and omitted l1dir, l2dir,
+  nius and flashcontrollers. Each is now included, but GATED on its configured
+  count -- reporting a component nobody asked for is its own error.
+  flashcontrollers is kept for storage / storage-class compute.
+  printComponentBreakdown() gained the same discipline: cores, caches and MCs
+  were printed unconditionally, so a device with no L3 printed "L3 Cache: 0 W".
+
+- **System scope reports its components at all.** printComponentBreakdown()
+  existed with NO caller, so a co-sim run printed one line per node and nothing
+  else -- you could not see what the link, the NoC or the MCs cost. That is why
+  the link-share question could not be answered without instrumenting.
+
+- **The link controller's area was computed and dropped.** getComponentArea()
+  had no PCIE case and fell through to 0, so 0.18 mm^2 per end never reached
+  any total.
+
+- MEASURED, once the report existed: host 0.360 W / 5.66 mm^2, device
+  0.050 W / 12.27 mm^2, link controller 0.0075 W and 0.36 mm^2 across both
+  ends -- about 1.8% of system power and 2.0% of area. The link is
+  LEAKAGE-dominated: its runtime dynamic is 8 uW on this cell.
+
+- **Harnessed to the interconnect model, in the ruled order:**
+  1. withPHY from the link CLASS, not the literal 1. An interposer is a wide
+     parallel on-package link with no serialiser; it was paying for a full
+     off-package SerDes. Measured: its controller drops to 0.094 mm^2 against
+     gen5's 0.18 -- 52%, exactly the SerDes area removed. This was the one
+     error wrong in KIND rather than degree.
+  2. num_channels was ALREADY the user's surface (power.pcie.num_lanes), so
+     no change was needed. Recorded rather than silently skipped.
+  3. The SerDes lane rate is now a parameter. It was the literal 4 -- PCIe
+     2.0's 4 Gb/s, a 2007 standard -- applied to gen5 (32 GT/s), CXL (gen5
+     PHY), NVLink (100 Gb/s/pair) and UALink (200G-class) alike. PIMID
+     supplies the class's published rate; an unknown class keeps McPAT's 4
+     rather than inventing one.
+
+BOUNDARY, stated because the gate could not show it: step 3 affects the
+PEAK/TDP path only. Runtime link dynamic is REPLACED by our byte-driven term
+(measured crossing bytes x cited pJ/bit, iocontrollers.cc), which is the right
+owner, and co-sim does not currently print peak power. So the lane-rate fix is
+correct and currently invisible in a co-sim report.
+
+NOT MODELLED, acknowledged rather than invented: CXL's coherence logic. CXL
+rides the PCIe gen5/6 electrical PHY, so pricing its PHY as PCIe is right;
+what it adds beyond the PHY is snoop/state silicon for which no area source is
+in hand. Gate 1140: 5/5.
+
 ## 1.11.28 -- one fabric, one process (E3)
 
 User ruling on E3: the synthetic in-memory NoC probe derives its process family

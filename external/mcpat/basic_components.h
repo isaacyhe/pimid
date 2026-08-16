@@ -276,6 +276,10 @@ public:
     string name;
     double  clockRate;
     int    num_channels, num_units;
+    /* PIMID 1.11.29: per-lane SerDes rate in Gb/s. The dynamic term was
+     * 10 mW/(Gb/s) x 4 -- PCIe 2.0's rate, hardcoded and applied to every link
+     * class. <=0 keeps that historical 4. */
+    double serdes_lane_gbps = 0.0;
     bool   withPHY;
     int    type;
     double duty_cycle, perc_load;

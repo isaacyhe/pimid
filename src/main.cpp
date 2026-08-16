@@ -6309,6 +6309,7 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 ps.link_pj_per_bit = pjbit;
                 ps.link_clock_mhz =
                     (config.pcie_link_type == "pcie_gen3") ? 500 : 1000;
+                ps.link_type_name = config.pcie_link_type;   // 1.11.29: name it
                 mcpat.setPCIeStats(ps);
                 if (charge_here) {
                     std::cout << "  [xing] " << node.name << ": link "
@@ -6560,6 +6561,15 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                       << result.leakage_power << " leak), "
                       << result.area << " mm^2"
                       << std::defaultfloat << std::endl;
+            /* 1.11.29 (user ruling): system scope reports its COMPONENTS, not
+             * just a per-node total. Until now a co-sim run printed one line
+             * per node and nothing else -- you could not see what the link,
+             * the NoC or the MCs cost, which is why the link-share question
+             * could not be answered without instrumenting the binary.
+             * printComponentBreakdown() already existed and had NO caller.
+             * It reports only what this node was configured with, so the
+             * shape follows the system the user defined. */
+            mcpat.printComponentBreakdown();
         } catch (const std::exception& e) {
             std::cerr << "  " << node.name << ": McPAT failed: " << e.what() << std::endl;
         }

@@ -529,6 +529,7 @@ typedef struct{
 	int num_channels;
 	int type;
 	bool withPHY;
+	double serdes_lane_gbps;   /* PIMID 1.11.29: per-lane SerDes rate, Gb/s */
 	double vdd;
 	double power_gating_vcc;
 	//stats

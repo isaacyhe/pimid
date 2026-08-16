@@ -1363,6 +1363,7 @@ void ParseXML::parse(char* filepath)
 				if (strcmp(xNode3.getChildNode("param",k).getAttribute("name"),"vdd")==0) {sys.pcie.vdd=atof(xNode3.getChildNode("param",k).getAttribute("value"));continue;}
 				if (strcmp(xNode3.getChildNode("param",k).getAttribute("name"),"power_gating_vcc")==0) {sys.pcie.power_gating_vcc=atof(xNode3.getChildNode("param",k).getAttribute("value"));continue;}
 				if (strcmp(xNode3.getChildNode("param",k).getAttribute("name"),"withPHY")==0) {sys.pcie.withPHY=(bool)atoi(xNode3.getChildNode("param",k).getAttribute("value"));continue;}
+				if (strcmp(xNode3.getChildNode("param",k).getAttribute("name"),"serdes_lane_gbps")==0) {sys.pcie.serdes_lane_gbps=atof(xNode3.getChildNode("param",k).getAttribute("value"));continue;}   /* PIMID 1.11.29 */
 
 			}
 			itmp=xNode3.nChildNode("stat");
@@ -1840,6 +1841,7 @@ void ParseXML::initialize() //Initialize all
 	sys.pcie.vdd =0;
 	sys.pcie.power_gating_vcc = -1;
 	sys.pcie.withPHY = false;
+	sys.pcie.serdes_lane_gbps = 0.0;   /* PIMID 1.11.29: 0 = keep the legacy 4 Gb/s */
 	sys.pcie.duty_cycle =1;
 	sys.pcie.total_load_perc=1;
 	sys.pcie.transferred_bytes=0;   /* PIMID 1.11.7: 0 = legacy load-scaled path */

@@ -262,7 +262,16 @@ PCIeController::PCIeController(ParseXML *XML_interface,InputParameter* interface
 		  //	  //Cadence ChipEstimate using 65nm soft IP;
 		  //	  frontend_dyn = 0.27e-9/8*g_tp.peri_global.Vdd/1.1*g_tp.peri_global.Vdd/1.1*(interface_ip.F_sz_nm/65.0);
 		  //SerDer_dyn is power not energy, scaling from 10mw/Gb/s @90nm
-		  SerDer_dyn   = 0.01*4*(interface_ip.F_sz_um/0.09)*g_tp.peri_global.Vdd/1.2*g_tp.peri_global.Vdd/1.2;//PCIe 2.0 max per lane speed is 4Gb/s
+		  /* PIMID 1.11.29 (user ruling, step 3): the lane rate is a PARAMETER.
+		   * It was the literal 4 -- PCIe 2.0's 4 Gb/s per lane, a 2007
+		   * standard -- applied to every link class PIMID can configure:
+		   * gen5 (32 GT/s, 8x), CXL (gen5/6 PHY), NVLink, UALink (200G-class,
+		   * ~50x). The 0.01 is 10 mW per Gb/s at 90nm, so the product is
+		   * literally "mW/(Gb/s) x rate": parameterising the rate is exact,
+		   * not a fudge. serdes_lane_gbps <= 0 keeps the historical 4. */
+		  const double lane_gbps = (pciep.serdes_lane_gbps > 0.0)
+		                         ? pciep.serdes_lane_gbps : 4.0;
+		  SerDer_dyn   = 0.01*lane_gbps*(interface_ip.F_sz_um/0.09)*g_tp.peri_global.Vdd/1.2*g_tp.peri_global.Vdd/1.2;
 		  SerDer_dyn   /= pciep.clockRate;//covert to energy per clock cycle
 
 		  //power_t.readOp.dynamic = (ctrl_dyn)*pciep.num_channels;
@@ -285,7 +294,10 @@ PCIeController::PCIeController(ParseXML *XML_interface,InputParameter* interface
 		  //	  //Cadence ChipEstimate using 65nm soft IP;
 		  //	  frontend_dyn = 0.27e-9/8*g_tp.peri_global.Vdd/1.1*g_tp.peri_global.Vdd/1.1*(interface_ip.F_sz_nm/65.0);
 		  //SerDer_dyn is power not energy, scaling from 10mw/Gb/s @90nm
-		  SerDer_dyn   = 0.01*4*(interface_ip.F_sz_um/0.09)*g_tp.peri_global.Vdd/1.2*g_tp.peri_global.Vdd/1.2;//PCIe 2.0 max per lane speed is 4Gb/s
+		  /* PIMID 1.11.29 step 3: same parameterisation on the low-power arm. */
+		  const double lane_gbps_lp = (pciep.serdes_lane_gbps > 0.0)
+		                            ? pciep.serdes_lane_gbps : 4.0;
+		  SerDer_dyn   = 0.01*lane_gbps_lp*(interface_ip.F_sz_um/0.09)*g_tp.peri_global.Vdd/1.2*g_tp.peri_global.Vdd/1.2;
 		  SerDer_dyn   /= pciep.clockRate;//covert to energy per clock cycle
 
 		  //Cadence ChipEstimate using 65nm
@@ -382,6 +394,7 @@ void PCIeController::set_pcie_param()
 	  pciep.perc_load       = XML->sys.pcie.total_load_perc;
 	  pciep.type            = XML->sys.pcie.type;
 	  pciep.withPHY         = XML->sys.pcie.withPHY;
+	  pciep.serdes_lane_gbps = XML->sys.pcie.serdes_lane_gbps;   // PIMID 1.11.29
 
 		if ( XML->sys.pcie.vdd>0)
 		{

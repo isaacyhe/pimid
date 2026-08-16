@@ -493,12 +493,45 @@ Processor::Processor(ParseXML *XML_interface)
       /* Rebuild the processor totals from the transformed components so the
        * aggregate and the parts agree -- the failure mode 1.11.0 found in the
        * NoC census and 1.11.4 found in the CoreBreakdown split. */
+      /* PIMID 1.11.29 (user ruling E8): COMPLETE the rollup. It listed
+       * core + l2 + l3 + noc + mcs by hand and silently omitted l1dir, l2dir,
+       * nius and flashcontrollers -- four component classes that upstream
+       * McPAT does add to the processor total (see the accumulation above:
+       * lines ~208, ~237, ~279, ~295). A hand-listed subset is a trap: every
+       * future component has to remember to appear here.
+       *
+       * Verified before changing it: PIMID never reads this aggregate --
+       * ComponentType::FULL_SYSTEM is declared and never populated, and the
+       * wrapper extracts CORE/NOC/PCIE/L2/L3/MC individually. So this moves no
+       * reported number today. It is completed rather than deleted so the
+       * aggregate is correct if anything ever consumes it. */
       power = core.power + l2.power + l3.power + noc.power + mcs.power;
       rt_power = core.rt_power + l2.rt_power + l3.rt_power
                + noc.rt_power + mcs.rt_power;
       area.set_area(core.area.get_area() + l2.area.get_area()
                   + l3.area.get_area() + noc.area.get_area()
                   + mcs.area.get_area());
+      /* PIMID 1.11.29 (user ruling E8, as refined): include a component ONLY
+       * when the user configured it. The rollup listed core+l2+l3+noc+mcs by
+       * hand and silently omitted four classes upstream McPAT does add
+       * (l1dir ~208, l2dir ~237, flashcontrollers ~279, nius ~295) -- but the
+       * fix is not to add them unconditionally, because reporting a component
+       * nobody asked for is its own error. Each is gated on its configured
+       * count, exactly as pcies already is below.
+       *
+       * flashcontrollers is kept rather than dropped: storage and
+       * storage-class compute are on the roadmap, and a controller that only
+       * contributes when configured costs nothing until then. */
+      auto addIf = [&](bool configured, const Component& c) {
+          if (!configured) return;
+          power = power + c.power;
+          rt_power = rt_power + c.rt_power;
+          area.set_area(area.get_area() + c.area.get_area());
+      };
+      addIf(XML->sys.number_of_L1Directories > 0, l1dir);
+      addIf(XML->sys.number_of_L2Directories > 0, l2dir);
+      addIf(XML->sys.niu.number_units       > 0, nius);
+      addIf(XML->sys.flashc.number_mcs > 0, flashcontrollers);   // system_mc: number_mcs
       if (XML->sys.pcie.number_units > 0) {
           power = power + pcies.power;
           rt_power = rt_power + pcies.rt_power;

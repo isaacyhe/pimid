@@ -111,6 +111,9 @@ public:
         double transferred_bytes = 0.0;
         double link_pj_per_bit = 0.0;
         int    link_clock_mhz = 0;   // 0 = legacy 350
+        /* 1.11.29: the link CLASS, so the report names what it priced rather
+         * than saying "PCIe" for a CXL/NVLink/UALink/interposer run. */
+        std::string link_type_name = "pcie";
     };
 
     /* 1.11.8 (#84): per-component power gating. pg_* mark components the
@@ -146,6 +149,13 @@ public:
      * Unknown types return -1: caller must reject loudly or use the
      * user override knob (printed k-style). */
     static double linkEnergyPJPerBit(const std::string& link_type);
+    /* 1.11.29: does this link class carry an off-package SerDes? Drives
+     * McPAT withPHY, which includes/excludes the SerDes area AND its
+     * dynamic term. Interposer is parallel on-package: no SerDes. */
+    static bool linkHasSerDes(const std::string& link_type);
+    /* 1.11.29: per-lane SerDes rate (Gb/s) for the link class; <=0 when
+     * unknown, which leaves the legacy 4 Gb/s rather than guessing. */
+    static double linkSerDesLaneGbps(const std::string& link_type);
     /* 1.11.21 (E1+E2): the DRAM-periphery AREA factor is a ratio between two
      * columns of one CACTI table, and baseline_device names the denominator
      * (0 hp, 1 lstp, 2 lop, 3 lp-dram, 4 comm-dram). Returns false when the
@@ -529,6 +539,13 @@ private:
 
     // McPAT area results (mm^2), populated by extractResults()
     double mcpat_core_area_mm2_ = 0.0;
+    /* 1.11.29: the LINK controller area. McPAT computes it
+     * (iocontrollers.cc: (ctrl_area + SerDer_area)/8*num_channels) and
+     * getComponentArea had no PCIE case, so it fell through to 0 -- the
+     * area was calculated and then dropped, including from the system
+     * total. Measured: the controller carries 0.0037 W of leakage per
+     * end, so it is present; only its area was invisible. */
+    double mcpat_pcie_area_mm2_ = 0.0;
     // 1.11.4: scaled/unscaled core power ratio under the DRAM-periphery
     // family; the CoreBreakdown block weights are multiplied by this so the
     // printed split stays consistent with the scaled core total.

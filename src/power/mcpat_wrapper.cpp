@@ -373,6 +373,50 @@ static void periphFamilyFactors(int table_nm, double& fa, double& fd, double& fl
     }
 }
 
+/* 1.11.29 (user ruling, step 1): does this link class have an off-package
+ * SerDes PHY? McPAT's withPHY includes/excludes BOTH the SerDes area and its
+ * dynamic term, so it is the single largest structural lever we have -- and
+ * PIMID emitted the literal 1 for every class.
+ *
+ * An INTERPOSER link is a wide parallel on-package connection over microbumps:
+ * no serialiser, no equaliser, no CDR. Charging it a full off-package SerDes
+ * is wrong in KIND, not degree -- which is why it leads this ordering. Our own
+ * termination model already returns zero for HBM "by physics (interposer)",
+ * and our link table prices it at 0.5 pJ/bit against PCIe gen5's 7.0; paying
+ * for a SerDes here contradicted both in the same run.
+ *
+ * Everything else in the table (PCIe, CXL, NVLink, UALink) genuinely rides a
+ * SerDes, so they keep the PHY. CXL in particular runs on the PCIe gen5/6
+ * electrical PHY -- pricing its PHY as PCIe is correct; what CXL adds beyond
+ * it is coherence logic, which we do NOT model and which is recorded as an
+ * acknowledged omission rather than invented. */
+/* 1.11.29 (step 3): per-lane SerDes rate, Gb/s, cited per class. McPAT's
+ * dynamic term is 10 mW/(Gb/s) x rate, and the rate was the literal 4 --
+ * PCIe 2.0. These are the published signalling rates of the classes our link
+ * table already prices:
+ *   PCIe gen3  8.0 GT/s    gen4 16.0    gen5 32.0    (PCI-SIG)
+ *   CXL 1.1/2.0 rides the gen5 PHY; CXL 3.0 the gen6 PHY -> gen5 rate here,
+ *              which is also why pricing its PHY as PCIe is correct: it IS.
+ *   NVLink 4.0 100 Gb/s per differential pair (NVIDIA)
+ *   UALink 1.0 200G-class SerDes
+ *   interposer parallel, no SerDes -- withPHY=0, so the rate is unused.
+ * Returns <=0 when the class is unknown, which leaves McPAT's historical 4
+ * rather than inventing a rate for something we cannot name. */
+double McPATWrapper::linkSerDesLaneGbps(const std::string& link_type) {
+    if (link_type.rfind("pcie_gen3", 0) == 0) return 8.0;
+    if (link_type.rfind("pcie_gen4", 0) == 0) return 16.0;
+    if (link_type.rfind("pcie_gen5", 0) == 0) return 32.0;
+    if (link_type.rfind("cxl", 0)      == 0) return 32.0;
+    if (link_type.rfind("nvlink", 0)   == 0) return 100.0;
+    if (link_type.rfind("ualink", 0)   == 0) return 200.0;
+    return -1.0;
+}
+
+bool McPATWrapper::linkHasSerDes(const std::string& link_type) {
+    if (link_type.rfind("interposer", 0) == 0) return false;
+    return true;
+}
+
 double McPATWrapper::linkEnergyPJPerBit(const std::string& link_type) {
     /* 1.11.15 (audit): match the TIMING side's vocabulary by family --
      * cxl_2_0/cxl_3_0, nvlink_3_0/4_0/c2c and interposer are accepted link
@@ -577,6 +621,7 @@ struct ResultBlob {
     McPATWrapper::PowerMetrics system_power;
     double peak_power;
     double core_area_mm2;
+    double pcie_area_mm2;   // 1.11.29: link controller area (was dropped)
     double l2_area_mm2;
     double l3_area_mm2;
     double noc_area_mm2;
@@ -662,6 +707,7 @@ void McPATWrapper::computePower() {
             blob.l3_area_mm2     = mcpat_l3_area_mm2_;
             blob.noc_area_mm2    = mcpat_noc_area_mm2_;
             blob.mc_area_mm2     = mcpat_mc_area_mm2_;
+            blob.pcie_area_mm2   = mcpat_pcie_area_mm2_;
             blob.total_area_mm2  = mcpat_total_area_mm2_;
             blob.num_noc_levels  = static_cast<int>(noc_level_power_.size());
             blob.core_ifu_w = blob.core_lsu_w = blob.core_mmu_w = 0.0;
@@ -781,6 +827,7 @@ void McPATWrapper::computePower() {
     mcpat_l3_area_mm2_    = blob.l3_area_mm2;
     mcpat_noc_area_mm2_   = blob.noc_area_mm2;
     mcpat_mc_area_mm2_    = blob.mc_area_mm2;
+    mcpat_pcie_area_mm2_  = blob.pcie_area_mm2;
     core_ifu_w_    = blob.core_ifu_w;      // 1.9.36
     core_lsu_w_    = blob.core_lsu_w;
     core_mmu_w_    = blob.core_mmu_w;
@@ -940,6 +987,7 @@ void McPATWrapper::extractResults() {
     mcpat_l3_area_mm2_ = mcpat_processor_->l3.area.get_area() * 1e-6;
     mcpat_noc_area_mm2_ = mcpat_processor_->noc.area.get_area() * 1e-6;
     mcpat_mc_area_mm2_ = mcpat_processor_->mcs.area.get_area() * 1e-6;
+    mcpat_pcie_area_mm2_ = mcpat_processor_->pcies.area.get_area() * 1e-6;  // 1.11.29
     mcpat_total_area_mm2_ = mcpat_processor_->area.get_area() * 1e-6;
 
     /* 1.11.12: the DRAM-periphery family MOVED INTO McPAT (processor.cc,
@@ -1130,6 +1178,8 @@ double McPATWrapper::getComponentArea(ComponentType component) const {
                 return mcpat_l3_area_mm2_;
             case ComponentType::MEMORY_CONTROLLER:
                 return mcpat_mc_area_mm2_;
+            case ComponentType::PCIE:
+                return mcpat_pcie_area_mm2_;   // 1.11.29: was falling through to 0
             case ComponentType::NOC:
                 return mcpat_noc_area_mm2_;
             default:
@@ -1216,6 +1266,24 @@ void McPATWrapper::printDetailedResults() const {
     std::cout << "    of which PE/core: "
               << getComponentArea(ComponentType::CORE) << " mm^2"
               << " (the quantity the periphery area factor scales)" << std::endl;
+    /* 1.11.29: the LINK controller, broken out. It was never reported, so the
+     * question "how much of a co-sim cell is the link?" could not be answered
+     * without instrumenting -- and that question decides whether the McPAT
+     * PCIe-2.0 SerDes constant is a results problem or a correctness tidy-up.
+     * Reported only when a link is configured. */
+    {
+        const auto lpm = getComponentPower(ComponentType::PCIE);
+        const double lp = lpm.total_power;
+        const double la = getComponentArea(ComponentType::PCIE);
+        if (lp > 0.0 || la > 0.0) {
+            const double tp = system_power_.total_power;
+            const double ta = getTotalArea();
+            std::cout << "    of which link ctrl: " << la << " mm^2 ("
+                      << (ta > 0.0 ? 100.0 * la / ta : 0.0) << "% of area), "
+                      << lp << " W (" << (tp > 0.0 ? 100.0 * lp / tp : 0.0)
+                      << "% of power)" << std::endl;
+        }
+    }
     std::cout << "=====================================\n" << std::endl;
 }
 
@@ -1239,16 +1307,31 @@ void McPATWrapper::printComponentBreakdown() const {
         std::cout << "    Total: " << power.total_power << " W" << std::endl;
     };
 
-    print_component("Cores", getComponentPower(ComponentType::CORE));
-    print_component("L1 Caches", getComponentPower(ComponentType::L1_CACHE));
-    print_component("L2 Caches", getComponentPower(ComponentType::L2_CACHE));
-    print_component("L3 Cache", getComponentPower(ComponentType::L3_CACHE));
-    print_component("Memory Controllers", getComponentPower(ComponentType::MEMORY_CONTROLLER));
+    /* 1.11.29 (user ruling): report the system the USER DEFINED. The scope is
+     * theirs -- host or no host, L3 or no L3, link or no link -- so a
+     * component appears only when it was configured. NoC and PCIe were
+     * already gated; cores, caches and MCs were not, so a device with no L3
+     * printed "L3 Cache: 0 W" as though the model had priced one. Same
+     * principle as the E8 rollup: never report a component nobody asked for. */
+    if (config_.num_cores > 0)
+        print_component("Cores", getComponentPower(ComponentType::CORE));
+    if (config_.l1d_size_bytes > 0 || config_.l1i_size_bytes > 0)
+        print_component("L1 Caches", getComponentPower(ComponentType::L1_CACHE));
+    if (config_.l2_size_bytes > 0)
+        print_component("L2 Caches", getComponentPower(ComponentType::L2_CACHE));
+    if (config_.l3_size_bytes > 0)
+        print_component("L3 Cache", getComponentPower(ComponentType::L3_CACHE));
+    if (config_.num_memory_controllers > 0)
+        print_component("Memory Controllers",
+                        getComponentPower(ComponentType::MEMORY_CONTROLLER));
     if (config_.has_noc || !noc_levels_.empty()) {
         print_component("NoC", getComponentPower(ComponentType::NOC));
     }
     if (pcie_stats_.number_units > 0) {
-        print_component("PCIe", getComponentPower(ComponentType::PCIE));
+        print_component("Link controller (" + pcie_stats_.link_type_name + ")",
+                        getComponentPower(ComponentType::PCIE));
+        std::cout << "    Area:    " << getComponentArea(ComponentType::PCIE)
+                  << " mm^2" << std::endl;
     }
 }
 
@@ -2029,7 +2112,15 @@ std::string McPATWrapper::generateXMLConfig() const {
                            ? pcie_stats_.link_clock_mhz : 350;
         xml << "    <component id=\"system.pcie\" name=\"pcie\">\n";
         xml << "      <param name=\"type\" value=\"1\"/>\n";
-        xml << "      <param name=\"withPHY\" value=\"1\"/>\n";
+        /* 1.11.29 step 1: from the link CLASS, not a literal. */
+        const bool has_serdes = linkHasSerDes(pcie_stats_.link_type_name);
+        xml << "      <param name=\"withPHY\" value=\"" << (has_serdes ? 1 : 0)
+            << "\"/>\n";
+        /* 1.11.29 step 3: the class's own signalling rate, not PCIe 2.0's. */
+        const double lane_gbps = linkSerDesLaneGbps(pcie_stats_.link_type_name);
+        if (lane_gbps > 0.0)
+            xml << "      <param name=\"serdes_lane_gbps\" value=\"" << lane_gbps
+                << "\"/>\n";
         xml << "      <param name=\"clockrate\" value=\"" << link_clk << "\"/>\n";
         xml << "      <param name=\"vdd\" value=\"0\"/>\n";
         xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
