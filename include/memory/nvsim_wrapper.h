@@ -42,6 +42,13 @@ public:
 
         // Technology parameters
         int process_node_nm;         // Technology node in nm
+        /* 1.11.49 (FIX-PRE-FLEET L77): the ITRS device roadmap. It was
+         * hardwired HP inside the wrapper, so power.device_corner silently
+         * did nothing for every NVM technology -- the exact corner family
+         * whose refusal (1.11.13) does NOT apply, since NVSim carries real
+         * HP/LSTP/LOP columns. 0=HP, 1=LSTP, 2=LOP, matching the McPAT
+         * device_type convention. */
+        int device_corner = 0;
         int temperature_k;           // Operating temperature in Kelvin
 
         // Optimization target

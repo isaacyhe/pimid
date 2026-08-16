@@ -42,6 +42,11 @@ public:
 
         // Technology
         double tech_node_nm;         // Technology node in nm (e.g., 22, 14, 7)
+        /* 1.11.49 (FIX-PRE-FLEET L59): the ITRS PERIPHERY flavor. Hardwired 0
+         * (ITRS-HP) for every query, so power.device_corner never reached
+         * CACTI at all. 0=HP, 1=LSTP, 2=LOP; periphery/tag flavors only --
+         * the data-array CELL type (SRAM vs comm-dram) is a different axis. */
+        int device_corner;
         uint32_t temperature;        // Operating temperature in Celsius
 
         // Access mode and type
@@ -91,6 +96,7 @@ public:
             , write_ports(0)
             , single_ended_read_ports(0)
             , tech_node_nm(22)
+            , device_corner(0)
             , temperature(350)  // 350K = ~77C
             , is_cache(false)
             , is_main_memory(false)

@@ -181,11 +181,13 @@ InputParameter* CACTIWrapper::createCACTIInput(const SRAMConfig& config) {
 
     // Cell technology flavor
     input->ram_cell_tech_type = static_cast<unsigned int>(config.cell_type);
-    input->peri_global_tech_type = 0;  // Peripheral always ITRS-HP
+    /* 1.11.49 (L59): periphery/tag flavors follow the declared corner instead
+     * of a hardwired ITRS-HP. The data-array CELL type is orthogonal. */
+    input->peri_global_tech_type = static_cast<unsigned int>(config.device_corner);
     input->data_arr_ram_cell_tech_type = static_cast<unsigned int>(config.cell_type);
-    input->data_arr_peri_global_tech_type = 0;
+    input->data_arr_peri_global_tech_type = static_cast<unsigned int>(config.device_corner);
     input->tag_arr_ram_cell_tech_type = 0;  // Tags always SRAM
-    input->tag_arr_peri_global_tech_type = 0;
+    input->tag_arr_peri_global_tech_type = static_cast<unsigned int>(config.device_corner);
 
     /* 1.11.30 (user ruling E5): from the CALLER, so CACTI and McPAT model one
      * metal stack. This was pinned to 1 here while McPAT defaulted to 0, so the

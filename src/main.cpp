@@ -5198,9 +5198,16 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     uint64_t cycles = zsim_stats.cycles;
     uint64_t instrs = zsim_stats.instrs > 0 ? zsim_stats.instrs : 1;
     if (cycles == 0 && instrs > 1) {
-        cycles = instrs;  // Conservative IPC=1 estimate
+        /* 1.11.48 (FIX-PRE-FLEET L220): 1.11.9 made `instrs` the ALL-CORE
+         * SUM; cycles are a per-core DURATION, so IPC=1 estimated from the
+         * sum inflated the duration by the PE count (a 16-PE cell claimed a
+         * 16x longer run). Per-core IPC=1 is instrs / cores. */
+        cycles = instrs / std::max(1, config.num_pes > 0 ? config.num_pes : 1);
+        if (cycles == 0) cycles = 1;
         std::cout << "  Note: cycles=0 (OOO contention sim not triggered), "
-                  << "estimating cycles=" << cycles << " from instrs" << std::endl;
+                  << "estimating cycles=" << cycles << " from instrs/core "
+                  << "(IPC=1 per core; instrs is the all-core sum since 1.11.9)"
+                  << std::endl;
     }
     if (cycles == 0) cycles = 1;
     mcpat.setTotalCycles(cycles);
@@ -5367,6 +5374,13 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         host_cfg.num_fpus = 2;
         // 1.9.32: the host IS a server part -- stated, not left to the default.
         host_cfg.device_scope = false;
+        /* 1.11.49 (FIX-PRE-FLEET L119): power.device_corner never reached the
+         * dual-McPAT HOST -- the exact case 1.11.13 says the knob exists for
+         * (pricing the host at a different corner than the device). The host
+         * is a LOGIC part, so no DRAM-periphery refusal applies; the corner
+         * maps directly. */
+        host_cfg.device_type = (config.device_corner == "lstp") ? 1
+                             : (config.device_corner == "lop")  ? 2 : 0;
         host_cfg.l1i_size_bytes = config.host_l1i_kb * 1024;
         host_cfg.l1d_size_bytes = config.host_l1d_kb * 1024;
         host_cfg.l2_size_bytes = config.host_l2_kb * 1024;
@@ -5431,17 +5445,19 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                       << " l1d=" << (hgrp.l1d_total_reads() + hgrp.l1d_total_writes())
                       << " mem=" << (hgrp.mem_rd + hgrp.mem_wr) << std::endl;
         } else {
-            host_mcpat.setTotalCycles(cycles);
-            host_mcpat.setBusyCycles(cycles / 10);
-            host_mcpat.setTotalInstructions(instrs / 10);
-            host_mcpat.setL1IAccesses(instrs / 10, instrs / 100);
-            host_mcpat.setL1DAccesses(instrs / 20, instrs / 40, instrs / 200, instrs / 400);
-            host_mcpat.setL2Accesses(instrs / 200, instrs / 400, instrs / 2000, instrs / 4000);
-            host_mcpat.setL3Accesses(instrs / 2000, instrs / 4000, instrs / 20000, instrs / 40000);
-            host_mcpat.setMemControllerAccesses(instrs / 20000, instrs / 40000);
-            std::cout << "  [Activity] host: NOT MEASURED -- fixed ratios of the "
-                         "device instruction count (estimate, not a measurement)"
-                      << std::endl;
+            /* 1.11.48 (FIX-PRE-FLEET L250, under the E26 ruling: "no
+             * measurements should never happen"). This branch synthesised a
+             * host from NINE fixed divisors of the DEVICE's instruction
+             * count -- busy=cycles/10, instrs/10, L1I=instrs/10 ... MC=
+             * instrs/20000 -- none measured, and 1.11.9's instrs-summing
+             * silently rebased every one of them by the PE count. A
+             * system-scope dump with no host counters is an INVALID INPUT;
+             * pricing an invented host hides that inside a result. */
+            std::cerr << "ERROR: system-scope dump carries no measured host "
+                         "counters; refusing to synthesise a host from fixed "
+                         "divisors of the device instruction count. Fix the "
+                         "input; do not trust this run." << std::endl;
+            exit(1);
         }
         host_mcpat.setMCTechParams(getMCTechParamsForMcPAT(config.host_memory_tech, 1));
 
@@ -5699,6 +5715,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             // the extensive quantities (leakage, area) by the bank count. Per-access
             // energy is already per-bank -- one access hits one bank.
             pimid::CACTIWrapper::SRAMConfig sram_cfg;
+            sram_cfg.device_corner = (config.device_corner == "lstp") ? 1 : (config.device_corner == "lop") ? 2 : 0;  // 1.11.49 (L59)
                 sram_cfg.ic_proj_type = config.interconnect_projection;   // 1.11.30 E5: one metal stack
             sram_cfg.capacity_bytes = 64 * 1024;  // one bank
             sram_cfg.line_size = config.cache_line_size;
@@ -5857,6 +5874,8 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             // by the bank count (per-access energy is already per-bank). Also keeps
             // NVSim off the multi-minute 16MB-array characterization.
             pimid::NVSimWrapper::NVMConfig nvm_cfg;
+            nvm_cfg.device_corner = (config.device_corner == "lstp") ? 1
+                                  : (config.device_corner == "lop")  ? 2 : 0;  // 1.11.49 (L77)
             nvm_cfg.capacity_bytes = 64 * 1024;  // one bank
             nvm_cfg.word_width_bits = config.cache_line_size * 8;  // one full line per access (64 B = 512 b), matching the CACTI/SRAM path
             nvm_cfg.process_node_nm = validateTechNodeNm(config.tech_node_nm, "NVM array");
@@ -6514,6 +6533,23 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 }
                 mcfg.device_type = corner;
             }
+        } else if (node.role == UnifiedConfig::SystemNode::HOST) {
+            /* 1.11.49 (gate 1159I Y2, completing L119): the corner block above
+             * is DEVICE-only, so a system-scope HOST node kept device_type=0
+             * regardless of power.device_corner -- every emitted XML carried
+             * value="0" under corner=lstp, which is how the gate caught it.
+             * The host is a LOGIC part: no DRAM-periphery refusal applies and
+             * the corner maps directly, same as the dual-McPAT host path. */
+            mcfg.process_family = 0;
+            int corner = (config.device_corner == "lstp") ? 1
+                       : (config.device_corner == "lop")  ? 2 : 0;
+            if (corner != 0) {
+                std::cout << "  [tech] " << node.name << ": device corner "
+                          << config.device_corner
+                          << " applied to the host's logic components."
+                          << std::endl;
+            }
+            mcfg.device_type = corner;
         }
 
         McPAT::DeviceProfile profile;
@@ -6560,7 +6596,12 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
         mcfg.num_alus = ov_get_int("num_alus", mcfg.num_alus);
         mcfg.num_muls = ov_get_int("num_muls", mcfg.num_muls);
         mcfg.num_fpus = ov_get_int("num_fpus", mcfg.num_fpus);
-        mcfg.device_type = ov_get_int("device_type", 0);
+        /* 1.11.49 (gate 1159J Z1): the default here was a literal 0, which
+         * silently clobbered the corner mapping the role branches above had
+         * just written -- the "[tech] ... corner applied" line printed and the
+         * emitted XML still carried device_type=0. Default to the value
+         * already on mcfg; an explicit per-node override still wins. */
+        mcfg.device_type = ov_get_int("device_type", mcfg.device_type);
         mcfg.longer_channel_device = ov_get_int("longer_channel_device", 1);
         mcfg.number_hardware_threads = ov_get_int("number_hardware_threads", 1);
         mcfg.interconnect_projection_type =
@@ -11249,7 +11290,12 @@ int main(int argc, char** argv) {
                     auto it = config.mcpat_overrides.find(key);
                     return (it != config.mcpat_overrides.end()) ? (int)it->second : fallback;
                 };
-                mcfg.device_type = ov_get_int("device_type", 0);
+                /* 1.11.49: same pattern as the per-node site's clobber fix.
+                 * Here nothing sets mcfg.device_type before this line today
+                 * (applyProcessFamily touches only process_family), so this is
+                 * behavior-preserving -- it just stops the literal-0 default
+                 * from silently wiping any future upstream assignment. */
+                mcfg.device_type = ov_get_int("device_type", mcfg.device_type);
                 mcfg.longer_channel_device = ov_get_int("longer_channel_device", 1);
                 mcfg.interconnect_projection_type =
         ov_get_int("interconnect_projection_type", config.interconnect_projection);  // 1.11.30 E5
@@ -12473,14 +12519,30 @@ int main(int argc, char** argv) {
                     // Per-core cycles in the single zsim.out ARE the per-rank
                     // cycles (rank r == core r in thread mode).
                     if (config.workload_type == "mpi" && config.mpi_ranks > 0) {
+                        /* 1.11.48 (FIX-PRE-FLEET L248): LAST DUMP ONLY. The
+                         * 1.11.9 last-dump-wins fix went to the main parser;
+                         * this summary still took the FIRST mpi_ranks cycle
+                         * lines -- i.e. the FIRST dump's stale mid-run values
+                         * whenever a periodic dump preceded the final one. */
                         std::ifstream sf(stats_path);
                         std::string ln;
+                        std::vector<std::string> lines_;
+                        while (std::getline(sf, ln)) lines_.push_back(ln);
+                        std::vector<size_t> seps_;
+                        for (size_t li = 0; li < lines_.size(); li++)
+                            if (lines_[li] == "===") seps_.push_back(li);
+                        size_t s0 = 0, s1 = lines_.size();
+                        if (seps_.size() >= 2) {
+                            s0 = seps_[seps_.size() - 2] + 1;
+                            s1 = seps_[seps_.size() - 1];
+                        }
                         std::vector<uint64_t> rankCycles;
-                        while (std::getline(sf, ln)) {
-                            size_t cpos = ln.find("cycles: ");
+                        for (size_t li = s0; li < s1; li++) {
+                            const std::string& l2 = lines_[li];
+                            size_t cpos = l2.find("cycles: ");
                             if (cpos != std::string::npos &&
-                                ln.find("# Simulated") != std::string::npos) {
-                                uint64_t v = strtoull(ln.c_str() + cpos + 8, nullptr, 10);
+                                l2.find("# Simulated") != std::string::npos) {
+                                uint64_t v = strtoull(l2.c_str() + cpos + 8, nullptr, 10);
                                 rankCycles.push_back(v);
                             }
                         }
@@ -12559,14 +12621,33 @@ int main(int argc, char** argv) {
                      * depend on the user having declared the workload accurately. Explicit
                      * workload.env still wins (overwrite=0 below). */
                     if (true) {
+                        /* 1.11.48 (FIX-PRE-FLEET L249): LAST DUMP ONLY -- the
+                         * same rule parseZSimOutputFile has carried since
+                         * 1.11.9, which this reader never received. zsim.out
+                         * holds one "===-delimited" dump PER stats write
+                         * (periodic + final), and counters are monotonic run
+                         * totals; accumulating every dump multiplied `tot`
+                         * and the PE count by the dump count (max survived,
+                         * mean and Total lied). */
                         std::ifstream sf(stats_path);
                         std::string ln;
+                        std::vector<std::string> lines_;
+                        while (std::getline(sf, ln)) lines_.push_back(ln);
+                        std::vector<size_t> seps_;
+                        for (size_t li = 0; li < lines_.size(); li++)
+                            if (lines_[li] == "===") seps_.push_back(li);
+                        size_t s0 = 0, s1 = lines_.size();
+                        if (seps_.size() >= 2) {
+                            s0 = seps_[seps_.size() - 2] + 1;
+                            s1 = seps_[seps_.size() - 1];
+                        }
                         std::vector<uint64_t> peCycles;
-                        while (std::getline(sf, ln)) {
-                            size_t cpos = ln.find("cycles: ");
+                        for (size_t li = s0; li < s1; li++) {
+                            const std::string& l2 = lines_[li];
+                            size_t cpos = l2.find("cycles: ");
                             if (cpos != std::string::npos &&
-                                ln.find("# Simulated") != std::string::npos) {
-                                uint64_t v = strtoull(ln.c_str() + cpos + 8, nullptr, 10);
+                                l2.find("# Simulated") != std::string::npos) {
+                                uint64_t v = strtoull(l2.c_str() + cpos + 8, nullptr, 10);
                                 if (v > 0) peCycles.push_back(v);
                             }
                         }

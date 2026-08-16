@@ -7,6 +7,54 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.49 -- readers read the last dump; the corner reaches what it claims
+
+FIX-PRE-FLEET batches F (L220/L248/L249/L250) and G (L59/L69/L77/L119).
+
+**Batch F -- stats readers and estimates.**
+- L248/L249: the 1.11.9 last-dump-wins rule finally reaches the two readers it
+  missed. The MPI rank summary took the FIRST mpi_ranks cycle lines -- the
+  first dump's stale mid-run values whenever a periodic dump preceded the
+  final one; the OMP critical-path summary accumulated EVERY dump, inflating
+  Total and the PE count by the dump count (max survived; mean and Total
+  lied). Both now segment on the "===" separators exactly as the main parser
+  has since 1.11.9.
+- L220: the IPC=1 cycle fallback estimated a DURATION from the all-core
+  instruction SUM -- inflated by the PE count since 1.11.9 made instrs a sum.
+  Now instrs/cores, stated in the note it prints.
+- L250 (under the E26 ruling): the unmeasured-host synthesis -- nine fixed
+  divisors of the DEVICE instruction count posing as a host -- is REFUSED.
+  A system-scope dump with no host counters is an invalid input.
+
+**Batch G -- power.device_corner reaches what its documentation claims.**
+- L69: L2/L3 components hardcoded device_type=0 (hp) in the same XML whose
+  system level carried the user's corner. The caches now follow the corner.
+- L77: NVSim's device roadmap was hardwired HP, so the corner silently did
+  nothing for every NVM technology -- the one family where it is genuinely
+  selectable (real ITRS HP/LSTP/LOP columns; no DRAM-periphery refusal
+  applies). Wired via NVMConfig.device_corner.
+- L119: the HOST never received the corner -- the exact case 1.11.13 says
+  the knob exists for. TWO independent gaps, both found by gate: (a) the
+  dual-McPAT device-scope path never mapped it onto host_cfg; (b) in
+  system-scope co-sim the per-node corner block was DEVICE-only, so host
+  nodes kept device_type=0 -- and even after mapping, the mcpat_overrides
+  block clobbered it back to 0 via its literal-0 default (the "corner
+  applied" line printed while the XML still carried 0). The override default
+  is now the corner-derived value already on the config -- an explicit
+  per-node device_type override still wins. The host is logic; the corner
+  maps directly, no refusal.
+- L59: CACTI's periphery/tag ITRS flavors were hardwired ITRS-HP for every
+  query; they now follow the corner where config is in scope (the SRAM
+  main-memory query). The data-array CELL type is a different axis and is
+  untouched. The no-config helper queries keep HP -- that residue is L70's
+  hardcoded-node finding, still open and tracked.
+- L106 reconciled: the "divergent system-scope copy" was already fixed by
+  1.11.17 (the per-node block runs the corner map, refusal, and guard);
+  the TRIAGE tag was stale.
+
+Defaults preserve prior emissions exactly (corner=hp emits the same 0s), so
+nothing moves unless the knob is used -- gate-asserted bit-stability.
+
 ## 1.11.48 -- the census tells integer SIMD from floating point (E batch)
 
 FIX-PRE-FLEET L201 and L210: classification honesty in the decoder census.

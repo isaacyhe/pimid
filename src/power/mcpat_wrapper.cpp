@@ -2075,7 +2075,11 @@ std::string McPATWrapper::generateXMLConfig() const {
             xml << "      <param name=\"buffer_sizes\" value=\"16,16,16,16\"/>\n";
             xml << "      <param name=\"clockrate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
             xml << "      <param name=\"ports\" value=\"1,1,1\"/>\n";
-            xml << "      <param name=\"device_type\" value=\"0\"/>\n";
+            /* 1.11.49 (FIX-PRE-FLEET L69): the corner the system declares is
+             * the corner the caches get. This was a hardcoded 0 (hp) in the
+             * same XML whose system-level device_type carried the user's
+             * power.device_corner -- silently overriding it for every L2. */
+            xml << "      <param name=\"device_type\" value=\"" << config_.device_type << "\"/>\n";
             xml << "      <stat name=\"read_accesses\" value=\"" << l2_reads_per << "\"/>\n";
             xml << "      <stat name=\"write_accesses\" value=\"" << l2_writes_per << "\"/>\n";
             xml << "      <stat name=\"read_misses\" value=\"" << l2_rmisses_per << "\"/>\n";
@@ -2098,7 +2102,7 @@ std::string McPATWrapper::generateXMLConfig() const {
             << ",64,16,16,16,23,64,1\"/>\n";
         xml << "      <param name=\"clockrate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
         xml << "      <param name=\"ports\" value=\"1,1,1\"/>\n";
-        xml << "      <param name=\"device_type\" value=\"0\"/>\n";
+        xml << "      <param name=\"device_type\" value=\"" << config_.device_type << "\"/>\n";  /* 1.11.49 (L69) */
         xml << "      <param name=\"buffer_sizes\" value=\"16,16,16,16\"/>\n";
         xml << "      <stat name=\"read_accesses\" value=\"" << l3_reads_ << "\"/>\n";
         xml << "      <stat name=\"write_accesses\" value=\"" << l3_writes_ << "\"/>\n";

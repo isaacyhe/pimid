@@ -231,8 +231,12 @@ void NVSimWrapper::createNVSimInput() {
     nvsim_input_->temperature = config_.temperature_k;
 
     // Device roadmap - IMPORTANT: must be set for Technology initialization
-    // Default to HP (high performance) if not specified
-    nvsim_input_->deviceRoadmap = HP;
+    /* 1.11.49 (L77): from power.device_corner via config, no longer hardwired
+     * HP. NVSim has real ITRS HP/LSTP/LOP columns, so unlike the DRAM-
+     * periphery family (one comm-dram column, corner refused) the corner is
+     * genuinely selectable here. */
+    nvsim_input_->deviceRoadmap = (config_.device_corner == 1) ? LSTP
+                                : (config_.device_corner == 2) ? LOP : HP;
 
     // Design target
     if (config_.is_cache) {
@@ -325,11 +329,17 @@ void NVSimWrapper::loadCellParameters() {
 namespace {
     struct NVMCacheKey {
         int nvm_type; uint64_t capacity_bytes; int process_node_nm; uint32_t word_width_bits;
+        /* 1.11.49 (gate 1159H X1): the DEVICE CORNER is part of the result's
+         * identity. Without it, an LSTP query silently served the pre-generated
+         * HP entry -- the L77 fix compiled and did nothing, and the gate
+         * caught it: LSTP leakage == HP leakage exactly. */
+        int device_corner;
         bool operator<(const NVMCacheKey& o) const {
             if (nvm_type != o.nvm_type) return nvm_type < o.nvm_type;
             if (capacity_bytes != o.capacity_bytes) return capacity_bytes < o.capacity_bytes;
             if (process_node_nm != o.process_node_nm) return process_node_nm < o.process_node_nm;
-            return word_width_bits < o.word_width_bits;
+            if (word_width_bits != o.word_width_bits) return word_width_bits < o.word_width_bits;
+            return device_corner < o.device_corner;
         }
     };
     struct NVMCacheVal {
@@ -362,7 +372,12 @@ namespace {
         std::ostringstream os;
         os << nvsimCacheDir() << "/nvm_t" << k.nvm_type
            << "_c" << k.capacity_bytes << "_n" << k.process_node_nm
-           << "_w" << k.word_width_bits << ".xml";
+           << "_w" << k.word_width_bits;
+        /* 1.11.49: corner joins the FILENAME for non-HP so the pre-generated
+         * HP set keeps its names (no regeneration for the default), while
+         * LSTP/LOP can never collide with it. */
+        if (k.device_corner != 0) os << "_dc" << k.device_corner;
+        os << ".xml";
         return os.str();
     }
     // Minimal scalar XML reader (looks for <field>value</field>). Returns true on
@@ -431,7 +446,7 @@ namespace {
 void NVSimWrapper::runNVSim() {
     // Cache short-circuit: if this exact (type, capacity, node) was characterized
     // before, reuse the scalar outputs and skip the expensive design-space search.
-    NVMCacheKey key{ (int)config_.nvm_type, config_.capacity_bytes, config_.process_node_nm, config_.word_width_bits };
+    NVMCacheKey key{ (int)config_.nvm_type, config_.capacity_bytes, config_.process_node_nm, config_.word_width_bits, config_.device_corner };  // 1.11.49: corner in the key
     // Reads (both the in-memory map and the on-disk XML) are skipped unless the
     // warehouse mode permits reading — OFF/WO must truly recompute.
     if (pimid::cache::readEnabled()) {
