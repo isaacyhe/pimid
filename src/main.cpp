@@ -6352,8 +6352,35 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                     !xing_link_charged;
                 if (charge_here) xing_link_charged = true;
                 McPAT::PCIeStats ps;
-                ps.number_units = 1;             // this node's end of the link
-                ps.num_channels = config.pcie_num_lanes;
+                /* 1.11.34: the HOST carries one controller PER ATTACHED DEVICE.
+                 * It was hardcoded to 1, so a multi-device system reported a
+                 * single controller's area and leakage on the host side however
+                 * many devices hung off it -- a silent undercount that scales
+                 * with device count, and multi_device.yaml is a shipped example.
+                 * A device end still has exactly one: its own link to the host.
+                 *
+                 * NOT FIXED, and stated rather than papered over: the crossing
+                 * counters (xing_h2d_bytes / xing_d2h_bytes) are GLOBAL, so
+                 * per-device link traffic cannot be attributed and the dynamic
+                 * term is still charged once, at the host, on the total. With
+                 * mixed link types across devices, one pJ/bit is applied to all.
+                 * Both need per-device counters in the plugin; inventing an
+                 * attribution here would be worse than the known limitation. */
+                int link_units = 1;
+                if (node.role == UnifiedConfig::SystemNode::HOST) {
+                    int ndev = 0;
+                    for (const auto& n2 : config.system_nodes)
+                        if (n2.role == UnifiedConfig::SystemNode::DEVICE) ++ndev;
+                    link_units = (ndev > 0) ? ndev : 1;
+                }
+                ps.number_units = link_units;
+                /* 1.11.34 (UCIe): an interposer is counted in MODULES of 64
+                 * lanes (advanced package), not in PCIe lanes. Using the PCIe
+                 * lane default for it compared different quantities. */
+                {
+                    const int lpm = McPAT::linkLanesPerModule(config.pcie_link_type);
+                    ps.num_channels = (lpm > 0) ? lpm : config.pcie_num_lanes;
+                }
                 ps.duty_cycle = 1.0;
                 ps.total_load_perc = 0.0;        // legacy path off; bytes drive it
                 ps.transferred_bytes =
@@ -9767,8 +9794,24 @@ int main(int argc, char** argv) {
             }
 
             // PCIe transfer modeling config (for cosim)
-            if (yaml_cfg["power"] && yaml_cfg["power"]["pcie"]) {
-                auto pc = yaml_cfg["power"]["pcie"];
+            /* 1.11.34: the surface is power.link.*, because the model accepts
+             * ELEVEN link classes across five families (pcie_gen3/4/5,
+             * cxl_2_0/cxl_3_0/cxl_mem, nvlink_3_0/4_0/c2c, ualink_1_0,
+             * interposer) and naming all of them "pcie" misdescribes every one
+             * that is not. An interposer is a parallel on-package link with no
+             * SerDes at all -- calling its configuration "pcie" invites exactly
+             * the category error found in its lane count this release.
+             * power.pcie.* stays as a DEPRECATED ALIAS so no existing config
+             * breaks; it is read only when power.link is absent. */
+            if (yaml_cfg["power"] && (yaml_cfg["power"]["link"] || yaml_cfg["power"]["pcie"])) {
+                const bool legacy_key = !yaml_cfg["power"]["link"];
+                if (legacy_key)
+                    std::cout << "  [config] power.pcie.* is deprecated; use "
+                                 "power.link.* (the model carries pcie, cxl, "
+                                 "nvlink, ualink and interposer classes). The "
+                                 "alias still works." << std::endl;
+                auto pc = legacy_key ? yaml_cfg["power"]["pcie"]
+                                     : yaml_cfg["power"]["link"];
                 config.pcie_timing_configured = true;  // power.pcie section present
                 config.pcie_enabled = pc["enabled"].as<bool>(config.pcie_enabled);
                 config.pcie_num_units = pc["num_units"].as<int>(config.pcie_num_units);

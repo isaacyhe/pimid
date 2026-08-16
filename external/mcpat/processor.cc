@@ -435,10 +435,16 @@ Processor::Processor(ParseXML *XML_interface)
    * would double-count it. */
   if (XML->sys.dram_periph_family == 1) {
       const double fa = XML->sys.dram_periph_area;
+      /* PIMID 1.11.34 (E11): the PITCH penalty applies to the CORE ONLY. It
+       * used to be folded into fa before emission, so it also scaled the caches
+       * and the memory controller -- off-pitch circuits that do not abut the
+       * array and are limited by wiring rather than by bitline geometry. */
+      const double fpitch = (XML->sys.dram_periph_pitch > 0.0)
+                          ? XML->sys.dram_periph_pitch : 1.0;
       const double fd = XML->sys.dram_periph_dyn;
       const double fl = XML->sys.dram_periph_leak;
-      const int    sc = XML->sys.dram_periph_scope;
-      auto applyFam = [&](Component& c, bool scaleArea, const char* who = "?") {
+      auto applyFam = [&](Component& c, bool scaleArea, const char* who = "?",
+                          double areaMul = 1.0) {
           /* PIMID 1.11.32 (user ruling E9): read each basis from ITSELF.
            * This used to take plainLeak from c.power -- the PEAK component --
            * and write it into the RUNTIME fields too, discarding whatever
@@ -521,7 +527,9 @@ Processor::Processor(ParseXML *XML_interface)
           c.power.readOp.power_gated_with_long_channel_leakage     = plainGated * fl;
           c.rt_power.readOp.power_gated_leakage                    = plainGatedRt * fl;
           c.rt_power.readOp.power_gated_with_long_channel_leakage  = plainGatedRt * fl;
-          if (scaleArea) c.area.set_area(c.area.get_area() * fa);
+          /* 1.11.34 (E11): areaMul carries the CORE-ONLY pitch penalty; it
+           * is 1.0 for every other component. */
+          if (scaleArea) c.area.set_area(c.area.get_area() * fa * areaMul);
       };
       /* AREA vs DEVICE factors are not the same claim. The dynamic and
        * leakage factors are device physics and apply to every component on
@@ -533,16 +541,19 @@ Processor::Processor(ParseXML *XML_interface)
        * factors and keeps its logic-process area -- stated, because the
        * alternative (scaling a wire-dominated area by a device ratio) put a
        * 16-PE add-on at 88% of its own HBM3 die. */
-      if (sc & 1) applyFam(core, true, "core");
-      if (sc & 2) { applyFam(l2, true, "l2"); applyFam(l3, true, "l3"); }
-      if (sc & 4) {
+      /* 1.11.34 (E10): the scope mask had one reachable value (15, emitted as
+       * a literal with no surface), so it is gone and the transform applies
+       * unconditionally -- which is what 15 meant. */
+      applyFam(core, true, "core", fpitch);   // core alone takes the pitch penalty
+      applyFam(l2, true, "l2"); applyFam(l3, true, "l3");
+      {
           applyFam(noc, false, "noc-agg");              // device factors, logic-process area
           /* The per-level objects the reporting layer reads must carry the
            * same transform as the aggregate: a breakdown that disagrees with
            * its own total is the drift this release exists to end. */
           for (int ni = 0; ni < numNOC; ni++) applyFam(*nocs[ni], false, "noc");
       }
-      if (sc & 8) applyFam(mcs, true, "mcs");
+      applyFam(mcs, true, "mcs");
       /* Rebuild the processor totals from the transformed components so the
        * aggregate and the parts agree -- the failure mode 1.11.0 found in the
        * NoC census and 1.11.4 found in the CoreBreakdown split. */

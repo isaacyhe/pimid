@@ -153,6 +153,13 @@ public:
      * McPAT withPHY, which includes/excludes the SerDes area AND its
      * dynamic term. Interposer is parallel on-package: no SerDes. */
     static bool linkHasSerDes(const std::string& link_type);
+    /* 1.11.34 (UCIe): lanes per PHY module for classes with their own module
+     * structure -- interposer is 64 (advanced package). <=0 = use the user's
+     * configured lane count. */
+    static int  linkLanesPerModule(const std::string& link_type);
+    /* 1.11.34: every class we model runs a transaction/data-link stack,
+     * interposer included -- UCIe's D2D adapter carries PCIe/CXL flit mode. */
+    static bool linkHasProtocolStack(const std::string& link_type);
     /* 1.11.29: per-lane SerDes rate (Gb/s) for the link class; <=0 when
      * unknown, which leaves the legacy 4 Gb/s rather than guessing. */
     static double linkSerDesLaneGbps(const std::string& link_type);

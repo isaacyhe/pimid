@@ -7,6 +7,72 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.34 -- the link is not PCIe, and the pitch penalty is not the whole die
+
+E10 and E11 ruled together, plus the link-model gaps the user asked to patch.
+Everything here except one item is sourced from UCIe or from our own placement
+ladder rather than asserted.
+
+- **E11: fa and PITCH are emitted separately.** They were multiplied into one
+  scalar, so wherever the area factor went the pitch penalty went too -- onto
+  the caches and the memory controller. Those are OFF-PITCH circuits: per
+  Vogelsang (MICRO 2010) the on-pitch circuitry is the sense-amp stripes and
+  local wordline drivers, laid out on the array's bitline pitch, while a cache
+  or MC sits further out and is limited by wiring. Only the PE core abuts the
+  array. MEASURED: at pitch 2.0 the device area now goes 8.553 -> 9.573 mm^2,
+  a ratio of 1.119. It was 2.0. The penalty was inflating device area by ~79%
+  more than physics supports whenever it was set.
+
+- **E10: the scope mask is gone.** Emitted as the literal 15 -- every bit,
+  always -- with no configuration surface, so it had one reachable value and
+  its bit structure implied a selectability that did not exist. The LINK
+  CONTROLLER stays untransformed for a stated reason rather than a missing
+  mask bit: our own ladder maps LOGIC_DIE (the HBM base die) to family 0, and
+  an HBM device reaches its host THROUGH that base die; for DDR-class parts
+  the controller is host-side. Either way it is logic silicon.
+
+- **The link surface is power.link.***, because the model accepts ELEVEN
+  classes across five families (pcie_gen3/4/5, cxl_2_0/3_0/mem,
+  nvlink_3_0/4_0/c2c, ualink_1_0, interposer) and naming all of them "pcie"
+  misdescribes every one that is not. power.pcie.* remains a deprecated alias,
+  announced when used, so no existing config breaks.
+
+- **Interposer, sourced from UCIe** (uciexpress.org; Hot Chips 2023 tutorial):
+    - 0.25-0.5 pJ/bit for the ADVANCED package (interposer/bridge, <=2 mm
+      channels) against 0.5-1 for the standard organic package. Our 0.5 sits
+      at the conservative top of the advanced range -- a ballpark before, a
+      cited bound now.
+    - 64 data lanes per PHY module (advanced) against 16 (standard). An
+      interposer was defaulting to a PCIe LANE count, which is a different
+      quantity; it now takes its own module structure.
+  AND A REVERSAL OF MY OWN PROPOSAL: I argued the interposer should stop
+  paying for a PCIe protocol stack. UCIe says otherwise -- its die-to-die
+  adapter explicitly carries PCIe flit mode and CXL flit mode, so the
+  transaction and data-link logic is genuinely present and only the SerDes is
+  not. Removing the stack would have under-counted real silicon. Kept.
+
+- **The host carries one link controller PER ATTACHED DEVICE.** It was
+  hardcoded to 1, so a multi-device system reported a single controller's area
+  and leakage however many devices hung off it -- and multi_device.yaml is a
+  shipped example.
+
+STILL NOT MODELLED, stated rather than invented:
+  - CXL coherence logic (user ruled it out of scope for this pass). CXL rides
+    the PCIe gen5/6 PHY so its PHY pricing is right; the snoop/state silicon
+    beyond it has no public area figure.
+  - UCIe PHY AREA. No public mm^2 or gate count exists, so an interposer
+    PHY's area is McPAT's PCIe controller minus its SerDes -- a bound, not a
+    measurement.
+  - PER-DEVICE link attribution. The crossing counters are global, so the
+    dynamic term is charged once at the host on the total, and mixed link
+    types across devices all take one pJ/bit. Needs per-device counters in the
+    plugin; inventing an attribution would be worse than the known limit.
+
+DATA IMPACT: none by default -- nothing in the corpus sets a pitch factor, the
+mask was always 15, and the rename is alias-compatible. Gate 1145 holds the
+shipped cell bit-identical (0.0499777 W, 10164680 cycles). Configs that DO set
+a pitch factor re-price, correctly, by ~1.12x instead of 2x.
+
 ## 1.11.33 -- why runtime leakage differs, and why we do not use it
 
 User question: leakage is static, so why does McPAT have a "runtime leakage"

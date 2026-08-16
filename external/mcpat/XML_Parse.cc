@@ -88,6 +88,7 @@ void ParseXML::parse(char* filepath)
 		/* PIMID 1.11.12: DRAM-periphery device family */
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_family")==0) {sys.dram_periph_family=atoi(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_area")==0) {sys.dram_periph_area=atof(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
+		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_pitch")==0) {sys.dram_periph_pitch=atof(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_dyn")==0) {sys.dram_periph_dyn=atof(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_leak")==0) {sys.dram_periph_leak=atof(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_scope")==0) {sys.dram_periph_scope=atoi(xNode2.getChildNode("param",i).getAttribute("value"));continue;}

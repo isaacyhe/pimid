@@ -417,6 +417,35 @@ bool McPATWrapper::linkHasSerDes(const std::string& link_type) {
     return true;
 }
 
+/* 1.11.34: lanes per PHY module, from UCIe. An interposer link is NOT counted
+ * in PCIe lanes -- UCIe organises the advanced package (interposer/bridge) in
+ * modules of N=64 single-ended unidirectional data lanes, against N=16 for the
+ * standard organic package. Defaulting an interposer to a PCIe lane count was
+ * a category error: they are different quantities.
+ * Returns <=0 when the class has no module structure of its own, leaving the
+ * user's power.link.num_lanes to govern. */
+int McPATWrapper::linkLanesPerModule(const std::string& link_type) {
+    if (link_type.rfind("interposer", 0) == 0) return 64;   // UCIe advanced pkg
+    return -1;                                              // SerDes classes: user lanes
+}
+
+/* 1.11.34: does this class run a transaction/data-link protocol stack?
+ * YES for every class we model, INCLUDING interposer -- and that reverses an
+ * earlier assumption of mine. UCIe's die-to-die adapter explicitly carries
+ * "PCIe flit mode" and "CXL flit mode" over the D2D link, so the protocol
+ * logic McPAT prices as ctrl_area is genuinely present; only the SerDes is
+ * not. Removing the stack for interposer, as this release first proposed,
+ * would have under-counted real silicon.
+ * (UCIe: FDI between protocol layer and adapter, RDI between adapter and PHY.)
+ *
+ * NOT SOURCEABLE, stated rather than guessed: UCIe PHY AREA. No public mm^2 or
+ * gate count exists -- the IP vendors do not publish it -- so an interposer
+ * PHY's area is McPAT's PCIe controller minus its SerDes, which is a bound
+ * rather than a measurement. */
+bool McPATWrapper::linkHasProtocolStack(const std::string& /*link_type*/) {
+    return true;
+}
+
 double McPATWrapper::linkEnergyPJPerBit(const std::string& link_type) {
     /* 1.11.15 (audit): match the TIMING side's vocabulary by family --
      * cxl_2_0/cxl_3_0, nvlink_3_0/4_0/c2c and interposer are accepted link
@@ -430,6 +459,13 @@ double McPATWrapper::linkEnergyPJPerBit(const std::string& link_type) {
     if (link_type.rfind("pcie_gen5", 0) == 0) return 7.0;
     if (link_type.rfind("cxl", 0)    == 0) return 8.4;  // gen5 PHY + coherence delta
     if (link_type.rfind("nvlink", 0) == 0) return 1.3;
+    /* 1.11.34: SOURCED. UCIe (Universal Chiplet Interconnect Express) is the
+     * standard for on-package die-to-die links, and publishes energy per bit
+     * by package class: ADVANCED package (silicon interposer/bridge, channels
+     * up to 2 mm) 0.25-0.5 pJ/bit; STANDARD package (organic substrate,
+     * channels to 25 mm) 0.5-1 pJ/bit. Our 0.5 sits at the CONSERVATIVE top of
+     * the advanced range -- it was a ballpark before and is now a cited bound.
+     * (uciexpress.org; UCIe overview, Hot Chips 2023 tutorial.) */
     if (link_type.rfind("interposer", 0) == 0) return 0.5;
     /* 1.11.19 (user decision D1): ualink_1_0 is a fully preset-supported
      * link on the TIMING side (main.cpp link vocabulary + preset table), so
@@ -1525,10 +1561,26 @@ std::string McPATWrapper::generateXMLConfig() const {
         double pitch = (config_.subarray_pitch_factor > 0.0)
                            ? config_.subarray_pitch_factor : 1.0;
         xml << "    <param name=\"dram_periph_family\" value=\"1\"/>\n";
-        xml << "    <param name=\"dram_periph_area\" value=\"" << (fa * pitch) << "\"/>\n";
+        /* 1.11.34 (E11): fa and PITCH are emitted SEPARATELY. They were
+         * multiplied into one scalar, so wherever the area factor went the
+         * pitch penalty went too -- onto the caches and the memory controller.
+         * Those are OFF-PITCH circuits: per Vogelsang (MICRO 2010) the on-pitch
+         * circuitry is the sense-amp stripes and local wordline drivers, laid
+         * out on the array's bitline pitch, while a cache or MC sits further
+         * out and is limited by wiring. Only the PE core abuts the array. */
+        xml << "    <param name=\"dram_periph_area\" value=\"" << fa << "\"/>\n";
+        xml << "    <param name=\"dram_periph_pitch\" value=\"" << pitch << "\"/>\n";
         xml << "    <param name=\"dram_periph_dyn\" value=\"" << fd << "\"/>\n";
         xml << "    <param name=\"dram_periph_leak\" value=\"" << fl << "\"/>\n";
-        xml << "    <param name=\"dram_periph_scope\" value=\"15\"/>\n";
+        /* 1.11.34 (E10): the scope mask is GONE. It was emitted as the
+         * literal 15 -- every bit, always -- with no configuration surface, so
+         * it had one reachable value and its bit structure implied a
+         * selectability that did not exist.
+         * The LINK CONTROLLER stays untransformed for a stated reason rather
+         * than a missing mask bit: our placement ladder maps LOGIC_DIE (the
+         * HBM base die) to family 0, and an HBM device reaches its host
+         * THROUGH that base die; for DDR-class parts the controller is
+         * host-side. Either way it is logic silicon. */
     }
     /* 1.11.8: sys.power_gating enables McPAT/CACTI's sleep-transistor
      * model so per-component power_gated_leakage endpoints are computed.
