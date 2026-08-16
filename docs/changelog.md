@@ -7,6 +7,93 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.38 -- the NoC is marked where the fabric is used (E16)
+
+**Also in this release: the published tree has not configured since 1.11.26.**
+`CMakeLists.txt` gained `add_executable(nvsim_warm tools/nvsim_warm.cpp)` in
+1.11.26, but `tools/nvsim_warm.cpp` was only ever created in the development
+tree -- it was never copied into the release tree and never added to git. Every
+release from 1.11.26 to 1.11.37 therefore shipped, to BOTH repositories, a
+source tree that fails at the CMake configure step:
+
+    CMake Error at CMakeLists.txt:296 (add_executable):
+      Cannot find source file: tools/nvsim_warm.cpp
+
+Anyone cloning either repository since 1.11.26 could not build. The file is
+added here. It was found by building the release tree before committing, which
+is a required step that had been skipped -- the development tree building
+proves nothing about what is being published, because the two trees only
+contain the same files if every new file is copied across, and a file that
+exists only in the dev tree is invisible to a diff of the files that DO exist
+in both.
+
+That same build then caught a second, self-inflicted version of the problem:
+`pe_memory_interface.h` was mirrored from the dev tree carrying BOTH this
+release's fix and the NEXT release's gap instrumentation, whose `GapHist`
+members live in `zsim.h` and `zsim_types.h` -- not mirrored, because they are
+not part of this release. Fifteen compile errors, all of the form "has no
+member named nocGaps". The release tree now carries the E16-only header. A
+release must be cut from the files that belong to IT, not from whatever the
+development tree currently holds.
+
+
+`pgres.noc` counts the phases the on-die fabric was busy; idle residency is
+what the NoC is credited for power gating. The marker sat at the TOP of
+`PEMemoryInterface::access()`, on the claim that every device access "injects
+into the tree fabric".
+
+- **That claim is true for one of the two NoC models.** Detailed Garnet forces
+  `wantLocal` false and routes every access, so the blanket marker was right
+  there. The ANALYTICAL model does not: an in-coverage access takes the local
+  fast path, computes `localAccessLatency + localLinkLat_`, and returns without
+  ever generating a packet. Those accesses were marking the fabric busy.
+
+- **The same defect appeared a second time while fixing it.** The degenerate
+  no-PE path (`dstEp < 0`) states in its own comment that it prices the access
+  as plain Ramulator DRAM with no Garnet traversal -- so it must be marked like
+  the local path, not like the routed one it sits inside.
+
+- **The NoC is now marked at the four sites that generate fabric traffic**:
+  local + `mcStandalone` (the MC hop is the only fabric a local access uses),
+  degenerate + `mcStandalone`, the routed Garnet path, and the analytical
+  remote path. `devMC` keeps its unconditional marker at the top of the
+  function -- no path out of `access()` skips the memory controller, so that
+  one was never wrong.
+
+- **Measured impact (gate 1149b, 8 cells, 20 arms).** On both analytical cells
+  the old code marked the NoC busy in 264 of 264 phases while `remoteAcc = 0`:
+  every access was local and ZERO packets crossed the fabric. The new code
+  marks 0. This is not a small correction to a residency -- it is the
+  difference between "fully busy" and "completely idle" on a component that
+  carried no traffic at all. The 1.11.39 gap histogram, built for an unrelated
+  purpose, reports `[noc] no events` on the same cells: independent
+  confirmation from a second instrument.
+
+- **The marker still fires where it should**, which is the arm that separates a
+  fix from a deletion: with `mc.placement = standalone` a local access does
+  cross to the MC node, and the NoC is marked in 23462 phases -- identical
+  before and after. Detailed-cell marking is likewise unchanged (1016 = 1016).
+  Cycles and power are identical old vs new on all four cell types.
+
+- **A gating-method defect found by this gate, unrelated to the fix.** Two arms
+  compared the detailed cell against constants carried from gate 1147
+  (0.0499777 W / 10164680 cyc) and failed -- from BOTH binaries identically.
+  A dedicated 3x repeat job then reproduced those constants exactly. Across 8
+  runs of the same binary, plugin, config and node, 6 give 10164680 cyc /
+  1366290 accesses / 1366102 Garnet packets and 2 give 10164688 / 1366286 /
+  1366101. The cell is NOT bit-reproducible: 8 cycles in 10.16M (0.00008%),
+  one packet in 1.37M. Negligible for results, fatal for an equality arm.
+  Cause is NOT diagnosed -- logged as audit item N6. From this release, gates
+  test a change by comparing old vs new WITHIN ONE JOB (exact, and the arm that
+  actually tests the change); comparisons against historical constants carry a
+  tolerance. All 20 old-vs-new arms here passed exactly.
+
+- **Note on 1-PE cells, found while gating.** Coverage is split among PEs
+  (`orgsPerPe = totalUnits / numPEs`, init.cpp:1009), not fixed at the
+  placement granularity, so a ONE-PE analytical cell owns the whole memory and
+  is 100% local at every placement level. A gate arm predicting BANK placement
+  would be remote-dense was wrong for this reason and has been corrected.
+
 ## 1.11.37 -- every DRAM state pays its own refresh (E15)
 
 A DRAM unit's background power is split across three JEDEC states -- ACTIVE

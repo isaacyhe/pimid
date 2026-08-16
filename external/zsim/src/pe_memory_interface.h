@@ -445,14 +445,25 @@ public:
     uint64_t access(MemReq& req) override {
         if (req.type == GETS) DqMix::reads.fetch_add(1, std::memory_order_relaxed);
         else                  DqMix::writes.fetch_add(1, std::memory_order_relaxed);
-        /* 1.11.8 PG residency: every device memory access rides the device
-         * MC path and injects into the tree fabric, so this one site marks
-         * both trackers. devMC[0] carries the aggregate device-MC activity
+        /* 1.11.8 PG residency: every device memory access rides the device MC
+         * path, so devMC[0] is marked here, unconditionally, and that is
+         * correct -- there is no path out of access() that skips the memory
+         * controller. devMC[0] carries the aggregate device-MC activity
          * (per-channel split is a refinement once channel ids are surfaced
-         * here -- stated, not hidden). */
+         * here -- stated, not hidden).
+         *
+         * 1.11.38 (audit E16): the NoC marker used to sit HERE too, on the
+         * claim that every access "injects into the tree fabric". That is
+         * true under detailed Garnet, which forces wantLocal false below and
+         * routes everything -- but NOT under the analytical NoC, where a
+         * local-region access takes the fast path and returns without a
+         * packet, and not on the degenerate no-PE path, which says in its own
+         * comment that it performs no traversal. Marking the fabric busy for
+         * those accesses drove its idle residency to zero and cost it gating
+         * credit it had earned. The NoC is now marked at the three sites that
+         * actually generate fabric traffic; search pgres.noc.touch. */
         { uint64_t _ph = zinfo->numPhases;
-          zinfo->pgres.devMC[0].touch(_ph);
-          zinfo->pgres.noc.touch(_ph); }
+          zinfo->pgres.devMC[0].touch(_ph); }
         // Update coherence state
         switch (req.type) {
             case PUTS: case PUTX: *req.state = I; break;
@@ -507,6 +518,8 @@ public:
             // shared MC (more hops). Keep it for device-only AND co-sim.
             if (zinfo->hierarchy.mcStandalone) {
                 lat += mcHopLatency(targetUnit, req.cycle, req.srcId);
+                // E16 site 1: the ONLY fabric traffic a local access makes.
+                zinfo->pgres.noc.touch(zinfo->numPhases);
             }
 
             profLocalAccesses_.inc();
@@ -534,11 +547,21 @@ public:
                     // route to. Price as plain Ramulator DRAM (no Garnet traversal).
                     uint32_t lat = remoteLat + 2 * localLinkLat_;
                     if (zinfo->hierarchy.nocAggBandwidthMBs > 0) lat += channelBandwidthWait(req.srcId, req.cycle);
-                    if (zinfo->hierarchy.mcStandalone) lat += mcHopLatency(targetUnit, req.cycle, req.srcId);
+                    // E16: no traversal happens here (see the comment above), so
+                    // the fabric is marked only for the MC hop, as in the local
+                    // path -- not by falling through to the routed-path marker.
+                    if (zinfo->hierarchy.mcStandalone) {
+                        lat += mcHopLatency(targetUnit, req.cycle, req.srcId);
+                        zinfo->pgres.noc.touch(zinfo->numPhases);
+                    }
                     profRemoteAccesses_.inc();
                     profRemoteLatency_.inc(lat);
                     return req.cycle + lat;
                 }
+                // E16 site 2: past the degenerate check, every access here is a
+                // real packet on the H-tree. dst==src is 0 HOPS but still an
+                // injection at the node, so it counts as fabric activity.
+                zinfo->pgres.noc.touch(zinfo->numPhases);
                 uint32_t srcNode = (uint32_t)mcId_ % gn->getNumNodes();
                 uint32_t dstNode = (uint32_t)dstEp % gn->getNumNodes();
                 uint32_t networkLat;
@@ -663,6 +686,11 @@ public:
             }
 
             // ── Simple model: hierarchy traversal + serialization + contention ──
+            // E16 site 3: the analytical NoC's remote path. This is the branch
+            // the finding was about -- it traverses (computeHierTraversal walks
+            // the LCA path and charges hops), so it marks; its LOCAL sibling
+            // above does not, and used to.
+            zinfo->pgres.noc.touch(zinfo->numPhases);
             // hierLat = per-tier hop-based latency through LCA path (no double-counting)
             uint32_t hierLat = (uint32_t)computeHierTraversal(
                 myUnit, targetUnit,
