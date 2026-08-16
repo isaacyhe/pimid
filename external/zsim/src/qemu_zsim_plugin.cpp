@@ -119,7 +119,8 @@ static void pimid_noc_mark_state(uint32_t st) {
 
 /* True if any genuine in-order core exists. The in-order pipeline (in_order_core)
  * consumes the SAME x86-decoded DynUop stream as the OOO core (its oooBbl), so we
- * must also run the decoder when an in-order core is present. PIMID_INORDER_NODECODE
+ * must also run the decoder when an in-order core is present. (Historical:
+ * PIMID_INORDER_NODECODE
  * disables that decode (in-order falls back to the legacy IPC=1 path), mirroring
  * PIMID_OOO_NODECODE. Only OOOCore and InOrderCore read oooBbl; since 1.11.15
  * decode runs for EVERY core type (the class census needs it), and alu/simple/
@@ -127,7 +128,6 @@ static void pimid_noc_mark_state(uint32_t st) {
  * charge when pim.pe.floating_point=false, so decode is timing-visible on
  * those cores ONLY under that non-default config. */
 static bool g_inorder_present = false;
-static bool g_inorder_decode_disabled = false;  /* PIMID_INORDER_NODECODE=1 */
 static bool g_inorder_nobranch = false;  /* PIMID_INORDER_NOBRANCH=1: skip branch feed */
 /* Combined gate: decode TBs into DynUops when EITHER a (non-disabled) OOO or a
  * (non-disabled) in-order core is present. Set once in qemu_plugin_install. */
@@ -1338,7 +1338,7 @@ static void insn_exec_cb(unsigned int vcpu_index, void *userdata) {
     if (cores[tid]) {
         if (g_ooo_present && !g_ooo_nobranch && !g_ooo_decode_disabled &&
                 cores[tid]->asOOOCore()) feedBranch = true;
-        else if (g_inorder_present && !g_inorder_nobranch && !g_inorder_decode_disabled &&
+        else if (g_inorder_present && !g_inorder_nobranch &&
                 cores[tid]->asInOrderCore()) feedBranch = true;
     }
     if (feedBranch) {
@@ -3289,7 +3289,6 @@ int qemu_plugin_install(qemu_plugin_id_t id,
     /* Detect any OOO core -> enable x86 decode of TBs into DynUops so the OOO
      * engine runs its real dataflow pipeline instead of the synthetic path. */
     g_ooo_decode_disabled = (getenv("PIMID_OOO_NODECODE") != nullptr);
-    g_inorder_decode_disabled = (getenv("PIMID_INORDER_NODECODE") != nullptr);
     g_ooo_dump = (getenv("PIMID_OOO_DUMP") != nullptr);
     g_ooo_nobranch = (getenv("PIMID_OOO_NOBRANCH") != nullptr);
     g_inorder_nobranch = (getenv("PIMID_INORDER_NOBRANCH") != nullptr);
@@ -3326,19 +3325,19 @@ int qemu_plugin_install(qemu_plugin_id_t id,
      * byte-identical: the mix counters do not feed timing.
      * The OOO escape is unchanged -- an OOO core cannot execute without
      * uops, so its decode kill-switch is genuinely about decode. */
-    if (nodecode_env && nodecode_env[0] && strcmp(nodecode_env, "0") != 0) {
-        g_decode_enabled = (g_ooo_present && !g_ooo_decode_disabled) ||
-                           g_inorder_present;
-    } else {
-        g_decode_enabled = !(g_ooo_present && g_ooo_decode_disabled);
-    }
+    /* 1.11.44: the in-order NODECODE escape hatch is deleted (user ruling);
+     * decode is unconditional for in-order. Only OOO retains a kill-switch,
+     * because an OOO core genuinely cannot execute without uops and the
+     * switch exists for decoder-fault triage, not as a timing mode. */
+    (void)nodecode_env;
+    g_decode_enabled = !(g_ooo_present && g_ooo_decode_disabled);
     if (g_ooo_present) {
         info("[ZSim] OOO core present: x86 decode -> DynUops enabled (real out-of-order path)%s",
              g_ooo_decode_disabled ? " [DISABLED via PIMID_OOO_NODECODE]" : "");
     }
     if (g_inorder_present) {
         info("[ZSim] In-order core present: x86 decode -> DynUops enabled (real in-order scoreboard)%s",
-             g_inorder_decode_disabled ? " [DISABLED via PIMID_INORDER_NODECODE]" : "");
+             "");
     }
 
     host_mask.resize(zinfo->numCores, false);

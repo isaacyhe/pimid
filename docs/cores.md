@@ -141,8 +141,10 @@ formerly-pulled OOO+MPI cell class is fully supported since that release.
   targets) and 16-entry return-address stack, all fed with real outcomes; any
   mispredict charges a 7-cycle front-end flush bubble (shallow in-order pipe;
   override with `PIMID_INORDER_MISPRED_PENALTY`, disable all branch modeling
-  with `PIMID_INORDER_NOBRANCH=1`). `PIMID_INORDER_NODECODE=1` restores the
-  legacy IPC = 1 path. The issue width is configurable via `pim.pe.issue_width`
+  with `PIMID_INORDER_NOBRANCH=1`). (1.11.44: the legacy IPC = 1
+  `PIMID_INORDER_NODECODE` escape hatch is REMOVED -- its A/B purpose ended
+  with the 1.4.x validation, and release-vs-release builds are the baseline
+  method. The in-order core has exactly one timing model.) The issue width is configurable via `pim.pe.issue_width`
   (default 2; env `PIMID_INORDER_WIDTH` overrides YAML). Diagnostics per
   in-order core: `uops`, `decodedBbls`, `syntheticBbls`, `depStalls`,
   `issueStalls`, `branches`, `mispredBranches`, `mispredStallCycles`,

@@ -78,7 +78,10 @@ class FilterCache;
  * Supporting it would need an OOOCoreRecorder-style multi-outstanding weave
  * recorder. Memory therefore stays serialized via memRespCycle.
  *
- * Escape hatch: PIMID_INORDER_NODECODE=1 restores the exact legacy IPC=1
+ * (1.11.44: the PIMID_INORDER_NODECODE legacy IPC=1 escape hatch is DELETED
+ * -- its A/B purpose ended with the 1.4.x validation and it bred audit
+ * findings. The line below is retained for history only.)
+ * Historical: PIMID_INORDER_NODECODE=1 restored the exact legacy IPC=1
  * immediate-processing path (byte-identical A/B baseline). A BBL with no decoded
  * uops falls back to a per-BBL synthetic 1-CPI path that still drains buffered
  * loads/stores through the cache so memory/NoC traffic never desyncs.
@@ -120,8 +123,6 @@ class InOrderCore : public Core {
         CoreRecorder cRec;
 
         // ---- In-order scoreboard state (decoded path) ----
-        // decodeMode: false when PIMID_INORDER_NODECODE is set -> legacy path.
-        bool decodeMode;
         uint32_t issueWidth; // independent uops issuable per cycle (default 2)
 
         BblInfo* prevBbl;    // deferred: simulate prev BBL once its mem addrs arrive

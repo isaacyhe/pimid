@@ -37,8 +37,10 @@ InOrderCore::InOrderCore(FilterCache* _l1i, FilterCache* _l1d, uint32_t _domain,
                          uint32_t _issueWidth)
     : Core(_name), l1i(_l1i), l1d(_l1d), instrs(0), uops(0), bbls(0),
       curCycle(0), cRec(_domain, _name) {
-    // PIMID_INORDER_NODECODE=1 -> legacy IPC=1 immediate path (A/B baseline).
-    decodeMode = (getenv("PIMID_INORDER_NODECODE") == nullptr);
+    /* 1.11.44 (user ruling): the legacy IPC=1 NODECODE path is DELETED. Its
+     * A/B purpose ended with the 1.4.x validation; releases are the baseline
+     * now, and the path bred audit findings (E25: a year of structurally
+     * inert mix/FP code). One core, one timing model. */
     // In-order superscalar issue width. Precedence (highest wins):
     //   1. PIMID_INORDER_WIDTH env var  (experimentation override)
     //   2. _issueWidth ctor arg         (YAML pim.pe.issue_width -> ZSim issueWidth)
@@ -211,28 +213,16 @@ void InOrderCore::leave() {
     cRec.notifyLeave(curCycle);
 }
 
-/* ---- Legacy immediate load/store (NODECODE path) ---- */
+/* ---- Load/store address capture for the deferred decoded path ---- */
 
 void InOrderCore::loadAndRecord(Address addr) {
-    if (!decodeMode) {
-        uint64_t startCycle = curCycle;
-        curCycle = l1d->load(addr, curCycle);
-        cRec.record(startCycle);
-    } else {
-        if (loads < 256) loadAddrs[loads] = addr;
-        loads++;
-    }
+    if (loads < 256) loadAddrs[loads] = addr;
+    loads++;
 }
 
 void InOrderCore::storeAndRecord(Address addr) {
-    if (!decodeMode) {
-        uint64_t startCycle = curCycle;
-        curCycle = l1d->store(addr, curCycle);
-        cRec.record(startCycle);
-    } else {
-        if (stores < 256) storeAddrs[stores] = addr;
-        stores++;
-    }
+    if (stores < 256) storeAddrs[stores] = addr;
+    stores++;
 }
 
 /* ---- Instruction fetch of the current BBL ---- */
@@ -408,27 +398,6 @@ inline void InOrderCore::simulateDecodedBbl(BblInfo* bblInfo) {
 /* ---- BBL entry point ---- */
 
 void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
-    if (!decodeMode) {
-        // Legacy IPC=1 immediate path (byte-identical A/B baseline).
-        instrs += bblInfo->instrs;
-        /* 1.11.8 PG residency; 1.11.18: injected timing charges are waits,
-         * not retirement (see the core .cpp files). */
-        if (!bblInfo->synth) { uint64_t _ph = zinfo->numPhases;
-            pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); }
-        mixAdd(bblInfo);  // 1.11.10 measured instruction mix
-        if (!coreHasFpu_ && coreFpEmulCycles_ &&
-            bblInfo->nFp) {   // 1.11.11 (#113): soft-float on an FPU-less element
-            curCycle += (uint64_t)bblInfo->nFp * coreFpEmulCycles_;
-        }
-        curCycle += bblInfo->instrs;
-        Address endBblAddr = bblAddr + bblInfo->bytes;
-        for (Address fetchAddr = bblAddr; fetchAddr < endBblAddr; fetchAddr += (1 << lineBits)) {
-            uint64_t startCycle = curCycle;
-            curCycle = l1i->load(fetchAddr, curCycle);
-            cRec.record(startCycle);
-        }
-        return;
-    }
 
     // Deferred decoded path: simulate the PREVIOUS BBL now that its memory
     // addresses have all been buffered (mem_cb fires between BBL callbacks).

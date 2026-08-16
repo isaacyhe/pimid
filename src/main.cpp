@@ -6886,7 +6886,16 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
             if (wall_seconds > 0.0 && node.frequency_mhz > 0) {
                 node_cycles = static_cast<uint64_t>(wall_seconds * node.frequency_mhz * 1e6);
             } else {
-                node_cycles = static_cast<uint64_t>(total_cycles * core_frac);
+                /* 1.11.44 (E26): same ruling as the instruction fallback below
+                 * -- total_cycles x core_frac is the same uniform-work
+                 * invention on the time axis. A run with no derivable wall
+                 * clock is an invalid input, not a scaling problem. */
+                std::cerr << "ERROR: node '" << node.name << "' has no "
+                             "derivable wall clock (wall_seconds="
+                          << wall_seconds << ", freq=" << node.frequency_mhz
+                          << " MHz); refusing the total_cycles x core_frac "
+                             "split. Fix the input." << std::endl;
+                exit(1);
             }
             /* 1.9.29: feed McPAT THIS node's own measured counters.
              *
@@ -6906,14 +6915,31 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 (node.role == UnifiedConfig::SystemNode::HOST) ? &zsim_stats.host
                                                                : &zsim_stats.dev;
             const bool have_grp = grp->has_activity();
-            // Scale factor for the fallback path only.
-            const double fb = core_frac;
+            /* 1.11.44 (audit E26, user ruling: "no measurements should never
+             * happen"). The fallback here priced an unmeasured node at
+             * total_instrs x core_frac -- a UNIFORM-WORK assumption, exactly
+             * false for a host driving a device. Worse, 1.11.9's
+             * instrs-summing changed total_instrs from first-core to all-core
+             * SUM, silently rebasing this estimate by ~Ncores while the
+             * comment claimed it "preserves prior behaviour". A node with no
+             * measured counters is an INVALID INPUT (the dump predates
+             * per-node groups, or the parse failed) -- pricing it on an
+             * invented split hides the defect inside a result. Refused. The
+             * path is dead on every healthy run: both groups measure in every
+             * co-sim dump this train has produced. */
+            if (!have_grp) {
+                std::cerr << "ERROR: node '" << node.name << "' has no "
+                             "measured per-node counters in the stats dump; "
+                             "refusing to price it on a uniform-work split "
+                             "(total x core_frac). The dump predates per-node "
+                             "groups or the parse failed -- fix the input; do "
+                             "not trust this run." << std::endl;
+                exit(1);
+            }
 
             /* 1.9.33: executed instructions only. grp->instrs still carries the
              * injected timing charges the plugin encodes in that field. */
-            uint64_t node_instrs = have_grp
-                                 ? grp->real_instrs()
-                                 : static_cast<uint64_t>(total_instrs * fb);
+            uint64_t node_instrs = grp->real_instrs();
             if (node_cycles == 0) node_cycles = 1;
             if (node_instrs == 0) node_instrs = 1;
 
@@ -6949,33 +6975,11 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                                               grp->mispredBranches);
                 mcpat.setMeasuredMix(grp->mix_int, grp->mix_mul, grp->mix_fp,
                                      grp->mix_ld, grp->mix_st, grp->mix_br);  // 1.11.10/.15
-            } else {
-                mcpat.setL1IAccesses(
-                    static_cast<uint64_t>(zsim_stats.l1i_total_reads() * fb),
-                    static_cast<uint64_t>(zsim_stats.l1i_mGETS * fb));
-                mcpat.setL1DAccesses(
-                    static_cast<uint64_t>(zsim_stats.l1d_total_reads() * fb),
-                    static_cast<uint64_t>(zsim_stats.l1d_total_writes() * fb),
-                    static_cast<uint64_t>(zsim_stats.l1d_mGETS * fb),
-                    static_cast<uint64_t>(zsim_stats.l1d_mGETXIM * fb));
-                mcpat.setL2Accesses(
-                    static_cast<uint64_t>(zsim_stats.l2_total_reads() * fb),
-                    static_cast<uint64_t>(zsim_stats.l2_total_writes() * fb),
-                    static_cast<uint64_t>(zsim_stats.l2_mGETS * fb),
-                    static_cast<uint64_t>(zsim_stats.l2_mGETXIM * fb));
-                mcpat.setL3Accesses(
-                    static_cast<uint64_t>(zsim_stats.l3_total_reads() * fb),
-                    static_cast<uint64_t>(zsim_stats.l3_total_writes() * fb),
-                    static_cast<uint64_t>(zsim_stats.l3_mGETS * fb),
-                    static_cast<uint64_t>(zsim_stats.l3_mGETXIM * fb));
-                mcpat.setMemControllerAccesses(
-                    static_cast<uint64_t>(zsim_stats.mem_rd * fb),
-                    static_cast<uint64_t>(zsim_stats.mem_wr * fb));
-                mcpat.setMeasuredCoreActivity(
-                    static_cast<uint64_t>(zsim_stats.uops * fb),
-                    static_cast<uint64_t>(zsim_stats.branches * fb),
-                    static_cast<uint64_t>(zsim_stats.mispredBranches * fb));
             }
+            /* 1.11.44 (E26): the per-component core_frac fallback that lived
+             * here is gone with its trigger -- have_grp is now a hard
+             * precondition (refused above), so a scaled all-nodes split can
+             * never be fed to McPAT. */
             std::cout << "  [Activity] " << node.name
                       << ": instrs=" << node_instrs
                       << " (synth=" << (have_grp ? grp->syntheticInstrs : 0) << ")"

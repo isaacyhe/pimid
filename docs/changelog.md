@@ -7,6 +7,49 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.44 -- the legacy in-order NODECODE path is deleted (user ruling)
+
+1.11.43 made the legacy IPC=1 path honest; this release concludes that the
+honest form of a dead path is absence. PIMID_INORDER_NODECODE existed as the
+A/B control for the 1.4.x pipeline validation -- byte-identical against
+pre-decode releases. That purpose ended when 1.4.x shipped: release-vs-release
+builds are the baseline method now, no gate in the current train used the env,
+and the path bred audit findings (E25: a year of structurally inert mix/FP
+code that looked functional). One core, one timing model.
+
+Removed: InOrderCore::decodeMode and its three branches (legacy bblAndRecord
+body, immediate load/store), the plugin's g_inorder_decode_disabled and its
+term in the branch-feed condition, and the env read. Decode is unconditional
+for in-order; only OOO keeps its kill-switch (decoder-fault triage -- an OOO
+core cannot execute without uops -- not a timing mode). docs/cores.md records
+the removal.
+
+**Also in this release -- E26 (user ruling: "no measurements should never
+happen").** When a co-sim node had no measured per-node counters, its power
+was estimated at total_instrs x core_frac -- a uniform-work split, exactly
+false for a host driving a device. 1.11.9's instrs-summing had silently
+rebased that estimate by ~Ncores while its comment claimed it "preserves prior
+behaviour". Both uniform-work fallbacks now REFUSE with an error naming the
+node and the missing input: the instruction split, and the parallel
+total_cycles x core_frac time split (a run with no derivable wall clock is an
+invalid input, not a scaling problem). The dead 26-line per-component
+core_frac cache/MC fallback went with its trigger. Dead on every healthy run
+-- both groups measure in every co-sim dump this train has produced -- so the
+corpus is unaffected (gate 1158e: reference co-sim completes, no refusal
+fires, host cycles 17082).
+
+Gate 1158d, 4/4:
+  J1 co-sim host 17080 cycles, within noise of the 17082 reference -- the
+     default decoded path is untouched.
+  J2 an in-order DEVICE cell (the pipeline under ~460k real instructions,
+     which no gate had exercised since ALU cells took over) completes at
+     941709 cycles with the full census (133909 int+mul / 262260 fp / 66098
+     branch per core).
+  J3 PIMID_INORDER_NODECODE=1 is a NO-OP: 941709 vs 941701 (the N6 noise
+     floor). This is the arm separating "deleted" from "broken" -- the env
+     used to select a different timing model entirely, so equality proves the
+     path no longer exists.
+
 ## 1.11.43 -- the FPU flag is a property of the core group (E23, E24)
 
 peHasFpu/fpEmulCycles were ONE GLOBAL (zinfo->hierarchy) consulted by all
