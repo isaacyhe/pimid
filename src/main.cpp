@@ -3740,6 +3740,34 @@ static void normalizeSystemConfig(UnifiedConfig& config) {
 static int resolveMemoryTopology(UnifiedConfig& config) {
     if (config.scope != "system") return 0;
 
+    /* 1.11.45 (audit E27, user ruling: multi-memory is v2 scope; the current
+     * picture is ONE host memory + ONE device memory). The 1.9.42 FATAL
+     * stopped every multi-memory topology; 1.11.9 rightly removed it for the
+     * standard decoupled pair but left NOTHING guarding a second memory of
+     * the same role -- the pricing loop latches host_done/dev_done, so a
+     * third memory-bearing node ran to completion and was silently DROPPED
+     * from the energy total. Underneath, measured counters exist as a single
+     * host/device pair, so such a node has nothing to be priced from.
+     * Refused at config time, naming the nodes, until v2's per-node counter
+     * plumbing exists. */
+    {
+        const UnifiedConfig::SystemNode* first_mem[2] = {nullptr, nullptr};
+        for (const auto& n : config.system_nodes) {
+            if (n.memory_tech.empty()) continue;
+            int r = (n.role == UnifiedConfig::SystemNode::HOST) ? 0 : 1;
+            if (!first_mem[r]) { first_mem[r] = &n; continue; }
+            std::cerr << "ERROR: two " << (r == 0 ? "HOST" : "DEVICE")
+                      << " nodes carry memory ('" << first_mem[r]->name << "' "
+                      << first_mem[r]->memory_tech << " and '" << n.name
+                      << "' " << n.memory_tech << "). This build prices ONE "
+                         "memory per role -- measured counters exist as a "
+                         "single host/device pair -- and silently dropping '"
+                      << n.name << "' from the energy total is not acceptable. "
+                         "Multi-memory topologies are v2 scope." << std::endl;
+            return 1;
+        }
+    }
+
     UnifiedConfig::SystemNode* host = nullptr;
     UnifiedConfig::SystemNode* dev  = nullptr;
     for (auto& n : config.system_nodes)
@@ -6024,7 +6052,8 @@ static void runPowerAnalysis(const UnifiedConfig& config,
  * than relocating it, so that path stays bit-identical here. 1.11.14 migrates
  * the calibration INTO the CACTI fork and both call sites collapse onto one
  * tool call -- this helper is the seam that migration will use. */
-static double computeDramDieAreaMM2(const std::string& memory_tech, bool print)
+static double computeDramDieAreaMM2(const std::string& memory_tech, bool print,
+                                    int effective_banks = 0)
 {
     /* 1.11.14 (#122, borders rule): the calibration MOVED INTO the CACTI
      * fork (CACTIWrapper::getCalibratedDieArea). This is now description +
@@ -6061,6 +6090,32 @@ static double computeDramDieAreaMM2(const std::string& memory_tech, bool print)
         cacti.initialize();
         auto ca = cacti.getCalibratedDieArea();
         if (ca.area_mm2 <= 0.0) return 0.0;
+        /* 1.11.45 (audit E28): the single-query form was ALGEBRAICALLY the
+         * JEDEC anchor -- k = jedec/raw then raw*k cancels raw, so the CACTI
+         * run was decorative and a node's bank reconfiguration was silently
+         * dropped. Device scope has had the honest two-query form since
+         * 1.11.14 (k from the PRESET organisation, area from the EFFECTIVE
+         * one); system scope now does the same when the node reconfigures. */
+        if (effective_banks > 0 &&
+            static_cast<uint32_t>(effective_banks) != cfg.banks) {
+            auto eff_cfg = cfg;
+            eff_cfg.banks = static_cast<uint32_t>(effective_banks);
+            pimid::CACTIWrapper cacti_eff(eff_cfg);
+            cacti_eff.initialize();
+            if (cacti_eff.isValid() && cacti_eff.getArea() > 0.0) {
+                double die = cacti_eff.getArea() * ca.k;
+                if (print) {
+                    std::cout << "  Die area:      " << std::fixed
+                              << std::setprecision(2) << die
+                              << " mm^2/die (CACTI x k at EFFECTIVE org "
+                              << effective_banks << " banks, k="
+                              << std::setprecision(3) << ca.k
+                              << " from the preset org)"
+                              << std::defaultfloat << std::endl;
+                }
+                return die;
+            }
+        }
         if (print) {
             std::cout << "  Die area:      " << std::fixed << std::setprecision(2)
                       << ca.area_mm2 << " mm^2/die (CACTI x k, k="
@@ -6086,14 +6141,23 @@ static double computeDramDieAreaMM2(const std::string& memory_tech, bool print)
  * decision. r_idle < 0 means "pg off / no counter" and reproduces the old
  * background exactly; crosses_dq false means an on-die placement, where the
  * accesses never reach a DQ pin. */
-static void reportSharedMemoryArrayEnergy(const std::string& memory_tech,
+/* 1.11.45 (audit E31, user ruling): RETURNS the memory system's power in
+ * WATTS on the caller's wall clock, so System Total Power can include the
+ * silicon System Total Area already counts. Base discipline (the 1.11.18
+ * Joules-vs-Watts class): the array and termination terms are ENERGIES and
+ * divide by wall_seconds -- the SAME 1.9.10 single time base every node's
+ * McPAT power uses -- while the background is already a rate and adds
+ * directly. wall_seconds <= 0 returns 0 and the total simply omits memory,
+ * as before. */
+static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
                                           uint64_t mem_rd, uint64_t mem_wr,
                                           double r_idle = -1.0,
                                           bool crosses_dq = false,
                                           bool pg_enabled = false,
-                                          const std::string& device_width = "")
+                                          const std::string& device_width = "",
+                                          double wall_seconds = 0.0)
 {
-    if (memory_tech.empty() || (mem_rd + mem_wr) == 0) return;
+    if (memory_tech.empty() || (mem_rd + mem_wr) == 0) return 0.0;
 
     const bool is_dram = !(memory_tech == "SRAM" || memory_tech == "STT_MRAM" ||
                            memory_tech == "PCM"  || memory_tech == "RERAM");
@@ -6105,7 +6169,7 @@ static void reportSharedMemoryArrayEnergy(const std::string& memory_tech,
                   << " -- array energy not charged in system scope yet; the "
                      "non-DRAM path is priced by its own model in device scope."
                   << std::endl;
-        return;
+        return 0.0;
     }
 
     try {
@@ -6162,10 +6226,19 @@ static void reportSharedMemoryArrayEnergy(const std::string& memory_tech,
                   << " + term=" << total_term_mj << ")"
                   << std::defaultfloat << std::endl;
         computeDramDieAreaMM2(memory_tech, /*print=*/true);  // 1.11.9
+        /* 1.11.45 (E31): the wattage this report just printed, on the wall
+         * clock. Energy terms divide by the same seconds node power uses;
+         * background is already a rate. */
+        if (wall_seconds > 0.0) {
+            return (total_rd_mj + total_wr_mj + total_term_mj) / 1000.0 / wall_seconds
+                   + bg_mw / 1000.0;
+        }
+        return 0.0;
     } catch (const std::exception& e) {
         std::cerr << "  [Memory array] Ramulator2 query failed: " << e.what()
                   << std::endl;
     }
+    return 0.0;
 }
 
 static void runPerNodePowerAnalysis(const UnifiedConfig& config,
@@ -7076,6 +7149,7 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
     }
 
     double mem_area_total = 0.0;   // 1.11.9: memory silicon, summed into the system total
+    double mem_power_total = 0.0;  // 1.11.45 (E31): its POWER, same wall clock, same total
     {
         /* COUPLED vs DECOUPLED. When the device IS the host's memory
          * (resolveMemoryTopology copies the device tech onto the host), both
@@ -7141,11 +7215,12 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                           << "): host and device accesses land on the same "
                              "silicon and are charged once" << std::endl;
                 sayFlushCharged("the shared array");
-                reportSharedMemoryArrayEnergy(tech, all_rd, all_wr,
+                mem_power_total += reportSharedMemoryArrayEnergy(tech, all_rd, all_wr,
                                               sys_r_idle, sys_crosses_dq,
-                                              config.pg_mc,                 // 1.11.20 D15
-                                              config.dram_device_width);    // 1.11.20 D13
-                mem_area_total += computeDramDieAreaMM2(tech, false);
+                                              config.mem_power_down,        // 1.11.45: split flag (was pg_mc)
+                                              config.dram_device_width,
+                                              wall_seconds);    // 1.11.20 D13
+                mem_area_total += computeDramDieAreaMM2(tech, false, config.num_banks);
             }
         } else {
         bool host_done = false, dev_done = false;
@@ -7160,14 +7235,15 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 std::cout << "  [mem] " << node.name << " (" << node.memory_tech
                           << "): host-side array energy" << std::endl;
                 sayFlushCharged("the host-side array");
-                reportSharedMemoryArrayEnergy(node.memory_tech,
+                mem_power_total += reportSharedMemoryArrayEnergy(node.memory_tech,
                                               zsim_stats.host.mem_rd,
                                               zsim_stats.host.mem_wr + flush_wr,  // 1.11.15
                                               sys_r_idle, sys_crosses_dq,         // 1.11.20
-                                              config.pg_mc,
-                                              config.dram_device_width);
+                                              config.mem_power_down,  // 1.11.45: split flag (1.11.41)
+                                              config.dram_device_width,
+                                              wall_seconds);
                 if (priced_techs.insert(node.memory_tech).second)
-                    mem_area_total += computeDramDieAreaMM2(node.memory_tech, false);
+                    mem_area_total += computeDramDieAreaMM2(node.memory_tech, false, node.banks);
                 host_done = true;
             } else if (node.role == UnifiedConfig::SystemNode::DEVICE && !dev_done &&
                        zsim_stats.dev.has_activity()) {
@@ -7177,10 +7253,10 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                                               zsim_stats.dev.mem_rd,
                                               zsim_stats.dev.mem_wr,
                                               sys_r_idle, sys_crosses_dq,         // 1.11.20
-                                              config.pg_mc,
+                                              config.mem_power_down,  // 1.11.45: split flag (1.11.41)
                                               config.dram_device_width);
                 if (priced_techs.insert(node.memory_tech).second)
-                    mem_area_total += computeDramDieAreaMM2(node.memory_tech, false);
+                    mem_area_total += computeDramDieAreaMM2(node.memory_tech, false, node.banks);
                 dev_done = true;
             }
         }
@@ -7208,8 +7284,17 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
     }
 
     std::cout << "\n--- System Total ---" << std::endl;
+    /* 1.11.45 (audit E31, user ruling): the memory die's POWER joins the
+     * total the memory die's AREA has been in since 1.11.9 -- the two
+     * adjacent lines described different systems. Same wall clock as every
+     * node's McPAT power (1.9.10 single time base); shared memory counted
+     * once, like area; split printed so the addition is auditable. */
+    sys_power += mem_power_total;
     std::cout << "  Power: " << std::fixed << std::setprecision(2)
-              << sys_power << " W (" << sys_dyn << " dyn + " << sys_leak << " leak)" << std::endl;
+              << sys_power << " W (" << sys_dyn << " dyn + " << sys_leak << " leak";
+    if (mem_power_total > 0.0)
+        std::cout << " + " << mem_power_total << " memory";
+    std::cout << ")" << std::endl;
     /* 1.11.9 (#86, audit): the memory die is silicon too -- omitting it made
      * a co-simulated PIM system's area smaller than the same configuration
      * reported in device scope. Shared memory is counted ONCE (a device that

@@ -121,14 +121,16 @@ LinkIOResult CactiIOWrapper::computeLink(const std::string& link_type,
     if (duty_cycle < 0.0) duty_cycle = 0.0;
     if (duty_cycle > 1.0) duty_cycle = 1.0;
 
-    if (g_ip == nullptr) {
-        r.source = "g_ip not initialised; CACTI must be configured first";
-        return r;
-    }
-
-    /* E30 DISCIPLINE: save the entire global, mutate only IO fields, restore.
-     * CACTIWrapper and the McPAT fork share this object. */
-    InputParameter saved = *g_ip;
+    /* 1.11.45 (audit E30, ruled): POINTER-SWAP, never a value copy. The old
+     * form saved *g_ip and later wrote *g_ip = saved -- a write THROUGH
+     * whatever the global pointed at, which after any CACTIWrapper's death is
+     * freed memory (dangling is not null, so a null-check cannot save you).
+     * We now point the global at our OWN object for the duration and restore
+     * the previous POINTER on exit, dereferencing nothing we do not own. */
+    static InputParameter s_io_ip;   // our object; lives for the process
+    InputParameter* prev_gip = g_ip;
+    s_io_ip = InputParameter();      // reset to defaults each call
+    g_ip = &s_io_ip;
 
     g_ip->io_type      = Serial;
     g_ip->num_dq       = lanes;
@@ -177,7 +179,7 @@ LinkIOResult CactiIOWrapper::computeLink(const std::string& link_type,
      * It refuses instead, and says why. */
     const double kFitMaxMHz = 8000.0;
     if (freq_mhz > kFitMaxMHz) {
-        *g_ip = saved;
+        g_ip = prev_gip;
         char buf[360];
         snprintf(buf, sizeof buf,
                  "CACTI-IO area/PHY coefficients are fitted for DDR-class rates; "
@@ -233,7 +235,7 @@ LinkIOResult CactiIOWrapper::computeLink(const std::string& link_type,
         r.source = "CACTI-IO threw during evaluation";
     }
 
-    *g_ip = saved;   // restore before any other consumer runs
+    g_ip = prev_gip;   // restore the POINTER; we dereferenced nothing old
     return r;
 }
 
@@ -357,8 +359,11 @@ LinkIOResult CactiIOWrapper::computeDramIO(const std::string& tech,
     if (activity < 0.0) activity = 0.0;
     if (activity > 1.0) activity = 1.0;
 
-    if (g_ip == nullptr) { r.source = "g_ip not initialised"; return r; }
-    InputParameter saved = *g_ip;
+    /* 1.11.45 (E30): pointer-swap, same rule as computeLink above. */
+    static InputParameter s_dram_ip;
+    InputParameter* prev_gip = g_ip;
+    s_dram_ip = InputParameter();
+    g_ip = &s_dram_ip;
 
     /* CHANNEL STRUCTURE -- per technology, because it is not shared.
      * A first cut applied DDR4's structure (25 CA pins, a strobe pair per
@@ -414,7 +419,7 @@ LinkIOResult CactiIOWrapper::computeDramIO(const std::string& tech,
     double freq_mhz = g_ip->bus_freq;
     const double kFitMaxMHz = 8000.0;
     if (freq_mhz > kFitMaxMHz) {
-        *g_ip = saved;
+        g_ip = prev_gip;
         r.source = "rate beyond CACTI-IO's fitted range; refused";
         return r;
     }
@@ -494,7 +499,7 @@ LinkIOResult CactiIOWrapper::computeDramIO(const std::string& tech,
         r.valid = false;
         r.source = "CACTI-IO threw during evaluation";
     }
-    *g_ip = saved;
+    g_ip = prev_gip;
     return r;
 }
 

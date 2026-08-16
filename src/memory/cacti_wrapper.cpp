@@ -9,6 +9,7 @@
 // Include CACTI headers if available
 #ifdef HAVE_CACTI
 #include "cacti_interface.h"
+#include "parameter.h"   // 1.11.45 (E30): g_ip, to clear the global at our boundary
 #endif
 
 namespace pimid {
@@ -35,6 +36,7 @@ CACTIWrapper::~CACTIWrapper() {
         cacti_result_ = nullptr;
     }
     if (cacti_input_) {
+        if (g_ip == cacti_input_) g_ip = nullptr;   // 1.11.45 (E30): never dangle
         delete cacti_input_;
         cacti_input_ = nullptr;
     }
@@ -276,6 +278,16 @@ void CACTIWrapper::runCACTI() {
 
         // Call CACTI interface
         uca_org_t result = cacti_interface(cacti_input_);
+        /* 1.11.45 (audit E30): the GLOBAL never outlives the call.
+         * cacti_interface() points g_ip at our input and leaves it there;
+         * when this wrapper is destroyed, delete cacti_input_ would turn the
+         * global into a dangling pointer that every later libcacti7 consumer
+         * (the McPAT fork reads g_ip->F_sz_nm in its area/energy formulas;
+         * CactiIOWrapper used to save/restore THROUGH it) can silently read
+         * -- or write -- as freed memory. The ecosystem worked only on the
+         * unstated invariant that every reader re-inits g_ip immediately
+         * before computing; this makes the rule real at our boundary. */
+        g_ip = nullptr;
 
         // Restore original working directory
         if (cwd_saved) {
@@ -457,7 +469,14 @@ CACTIWrapper::CalibratedArea CACTIWrapper::getCalibratedDieArea() const {
      * fixed now: MB divided by MB/mm^2. */
     double chip_mbyte = static_cast<double>(config_.capacity_bytes)
                       / (1024.0 * 1024.0);
-    double jedec_ref = (chip_mbyte / vendorDieDensity(config_.memory_tech)) * 1.12;
+    /* 1.11.45 (audit E29, user ruling): the x1.12 is GONE. Its provenance was
+     * lost in the 1.11.14 migration, and it double-counted periphery: the
+     * vendorDieDensity() rows are measured from REAL DIES (die photos and
+     * vendor disclosures), so capacity/density is already a full-die area,
+     * periphery, spare arrays and all. Multiplying a full-die anchor by a
+     * periphery allowance charges it twice. Every DRAM die area shrinks by
+     * 1/1.12 = 10.7% relative to 1.11.44. */
+    double jedec_ref = chip_mbyte / vendorDieDensity(config_.memory_tech);
     if (!(jedec_ref > 0.0)) return out;
     out.k = jedec_ref / out.raw_mm2;
     out.area_mm2 = out.raw_mm2 * out.k;

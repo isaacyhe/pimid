@@ -7,6 +7,63 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.45 -- die area loses its phantom 12%; the topology and the global get rules (E27-E30)
+
+**NUMBERS MOVE: every DRAM die area shrinks by exactly 1/1.12 = 10.7%.**
+HBM3 reference: 112.00 -> 100.00 mm^2/die (gate 1158h, exact by construction).
+This touches the CAL area figures.
+
+E27 (user ruling: multi-memory is v2; the current picture is 1 host + 1
+device memory). The 1.9.42 FATAL was deleted with no replacement, so a second
+memory-bearing node of the same role was silently DROPPED from the energy
+total (host_done/dev_done latches; measured counters exist only as a single
+host/device pair, so it had nothing to be priced from anyway). Refused at
+config time, naming both nodes, before any simulation launches. Gate 1158f:
+the 1h+1d picture is untouched; a 2-device-memory config stops with the error
+and never reaches QEMU.
+
+E28. The system-scope die-area "calibration" computed k = jedec/raw and then
+raw x k -- algebraically the JEDEC anchor, ALWAYS: the CACTI run was
+decorative and a node's bank reconfiguration cancelled exactly. (The finding
+blamed device scope; verification shows device scope has had the honest
+two-query form since 1.11.14 -- it was SYSTEM scope carrying the cancelling
+single-query.) System scope now uses the same two-query form: k from the
+preset organisation, area from the node's effective banks.
+
+E29 (user ruling). The x1.12 on the JEDEC anchor is GONE. Its provenance was
+lost in the 1.11.14 migration, and it double-counted periphery: the vendor
+density rows are measured from REAL DIES, so capacity/density is already a
+full-die area. Multiplying a full-die anchor by a periphery allowance charged
+it twice.
+
+E31 (user ruling, the queue's last item). System Total AREA has included the
+memory die since 1.11.9; System Total POWER excluded it -- two adjacent lines
+describing different systems. reportSharedMemoryArrayEnergy() now RETURNS the
+wattage it prints (energy terms divided by the SAME 1.9.10 wall clock every
+node's McPAT power uses; background is already a rate), the three call sites
+accumulate it, and the total prints "+ X memory" so the addition is auditable
+from the line itself. Co-sim System Total Power RISES by the memory system's
+power -- numbers-moving for every co-sim total. Riding along: the decoupled
+and coupled memory calls still passed pg_mc as the DRAM power-down flag; they
+now pass memory.power_down, completing the 1.11.41 split at its last three
+sites. Reporting gap noted in the ledger: exact external reconstruction of
+the memory term needs wall_seconds printed, which the report does not yet do
+-- the gate audits the printed total against its own printed parts and bounds
+the term from below by the background.
+
+E30 (user ruling). CACTI's g_ip global was left dangling by the whole
+ecosystem: cacti_interface/init_interface point it at the caller's object --
+sometimes a STACK LOCAL (mcpat interconnect.cc:78) -- and nothing clears it;
+CACTIWrapper's destructor deleted the pointee. Everything worked on the
+unstated invariant that every reader re-inits before computing. Worst live
+case was 1.11.40's own CactiIOWrapper, which saved and RESTORED BY VALUE
+THROUGH g_ip -- a write into freed memory once any CACTIWrapper died. Fixed:
+CACTIWrapper clears the global after its call and in its destructor when it
+owns the pointee; CactiIOWrapper switches to POINTER-SWAP (points g_ip at its
+own object, restores the previous pointer, dereferences nothing it does not
+own); the ownership rule is stated at the boundary. Bit-neutral by
+construction and asserted by gate 1158i.
+
 ## 1.11.44 -- the legacy in-order NODECODE path is deleted (user ruling)
 
 1.11.43 made the legacy IPC=1 path honest; this release concludes that the
