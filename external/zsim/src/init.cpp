@@ -1456,6 +1456,7 @@ static void InitSystem(Config& config) {
                     } else {
                         assert(type == "OOO" || type == "OoO");
                         OOOCore* ocore = new (&oooCores[j]) OOOCore(ic, dc, name);
+                        ocore->setFpuCapability(grpHasFpu, grpFpEmul);   // 1.11.47 (L203)
                         zinfo->eventRecorders[coreIdx] = ocore->getEventRecorder();
                         zinfo->eventRecorders[coreIdx]->setSourceId(coreIdx);
                         core = ocore;

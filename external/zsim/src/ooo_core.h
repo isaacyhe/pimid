@@ -419,6 +419,18 @@ struct BblInfo;
 
 class OOOCore : public Core {
     private:
+        /* 1.11.47 (FIX-PRE-FLEET L203): per-core FPU capability, the E23
+         * pattern. OOOCore and NullCore were the two selectable PE types the
+         * 1.11.11 soft-float charge never reached -- an FPU-less OOO element
+         * silently kept hardware-float timing. */
+        bool coreHasFpu_ = true;
+        uint32_t coreFpEmulCycles_ = 0;
+    public:
+        void setFpuCapability(bool hasFpu, uint32_t emulCycles) {
+            coreHasFpu_ = hasFpu; coreFpEmulCycles_ = emulCycles;
+        }
+
+    private:
         FilterCache* l1i;
         FilterCache* l1d;
 

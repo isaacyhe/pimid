@@ -1480,6 +1480,7 @@ struct UnifiedConfig {
 
     // PCIe transfer modeling (cosim→system synthesis + system links)
     bool pcie_enabled = true;       // power.pcie.enabled (default true for cosim)
+    bool pcie_enabled_user_set = false;  // 1.11.47 (L176): explicit user choice wins
     int pcie_num_units = 1;         // power.pcie.num_units
     int pcie_num_channels = 16;     // power.pcie.num_channels (x16)
     /* 1.11.40 (E19): duty_cycle is DERIVED from measured bytes / elapsed
@@ -6688,6 +6689,23 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
              * table; unknown types are a fatal config error unless the
              * user supplies pcie_pj_per_bit_override. */
             {
+                /* 1.11.47 (FIX-PRE-FLEET L176, completion): this block never
+                 * consulted power.pcie.enabled -- "ignored on the only path a
+                 * co-simulation takes", the finding's own words. The first
+                 * half of the fix (not force-overriding an explicit false)
+                 * shipped earlier in this release; gating the CONSUMER is the
+                 * half gate 1159C proved missing. Timing keeps the link
+                 * either way -- this is energy pricing only. */
+                if (!config.pcie_enabled) {
+                    static bool said_disabled = false;
+                    if (!said_disabled) {
+                        said_disabled = true;
+                        std::cout << "  [xing] link ENERGY pricing disabled "
+                                     "(power.pcie.enabled=false, user choice); "
+                                     "the declared link keeps its timing."
+                                  << std::endl;
+                    }
+                } else {
                 /* 1.11.15 (audit), three corrections in this block.
                  * (1) FLUSH bytes leave the link: the coherence flush is the
                  * host writing back its own dirty lines to memory -- it rides
@@ -6748,9 +6766,21 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                  * defaults) only ever applied to the array charge; on the link
                  * it was not conservative but absent. */
                 const bool xing_coupled = sharedMemoryCoupled(config);
+                /* 1.11.47 (FIX-PRE-FLEET L190): PROTOCOL FRAMING IS TRAFFIC.
+                 * The timing model charges pcie_header_bytes per transaction;
+                 * the energy model priced payload only, and xingCount -- the
+                 * measured transaction count that supplies exactly this term
+                 * -- was parsed and used for nothing but a log line. Framing
+                 * bytes cross the same SerDes as payload and are priced at
+                 * the same pJ/bit. */
+                uint64_t xframing = zsim_stats.xing_count *
+                                    static_cast<uint64_t>(
+                                        config.pcie_header_bytes > 0
+                                            ? config.pcie_header_bytes : 0);
                 uint64_t xbytes = zsim_stats.xing_h2d_bytes +
                                   zsim_stats.xing_d2h_bytes +
-                                  (xing_coupled ? zsim_stats.xing_flush_bytes : 0);
+                                  (xing_coupled ? zsim_stats.xing_flush_bytes : 0) +
+                                  xframing;
                 McPAT::McPATWrapper::LinkEnergyBand pjband =
                     McPAT::McPATWrapper::linkEnergyBandPJPerBit(config.pcie_link_type);
                 double pjbit;
@@ -6912,6 +6942,7 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                               << (xing_coupled
                                     ? " + flush " + std::to_string(zsim_stats.xing_flush_bytes)
                                     : std::string())
+                              << " + framing " << xframing
                               << "), " << zsim_stats.xing_count
                               /* 1.11.40 (user ruling): report the BAND, not a
                                * midpoint pretending to be a measurement. A
@@ -6949,6 +6980,7 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                                       "crosses) -- charged as writes only")
                               << std::endl;
                 }
+            }
             }
 
             // Avoid McPAT's homogeneous_NoCs=1 code path (number_of_NoCs == 1),
@@ -8483,7 +8515,15 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
             config.pcie_link_type = lnk.link_type;
             if (!config.pcie_timing_configured) {
                 config.pcie_timing_configured = true;
-                config.pcie_enabled = true;
+                /* 1.11.47 (FIX-PRE-FLEET L176): a declared link enables link
+                 * pricing BY DEFAULT, but an explicit power.pcie.enabled=false
+                 * is the user's call and is no longer silently overridden. */
+                if (!config.pcie_enabled_user_set) config.pcie_enabled = true;
+                else if (!config.pcie_enabled)
+                    std::cout << "  [xing] power.pcie.enabled=false: the "
+                                 "declared link keeps its TIMING; link ENERGY "
+                                 "pricing is disabled by user choice."
+                              << std::endl;
                 config.pcie_base_latency_ns = lnk.base_latency_ns;
                 config.pcie_bandwidth_GBs = lnk.bandwidth_GBs;
                 config.pcie_header_bytes = lnk.header_bytes;
@@ -9658,7 +9698,17 @@ int main(int argc, char** argv) {
                     config.pe_lanes = yaml_cfg["pim"]["pe"]["lanes"].as<int>(config.pe_lanes);
                     config.pe_has_fp = yaml_cfg["pim"]["pe"]["floating_point"].as<bool>(config.pe_has_fp);
                     config.pe_fp_emul_cycles = yaml_cfg["pim"]["pe"]["fp_emulation_cycles"]
-                                                   .as<uint32_t>(config.pe_fp_emul_cycles);  // 1.11.11
+                                                   .as<uint32_t>(config.pe_fp_emul_cycles);                     /* 1.11.47 (L203): null_core has NO timing model, so a
+                     * soft-float timing charge cannot mean anything there.
+                     * Refused rather than silently accepted-and-ignored. */
+                    if (!config.pe_has_fp && config.pe_type == "null_core") {
+                        std::cerr << "ERROR: pim.pe.floating_point=false with "
+                                     "pe.type=null_core -- the null core has no "
+                                     "timing model to charge FP emulation on. "
+                                     "Use a timing core type." << std::endl;
+                        return 1;
+                    }
+ // 1.11.11
                     if (yaml_cfg["pim"]["pe"]["element_bits"]) {
                         std::cerr << "Error: pim.pe.element_bits was withdrawn. The "
                                   << "element's datapath width is pim.pe.operand_width, "
@@ -10462,6 +10512,7 @@ int main(int argc, char** argv) {
                 auto pc = legacy_key ? yaml_cfg["power"]["pcie"]
                                      : yaml_cfg["power"]["link"];
                 config.pcie_timing_configured = true;  // power.pcie section present
+                if (pc["enabled"]) config.pcie_enabled_user_set = true;   // 1.11.47 (L176)
                 config.pcie_enabled = pc["enabled"].as<bool>(config.pcie_enabled);
                 config.pcie_num_units = pc["num_units"].as<int>(config.pcie_num_units);
                 config.pcie_num_channels = pc["num_channels"].as<int>(config.pcie_num_channels);

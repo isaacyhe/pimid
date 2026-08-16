@@ -474,6 +474,15 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
           if (!bblInfo->synth) { uint64_t _ph = zinfo->numPhases;
               pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); } }
     mixAdd(bblInfo);  // 1.11.10 measured instruction mix
+    /* 1.11.47 (L203): soft-float on an FPU-less OOO element -- the same
+     * charge simple/in-order/alu cores have carried since 1.11.11. Applied at
+     * retire alongside the mix, as a serialising penalty: emulated FP is a
+     * library call chain the OOO window cannot hide. (L207's known off-by-one
+     * BBL attribution applies to this the same way it applies to the mix --
+     * one finding, not two.) */
+    if (!coreHasFpu_ && coreFpEmulCycles_ && bblInfo->nFp) {
+        curCycle += (uint64_t)bblInfo->nFp * coreFpEmulCycles_;
+    }
     uops += bbl->uops;
     bbls++;
     approxInstrs += bbl->approxInstrs;

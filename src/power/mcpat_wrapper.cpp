@@ -1919,8 +1919,19 @@ std::string McPATWrapper::generateXMLConfig() const {
             : inst_per_core * 1 / 100;
         if (mispred_per_core > br_per_core) mispred_per_core = br_per_core;
         xml << "      <stat name=\"branch_mispredictions\" value=\"" << mispred_per_core << "\"/>\n";
-        xml << "      <stat name=\"load_instructions\" value=\"" << (inst_per_core * 20 / 100) << "\"/>\n";
-        xml << "      <stat name=\"store_instructions\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        /* 1.11.47 (FIX-PRE-FLEET L200): mixLd/mixSt were measured, parsed,
+         * stored -- and never used; loads/stores stayed hardcoded 20%/10%.
+         * Measured values now reach McPAT, UNSOURCED fractions only as the
+         * warned fallback for cores that never decode. */
+        {
+            const uint64_t nc_ = std::max(1, config_.num_cores);
+            uint64_t ld_pc = (meas_ld_ + meas_st_) > 0 ? meas_ld_ / nc_
+                                                       : inst_per_core * 20 / 100;
+            uint64_t st_pc = (meas_ld_ + meas_st_) > 0 ? meas_st_ / nc_
+                                                       : inst_per_core * 10 / 100;
+            xml << "      <stat name=\"load_instructions\" value=\"" << ld_pc << "\"/>\n";
+            xml << "      <stat name=\"store_instructions\" value=\"" << st_pc << "\"/>\n";
+        }
         xml << "      <stat name=\"committed_instructions\" value=\"" << inst_per_core << "\"/>\n";
         xml << "      <stat name=\"committed_int_instructions\" value=\"" << int_per_core << "\"/>\n";
         xml << "      <stat name=\"committed_fp_instructions\" value=\"" << fp_per_core << "\"/>\n";
@@ -1946,12 +1957,30 @@ std::string McPATWrapper::generateXMLConfig() const {
         xml << "      <stat name=\"float_regfile_writes\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
         xml << "      <stat name=\"function_calls\" value=\"" << (inst_per_core / 100) << "\"/>\n";
         xml << "      <stat name=\"context_switches\" value=\"0\"/>\n";
-        xml << "      <stat name=\"ialu_accesses\" value=\"" << (inst_per_core * 70 / 100) << "\"/>\n";
-        xml << "      <stat name=\"fpu_accesses\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
-        xml << "      <stat name=\"mul_accesses\" value=\"" << (inst_per_core * 5 / 100) << "\"/>\n";
+        /* 1.11.47 (FIX-PRE-FLEET L199): the measured mix never reached the
+         * stats that actually drive execution-unit power -- ialu/fpu/mul
+         * stayed at 70/10/5% while the census sat computed above. Measured
+         * classes now drive the units; the fractions remain only as the
+         * warned no-decode fallback. */
+        {
+            const uint64_t nc_ = std::max(1, config_.num_cores);
+            const bool mm_ = (meas_int_ + meas_fp_ + meas_mul_) > 0;
+            uint64_t ia_pc = mm_ ? meas_int_ / nc_ : inst_per_core * 70 / 100;
+            uint64_t fp_pc = mm_ ? meas_fp_  / nc_ : inst_per_core * 10 / 100;
+            uint64_t mu_pc = mm_ ? meas_mul_ / nc_ : inst_per_core * 5 / 100;
+            xml << "      <stat name=\"ialu_accesses\" value=\"" << ia_pc << "\"/>\n";
+            xml << "      <stat name=\"fpu_accesses\" value=\"" << fp_pc << "\"/>\n";
+            xml << "      <stat name=\"mul_accesses\" value=\"" << mu_pc << "\"/>\n";
+        }
         xml << "      <stat name=\"cdb_alu_accesses\" value=\"" << inst_per_core << "\"/>\n";
-        xml << "      <stat name=\"cdb_mul_accesses\" value=\"" << (inst_per_core * 5 / 100) << "\"/>\n";
-        xml << "      <stat name=\"cdb_fpu_accesses\" value=\"" << (inst_per_core * 10 / 100) << "\"/>\n";
+        {
+            const uint64_t nc_ = std::max(1, config_.num_cores);
+            const bool mm_ = (meas_int_ + meas_fp_ + meas_mul_) > 0;
+            xml << "      <stat name=\"cdb_mul_accesses\" value=\""
+                << (mm_ ? meas_mul_ / nc_ : inst_per_core * 5 / 100) << "\"/>\n";
+            xml << "      <stat name=\"cdb_fpu_accesses\" value=\""
+                << (mm_ ? meas_fp_ / nc_ : inst_per_core * 10 / 100) << "\"/>\n";
+        }
 
         if (alu_only) {
             /* 1.9.32: the element's instruction store, stated instead of

@@ -1657,7 +1657,13 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
             }
 
             if (barrierLat > 0) {
-                BblInfo* bbl = createSimpleBblInfo(barrierLat, barrierLat * 4, true);  // 1.11.16: injected charge
+                /* 1.11.47 (FIX-PRE-FLEET L183): bytes = 0. 1.11.7 removed the
+                 * phantom instruction-fetch traffic from the flush/launch/WORK
+                 * synthetic BBLs and MISSED this one -- the MPI barrier, the
+                 * dominant synthetic in thread-MPI co-sim, still carried
+                 * bytes = barrierLat*4 and manufactured ifetch traffic
+                 * proportional to barrier latency. A wait fetches nothing. */
+                BblInfo* bbl = createSimpleBblInfo(barrierLat, 0, true);  // 1.11.16: injected charge
                 fPtrs[tid].bblPtr(tid, 0, bbl);
             }
 

@@ -7,6 +7,44 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.47 -- waits fetch nothing, framing is traffic, the mix reaches the units
+
+FIX-PRE-FLEET batches C and D (L176/L183/L190/L199/L200/L203).
+
+**Batch C -- crossing energy.**
+- L183: the MPI-barrier synthetic BBL still carried bytes = barrierLat*4,
+  manufacturing phantom instruction-fetch traffic proportional to barrier
+  latency -- 1.11.7 zeroed the other synthetic BBLs and missed the DOMINANT
+  one in thread-MPI co-sim. A wait fetches nothing; bytes = 0.
+- L176, both halves: an explicit power.pcie.enabled=false is no longer
+  force-overridden by the network-links sync, AND the co-sim pricing block --
+  which never consulted the flag at all, "the only path a co-simulation
+  takes" -- is now gated on it. Gate 1159C caught the second half missing:
+  the first fix alone left the link priced (0.015 W controller dynamic) with
+  the flag correctly false. Disabled runs state it and keep the link's
+  TIMING; only energy pricing is off.
+- L190: protocol framing is traffic. The timing model charges
+  pcie_header_bytes per transaction; the energy model priced payload only,
+  and xingCount was measured, parsed and used for one log line. Framing bytes
+  (xingCount x header_bytes) now join the priced traffic at the same pJ/bit,
+  and the [xing] parenthetical carries the term so the sum still audits from
+  the line itself (reference: h2d 64 + d2h 64 + flush + framing 60 = total).
+
+**Batch D -- the measured mix drives the machine.**
+- L199: ialu/fpu/mul_accesses -- the stats that actually drive McPAT's
+  execution-unit power -- stayed at 70/10/5% fractions while the decoder
+  census sat computed in the same function. Measured classes now reach them
+  (census fp class lands in fpu_accesses EXACTLY); the unsourced fractions
+  survive only as the warned no-decode fallback.
+- L200: mixLd/mixSt were measured, parsed, stored, never used;
+  load/store_instructions stayed 20%/10%. Measured now.
+- L203: OOOCore never received the soft-float charge (an FPU-less OOO element
+  silently kept hardware-float timing) -- it now carries the E23 per-core
+  capability and charges at retire, as a serialising penalty (emulated FP is
+  a library-call chain the OOO window cannot hide). null_core has NO timing
+  model, so floating_point=false there is REFUSED at config time rather than
+  accepted-and-ignored.
+
 ## 1.11.46 -- the memory system is populated silicon, and one part per technology
 
 FIX-PRE-FLEET batches A and B (audit items L164/L168/L170/L181/L189/L234/L236/
