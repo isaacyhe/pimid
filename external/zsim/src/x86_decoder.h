@@ -104,6 +104,12 @@ struct Decoded {
     MemRole  mem;
     bool     hasModrm;
     bool     isPureMove;   /* value moves mem<->reg with no computation */
+    /* 1.11.47 (FIX-PRE-FLEET L201): vector-INTEGER marker. The census used to
+     * collapse C_VECALU/C_VECMOV (and packed-int C_FMUL) into the FP bucket,
+     * so paddb/pxor-class integer SIMD was priced as floating point AND
+     * charged soft-float emulation on FPU-less elements. Timing classes are
+     * untouched -- this flag corrects CLASSIFICATION only. */
+    bool     vecInt;
     bool     regIsSrc, regIsDst;
     bool     rmIsSrc,  rmIsDst;
     bool     readsFlags, writesFlags;
@@ -642,7 +648,7 @@ static inline bool decodeOne(const uint8_t* b, uint32_t len, Decoded& d) {
             /* --- SSE2 packed-integer logic (cheap) --- */
             case 0xEF: case 0xEB: case 0xDB: case 0xDF: /* pxor/por/pand/pandn */
                 setRegIds(RF_VEC, RF_VEC);
-                d.cls = C_VECMOV;
+                d.cls = C_VECMOV; d.vecInt = true;   /* L201 */
                 d.regIsSrc = d.regIsDst = true; d.rmIsSrc = true;
                 if (memOperand) d.mem = MEM_LOAD;
                 return hasModrm;
@@ -656,7 +662,7 @@ static inline bool decodeOne(const uint8_t* b, uint32_t len, Decoded& d) {
             case 0xDA: case 0xDE: case 0xEA: case 0xEE: /* pmin/pmax ub/sw */
             case 0xF6:                         /* psadbw */
                 setRegIds(RF_VEC, RF_VEC);
-                d.cls = C_VECALU;
+                d.cls = C_VECALU; d.vecInt = true;   /* L201 */
                 d.regIsSrc = d.regIsDst = true; d.rmIsSrc = true;
                 if (memOperand) d.mem = MEM_LOAD;
                 return hasModrm;
@@ -664,7 +670,7 @@ static inline bool decodeOne(const uint8_t* b, uint32_t len, Decoded& d) {
             case 0xD5: case 0xE4: case 0xE5: case 0xF4: /* pmullw/pmulhuw/pmulhw/pmuludq */
             case 0xF5:                         /* pmaddwd */
                 setRegIds(RF_VEC, RF_VEC);
-                d.cls = C_FMUL;
+                d.cls = C_FMUL; d.vecInt = true;     /* L201: integer multiply on the FP unit */
                 d.regIsSrc = d.regIsDst = true; d.rmIsSrc = true;
                 if (memOperand) d.mem = MEM_LOAD;
                 return hasModrm;
@@ -779,7 +785,7 @@ static inline bool decodeOne(const uint8_t* b, uint32_t len, Decoded& d) {
                 /* other SSE ALU-ish (pxor, packed int, shuffles): treat as
                  * vector ALU with load if mem. */
                 setRegIds(RF_VEC, RF_VEC);
-                d.cls = C_VECALU;
+                d.cls = C_VECALU; d.vecInt = true;   /* L201: packed-int-ish fallback */
                 d.regIsSrc = d.regIsDst = true; d.rmIsSrc = true;
                 if (memOperand) d.mem = MEM_LOAD;
                 d.approx = true;
@@ -826,6 +832,16 @@ static inline bool decodeOne(const uint8_t* b, uint32_t len, Decoded& d) {
         return hasModrm;
     }
 
+    /* 1.11.47 (FIX-PRE-FLEET L210): x87 (D8-DF, one-byte map) is REAL
+     * floating point and used to fall through to C_GENERIC -> the census's
+     * integer bucket -- FP work priced as integer AND escaping the soft-float
+     * charge on FPU-less elements, the mirror image of L201. Classed as FP;
+     * still approx (no per-op x87 uop model, and none is invented). */
+    if (map == 1 && op >= 0xD8 && op <= 0xDF) {
+        d.cls = C_FADD; d.approx = true;
+        if (memOperand) d.mem = MEM_LOAD;
+        return hasModrm;
+    }
     d.cls = C_GENERIC; d.approx = true;
     return hasModrm;
 }
@@ -1028,8 +1044,15 @@ static inline BblInfo* createDecodedBblInfo(uint64_t bblAddr,
         cLd += loads; cSt += stores;
         switch (d.cls) {
             case C_IMUL: case C_IDIV:                       cMul++; break;
-            case C_FADD: case C_FMUL: case C_FDIV:
-            case C_FMA:  case C_VECALU: case C_VECMOV:      cFp++;  break;
+            /* 1.11.47 (L201): vecInt routes packed-INTEGER SIMD to the int
+             * (or mul) bucket the work belongs to; only genuinely
+             * floating-point vector ops stay FP. */
+            case C_FMUL: if (d.vecInt) { cMul++; break; }
+                         cFp++; break;
+            case C_VECALU: case C_VECMOV:
+                         if (d.vecInt) { cInt++; break; }
+                         cFp++; break;
+            case C_FADD: case C_FDIV: case C_FMA:           cFp++;  break;
             case C_BRANCH:                                  cBr++;  break;
             default:                                        cInt++; break;
         }

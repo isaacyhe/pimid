@@ -7,6 +7,33 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.48 -- the census tells integer SIMD from floating point (E batch)
+
+FIX-PRE-FLEET L201 and L210: classification honesty in the decoder census.
+Timing classes are untouched -- these are census corrections only, and the
+gate's conservation arm proves it.
+
+- L201: C_VECALU/C_VECMOV (and packed-integer C_FMUL) collapsed into the FP
+  bucket, so paddb/pxor-class INTEGER SIMD was priced as floating point and
+  charged soft-float emulation on FPU-less elements. A vecInt marker at the
+  four packed-integer decoder sites routes them to the int/mul buckets the
+  work belongs to; genuinely-FP vector ops stay FP.
+- L210: x87 (D8-DF) fell through to C_GENERIC and the census's INTEGER
+  default -- real floating point priced as integer and ESCAPING the
+  soft-float charge, the mirror image of L201. Classed FP (still approx: no
+  per-op x87 uop model exists and none is invented).
+
+Gate 1159F: on the reference workload exactly 54 instructions redistribute
+fp -> int with the total classified CONSERVED (462,267 both sides -- the arm
+that catches a classifier that loses work rather than reclassifying it);
+timing bit-identical on the alu cell; the FPU-less OOO cell's cycles drop
+10,669,864 -> 10,667,638, matching 54 x 40 emulation cycles (2,160) plus the
+N6 jitter floor. (The gate's V2 arm printed empty from a one-argument call to
+a two-argument extractor -- the value verified directly from the log.)
+
+Ledger: the TRIAGE tags for all Batch A-E items are flipped to CLOSED in this
+release.
+
 ## 1.11.47 -- waits fetch nothing, framing is traffic, the mix reaches the units
 
 FIX-PRE-FLEET batches C and D (L176/L183/L190/L199/L200/L203).
