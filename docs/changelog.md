@@ -7,6 +7,41 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.37 -- every DRAM state pays its own refresh (E15)
+
+A DRAM unit's background power is split across three JEDEC states -- ACTIVE
+STANDBY (IDD3N) while a row is open, PRECHARGE STANDBY (IDD2N) when an idle
+controller has closed its pages, PRECHARGE POWER-DOWN (IDD2P) when CKE goes
+low. Refresh continues in all three: the device must retain.
+
+- **Refresh was charged against the wrong baseline in two of the three.**
+  `refreshMW()` returns the refresh EXCESS over IDD3N -- correct only when
+  added to an IDD3N baseline, where `vdd*idd3n + vdd*(idd5-idd3n)*duty`
+  reconstructs the interleave. `backgroundUnitMW()` added that one term on top
+  of all three states, including the idle fraction whose baseline is IDD2N or
+  IDD2P. Since IDD2P < IDD3N, refresh was UNDER-charged during power-down by
+  `vdd*(idd3n-idd2p)*duty`.
+
+- **The fix is state-independent.** JEDEC IDD5 is the all-bank auto-refresh
+  current measured with banks precharged -- an absolute figure, not an
+  increment -- and a device must EXIT power-down to accept a REFRESH command.
+  So for the tRFC/tREFI duty fraction the unit draws IDD5 whatever state it
+  was holding, and its own state current for the remainder:
+        P(state) = vdd * ( idd_state * (1 - duty) + idd5 * duty )
+  Each state now pays that. The separate additive refresh term is gone.
+  `refreshMW()` survives only as the reported line item, and its comment now
+  says what it is relative to. A clamp keeps refresh from ever REDUCING a
+  unit's power on a table row where IDD5 < the state current.
+
+- **Data impact: none.** At r_idle = 0 the new expression reduces
+  algebraically to the old one, and 1.11.20 measured r_idle = 0 across the
+  corpus -- memory-bound kernels keep the controller busy every phase. Gate
+  1148 asserts that bit-identity for all seven technologies, and separately
+  measures the recovered under-charge at full idle: 0.68 mW per unit on HBM3
+  (2.6% of its 26.4 mW per-unit background), 10.8 mW across a 16-channel
+  stack; 4.67 mW on GDDR6, 1.21 on DDR3, 1.82 on DDR5. This is a correctness
+  fix for future workloads with real idle, not a results change.
+
 ## 1.11.36 -- a phase is counted once (E14)
 
 PhaseActivity counts, per component, how many PHASES it was busy in; idle

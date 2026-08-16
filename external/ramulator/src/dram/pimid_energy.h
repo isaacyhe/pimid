@@ -210,13 +210,46 @@ inline double terminationNJ(const std::string& tech, double term_override_pJ_per
  * done once, in backgroundSystemMW(). (Before 1.11.20 there was no
  * multiplication at all: an HBM stack's 8-16 channels and a DDR rank's 8
  * chips were each reported as a single device's background.) */
+/* 1.11.37 (audit E15): refresh charged PER STATE.
+ *
+ * JEDEC IDD5 is the all-bank auto-refresh current, measured with the banks
+ * precharged; the device draws it for tRFC out of every tREFI. It is an
+ * ABSOLUTE current, not an increment, and a device must EXIT power-down to
+ * accept a REFRESH command -- so for the tRFC/tREFI duty fraction the unit
+ * draws IDD5 whatever state it was otherwise holding, and its own state
+ * current for the remainder.
+ *
+ *     P(state) = vdd * ( idd_state * (1 - duty) + idd5 * duty )
+ *
+ * That expression is state-independent, which the previous structure was not:
+ * refreshMW() below returns the excess over IDD3N, correct only when added to
+ * an IDD3N baseline, and backgroundUnitMW() added it over the IDLE fraction
+ * too, where the baseline is IDD2N or IDD2P. Since IDD2P < IDD3N, refresh was
+ * UNDER-charged during power-down by vdd*(idd3n-idd2p)*duty -- for HBM3,
+ * 1.1 * (22-7) * (160/3900) = 0.68 mW/unit, ~2.6% of the 26.4 mW per-unit
+ * background, 10.8 mW across a 16-channel stack at full idle. Inert on the
+ * present corpus (1.11.20 measured r_idle = 0: memory-bound kernels keep the
+ * controller busy every phase), so this is a correctness fix, not a results
+ * change -- backgroundUnitMW is bit-identical at r_idle = 0 by construction.
+ *
+ * The idd5 clamp guards a table row where IDD5 < the state current, which
+ * would otherwise let refresh REDUCE a unit's power. */
+inline double stateWithRefreshMW(const IDDSpec& s, double idd_state) {
+    const double duty = (s.trefi_ns > 0.0) ? (s.trfc_ns / s.trefi_ns) : 0.0;
+    const double idd5 = (s.idd5 > idd_state) ? s.idd5 : idd_state;
+    return s.vdd * (idd_state * (1.0 - duty) + idd5 * duty);
+}
+
+/* The refresh EXCESS over active standby. Reported as its own line item, and
+ * that is the only thing it means: it is IDD3N-relative and must not be added
+ * to a baseline that is not IDD3N. backgroundUnitMW() no longer calls it. */
 inline double refreshMW(const std::string& tech) {
     IDDSpec s = iddFor(tech);
     return s.vdd * (s.idd5 - s.idd3n) * (s.trfc_ns / s.trefi_ns);
 }
 inline double backgroundMW(const std::string& tech) {
     IDDSpec s = iddFor(tech);
-    return s.vdd * s.idd3n + refreshMW(tech);
+    return stateWithRefreshMW(s, s.idd3n);   // == vdd*idd3n + refreshMW(tech)
 }
 
 /* 1.11.20 (user decision D13): POPULATION. How many IDD-bearing units the
@@ -265,8 +298,10 @@ inline int backgroundUnits(const std::string& tech,
  *                       D15 fixes the baseline instead.
  *   idle, pg on         PRECHARGE POWER-DOWN, IDD2P (CKE low).
  *
- * Refresh continues in ALL states -- DRAM must retain -- so it is added
- * unconditionally.
+ * Refresh continues in ALL states -- DRAM must retain -- so every state pays
+ * it, each against its OWN baseline (1.11.37, E15). Before that it was added
+ * as one IDD3N-relative term on top of all three states, which under-charged
+ * refresh during power-down.
  *
  * tXP hysteresis: entry/exit overhead means a small slice of the idle time
  * cannot reach power-down. Phases are 10k cycles and tXP is ~10 ns, so that
@@ -282,9 +317,10 @@ inline double backgroundUnitMW(const std::string& tech, double r_idle,
     if (r_idle > 1.0) r_idle = 1.0;
     IDDSpec s = iddFor(tech);
     const double kHysteresisDerate = 0.99;
-    const double active_mw = s.vdd * s.idd3n;   // IDD3N, row open
-    const double pre_mw    = s.vdd * s.idd2n;   // IDD2N, banks precharged
-    double pd_mw           = s.vdd * s.idd2p;   // IDD2P, CKE low
+    /* Each state pays its OWN refresh (E15) -- see stateWithRefreshMW. */
+    const double active_mw = stateWithRefreshMW(s, s.idd3n);  // IDD3N, row open
+    const double pre_mw    = stateWithRefreshMW(s, s.idd2n);  // IDD2N, precharged
+    double pd_mw           = stateWithRefreshMW(s, s.idd2p);  // IDD2P, CKE low
     if (pd_mw > pre_mw) pd_mw = pre_mw;         // guard odd rows: never a penalty
     double idle_mw;
     if (pg_enabled) {
@@ -293,7 +329,7 @@ inline double backgroundUnitMW(const std::string& tech, double r_idle,
     } else {
         idle_mw = pre_mw * r_idle;
     }
-    return active_mw * (1.0 - r_idle) + idle_mw + refreshMW(tech);
+    return active_mw * (1.0 - r_idle) + idle_mw;
 }
 
 /* The memory system's background: population x per-unit state-aware power.
