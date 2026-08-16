@@ -4799,11 +4799,27 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             if (pitch != 1.0)
                 std::cout << " x pitch " << pitch << " = " << (fa * pitch)
                           << "x applied";
+            /* 1.11.27: the band is no longer open at the top. Samsung's
+             * FIMDRAM (Kwon, ISSCC 2021 25.4) replaced half the cell array in
+             * each bank with a 16-wide SIMD PCU on a 20nm DRAM process, at
+             * unchanged HBM2 dimensions: 8 GB -> 6 GB, so 2 GB of array bought
+             * the compute. At our measured HBM2 density (Sohn, ISSCC 2016
+             * 18.2: 8 Gb / 96 mm^2) that is ~24 mm^2 per die over 16 PCUs, so
+             * ~1.5 mm^2 per PCU -- an UPPER bound, since some of the reclaimed
+             * area is control and routing.
+             * Our comparable PE prices at 0.4925 mm^2 in logic. The linear end
+             * puts it at 1.204 mm^2, UNDER that bound; the squared end puts it
+             * at 2.943 mm^2, 1.96x ABOVE it. Silicon therefore contradicts the
+             * pessimistic end and is consistent with the linear one, which is
+             * the value we apply. The UPMEM die is NOT a quantitative anchor:
+             * its Hot Chips 31 deck carries no die area at all. */
             std::cout << " -- uncertainty band ["
                       << (fa * pitch) << ", " << (fa * fa * pitch)
-                      << "]: the squared ratio is the pessimistic end, the "
-                         "linear one the conservative end, and the UPMEM die is "
-                         "the only silicon anchor between them." << std::endl;
+                      << "]: the linear ratio is applied. Samsung FIMDRAM "
+                         "(ISSCC 2021 25.4, ~1.5 mm^2/PCU upper bound) is "
+                         "consistent with the linear end and rules out the "
+                         "squared one, which would exceed it by 1.96x."
+                      << std::endl;
         } else if (corner != 0) {
             /* 1.11.17: say when a corner is APPLIED, not only when refused --
              * 1.11.13's own stated defect ("priced hp without saying so")

@@ -7,6 +7,43 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.27 -- the area factor gets a silicon anchor, and it is not the pessimistic one
+
+The DRAM-periphery area factor has shipped since 1.11.2 with an uncertainty
+band of [2.44, 5.98]x and a comment saying "the UPMEM die is the only silicon
+anchor between them". Reading the UPMEM deck (Hot Chips 31, user-supplied)
+showed it carries no die area at all -- so that anchor was qualitative, and the
+top of the band had never been tested against anything.
+
+- **PE/core area is now reported.** getComponentArea(CORE) existed and was
+  never printed, so the only area a run exposed was Total Area -- which bundles
+  NoC, MC, caches and the memory die. A first attempt at this validation
+  compared that total against a published per-compute-unit figure and produced
+  a meaningless 3.8x; the tell was that the ratio between placements came out
+  1.788x when the printed factor was 2.444x, i.e. diluted by components the
+  factor does not scale. With PE-only area the ratio is exactly 2.444x, which
+  also confirms the factor reaches the quantity it is supposed to scale.
+
+- **The anchor.** Samsung FIMDRAM (Kwon et al., ISSCC 2021 25.4) replaced HALF
+  the cell array in each bank with a 16-wide SIMD programmable computing unit
+  on a 20nm DRAM process, at unchanged HBM2 physical dimensions: 8 GB -> 6 GB,
+  so 2 GB of cell array bought the compute. At our measured HBM2 density
+  (Sohn, ISSCC 2016 18.2: 8 Gb / 96 mm^2) that is ~24 mm^2 per die across 16
+  PCUs -- about 1.5 mm^2 per PCU, an UPPER bound since some reclaimed area is
+  control and routing.
+
+- **The test, and the result:**
+      comparable PE in a logic process      0.4925 mm^2
+      linear end  (2.444x)  ->  1.2039 mm^2   UNDER the ~1.5 bound
+      squared end (5.975x)  ->  2.9428 mm^2   ABOVE the bound by 1.96x
+  Silicon contradicts the pessimistic end of our own band and is consistent
+  with the linear one -- which is the value we apply. The band print now says
+  so and names the paper, instead of citing an anchor that has no number in it.
+
+DATA IMPACT: none. This reports an existing quantity and annotates a print;
+the applied factor is unchanged at 2.444x. What changes is that the value now
+has evidence behind it rather than a stated preference between two ends.
+
 ## 1.11.26 -- LPDDR5 terminates, and it terminates to ground
 
 The termination table declared LPDDR5 "unterminated by design" and returned

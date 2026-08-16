@@ -1207,6 +1207,15 @@ void McPATWrapper::printDetailedResults() const {
     std::cout << "  Total Power: " << system_power_.total_power << " W" << std::endl;
     std::cout << "  Peak Power: " << getPeakPower() << " W" << std::endl;
     std::cout << "  Total Area: " << getTotalArea() << " mm^2" << std::endl;
+    /* 1.11.27: the PE's OWN area, reported separately. Total Area bundles the
+     * NoC, MC, caches and memory die, so it cannot be compared against a
+     * published per-compute-unit figure -- attempting exactly that against
+     * Samsung's FIMDRAM PCU compared different quantities and produced a
+     * meaningless 3.8x. The core area is what the DRAM-periphery factor
+     * actually scales, and it is what a silicon anchor is quoted per. */
+    std::cout << "    of which PE/core: "
+              << getComponentArea(ComponentType::CORE) << " mm^2"
+              << " (the quantity the periphery area factor scales)" << std::endl;
     std::cout << "=====================================\n" << std::endl;
 }
 
