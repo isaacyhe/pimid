@@ -1,3 +1,5 @@
+#include "power/cacti_io_wrapper.h"   // 1.11.40 (N8): harnessed IO model
+#include <iostream>
 #include "memory/ramulator_wrapper.h"
 #include <iostream>
 #include <fstream>
@@ -463,7 +465,91 @@ double RamulatorWrapper::getArrayWriteEnergyNJ() const {
         dram_type_, getTRC(), getTRAS(), getTBurst(), energy_bank_override_pJ_per_byte_);
 }
 double RamulatorWrapper::getTerminationEnergyNJ() const {
+    /* 1.11.40 (audit N8, user ruling: harness the model, do not table the
+     * answer). The DQ termination energy now comes from CACTI-IO -- a real
+     * off-chip IO model built from extracted parameters -- instead of the
+     * hand-written SSTL/POD/LVSTL scheme table in pimid_energy.h.
+     *
+     * WHY THE SWITCH MATTERS, measured (gate 1155b, pJ/bit, this term only):
+     *     tech     hand table   CACTI-IO   ratio
+     *     DDR3       4.7508      (model)    ~2.6x on the FULL interface
+     *     DDR4       2.5568                 ~2.1x
+     *     DDR5       1.4323                 ~3.3x
+     *     LPDDR5     0.0349      4.9547     142x on the full interface
+     * The DDR gaps are the hand table modelling ONLY termination while the
+     * interface also burns driver-switching and PHY energy. LPDDR5's 142x is a
+     * different failure: LVSTL exists precisely to eliminate static
+     * termination current, so the one term the table modelled is the one term
+     * LVSTL makes negligible, and 0.0349 pJ/bit is a number with no physical
+     * meaning. Real mobile DRAM interfaces sit near 3-6 pJ/bit.
+     *
+     * TERM-BY-TERM, not aggregate: this call is the TERMINATION line, so it
+     * takes CACTI-IO's termination component alone. Substituting the model's
+     * full interface total here would silently fold driver and PHY energy into
+     * a quantity named "termination" and make the swap uncheckable.
+     *
+     * The explicit override still wins, and CACTI-IO refusing (GDDR6 has no
+     * parameter set) falls back to the scheme table with that stated -- a
+     * refusal must not silently become zero. */
+    if (energy_term_override_pJ_per_bit_ >= 0.0)
+        return Ramulator::pimid_energy::terminationNJ(dram_type_,
+                                                      energy_term_override_pJ_per_bit_);
+
+    const double rate = PIMID::CactiIOWrapper::dramRateMTs(dram_type_);
+    const int    ndq  = PIMID::CactiIOWrapper::dramChannelWidthBits(dram_type_);
+    if (rate > 0.0 && ndq > 0) {
+        /* activity = 1.0: this is an energy PER ACCESS, so the interface is
+         * active for the whole of it. Averaging by a duty cycle here would
+         * charge the access for the idle time around it. */
+        PIMID::LinkIOResult io =
+            PIMID::CactiIOWrapper::computeDramIO(dram_type_, ndq, rate, 1.0);
+        /* ONLY AN EXACT MAP MAY REPLACE A RESULT. DDR3/DDR4/DDR5 map exactly
+         * onto CACTI-IO parameter sets. LPDDR5 and HBM do not -- they borrow
+         * LPDDR2 and WideIO, whose parameters were fitted for different
+         * interfaces, and the borrowed numbers do not survive a sanity check
+         * (LPDDR5 comes out near 34 pJ/bit against a published 3-6). Letting an
+         * approximate map rewrite a result would replace one unsourced number
+         * with another and call it a model. Those technologies keep the
+         * existing path; the model's figure is reported as a cross-check
+         * elsewhere, not substituted here. */
+        if (io.valid && io.exact_map && io.energy_pj_per_bit_term > 0.0)
+            return io.energy_pj_per_bit_term * 512.0 / 1000.0;   // per 64 B
+    }
+    /* Fall back, and say so rather than reporting zero. */
+    static bool warned = false;
+    if (!warned) {
+        warned = true;
+        std::cerr << "[power] NOTE: CACTI-IO has no parameter set for '"
+                  << dram_type_ << "'; DQ termination falls back to the "
+                     "pimid_energy scheme table (termination term only)."
+                  << std::endl;
+    }
     return Ramulator::pimid_energy::terminationNJ(dram_type_, energy_term_override_pJ_per_bit_);
+}
+
+double RamulatorWrapper::getInterfaceDynamicEnergyNJ() const {
+    /* 1.11.40: driver switching + PHY, per 64 B. PIMID has never modelled
+     * these -- the interface was termination-only -- so this is new accounting
+     * rather than a re-attribution. Zero when CACTI-IO has no parameter set,
+     * which is honest: we do not know it, rather than it being absent. */
+    const double rate = PIMID::CactiIOWrapper::dramRateMTs(dram_type_);
+    const int    ndq  = PIMID::CactiIOWrapper::dramChannelWidthBits(dram_type_);
+    if (rate <= 0.0 || ndq <= 0) return 0.0;
+    PIMID::LinkIOResult io =
+        PIMID::CactiIOWrapper::computeDramIO(dram_type_, ndq, rate, 1.0);
+    if (!io.valid || !io.exact_map) return 0.0;   // exact maps only, as above
+    const double non_term = io.energy_pj_per_bit - io.energy_pj_per_bit_term;
+    return (non_term > 0.0) ? non_term * 512.0 / 1000.0 : 0.0;
+}
+
+double RamulatorWrapper::getInterfaceAreaMM2() const {
+    /* 1.11.40: IO area, which PIMID reported as unmodelled. */
+    const double rate = PIMID::CactiIOWrapper::dramRateMTs(dram_type_);
+    const int    ndq  = PIMID::CactiIOWrapper::dramChannelWidthBits(dram_type_);
+    if (rate <= 0.0 || ndq <= 0) return 0.0;
+    PIMID::LinkIOResult io =
+        PIMID::CactiIOWrapper::computeDramIO(dram_type_, ndq, rate, 1.0);
+    return (io.valid && io.exact_map) ? io.io_area_mm2 : 0.0;
 }
 double RamulatorWrapper::getRefreshPowerMW() const {
     return Ramulator::pimid_energy::refreshMW(dram_type_);

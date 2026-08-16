@@ -7,6 +7,119 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.40 -- quantities the simulation reveals stop being constants
+
+One principle, five changes. A value the run can produce must not be a
+configured constant, and a physical rate is a BAND, not a number.
+
+**E18 -- the coherence flush crosses the link.** Link energy was priced on 128
+bytes (a doorbell and its ack) while `xingFlushBytes` recorded 16,777,216 B
+moving at the same boundary. 1.11.15 had removed the flush from the link
+because "it rides the memory channel, not the PCIe/CXL PHY" -- true, and it
+never said WHERE that memory channel is. In a COUPLED system the shared array
+IS the device's DRAM, on the far side of the link, so the bytes traverse the
+PHY and land in DRAM: two pieces of silicon, two energies. The flush is now
+added to the link byte count in the coupled branch only; the decoupled branch,
+where the host flushes to its own memory, is untouched and was already right.
+Gate 1152c, 12/12.
+
+**E19 -- the link duty cycle is derived.** `power.pcie.duty_cycle` defaulted to
+0.01 with no citation and was wrong in both regimes, in opposite directions:
+against the reference co-sim run the true duty is 2.31e-06 without the flush
+(0.01 was 4329x HIGH) and 0.303 with it (0.01 was 30x LOW). No constant can be
+right across that. It is now `(xbytes / link_bytes_per_s) / wall_seconds`,
+measured per run. The YAML key survives only as an explicit override and prints
+what the measurement would have been. Gate 1153, 8/8; the derived 0.3 matches an
+independent hand calculation of 0.3028.
+
+**N7 -- the coherence footprint is measured.** `coherence_footprint_bytes`
+defaulted to a fixed 16 MiB regardless of workload. Measured: the host caches
+hold **54,464** dirty bytes -- 308x smaller, and within the 294,912 B the cache
+hierarchy can physically hold, which the 16 MiB constant exceeded by 56.9x. It
+was not an over-estimate but an impossibility: a flush writes back dirty lines
+FROM cache and cannot move more than the cache holds. The flush had been
+consuming 1,748,027 of 1,758,987 host cycles -- **99.0% of the host timeline** --
+on a 4096-element kernel. Now 6,074 cycles. The footprint is re-measured at
+every flush (the dirty set after offload #1 is not the dirty set after #2) and a
+configured value is REFUSED rather than silently honoured. Gate 1154.
+
+**Link energy becomes a band.** Each `pJ/bit` was a scalar. They are now
+published ranges with provenance, and the report carries the band and the
+resulting energy range rather than a midpoint passing for a measurement:
+    pcie_gen5   7.6-11.4   Samsung 8LPP 7.6 (excl clocking) .. 10nm CMOS 11.4
+                           (incl PLL+clocking) -- the retired 7.0 was BELOW the
+                           published minimum
+    pcie_gen4   1.93-6.0   1.93 is TRANSMITTER-ONLY, a bound no full link can
+                           reach; 6.0 is a full SerDes. A boundary, not a spread
+    pcie_gen3   4.0        retires an unsourced 5.0
+    nvlink      1.17-1.30  measured PHY (JSSC 2019) .. NVIDIA product figure
+    interposer  0.25-0.5   UCIe advanced package -- this range was ALREADY
+                           sourced in the comment and then thrown away by
+                           returning 0.5
+    ualink      3.5        200G short-reach incl SerDes+DSP; retires an assumed
+                           8.0 that was 2.3x higher
+Entries with one figure are labelled SINGLE POINT, because that is a fact about
+our sourcing rather than about the hardware.
+
+**N8 -- CACTI-IO is harnessed for the DRAM interface.** `external/cacti/extio.cc`
+is a full off-chip IO model built from extracted parameters (swings,
+capacitances, bias/leak currents, termination tables, an area polynomial). It
+has been vendored, compiled into libcacti7, and called by NOTHING.
+  - Its DRAM paths work: DDR4-3200 x64 gives IO area 2.99 mm2, termination
+    262 mW, dynamic 443 mW, PHY 390 mW.
+  - Its Serial path had never been executed by anyone and is unusable: the
+    branch left rtt/rs/r_on/t_flight at zero so it faulted with SIGFPE on
+    construction; `num_mem_clk` divides by `num_clk/2` and a serial link
+    legitimately has zero clock pins; and the area polynomial is a FIT over DDR
+    frequencies whose cubic term grows 55000x from 800 MHz to 32 GHz, giving
+    61 mm2 of IO area for 16 lanes. We repair the construction faults and REFUSE
+    above 8000 MHz rather than extrapolating. PCIe/CXL therefore stays on the
+    published bands above.
+  - DQ termination now comes from the model for DDR3 and DDR4 -- the EXACT
+    technology maps -- replacing a hand-written SSTL/POD/LVSTL scheme table.
+    DDR3 2.43 -> 9.26 nJ/64B, DDR4 1.31 -> 2.19. Driver-switching and PHY energy
+    (20.8 and 10.2 nJ/64B) and IO area are newly modelled; the interface had
+    been termination-only.
+  - DDR5, LPDDR5 and HBM map only APPROXIMATELY (onto DDR4, LPDDR2 and WideIO),
+    so the model is reported as a cross-check and NOT substituted: borrowed
+    parameter sets do not survive a sanity check (LPDDR5 lands near 34 pJ/bit
+    against a published 3-6). GDDR6 has no parameter set and is refused
+    outright. Replacing one unsourced number with another and calling it a
+    model is the defect this release exists to remove.
+  - The hand table's LPDDR5 entry is separately wrong by ~142x: it models only
+    static termination, which is exactly what LVSTL is designed to eliminate, so
+    it captured the one negligible term and omitted everything real. That defect
+    is live in every LPDDR5 cell and is NOT fixed here -- LPDDR5 has no exact
+    map -- it is recorded as audit N8.
+
+**Gate 1156 / 1156b.** The scope claim is the defence of this release, so it is
+what the gate tests. HBM3 is bit-identical old vs new (0.0499777 W, 10164680
+cycles) -- the approximate map does not substitute, which is the arm that would
+have caught an exact-map leak. Co-sim host cycles fall 1,758,995 -> 17,062
+(99.0%), footprint measures 54,464 B within the 294,912 B cache capacity, link
+bytes are 128 + the measured footprint, and the band prints. Device cycles are
+unchanged on every cell.
+
+TWO ARMS FAILED ON WRONG PREDICTIONS OF MINE, not on defects, and both are
+worth recording because each encoded an assumption about a cell rather than a
+claim about the change:
+  - I first tested DDR4 at BANK placement, which reports "on-die placement: no
+    DQ crossing, no termination". The PE is INSIDE the DRAM there, so nothing
+    crosses the DQ pins and termination is correctly zero -- the arm could
+    never have moved. Re-run at HOST_MC placement, where accesses do cross DQ,
+    termination goes 1.309 -> 2.185 nJ/access, matching the offline calculation
+    (1.30909 -> 2.18526) exactly.
+  - I then predicted total power would visibly rise. It does not: that cell
+    reports "Total dynamic: 0.0 mJ (rd=0.0 + wr=0.0 + act=0.0 + term=0.0)" on
+    BOTH arms. The per-access energy changed; there are no counted accesses to
+    multiply it by. Verified at the per-access level instead.
+
+**Data impact.** DDR3 and DDR4 interface energy changes, and only where
+accesses actually cross the DQ pins -- on-die placements charge no termination
+and are unaffected. Every other technology is untouched. Co-sim results change substantially: the host timeline loses 99%
+of its cycles with the 16 MiB flush constant gone, and coupled-system link
+energy gains the flush bytes.
+
 ## 1.11.38 -- the NoC is marked where the fabric is used (E16)
 
 **Also in this release: the published tree has not configured since 1.11.26.**

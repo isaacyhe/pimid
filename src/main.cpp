@@ -1481,7 +1481,13 @@ struct UnifiedConfig {
     bool pcie_enabled = true;       // power.pcie.enabled (default true for cosim)
     int pcie_num_units = 1;         // power.pcie.num_units
     int pcie_num_channels = 16;     // power.pcie.num_channels (x16)
-    double pcie_duty_cycle = 0.01;  // power.pcie.duty_cycle
+    /* 1.11.40 (E19): duty_cycle is DERIVED from measured bytes / elapsed
+     * time in the co-sim path -- it is a quantity the simulation reveals.
+     * This field is now an explicit OVERRIDE, applied only when the user
+     * set it, and printed when it is. The 0.01 it used to default to had
+     * no citation and was wrong by 4329x or 30x depending on regime. */
+    double pcie_duty_cycle = 0.01;  // power.pcie.duty_cycle (override only)
+    bool pcie_duty_cycle_user_set = false;
     double pcie_load_perc = 0.01;   // power.pcie.total_load_perc
     // PCIe timing model (bandwidth + latency constrained link)
     bool pcie_timing_configured = false;  // set true when power.pcie section exists in YAML
@@ -1526,7 +1532,15 @@ struct UnifiedConfig {
     // a no-op (no live buffer registration), so this is an explicit config field
     // with a conservative default. LIMITATION: no per-run WSS tracking; the whole
     // footprint is treated as dirty (upper bound, conservative-against-PIM).
-    long long coherence_footprint_bytes = 16777216;  // 16 MiB default
+    /* 1.11.40 (audit N7, user ruling: the footprint is MEASURED). 0 = measure
+     * it at roi_begin from the host caches' dirty (M) lines. A positive value
+     * is an explicit OVERRIDE and is reported as one.
+     *
+     * The old 16 MiB default was 56.9x the host cache hierarchy it claimed to
+     * flush and consumed 99.4% of the host's simulated cycles on a
+     * 4096-element kernel -- a constant standing in for a quantity the
+     * simulation can reveal exactly. */
+    long long coherence_footprint_bytes = 0;   // 0 = measure (N7)
 
     // Kernel LAUNCH cost tree (1.7.3, HANDOFF ISSUE 2). Emitted as sys.launch.*
     // in system scope; charged on the host core at the offload doorbell. Real GPU
@@ -1857,6 +1871,19 @@ static std::string canonicalMemTech(std::string t) {
  *
  * Skipped if user explicitly set zsim_mem_controller_type != "auto".
  */
+/* 1.11.40 (audit E18): is the system's memory ONE shared array, or does the
+ * host hold its own? Used to be derived inline in the memory-reporting block;
+ * the link-energy block needs the SAME answer, and re-deriving it there would
+ * be two copies of one claim that can drift apart. Single definition, two
+ * callers.
+ *
+ * Coupled means the host and the device address the same silicon -- which in a
+ * PIM system is the DEVICE's DRAM, on the far side of the link. That is what
+ * makes the coherence flush link traffic; see the E18 comment at the byte
+ * total. Empty tech on either side collapses to coupled, preserving the
+ * pre-1.11.9 single-array behaviour the corpus was measured under. */
+static bool sharedMemoryCoupled(const UnifiedConfig& config);
+
 static void autoGenerateRamulatorConfig(UnifiedConfig& config, const std::string& tech);
 
 static void getMemControllerConfig(UnifiedConfig& config) {
@@ -2278,6 +2305,18 @@ static bool dramHTreeBuilder(const std::string& tech,
  * for a 64-byte cache line. Results are stored as integers in UnifiedConfig
  * so they can be emitted into the ZSim config file without library dependencies.
  */
+static bool sharedMemoryCoupled(const UnifiedConfig& config) {
+    std::string h_tech, d_tech;
+    for (const auto& node : config.system_nodes) {
+        if (node.memory_tech.empty()) continue;
+        if (node.role == UnifiedConfig::SystemNode::HOST && h_tech.empty())
+            h_tech = node.memory_tech;
+        if (node.role == UnifiedConfig::SystemNode::DEVICE && d_tech.empty())
+            d_tech = node.memory_tech;
+    }
+    return (h_tech.empty() || d_tech.empty() || h_tech == d_tech);
+}
+
 static void computeHierarchyLatencies(UnifiedConfig& config) {
     // Map placement_level string to integer
     if (config.placement_level == "SUBARRAY")       config.pe_hierarchy_level = 0;
@@ -6414,8 +6453,46 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                  *     (xing_link_charged), and the byte parenthetical now
                  *     sums to the number in front of it -- flush is reported
                  *     as the separate reattributed quantity it is. */
+                /* 1.11.40 (audit E18, user ruling): the flush is BACK on the
+                 * link -- but only when the shared array is the DEVICE's.
+                 *
+                 * 1.11.15 took it off with this reason: "the coherence flush
+                 * is the host writing back its own dirty lines to memory --
+                 * it rides the memory channel, not the PCIe/CXL PHY". Every
+                 * word of that is true, and it settles nothing on its own,
+                 * because it does not say WHERE that memory channel is. In a
+                 * COUPLED system the host and device address one array and
+                 * that array is the device's DRAM (see the memory block
+                 * below: tech = d_tech.empty() ? h_tech : d_tech, "host and
+                 * device accesses land on the same silicon"). The memory
+                 * channel the flush rides is then on the FAR SIDE of the
+                 * link, so the bytes traverse the PHY and land in DRAM. Two
+                 * pieces of silicon, two energies; charging both is not
+                 * double-counting, and charging only the array is an
+                 * omission. In a DECOUPLED system the host really does write
+                 * back to its own memory, nothing crosses, and 1.11.15's
+                 * reason holds exactly -- that path is unchanged.
+                 *
+                 * Corroboration from the other coherence mode: mode=separate
+                 * is documented as "the 1.7.1 bridge bulk-DMA path already
+                 * prices the crossing". Case 2 prices it; Case 1 did not; and
+                 * Case 1 is the mode whose memory IS the shared device array.
+                 *
+                 * SCALE: on the measured co-sim cell this is 128 B -> 16.8 MB,
+                 * 7.2 nJ -> ~940 uJ at 7 pJ/bit. The flush is the offload's
+                 * data-PREP cost -- the price of using the device -- so
+                 * under-charging it flattered PIM, the direction that matters
+                 * most in a paper arguing for PIM. Note also that the
+                 * footprint's stated "conservative-against-PIM" upper bound
+                 * (whole footprint treated as dirty, main.cpp coherence
+                 * defaults) only ever applied to the array charge; on the link
+                 * it was not conservative but absent. */
+                const bool xing_coupled = sharedMemoryCoupled(config);
                 uint64_t xbytes = zsim_stats.xing_h2d_bytes +
-                                  zsim_stats.xing_d2h_bytes;
+                                  zsim_stats.xing_d2h_bytes +
+                                  (xing_coupled ? zsim_stats.xing_flush_bytes : 0);
+                McPAT::McPATWrapper::LinkEnergyBand pjband =
+                    McPAT::McPATWrapper::linkEnergyBandPJPerBit(config.pcie_link_type);
                 double pjbit;
                 if (config.pcie_pj_per_bit_override >= 0.0) {
                     pjbit = config.pcie_pj_per_bit_override;
@@ -6470,7 +6547,61 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                     const int lpm = McPAT::linkLanesPerModule(config.pcie_link_type);
                     ps.num_channels = (lpm > 0) ? lpm : config.pcie_num_lanes;
                 }
-                ps.duty_cycle = 1.0;
+                /* 1.11.40 (audit E19, user ruling): the link's duty cycle is a
+                 * quantity THE SIMULATION REVEALS, not a knob and not a
+                 * default. It is bytes-crossed over time-elapsed, and both
+                 * terms are already measured here:
+                 *
+                 *   duty = (xbytes / link_bytes_per_s) / wall_seconds
+                 *
+                 * McPAT applies duty_cycle ONLY to the TDP branch
+                 * (iocontrollers.cc:329), so this sets what "peak link
+                 * dynamic" means; runtime dynamic already comes from the same
+                 * measured bytes via link_pj_per_bit, which is why
+                 * total_load_perc stays 0 -- the legacy scaling would
+                 * double-count a number we now know.
+                 *
+                 * WHAT IT REPLACES: a hand-set power.pcie.duty_cycle whose
+                 * 0.01 default carried no citation and was wrong in BOTH
+                 * regimes, in opposite directions. On the reference co-sim run
+                 * (host 1758987 cyc @ 2 GHz, 63 GB/s):
+                 *     flush excluded from the link   true duty 2.31e-06
+                 *                                    (0.01 was 4329x HIGH)
+                 *     flush included (E18)           true duty 3.03e-01
+                 *                                    (0.01 was 30x LOW)
+                 * No constant can be right across that, and the derived value
+                 * moves with the workload -- which is what makes it measured
+                 * rather than configured.
+                 *
+                 * The YAML key survives as an explicit OVERRIDE only, and is
+                 * printed when used so it can never be silently in force. */
+                double link_bps = config.pcie_bandwidth_GBs * 1e9;
+                double duty_derived = -1.0;
+                if (link_bps > 0.0 && wall_seconds > 0.0) {
+                    duty_derived = (static_cast<double>(xbytes) / link_bps) / wall_seconds;
+                    if (duty_derived > 1.0) duty_derived = 1.0;   // saturated link
+                    if (duty_derived < 0.0) duty_derived = 0.0;
+                }
+                if (config.pcie_duty_cycle_user_set) {
+                    ps.duty_cycle = config.pcie_duty_cycle;
+                    std::cout << "  [xing] " << node.name
+                              << ": link duty OVERRIDE " << ps.duty_cycle
+                              << " (measured would be ";
+                    if (duty_derived >= 0.0) std::cout << duty_derived;
+                    else                     std::cout << "underivable";
+                    std::cout << ")" << std::endl;
+                } else if (duty_derived >= 0.0) {
+                    ps.duty_cycle = duty_derived;
+                } else {
+                    /* Cannot derive: no bandwidth or no elapsed time. Say so --
+                     * a silent fallback here is exactly the placeholder this
+                     * change exists to remove. */
+                    ps.duty_cycle = 1.0;
+                    std::cerr << "[power] WARNING: link duty cycle NOT derivable"
+                                 " (bandwidth_GBs=" << config.pcie_bandwidth_GBs
+                              << ", wall_seconds=" << wall_seconds
+                              << "); reporting peak at full rate." << std::endl;
+                }
                 ps.total_load_perc = 0.0;        // legacy path off; bytes drive it
                 ps.transferred_bytes =
                     charge_here ? static_cast<double>(xbytes) : 0.0;   // link priced once
@@ -6484,12 +6615,45 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                               << config.pcie_link_type << ", " << xbytes
                               << " B crossed (h2d " << zsim_stats.xing_h2d_bytes
                               << " + d2h " << zsim_stats.xing_d2h_bytes
+                              << (xing_coupled
+                                    ? " + flush " + std::to_string(zsim_stats.xing_flush_bytes)
+                                    : std::string())
                               << "), " << zsim_stats.xing_count
+                              /* 1.11.40 (user ruling): report the BAND, not a
+                               * midpoint pretending to be a measurement. A
+                               * single-point entry says so, because that is a
+                               * fact about our sourcing, not the hardware. */
                               << " crossings, " << pjbit << " pJ/bit"
+                              << (pjband.valid()
+                                    ? (pjband.single_point
+                                         ? std::string(" [SINGLE POINT, range not sourced: ")
+                                             + pjband.provenance + "]"
+                                         : " [band " + std::to_string(pjband.lo) + "-"
+                                             + std::to_string(pjband.hi) + " pJ/bit -> link energy "
+                                             + std::to_string(xbytes * 8.0 * pjband.lo * 1e-12) + "-"
+                                             + std::to_string(xbytes * 8.0 * pjband.hi * 1e-12) + " J]")
+                                    : std::string())
+                              /* 1.11.40 (E19): the duty cycle is measured, so
+                               * report it as a measurement -- a reader must be
+                               * able to see what peak link dynamic was scaled
+                               * by without reading the source. */
+                              << ", peak duty " << ps.duty_cycle
+                              << (config.pcie_duty_cycle_user_set ? " [OVERRIDE]" : " [derived: bytes/time]")
                               << (link_unpriced ? " [link dynamic UNPRICED: unknown link type]" : "")
-                              << "; flush " << zsim_stats.xing_flush_bytes
-                              << " B rides the MEMORY channel (charged as "
-                                 "writes, not link traffic)" << std::endl;
+                              /* 1.11.40 (E18): the parenthetical must sum to the
+                               * number in front of it -- the 1.11.15 line put
+                               * flush OUTSIDE the sum and said it was not link
+                               * traffic, which is only true when the host owns
+                               * its memory. Say which case this run is. */
+                              << "; flush " << zsim_stats.xing_flush_bytes << " B "
+                              << (xing_coupled
+                                    ? "CROSSES the link (shared array is device "
+                                      "memory) and is ALSO charged as array writes "
+                                      "-- PHY and DRAM are different silicon"
+                                    : "rides the host's OWN memory channel "
+                                      "(decoupled: host array is local, nothing "
+                                      "crosses) -- charged as writes only")
+                              << std::endl;
                 }
             }
 
@@ -6810,7 +6974,7 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
             if (node.role == UnifiedConfig::SystemNode::DEVICE && d_tech.empty())
                 d_tech = node.memory_tech;
         }
-        const bool coupled = (h_tech.empty() || d_tech.empty() || h_tech == d_tech);
+        const bool coupled = sharedMemoryCoupled(config);   // 1.11.40: one definition
         /* 1.11.15 (audit): the coherence-flush footprint is host dirty lines
          * written back to MEMORY -- it belongs in the array-write charge, not
          * on the PCIe PHY (where 1.11.7 had priced it as 99.999% of the link
@@ -7592,8 +7756,14 @@ static void emitZSimCoherenceBlock(std::ostream& out, const UnifiedConfig& confi
         if (unified && wb_bytes_per_cycle > 0.0 && config.coherence_footprint_bytes > 0)
             flush_cyc += std::ceil((double)config.coherence_footprint_bytes / wb_bytes_per_cycle);
         double flush_ns = flush_cyc * 1000.0 / f;
+        /* 1.11.40 (N7): with footprint 0 the flush size is not knowable on the
+         * login node -- it is measured at roi_begin from the caches' dirty
+         * lines. Say that, rather than printing a 0 that reads as "no flush". */
         std::cerr << "[coherence] mode=" << (unified ? "unified" : "separate")
-                  << " footprint=" << config.coherence_footprint_bytes << "B"
+                  << " footprint="
+                  << (config.coherence_footprint_bytes > 0
+                        ? std::to_string(config.coherence_footprint_bytes) + "B (OVERRIDE)"
+                        : std::string("MEASURED at roi_begin (host dirty lines)"))
                   << " writeback_bw=" << writeback_bw_gbs << "GB/s"
                   << " fixed=" << config.coherence_flush_fixed_ns << "ns"
                   << " -> flush=" << (unified ? (uint64_t)flush_cyc : 0)
@@ -9918,7 +10088,10 @@ int main(int argc, char** argv) {
                 config.pcie_enabled = pc["enabled"].as<bool>(config.pcie_enabled);
                 config.pcie_num_units = pc["num_units"].as<int>(config.pcie_num_units);
                 config.pcie_num_channels = pc["num_channels"].as<int>(config.pcie_num_channels);
-                config.pcie_duty_cycle = pc["duty_cycle"].as<double>(config.pcie_duty_cycle);
+                if (pc["duty_cycle"]) {
+                    config.pcie_duty_cycle = pc["duty_cycle"].as<double>(config.pcie_duty_cycle);
+                    config.pcie_duty_cycle_user_set = true;   // 1.11.40 (E19)
+                }
                 config.pcie_load_perc = pc["total_load_perc"].as<double>(config.pcie_load_perc);
                 // PCIe timing model params (tunable for CXL-like behavior)
                 config.pcie_base_latency_ns = pc["base_latency_ns"].as<double>(config.pcie_base_latency_ns);

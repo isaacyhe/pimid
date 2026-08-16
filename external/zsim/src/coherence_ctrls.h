@@ -59,6 +59,12 @@ class CC : public GlobAlloc {
         //Repl policy interface
         virtual uint32_t numSharers(uint32_t lineId) = 0;
         virtual bool isValid(uint32_t lineId) = 0;
+        /* 1.11.40 (audit N7): how many lines in this cache are MODIFIED,
+         * i.e. would have to be written back by a flush. The coherence
+         * flush footprint is exactly this quantity and it is measurable;
+         * it was a 16 MiB constant, which is 56.9x the whole host cache
+         * hierarchy and therefore not merely unmeasured but impossible. */
+        virtual uint64_t countDirtyLines() const = 0;
 };
 
 
@@ -101,7 +107,15 @@ class MESIBottomCC : public GlobAlloc {
         PAD();
 
     public:
-        MESIBottomCC(uint32_t _numLines, uint32_t _selfId, bool _nonInclusiveHack) : numLines(_numLines), selfId(_selfId), nonInclusiveHack(_nonInclusiveHack) {
+        /* 1.11.40 (N7): count lines in M. Only M is dirty -- E is exclusive
+         * but CLEAN and needs no writeback, which is the distinction a
+         * capacity-based estimate cannot make. */
+        uint64_t countDirtyLines() const {
+            uint64_t n = 0;
+            for (uint32_t i = 0; i < numLines; i++) if (array[i] == M) n++;
+            return n;
+        }
+                MESIBottomCC(uint32_t _numLines, uint32_t _selfId, bool _nonInclusiveHack) : numLines(_numLines), selfId(_selfId), nonInclusiveHack(_nonInclusiveHack) {
             array = gm_calloc<MESIState>(numLines);
             for (uint32_t i = 0; i < numLines; i++) {
                 array[i] = I;
@@ -402,6 +416,7 @@ class MESICC : public CC {
         //Repl policy interface
         uint32_t numSharers(uint32_t lineId) {return tcc->numSharers(lineId);}
         bool isValid(uint32_t lineId) {return bcc->isValid(lineId);}
+        uint64_t countDirtyLines() const {return bcc->countDirtyLines();}  // 1.11.40 (N7)
 };
 
 // Terminal CC, i.e., without children --- accepts GETS/X, but not PUTS/X
@@ -490,6 +505,7 @@ class MESITerminalCC : public CC {
         //Repl policy interface
         uint32_t numSharers(uint32_t lineId) {return 0;} //no sharers
         bool isValid(uint32_t lineId) {return bcc->isValid(lineId);}
+        uint64_t countDirtyLines() const {return bcc->countDirtyLines();}  // 1.11.40 (N7)
 };
 
 #endif  // COHERENCE_CTRLS_H_

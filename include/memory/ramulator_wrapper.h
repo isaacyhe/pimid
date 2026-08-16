@@ -73,7 +73,13 @@ public:
     void setBankEnergyOverridePJPerByte(double v) { energy_bank_override_pJ_per_byte_ = v; }
     double getArrayReadEnergyNJ() const;     // array rd (act+col, amortized) per 64B
     double getArrayWriteEnergyNJ() const;    // array wr per 64B
-    double getTerminationEnergyNJ() const;   // ODT/termination per 64B (DDR-class; HBM=0)
+    double getTerminationEnergyNJ() const;   // ODT/termination per 64B, from CACTI-IO
+    /* 1.11.40 (N8): interface terms PIMID never modelled -- driver switching
+     * and PHY per 64 B, and the IO area. Previously the DQ interface was
+     * termination-only, which understated LPDDR5 by 142x because LVSTL exists
+     * to make termination negligible. */
+    double getInterfaceDynamicEnergyNJ() const;
+    double getInterfaceAreaMM2() const;
     // Override termination energy (pJ/bit; <0 = model default, 0 = force no termination).
     void setTerminationOverridePJPerBit(double v) { energy_term_override_pJ_per_bit_ = v; }
     double getBackgroundPowerMW() const;     // per-unit active standby + refresh

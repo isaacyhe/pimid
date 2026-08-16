@@ -446,36 +446,93 @@ bool McPATWrapper::linkHasProtocolStack(const std::string& /*link_type*/) {
     return true;
 }
 
+McPATWrapper::LinkEnergyBand
+McPATWrapper::linkEnergyBandPJPerBit(const std::string& link_type) {
+    LinkEnergyBand b;
+    /* PCIe gen5. SOURCED BAND, and the reason this change exists: the old
+     * scalar was 7.0, which is BELOW the lowest published figure. A single
+     * value picked without looking at the spread landed outside the spread.
+     *   7.6  pJ/bit  PCIe gen5/SAS4 SerDes, Samsung 8LPP (semiwiki)
+     *  11.4  pJ/bit  32 Gb/s NRZ 37dB SerDes, 10nm CMOS, PCIe Gen5 --
+     *                INCLUDING PLL and clocking (IEEE, doc 9075947)
+     * The 1.5x spread is mostly what the measurement counted: clocking in or
+     * out. That is a boundary, not noise, so both ends are carried. */
+    if (link_type.rfind("pcie_gen5", 0) == 0) {
+        b.lo = 7.6; b.hi = 11.4;
+        b.provenance = "Samsung 8LPP 7.6 (excl clocking) .. 10nm CMOS 11.4 (incl PLL+clocking)";
+        return b;
+    }
+    /* PCIe gen4. TWO published figures, and the gap between them is a
+     * BOUNDARY, not a spread -- they measure different things:
+     *   1.93 pJ/bit  TRANSMITTER ONLY, 16 Gb/s, 28 nm CMOS, including
+     *                interface, bias and BIST (MDPI Electronics 10(1):68)
+     *   6.0  pJ/bit  FULL SerDes (TX+RX), Analog Bits Gen4 1-16G on Samsung
+     *                7LPP/5LPE (semiwiki)
+     * A real link needs both ends, so 1.93 is a LOWER BOUND that no complete
+     * link can reach, not an achievable full-link figure. Carried as the band
+     * floor with that stated, because hiding it would discard the measurement
+     * and inventing a TX+RX total from it would be fabrication. */
+    if (link_type.rfind("pcie_gen4", 0) == 0) {
+        b.lo = 1.93; b.hi = 6.0;
+        b.provenance = "1.93 TX-ONLY 28nm (lower bound, not a full link) .. 6.0 full SerDes Samsung 7LPP/5LPE";
+        return b;
+    }
+    /* PCIe gen3: one figure, and it RETIRES the 5.0 this table used to return,
+     * which had no source. Analog Bits Gen3 1-8G on Samsung 7LPP/5LPE. */
+    if (link_type.rfind("pcie_gen3", 0) == 0) {
+        b.lo = b.hi = 4.0; b.single_point = true;
+        b.provenance = "4.0 full SerDes Samsung 7LPP/5LPE (semiwiki); retires unsourced 5.0";
+        return b;
+    }
+    /* CXL rides the gen5 PHY plus a coherence delta, so its band is the gen5
+     * band shifted by that delta -- derived from gen5, not independently
+     * asserted, so the two cannot drift apart. */
+    if (link_type.rfind("cxl", 0) == 0) {
+        LinkEnergyBand g5 = linkEnergyBandPJPerBit("pcie_gen5");
+        const double coherence_delta = 1.4;   // was 8.4 - 7.0 in the old scalars
+        b.lo = g5.lo + coherence_delta;
+        b.hi = g5.hi + coherence_delta;
+        b.provenance = "gen5 band + 1.4 coherence delta (delta itself a single point)";
+        return b;
+    }
+    /* UCIe. The range was ALREADY sourced and written down here, then thrown
+     * away by returning 0.5. ADVANCED package (interposer/bridge, <=2 mm):
+     * 0.25-0.5 pJ/bit. STANDARD package (organic, <=25 mm): 0.5-1 pJ/bit.
+     * (uciexpress.org; UCIe overview, Hot Chips 2023 tutorial.) We model the
+     * advanced package, so that is the band carried. */
+    if (link_type.rfind("interposer", 0) == 0) {
+        b.lo = 0.25; b.hi = 0.5;
+        b.provenance = "UCIe advanced package 0.25-0.5 (uciexpress.org, HC2023)";
+        return b;
+    }
+    /* NVLink. TWO ANGLES, which is what makes this a band rather than a point:
+     *   1.17 pJ/bit  measured PHY -- 25 Gb/s/pin ground-referenced single-ended
+     *                signalling, 16 nm FinFET (NVIDIA Research, JSSC 2019)
+     *   1.30 pJ/bit  NVIDIA's product-level figure for NVLink
+     * A research PHY and a shipped product are different claims; keeping both
+     * ends preserves that rather than averaging one into the other. */
+    if (link_type.rfind("nvlink", 0) == 0) {
+        b.lo = 1.17; b.hi = 1.30;
+        b.provenance = "1.17 measured PHY 16nm FinFET (JSSC 2019) .. 1.30 NVIDIA product figure";
+        return b;
+    }
+    /* UALink 200G. SOURCED, and it RETIRES the 8.0 that D1 assumed from
+     * "200G-class SerDes" -- the published figure is 3.5 pJ/bit for 200 Gb/s
+     * reaching the edge of the board, INCLUDING the SerDes and short-reach
+     * link DSP (arXiv 2510.15893). The old assumption was 2.3x above it.
+     * Single point: only the short-reach case is published, so a longer-reach
+     * UALink would sit above this and that end is NOT sourced. */
+    if (link_type.rfind("ualink", 0) == 0) {
+        b.lo = b.hi = 3.5; b.single_point = true;
+        b.provenance = "3.5 @200G short-reach incl SerDes+DSP (arXiv 2510.15893); long-reach end NOT sourced; retires assumed 8.0";
+        return b;
+    }
+    return b;   // invalid: caller warns and prices at zero
+}
+
 double McPATWrapper::linkEnergyPJPerBit(const std::string& link_type) {
-    /* 1.11.15 (audit): match the TIMING side's vocabulary by family --
-     * cxl_2_0/cxl_3_0, nvlink_3_0/4_0/c2c and interposer are accepted link
-     * types that this table rejected, aborting completed co-sims at
-     * power-analysis time. Family prefix match; interposer is the
-     * silicon-interposer parallel link (HBM-class, no SerDes), published
-     * ballpark ~0.5 pJ/bit. ualink and other unknowns return -1: the caller
-     * warns and prices the transfer at zero rather than killing the run. */
-    if (link_type.rfind("pcie_gen3", 0) == 0) return 5.0;
-    if (link_type.rfind("pcie_gen4", 0) == 0) return 6.0;
-    if (link_type.rfind("pcie_gen5", 0) == 0) return 7.0;
-    if (link_type.rfind("cxl", 0)    == 0) return 8.4;  // gen5 PHY + coherence delta
-    if (link_type.rfind("nvlink", 0) == 0) return 1.3;
-    /* 1.11.34: SOURCED. UCIe (Universal Chiplet Interconnect Express) is the
-     * standard for on-package die-to-die links, and publishes energy per bit
-     * by package class: ADVANCED package (silicon interposer/bridge, channels
-     * up to 2 mm) 0.25-0.5 pJ/bit; STANDARD package (organic substrate,
-     * channels to 25 mm) 0.5-1 pJ/bit. Our 0.5 sits at the CONSERVATIVE top of
-     * the advanced range -- it was a ballpark before and is now a cited bound.
-     * (uciexpress.org; UCIe overview, Hot Chips 2023 tutorial.) */
-    if (link_type.rfind("interposer", 0) == 0) return 0.5;
-    /* 1.11.19 (user decision D1): ualink_1_0 is a fully preset-supported
-     * link on the TIMING side (main.cpp link vocabulary + preset table), so
-     * a run could complete and report exactly 0 J of link energy with only
-     * a stderr note. UALink 1.0 rides 200G-class SerDes -- the same PHY
-     * generation as PCIe gen6/CXL 3.x -- so it is priced in that band
-     * rather than left unpriceable. Flagged with the other per-link
-     * figures as a published-ballpark constant, not a measurement. */
-    if (link_type.rfind("ualink", 0) == 0) return 8.0;
-    return -1.0;
+    LinkEnergyBand b = linkEnergyBandPJPerBit(link_type);
+    return b.valid() ? b.mid() : -1.0;
 }
 
 void McPATWrapper::setPCIeStats(const PCIeStats& stats) {

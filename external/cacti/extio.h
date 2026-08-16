@@ -16,6 +16,20 @@ public:
 	void extio_power_phy(); 
 	void extio_power_term(); 
 
+	/* PIMID 1.11.40: accessors. Upstream CACTI-IO computes these and prints
+	 * them, keeping every result private -- usable as a standalone report,
+	 * unusable as a library. PIMID harnesses this model for interconnect
+	 * power and area, so the results have to be readable. Compute-then-read:
+	 * call the extio_*() methods first. */
+	double getIOAreaMM2()           const { return io_area; }
+	double getIOPowerTermMW()       const { return io_power_term; }
+	double getIOPowerDynamicMW()    const { return io_power_dynamic; }
+	double getPHYPowerMW()          const { return phy_power; }
+	double getPHYStaticPowerMW()    const { return phy_static_power; }
+	double getPHYDynamicPowerMW()   const { return phy_dynamic_power; }
+	double getTimingMarginUI()      const { return io_tmargin; }
+	double getVoltageMarginV()      const { return io_vmargin; }
+
 private:
   IOTechParam *io_param;  
 

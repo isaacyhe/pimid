@@ -463,7 +463,8 @@ public:
          * credit it had earned. The NoC is now marked at the three sites that
          * actually generate fabric traffic; search pgres.noc.touch. */
         { uint64_t _ph = zinfo->numPhases;
-          zinfo->pgres.devMC[0].touch(_ph); }
+          zinfo->pgres.devMC[0].touch(_ph);
+          zinfo->pgres.devMCGaps.event(req.cycle); }   // E17 measurement
         // Update coherence state
         switch (req.type) {
             case PUTS: case PUTX: *req.state = I; break;
@@ -520,6 +521,7 @@ public:
                 lat += mcHopLatency(targetUnit, req.cycle, req.srcId);
                 // E16 site 1: the ONLY fabric traffic a local access makes.
                 zinfo->pgres.noc.touch(zinfo->numPhases);
+                zinfo->pgres.nocGaps.event(req.cycle);   // E17 measurement
             }
 
             profLocalAccesses_.inc();
@@ -553,6 +555,7 @@ public:
                     if (zinfo->hierarchy.mcStandalone) {
                         lat += mcHopLatency(targetUnit, req.cycle, req.srcId);
                         zinfo->pgres.noc.touch(zinfo->numPhases);
+                zinfo->pgres.nocGaps.event(req.cycle);   // E17 measurement
                     }
                     profRemoteAccesses_.inc();
                     profRemoteLatency_.inc(lat);
@@ -562,6 +565,7 @@ public:
                 // real packet on the H-tree. dst==src is 0 HOPS but still an
                 // injection at the node, so it counts as fabric activity.
                 zinfo->pgres.noc.touch(zinfo->numPhases);
+                zinfo->pgres.nocGaps.event(req.cycle);   // E17 measurement
                 uint32_t srcNode = (uint32_t)mcId_ % gn->getNumNodes();
                 uint32_t dstNode = (uint32_t)dstEp % gn->getNumNodes();
                 uint32_t networkLat;
@@ -691,6 +695,7 @@ public:
             // the LCA path and charges hops), so it marks; its LOCAL sibling
             // above does not, and used to.
             zinfo->pgres.noc.touch(zinfo->numPhases);
+                zinfo->pgres.nocGaps.event(req.cycle);   // E17 measurement
             // hierLat = per-tier hop-based latency through LCA path (no double-counting)
             uint32_t hierLat = (uint32_t)computeHierTraversal(
                 myUnit, targetUnit,

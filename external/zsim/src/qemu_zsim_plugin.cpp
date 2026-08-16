@@ -52,6 +52,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 #include "profile_stats.h"
 #include "scheduler.h"
 #include "stats.h"
+#include "cache.h"   // 1.11.40 (N7): zsimAllCaches / dirtyBytes
 #include "zsim.h"
 #include "ooo_core.h"     // CtrlFlowKind codes for the branch/indirect feed
 #include "x86_decoder.h"  // minimal x86-64 decoder -> DynUops for the real OOO path
@@ -810,6 +811,68 @@ static void recordProtocolTailStats() {
  * process lives on to finish its MPI protocol (closing barrier, serving
  * reduces as root). The later real SimEnd (natural guest exit) skips the
  * re-dump. */
+/* 1.11.40 (audit E17): dump the inter-event gap histograms. MEASUREMENT ONLY
+ * -- nothing in the power model reads these. They answer the question E17
+ * raised before any residency redesign is attempted: does idle time at a
+ * gating-relevant scale actually EXIST in these workloads, and how much of it?
+ *
+ * The reported thresholds are the wake penalties a real scheme would pay:
+ *   tXP    DRAM precharge power-down exit, ~10 ns. At the device clock that is
+ *          a handful of cycles; printed in cycles at the run's own frequency
+ *          so the reader is not converting in their head.
+ *   100 ns / 1 us  reference points either side of it, so the shape of the
+ *          distribution is visible rather than a single number.
+ * "usable" subtracts the wake penalty from every qualifying gap, which is what
+ * the gap actually yields -- entry and exit are paid out of the idle window. */
+static void dumpGapHistograms() {
+    struct Item { const char* name; GapHist* h; };
+    Item items[2] = { {"noc", &zinfo->pgres.nocGaps},
+                      {"devMC", &zinfo->pgres.devMCGaps} };
+    double mhz = (zinfo->freqMHz > 0) ? (double)zinfo->freqMHz : 1000.0;
+    /* Denominator is the ROI span each histogram actually covers, NOT
+     * globPhaseCycles. globPhaseCycles is phases x phaseLength over the WHOLE
+     * run -- 7086 phases on the detailed cell where the priced window is 1016 --
+     * so dividing by it mixed a whole-run denominator with ROI-gated events and
+     * reported percentages above 100%. See GapHist's comment. */
+    info("[E17 gap histogram] clock %.0f MHz, whole run %lu cyc "
+         "(%lu phases); percentages below are against each component's own "
+         "ROI span. MEASUREMENT ONLY, no model reads this",
+         mhz, (unsigned long)zinfo->globPhaseCycles,
+         (unsigned long)zinfo->numPhases);
+    for (Item& it : items) {
+        GapHist* h = it.h;
+        if (h->events == 0) { info("[E17 %s] no events", it.name); continue; }
+        uint64_t total = h->spanCycles();
+        if (total == 0) { info("[E17 %s] zero span", it.name); continue; }
+        info("[E17 %s] ROI span %lu cyc (%.1f%% of the whole run)", it.name,
+             (unsigned long)total,
+             zinfo->globPhaseCycles ? 100.0 * total / zinfo->globPhaseCycles : 0.0);
+        info("[E17 %s] events=%lu samples=%lu (dropped=%lu)", it.name,
+             (unsigned long)h->events, (unsigned long)h->samples,
+             (unsigned long)(h->events - h->samples));
+        uint64_t inGaps = 0;
+        for (int b = 0; b < GapHist::kBuckets; b++) {
+            if (h->count[b] == 0) continue;
+            inGaps += h->cycles[b];
+            info("[E17 %s] gap 2^%-2d (%10.1f ns) count=%-10lu cycles=%-12lu",
+                 it.name, b, (double)(1ull << b) * 1000.0 / mhz,
+                 (unsigned long)h->count[b], (unsigned long)h->cycles[b]);
+        }
+        info("[E17 %s] cycles in gaps total=%lu (%.2f%% of run)", it.name,
+             (unsigned long)inGaps, total ? 100.0 * inGaps / total : 0.0);
+        const double ns_thresh[3] = {10.0, 100.0, 1000.0};
+        const char*  ns_name[3]   = {"tXP~10ns", "100ns", "1us"};
+        for (int i = 0; i < 3; i++) {
+            uint64_t th = (uint64_t)(ns_thresh[i] * mhz / 1000.0);
+            if (th < 1) th = 1;
+            uint64_t u = h->cyclesInGapsOver(th);
+            info("[E17 %s] usable idle above %-9s (%4lu cyc): %-12lu = %.2f%% of run",
+                 it.name, ns_name[i], (unsigned long)th, (unsigned long)u,
+                 total ? 100.0 * u / total : 0.0);
+        }
+    }
+}
+
 static volatile uint32_t g_termStatsDumped = 0;
 static void dumpTerminationStats() {
     if (!__sync_bool_compare_and_swap(&g_termStatsDumped, 0, 1)) return;
@@ -820,6 +883,8 @@ static void dumpTerminationStats() {
     for (StatsBackend* backend : *(zinfo->statsBackends)) {
         backend->dump(false);
     }
+
+    dumpGapHistograms();   // 1.11.40 (audit E17): measurement only
 
     if (zinfo->garnetNetwork) {
         zinfo->garnetNetwork->setTotalCycles(zinfo->globPhaseCycles);
@@ -1550,7 +1615,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
             mpi_roi_baselined = true;
             for (uint32_t c = 0; c < zinfo->numCores; c++)
                 if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
-            zinfo->pgres.markRoi(zinfo->numPhases);   // 1.11.18: PG residency window
+            zinfo->pgres.markRoi(zinfo->numPhases, zinfo->globPhaseCycles);   // 1.11.18: PG residency window
             snapshotRoiBaseCyc();
             if (getenv("PIMID_DEBUG_RDV"))
                 info("Thread %d: synthesized per-rank ROI baseline at first "
@@ -1696,7 +1761,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         mpi_roi_baselined = true;
         for (uint32_t c = 0; c < zinfo->numCores; c++)
             if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
-        zinfo->pgres.markRoi(zinfo->numPhases);   // 1.11.18: PG residency window
+        zinfo->pgres.markRoi(zinfo->numPhases, zinfo->globPhaseCycles);   // 1.11.18: PG residency window
         snapshotRoiBaseCyc();
         if (getenv("PIMID_DEBUG_RDV"))
             info("Thread %d: synthesized per-rank ROI baseline at first MPI %s "
@@ -2038,15 +2103,48 @@ static uint32_t boundaryTransferCycles(uint32_t transfer_bytes = 0) {
  * NO_OFFLOAD baselines never reach the co-sim roi_begin block, so they are
  * never charged.
  */
+/* 1.11.40 (audit N7, user ruling: the footprint is MEASURED). Walk every cache
+ * and sum the lines in M -- exactly the bytes a writeback flush must move.
+ *
+ * Why this is the right quantity and the constant was not: a flush writes back
+ * DIRTY LINES FROM CACHE. It cannot move more than the caches hold. The 16 MiB
+ * default was 56.9x the host hierarchy here (32 KB L1D + 256 KB L2), i.e. not
+ * an over-estimate but an impossibility, and it consumed 99.4% of the host's
+ * simulated cycles on a 4096-element kernel.
+ *
+ * E (exclusive) lines are deliberately NOT counted: exclusive-but-clean needs
+ * no writeback. That distinction is the reason to read MESI state rather than
+ * estimate from occupancy or capacity.
+ *
+ * Registry scope: alu_core PEs carry no cache, so in a co-sim run every
+ * registered cache is a host cache. The count is reported so that assumption is
+ * visible; a cache-bearing PE type would require making this role-aware. */
+static uint64_t measuredFlushFootprintBytes() {
+    if (!zinfo) return 0;
+    uint64_t bytes = 0;
+    for (Cache* c : zsimAllCaches()) if (c) bytes += c->dirtyBytes(zinfo->lineSize);
+    return bytes;
+}
+
+/* The footprint used. No override, no default: the flush moves the dirty lines
+ * that exist AT THIS FLUSH, and that is a different number at each one -- the
+ * dirty set after offload #1 is not the dirty set after #2. Any constant here,
+ * however configurable, asserts that it does not change. */
+static uint64_t effectiveFlushFootprintBytes() {
+    if (!zinfo) return 0;
+    uint64_t measured = measuredFlushFootprintBytes();
+    zinfo->coherence.footprintMeasured = measured;
+    return measured;
+}
+
 static uint64_t coherenceFlushCycles() {
     if (!zinfo || !zinfo->coherence.enabled) return 0;
     if (zinfo->coherence.mode != 0) return 0;   // separate = cache bypass, no flush
     uint64_t cyc = zinfo->coherence.flushFixedCycles;
-    if (zinfo->coherence.writebackBytesPerCycle > 0.0 &&
-        zinfo->coherence.footprintBytes > 0) {
+    uint64_t fp = effectiveFlushFootprintBytes();
+    if (zinfo->coherence.writebackBytesPerCycle > 0.0 && fp > 0) {
         cyc += (uint64_t)std::ceil(
-            (double)zinfo->coherence.footprintBytes /
-            zinfo->coherence.writebackBytesPerCycle);
+            (double)fp / zinfo->coherence.writebackBytesPerCycle);
     }
     return cyc;
 }
@@ -2071,15 +2169,20 @@ static void chargeCoherenceFlush(uint32_t tid) {
      * N-fold term landed directly in the array energy CAL reads. Worse, it
      * gave a FIXED working set an energy slope in N, aimed straight at the
      * pecount sweep. The slices now sum to the footprint exactly once. */
-    uint64_t flushSlice = zinfo->coherence.footprintBytes /
+    /* 1.11.40 (N7): slice the MEASURED footprint, not the configured constant.
+     * D4's per-rank slicing is unchanged -- the slices still sum to the whole
+     * footprint exactly once; only the quantity being sliced is now real. */
+    uint64_t flushFootprint = effectiveFlushFootprintBytes();
+    uint64_t flushSlice = flushFootprint /
                           ((g_mpi_rank_count > 0) ? g_mpi_rank_count : 1u);
     __sync_fetch_and_add(&zinfo->xing.flushBytes, flushSlice);
     __sync_fetch_and_add(&zinfo->xing.count, 1);
     __sync_fetch_and_add(&zinfo->coherence.flushCount, 1);
     __sync_fetch_and_add(&zinfo->coherence.flushCyclesCharged, flushCyc);
-    info("Thread %d: Case-1 coherence flush at roi_begin (footprint %llu B -> %llu cycles)",
-         tid, (unsigned long long)zinfo->coherence.footprintBytes,
-         (unsigned long long)flushCyc);
+    info("Thread %d: Case-1 coherence flush (measured %llu dirty B across %zu "
+         "caches -> %llu cycles)",
+         tid, (unsigned long long)flushFootprint,
+         zsimAllCaches().size(), (unsigned long long)flushCyc);
 }
 
 /**
@@ -2255,7 +2358,7 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
         // array-init/setup that otherwise runs on the launcher PE and dominates.
         for (uint32_t c = 0; c < zinfo->numCores; c++)
             if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
-        zinfo->pgres.markRoi(zinfo->numPhases);   // 1.11.18: PG residency window
+        zinfo->pgres.markRoi(zinfo->numPhases, zinfo->globPhaseCycles);   // 1.11.18: PG residency window
         // This rank got a real roi_begin -> don't also synthesize a baseline at
         // the first MPI op (see handleMpiMagicOp). rank 0 takes this path.
         mpi_roi_baselined = true;
@@ -2512,7 +2615,7 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         // array-init/setup that otherwise runs on the launcher PE and dominates.
         for (uint32_t c = 0; c < zinfo->numCores; c++)
             if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
-        zinfo->pgres.markRoi(zinfo->numPhases);   // 1.11.18: PG residency window
+        zinfo->pgres.markRoi(zinfo->numPhases, zinfo->globPhaseCycles);   // 1.11.18: PG residency window
         // This rank got a real roi_begin -> don't also synthesize a baseline at
         // the first MPI op (see handleMpiMagicOp). rank 0 takes this path.
         mpi_roi_baselined = true;

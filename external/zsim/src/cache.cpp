@@ -30,6 +30,14 @@
 #include "timing_event.h"
 #include "zsim.h"
 
+/* 1.11.40 (audit N7): the registry itself. Function-local static avoids any
+ * static-init-order dependency; InitSystem is the only writer and it runs
+ * single-threaded, so no lock is needed here. */
+g_vector<Cache*>& zsimAllCaches() {
+    static g_vector<Cache*> caches;
+    return caches;
+}
+
 Cache::Cache(uint32_t _numLines, CC* _cc, CacheArray* _array, ReplPolicy* _rp, uint32_t _accLat, uint32_t _invLat, const g_string& _name)
     : cc(_cc), array(_array), rp(_rp), numLines(_numLines), accLat(_accLat), invLat(_invLat), name(_name) {}
 

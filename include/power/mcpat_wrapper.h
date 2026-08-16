@@ -148,6 +148,29 @@ public:
      *   nvlink    1.3   (NVIDIA NVLink4 per-bit claim)
      * Unknown types return -1: caller must reject loudly or use the
      * user override knob (printed k-style). */
+    /* 1.11.40 (user ruling): a physical rate is NOT one number. Every energy
+     * per bit here is a point on a distribution that moves with process node,
+     * operating point, and what the measurement included (PLL and clocking in
+     * or out). Carrying a scalar asserts a precision no source supports, and
+     * the collapse is where the information was lost: the UCIe entry had its
+     * 0.25-0.5 range SOURCED and written into the comment, then returned 0.5.
+     *
+     * lo/hi are the published bounds. single_point marks an entry where only
+     * one figure was found -- the band is then lo==hi and that is a statement
+     * about OUR SOURCING, not about the hardware, so it is reported as such
+     * rather than passing for a converged value. */
+    struct LinkEnergyBand {
+        double lo = -1.0;
+        double hi = -1.0;
+        bool   single_point = false;
+        const char* provenance = "";
+        bool valid() const { return lo > 0.0 && hi >= lo; }
+        double mid() const { return 0.5 * (lo + hi); }
+    };
+    static LinkEnergyBand linkEnergyBandPJPerBit(const std::string& link_type);
+
+    /* Midpoint of the band. Kept because McPAT's interface takes a scalar;
+     * every CALLER that reports a number must report the band alongside it. */
     static double linkEnergyPJPerBit(const std::string& link_type);
     /* 1.11.29: does this link class carry an off-package SerDes? Drives
      * McPAT withPHY, which includes/excludes the SerDes area AND its

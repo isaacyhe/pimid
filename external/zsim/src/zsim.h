@@ -405,7 +405,20 @@ struct GlobSimInfo {
     struct {
         bool enabled = false;
         uint32_t mode = 0;                    // 0=unified(flush), 1=separate(bypass)
-        uint64_t footprintBytes = 0;          // input+output working-set (upper bound)
+        /* 1.11.40 (audit N7): footprintBytes is now an explicit OVERRIDE, not
+         * the source of truth. The flush footprint is MEASURED at roi_begin by
+         * walking the host caches' MESI state for lines in M -- the bytes a
+         * writeback would actually move.
+         *
+         * What it replaces: a fixed 16 MiB config default that never looked at
+         * the workload. On the reference co-sim cell that constant consumed
+         * 1748027 of the host's 1758987 simulated cycles -- 99.4% of the host
+         * timeline -- for a kernel of 4096 elements. It is also 56.9x the whole
+         * host cache hierarchy (32 KB L1D + 256 KB L2), so it was not merely
+         * unmeasured but physically impossible: a flush writes back dirty lines
+         * FROM cache and cannot exceed what the cache holds. */
+        uint64_t footprintBytes = 0;          // refused if set; see init.cpp
+        volatile uint64_t footprintMeasured = 0;  // 1.11.40: what the caches held
         double   writebackBytesPerCycle = 0.0;// host cache writeback BW @ ref clock
         uint32_t flushFixedCycles = 0;        // fixed flush/wbinvd latency
         // Stats (accumulated at each charged roi_begin flush)
@@ -445,10 +458,27 @@ struct GlobSimInfo {
          * roi_begin, with the phase index) make the numerator and its
          * denominator the same window. All zero without an ROI, which
          * reproduces the whole-run behavior exactly. */
+        /* 1.11.40 (audit E17): measurement-only companions to the two
+         * device-side trackers above. Instrumented at the SAME sites, with the
+         * event CYCLE instead of the phase index, so the two views come from
+         * one event stream and can be compared directly. Nothing reads these
+         * back into the model -- they exist to decide whether a cycle-resolved
+         * residency model can report anything, before one is written.
+         * Scope is deliberate: noc and devMC are the components the device-side
+         * gating model targets. anyCore is a different gating domain (core
+         * clock gating) and is not instrumented here. */
+        GapHist nocGaps;
+        GapHist devMCGaps;
         uint64_t roiPhase = 0;
         uint64_t roiAnyCore = 0, roiSharedCache = 0, roiNoc = 0;
         uint64_t roiHostMC = 0, roiDevMC0 = 0;
-        inline void markRoi(uint64_t phase) {
+        /* 1.11.40 (E17): the gap histograms arm HERE, not at the call sites --
+         * there are four of them and a measurement that silently misses one
+         * would report a window it did not measure. Same instant, same window
+         * as the residency counters it exists to inform. */
+        inline void markRoi(uint64_t phase, uint64_t cycle) {
+            nocGaps.arm(cycle);
+            devMCGaps.arm(cycle);
             roiPhase = phase;
             roiAnyCore     = anyCore.activePhases;
             roiSharedCache = sharedCache.activePhases;

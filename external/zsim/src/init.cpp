@@ -294,6 +294,17 @@ BaseCache* BuildCacheBank(Config& config, const string& prefix, g_string& name, 
         cache = new FilterCache(numSets, numLines, cc, array, rp, accLat, invLat, name);
     }
 
+    /* 1.11.40 (audit N7): register every cache so the coherence flush can MEASURE
+     * its footprint instead of using a constant. There was no global registry;
+     * caches were only reachable through the local cMap during InitSystem.
+     * Device PEs of type alu_core have no cache at all (see pe_memory_interface.h,
+     * "The ALU has no cache"), so in a co-sim run every entry here is a host
+     * cache -- which is what makes summing the whole registry the right answer
+     * for a HOST flush. If a cache-bearing PE type is ever added this must
+     * become role-aware, and the flush reports the count so the assumption is
+     * visible rather than buried. */
+    zsimAllCaches().push_back(cache);
+
 #if 0
     info("Built L%d bank, %d bytes, %d lines, %d ways (%d candidates if array is Z), %s array, %s hash, %s replacement, accLat %d, invLat %d name %s",
             level, bankSize, numLines, ways, candidates, arrayType.c_str(), hashType.c_str(), replType.c_str(), accLat, invLat, name.c_str());
@@ -782,6 +793,16 @@ static void InitSystem(Config& config) {
         {
             const char* fb = config.get<const char*>("sys.coherence.footprintBytes", "0");
             zinfo->coherence.footprintBytes = strtoull(fb, nullptr, 10);
+            /* 1.11.40 (N7): footprintBytes is retained only so an explicitly
+             * configured value can be REFUSED rather than silently ignored --
+             * the flush size is measured from the caches' dirty lines at each
+             * flush and is a different number at each one. */
+            if (zinfo->coherence.footprintBytes > 0) {
+                panic("sys.coherence.footprintBytes=%llu is set, but the flush "
+                      "footprint is MEASURED from host dirty lines at each "
+                      "flush -- it is not one number. Remove the key.",
+                      (unsigned long long)zinfo->coherence.footprintBytes);
+            }
         }
         zinfo->coherence.flushFixedCycles = config.get<uint32_t>("sys.coherence.flushFixedCycles", 0);
         const char* wbpc = config.get<const char*>("sys.coherence.writebackBytesPerCycle", "0.0");

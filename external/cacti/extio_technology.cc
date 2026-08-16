@@ -269,8 +269,13 @@ int IOTechParam::frequnecy_index(Mem_IO_type type)
 IOTechParam::IOTechParam(InputParameter * g_ip) 
 {
   num_mem_ca  = g_ip->num_mem_dq * (g_ip->num_dq/g_ip->mem_data_width); 
+/* PIMID 1.11.40: a SERIAL link embeds its clock and recovers it with a CDR,
+ * so it has NO dedicated clock pins and num_clk is legitimately 0. Integer
+ * 0/2 = 0 then faults this division with SIGFPE, which is why io_type=Serial
+ * could never be constructed. Guard with a neutral divisor: with no clock
+ * pins there is exactly one clock domain to load. */
   num_mem_clk =  g_ip->num_mem_dq *
-                (g_ip->num_dq/g_ip->mem_data_width)/(g_ip->num_clk/2); 
+                (g_ip->num_dq/g_ip->mem_data_width)/((g_ip->num_clk >= 2) ? (g_ip->num_clk/2) : 1); 
 
 
   if (g_ip->io_type == LPDDR2) { //LPDDR
@@ -834,6 +839,42 @@ IOTechParam::IOTechParam(InputParameter * g_ip)
 
      r_diff_term = 100;
 
+     /* PIMID 1.11.40: COMPLETES AN INCOMPLETE UPSTREAM PATH.
+      * The Serial branch declared r_diff_term and nothing else, leaving
+      * rtt1/rtt2_dq_*, rs1/rs2_dq, rtt_ca, r_stub_ca and z0 at zero. The swing
+      * math below then evaluates
+      *     rpar_write = (rtt1+rs1)*(rtt2+rs2) / (rtt1+rs1+rtt2+rs2)
+      * which divides by zero, so io_type=Serial faulted on construction and
+      * was unreachable. Values follow this file's own conventions and the
+      * physics of a point-to-point differential link:
+      *   rtt1_dq_* = 50    single-ended half of the 100 ohm differential
+      *                     termination already declared above
+      *   rtt2_dq_* = 100000  the "no second load" sentinel used elsewhere in
+      *                     this file -- a serial link is POINT-TO-POINT,
+      *                     unlike the multi-drop DIMM bus the DDR branches model
+      *   rs1/rs2   = 0     matched channel, no series stub
+      *   rtt_ca    = 100000, r_stub_ca = 0   no separate command/address bus
+      *   z0        = 50    matched single-ended characteristic impedance
+      * Stated here rather than in the caller, because it is a change to the
+      * MODEL's parameter set, not to how PIMID calls it. */
+     rtt1_dq_read  = 50;
+     rtt2_dq_read  = 100000;
+     rtt1_dq_write = 50;
+     rtt2_dq_write = 100000;
+     rs1_dq = 0;
+     rs2_dq = 0;
+     rtt_ca = 100000;
+     r_stub_ca = 0;
+     z0 = 50;
+     /* PIMID 1.11.40, continued: r_on and t_flight are read from g_ip by every
+      * OTHER io_type branch but were never assigned here, so Serial produced
+      * r_on = 0 and io_area = ioarea_k0/0 = inf. Same completion, same reason.
+      * Fallbacks are the values the neighbouring branches use for a matched
+      * 50 ohm channel, applied only when the caller supplied nothing. */
+     r_on = (g_ip->ron_value > 0.0) ? g_ip->ron_value : 50;
+     r_on_ca = 50;
+     t_flight = (g_ip->tflight_value > 0.0) ? g_ip->tflight_value : 0.5;
+     t_flight_ca = t_flight;
 
      t_jitter_setup_sen = t_jitter_setup;
 
@@ -914,8 +955,13 @@ IOTechParam::IOTechParam(InputParameter * g_ip, Mem_IO_type io_type1, int num_me
 						, int num_dq, int connection, int num_loads, double freq) 
 {
   num_mem_ca  = num_mem_dq * (mem_data_width); 
+/* PIMID 1.11.40: a SERIAL link embeds its clock and recovers it with a CDR,
+ * so it has NO dedicated clock pins and num_clk is legitimately 0. Integer
+ * 0/2 = 0 then faults this division with SIGFPE, which is why io_type=Serial
+ * could never be constructed. Guard with a neutral divisor: with no clock
+ * pins there is exactly one clock domain to load. */
   num_mem_clk =  num_mem_dq *
-                (num_dq/mem_data_width)/(g_ip->num_clk/2); 
+                (num_dq/mem_data_width)/((g_ip->num_clk >= 2) ? (g_ip->num_clk/2) : 1); 
 
   io_type = io_type1;
   frequency = freq;
@@ -1539,6 +1585,42 @@ IOTechParam::IOTechParam(InputParameter * g_ip, Mem_IO_type io_type1, int num_me
 
      r_diff_term = 100;
 
+     /* PIMID 1.11.40: COMPLETES AN INCOMPLETE UPSTREAM PATH.
+      * The Serial branch declared r_diff_term and nothing else, leaving
+      * rtt1/rtt2_dq_*, rs1/rs2_dq, rtt_ca, r_stub_ca and z0 at zero. The swing
+      * math below then evaluates
+      *     rpar_write = (rtt1+rs1)*(rtt2+rs2) / (rtt1+rs1+rtt2+rs2)
+      * which divides by zero, so io_type=Serial faulted on construction and
+      * was unreachable. Values follow this file's own conventions and the
+      * physics of a point-to-point differential link:
+      *   rtt1_dq_* = 50    single-ended half of the 100 ohm differential
+      *                     termination already declared above
+      *   rtt2_dq_* = 100000  the "no second load" sentinel used elsewhere in
+      *                     this file -- a serial link is POINT-TO-POINT,
+      *                     unlike the multi-drop DIMM bus the DDR branches model
+      *   rs1/rs2   = 0     matched channel, no series stub
+      *   rtt_ca    = 100000, r_stub_ca = 0   no separate command/address bus
+      *   z0        = 50    matched single-ended characteristic impedance
+      * Stated here rather than in the caller, because it is a change to the
+      * MODEL's parameter set, not to how PIMID calls it. */
+     rtt1_dq_read  = 50;
+     rtt2_dq_read  = 100000;
+     rtt1_dq_write = 50;
+     rtt2_dq_write = 100000;
+     rs1_dq = 0;
+     rs2_dq = 0;
+     rtt_ca = 100000;
+     r_stub_ca = 0;
+     z0 = 50;
+     /* PIMID 1.11.40, continued: r_on and t_flight are read from g_ip by every
+      * OTHER io_type branch but were never assigned here, so Serial produced
+      * r_on = 0 and io_area = ioarea_k0/0 = inf. Same completion, same reason.
+      * Fallbacks are the values the neighbouring branches use for a matched
+      * 50 ohm channel, applied only when the caller supplied nothing. */
+     r_on = (g_ip->ron_value > 0.0) ? g_ip->ron_value : 50;
+     r_on_ca = 50;
+     t_flight = (g_ip->tflight_value > 0.0) ? g_ip->tflight_value : 0.5;
+     t_flight_ca = t_flight;
 
      t_jitter_setup_sen = t_jitter_setup;
 

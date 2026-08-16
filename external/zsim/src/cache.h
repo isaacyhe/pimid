@@ -41,6 +41,13 @@ class Network;
  * too, but to avoid virtual function call overheads we work with MESI
  * controllers, since for now we only have MESI controllers
  */
+/* 1.11.40 (audit N7): global cache registry. Function-local static so it is
+ * safe before any other static initialiser runs; populated once per cache in
+ * InitSystem. Read ONLY at roi_begin, to measure the coherence-flush footprint
+ * that used to be a 16 MiB constant. */
+class Cache;
+g_vector<Cache*>& zsimAllCaches();
+
 class Cache : public BaseCache {
     protected:
         CC* cc;
@@ -64,6 +71,14 @@ class Cache : public BaseCache {
         void initStats(AggregateStat* parentStat);
 
         virtual uint64_t access(MemReq& req);
+
+        /* 1.11.40 (audit N7): dirty bytes resident in THIS cache -- the
+         * bytes a coherence flush would have to write back. Walks the
+         * MESI state array, so it is O(numLines) and is called ONCE, at
+         * roi_begin, not on any access path. */
+        uint64_t dirtyBytes(uint32_t lineSize) const {
+            return cc->countDirtyLines() * (uint64_t)lineSize;
+        }
 
         //NOTE: reqWriteback is pulled up to true, but not pulled down to false.
         virtual uint64_t invalidate(const InvReq& req) {

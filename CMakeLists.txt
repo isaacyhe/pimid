@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(PIMID VERSION 1.11.38 LANGUAGES CXX)
+project(PIMID VERSION 1.11.40 LANGUAGES CXX)
 
 # The reported version is taken FROM the project version, so the two cannot
 # drift apart again (see release 1.10.2).
@@ -173,6 +173,7 @@ set(PIMID_SOURCES
     src/power/power_model.cpp
     src/power/mcpat_model.cpp
     src/power/mcpat_wrapper.cpp
+    src/power/cacti_io_wrapper.cpp   # 1.11.40: CACTI-IO harness (audit E19/link scope)
     src/power/power_model_manager.cpp
 
     # Model registry - NEW PATH
