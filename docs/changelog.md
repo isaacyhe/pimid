@@ -7,6 +7,44 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.32 -- each leakage basis is transformed on its own value (E9)
+
+applyFam read plainLeak from c.power -- the PEAK component -- and wrote it into
+the RUNTIME fields too, discarding whatever runtime leakage McPAT had computed.
+The gated fields two lines below already read plainGated and plainGatedRt
+separately, so the function disagreed with itself: the correct pattern was
+present, applied to the gated endpoints and not the active ones.
+
+- **Each basis now reads itself**, mirroring the gated handling.
+
+- **I PREDICTED THIS WAS INERT, AND I WAS WRONG.** I claimed peak and runtime
+  leakage were equal by construction, from reading set_pppm: slots 1-3 carry
+  the same multiplier in both bases, only slot 0 (dynamic) differs, and no
+  component assigns rt leakage independently. Rather than trust that reading I
+  asserted it in code, so the model would report a divergence instead of
+  silently overwriting it. Gate 1143 fired on the first run:
+        peak leakage    0.0361957 W
+        runtime leakage 0.0060599 W      -- 5.97x apart
+  So the old code was inflating runtime leakage ~6x for every DRAM-periphery
+  component. The reading was wrong; the assertion is why we know.
+
+DATA IMPACT: none, and for a reason worth recording. extractComponent takes
+runtime_dynamic from rt_power but LEAKAGE FROM comp.power -- the peak basis,
+deliberately, per a 1.11.4 comment. So McPAT's runtime leakage has never
+reached a reported number, and corrupting it moved nothing. The cell is
+bit-identical to 1.11.31 (0.0499777 W, 10164680 cycles). Gate 1143: 3/4, with
+the one FAIL being the assertion doing its job.
+
+RAISED AND LOGGED, not fixed here:
+  N4 extractComponent mixes bases -- dynamic from runtime, leakage from peak,
+     which differ 6x. Leakage is static power, so that gap needs explaining
+     before either basis is chosen. Partial trace: core.cc sets power and
+     rt_power from the SAME leakage term, so the divergence enters through
+     power_t. Not root-caused; mixing bases inside one PowerMetrics is the
+     shape of the Joules-vs-Watts defect 1.11.18 found.
+  N5 ComponentType::FULL_SYSTEM is declared and never populated, which is why
+     E8's rollup was dead code and why completing it moved no number.
+
 ## 1.11.31 -- the pitch factor is bounded by silicon, and says when it is ignored (E7)
 
 power.subarray_pitch_factor was the one knob in the 1.11 process surface with

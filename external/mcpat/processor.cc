@@ -439,14 +439,47 @@ Processor::Processor(ParseXML *XML_interface)
       const double fl = XML->sys.dram_periph_leak;
       const int    sc = XML->sys.dram_periph_scope;
       auto applyFam = [&](Component& c, bool scaleArea) {
-          double plainLeak = c.power.readOp.leakage;
+          /* PIMID 1.11.32 (user ruling E9): read each basis from ITSELF.
+           * This used to take plainLeak from c.power -- the PEAK component --
+           * and write it into the RUNTIME fields too, discarding whatever
+           * runtime leakage McPAT had computed. The gated fields below already
+           * read plainGated and plainGatedRt separately, so the function
+           * disagreed with itself: the correct pattern was present, applied to
+           * the gated endpoints and not the active ones.
+           *
+           * Today the two are equal by construction -- McPAT's aggregation
+           * uses the same pppm slots 1-3 for leakage in both bases
+           * (set_pppm(..., n, n, n) for peak and runtime alike; only slot 0,
+           * the dynamic multiplier, differs), and no component assigns
+           * rt leakage independently. So this is a latent trap rather than a
+           * live error, and the change is numerically inert.
+           *
+           * Rather than rely on that reading, ASSERT it: if McPAT ever gives
+           * runtime leakage its own basis, the mismatch is reported instead of
+           * being silently overwritten. Verified by reading set_pppm, and now
+           * by the model itself on every run. */
+          double plainLeak   = c.power.readOp.leakage;
+          double plainLeakRt = c.rt_power.readOp.leakage;
+          {
+              static bool warned_leak_basis = false;
+              const double ref = std::max(std::fabs(plainLeak), std::fabs(plainLeakRt));
+              if (!warned_leak_basis && ref > 0.0 &&
+                  std::fabs(plainLeak - plainLeakRt) > 1e-9 * ref) {
+                  warned_leak_basis = true;
+                  std::cerr << "[fam] NOTE: McPAT peak and runtime leakage differ ("
+                            << plainLeak << " vs " << plainLeakRt
+                            << " W). They shared a basis when 1.11.32 was written; "
+                               "each is now transformed on its own value, which is "
+                               "the correct handling either way." << std::endl;
+              }
+          }
           c.power.readOp.dynamic    *= fd;
           c.rt_power.readOp.dynamic *= fd;
           c.power.readOp.leakage                        = plainLeak * fl;
           c.power.readOp.longer_channel_leakage         = plainLeak * fl;
           c.power.readOp.gate_leakage                  *= fl;
-          c.rt_power.readOp.leakage                     = plainLeak * fl;
-          c.rt_power.readOp.longer_channel_leakage      = plainLeak * fl;
+          c.rt_power.readOp.leakage                     = plainLeakRt * fl;
+          c.rt_power.readOp.longer_channel_leakage      = plainLeakRt * fl;
           c.rt_power.readOp.gate_leakage               *= fl;
           /* 1.11.15 (audit): the GATED endpoints must ride the same family
            * transform, or power gating on a periphery component compares a
