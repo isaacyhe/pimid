@@ -438,7 +438,7 @@ Processor::Processor(ParseXML *XML_interface)
       const double fd = XML->sys.dram_periph_dyn;
       const double fl = XML->sys.dram_periph_leak;
       const int    sc = XML->sys.dram_periph_scope;
-      auto applyFam = [&](Component& c, bool scaleArea) {
+      auto applyFam = [&](Component& c, bool scaleArea, const char* who = "?") {
           /* PIMID 1.11.32 (user ruling E9): read each basis from ITSELF.
            * This used to take plainLeak from c.power -- the PEAK component --
            * and write it into the RUNTIME fields too, discarding whatever
@@ -454,10 +454,29 @@ Processor::Processor(ParseXML *XML_interface)
            * rt leakage independently. So this is a latent trap rather than a
            * live error, and the change is numerically inert.
            *
-           * Rather than rely on that reading, ASSERT it: if McPAT ever gives
-           * runtime leakage its own basis, the mismatch is reported instead of
-           * being silently overwritten. Verified by reading set_pppm, and now
-           * by the model itself on every run. */
+           * WHY THEY DIFFER, root-caused in 1.11.33 rather than left open.
+           * The gap is almost entirely the EXECUTION UNIT. Measured per
+           * sub-unit on a BANK/HBM3 cell:
+           *     ifu    0.001138 / 0.000818    1.39x
+           *     lsu    0.001641 / 0.001641    1.00x
+           *     exu    0.031331 / 0.001515   20.68x   <- 98.9% of the gap
+           *     mmu    0.000417 / 0.000417    1.00x
+           *     undiff 0.001668 (added to both)
+           *     SUM    0.036196 / 0.006060    5.973x  == the measured ratio
+           * lsu, mmu and undiffCore agree EXACTLY, as leakage should. Only exu
+           * collapses, because McPAT scales the execution unit's RUNTIME
+           * leakage with utilisation: an unexercised ALU or FPU contributes
+           * almost none. That is not how leakage works -- a powered idle unit
+           * leaks the same as a busy one, and gating is tracked in separate
+           * fields -- so the runtime figure is the physically wrong one.
+           *
+           * PIMID reads leakage from the PEAK basis (extractComponent), which
+           * counts every powered device. That is the correct choice; switching
+           * to rt_power would silently drop ~86% of core static power. The
+           * transform below still gives each basis its own value, so whichever
+           * a future consumer reads is transformed consistently.
+           *
+           * The check below is a REGRESSION GUARD, not a discovery tool. */
           double plainLeak   = c.power.readOp.leakage;
           double plainLeakRt = c.rt_power.readOp.leakage;
           {
@@ -466,11 +485,12 @@ Processor::Processor(ParseXML *XML_interface)
               if (!warned_leak_basis && ref > 0.0 &&
                   std::fabs(plainLeak - plainLeakRt) > 1e-9 * ref) {
                   warned_leak_basis = true;
-                  std::cerr << "[fam] NOTE: McPAT peak and runtime leakage differ ("
+                  std::cerr << "[fam] peak vs runtime leakage on " << who << ": "
                             << plainLeak << " vs " << plainLeakRt
-                            << " W). They shared a basis when 1.11.32 was written; "
-                               "each is now transformed on its own value, which is "
-                               "the correct handling either way." << std::endl;
+                            << " W. EXPECTED upstream (McPAT scales the execution "
+                               "unit's runtime leakage with utilisation); PIMID "
+                               "reports the PEAK basis, which is the physical one."
+                            << std::endl;
               }
           }
           c.power.readOp.dynamic    *= fd;
@@ -513,16 +533,16 @@ Processor::Processor(ParseXML *XML_interface)
        * factors and keeps its logic-process area -- stated, because the
        * alternative (scaling a wire-dominated area by a device ratio) put a
        * 16-PE add-on at 88% of its own HBM3 die. */
-      if (sc & 1) applyFam(core, true);
-      if (sc & 2) { applyFam(l2, true); applyFam(l3, true); }
+      if (sc & 1) applyFam(core, true, "core");
+      if (sc & 2) { applyFam(l2, true, "l2"); applyFam(l3, true, "l3"); }
       if (sc & 4) {
-          applyFam(noc, false);              // device factors, logic-process area
+          applyFam(noc, false, "noc-agg");              // device factors, logic-process area
           /* The per-level objects the reporting layer reads must carry the
            * same transform as the aggregate: a breakdown that disagrees with
            * its own total is the drift this release exists to end. */
-          for (int ni = 0; ni < numNOC; ni++) applyFam(*nocs[ni], false);
+          for (int ni = 0; ni < numNOC; ni++) applyFam(*nocs[ni], false, "noc");
       }
-      if (sc & 8) applyFam(mcs, true);
+      if (sc & 8) applyFam(mcs, true, "mcs");
       /* Rebuild the processor totals from the transformed components so the
        * aggregate and the parts agree -- the failure mode 1.11.0 found in the
        * NoC census and 1.11.4 found in the CoreBreakdown split. */

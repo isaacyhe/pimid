@@ -7,6 +7,54 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.33 -- why runtime leakage differs, and why we do not use it
+
+User question: leakage is static, so why does McPAT have a "runtime leakage"
+at all, and how can it change? It cannot -- and tracing the 5.97x gap 1.11.32
+found gives the answer.
+
+ROOT CAUSE: the EXECUTION UNIT. Measured per core sub-unit on a BANK/HBM3
+cell, instrumented and then removed:
+
+    unit          peak W   runtime W    ratio
+    ifu         0.001138    0.000818    1.39x
+    lsu         0.001641    0.001641    1.00x
+    exu         0.031331    0.001515   20.68x   <- 98.9% of the gap
+    mmu         0.000417    0.000417    1.00x
+    undiffCore  0.001668    0.001668    1.00x
+    SUM         0.036196    0.006060    5.973x  == the measured ratio
+
+lsu, mmu and undiffCore agree EXACTLY, which is what leakage must do. Only exu
+collapses, because McPAT scales the execution unit's RUNTIME leakage with
+utilisation: an unexercised ALU or FPU contributes almost none. That is not how
+leakage works -- a powered idle unit leaks the same as a busy one, and gating
+is tracked in separate fields (power_gated_leakage). The runtime figure is the
+physically wrong one. Our cell is a 1-PE ALU profile, so most execution units
+idle and the runtime number falls to a twentieth.
+
+- **PIMID was already right.** extractComponent reads leakage from the PEAK
+  basis, which counts every powered device. Switching to rt_power -- which N4
+  was contemplating -- would silently drop ~86% of core static power.
+- **The guard stays**, reworded from a discovery tool into a REGRESSION guard:
+  it names the component, fires once, and states the upstream cause, so a
+  future convergence or a new divergence is visible rather than silent.
+- **A second, unrelated upstream bug found and fixed on the way.** McPAT's NoC
+  scales runtime leakage by 1 while the peak path scales router leakage by
+  total_nodes and link_bus leakage by global_linked_ports x total_nodes. Same
+  class of error -- static power made to depend on structure only in one basis
+  -- and also invisible, since PIMID reads peak. The runtime path now carries
+  the same structural multipliers.
+
+DATA IMPACT: none. Bit-identical to 1.11.31/32 (0.0499777 W, 10164680 cycles),
+because every leakage number PIMID reports comes from the peak basis and always
+has. Gate 1144: 4/4.
+
+CORRECTIONS TO MY OWN CLAIMS, recorded: I asserted the two bases were equal by
+construction (wrong -- refuted by the assertion I wrote to check it), then
+attributed the gap to the NoC's missing total_nodes multiplier (wrong -- that
+bug is real but unrelated; the assertion fires on "core"). The per-sub-unit
+measurement is what settled it. N4 is closed by this entry.
+
 ## 1.11.32 -- each leakage basis is transformed on its own value (E9)
 
 applyFam read plainLeak from c.power -- the PEAK component -- and wrote it into

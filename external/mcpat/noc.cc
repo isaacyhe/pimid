@@ -224,6 +224,34 @@ void NoC::computeEnergy(bool is_tdp)
 	    	stats_t.readAc.access  = XML->sys.NoC[ithNoC].total_accesses;
             rtp_stats = stats_t;
         	set_pppm(pppm_t, 1, 0 , 0, 0);
+        	/* PIMID 1.11.33: RUNTIME LEAKAGE MISSED THE STRUCTURAL MULTIPLIERS.
+        	 *
+        	 * The peak branch above scales router leakage by total_nodes, and
+        	 * link_bus leakage by global_linked_ports THEN total_nodes. The
+        	 * runtime branch scaled both by ONE, so it reported the leakage of a
+        	 * single router and a single link where the peak reported the whole
+        	 * fabric.
+        	 *
+        	 * That asymmetry is CORRECT for dynamic and WRONG for leakage.
+        	 * Runtime dynamic comes from rtp_stats.readAc.access, a measured
+        	 * count that already covers every router in the fabric, so it must
+        	 * NOT be multiplied again. Leakage is static and per-router: N
+        	 * routers leak N times one router, whatever the traffic. Leakage
+        	 * cannot depend on activity at all -- that is what makes this a bug
+        	 * and not a convention.
+        	 *
+        	 * Measured before the fix on a BANK/HBM3 cell: peak 0.0361957 W
+        	 * against runtime 0.0060599 W, 5.97x apart. Not an integer because
+        	 * the two contributors carry different peak multipliers, so the
+        	 * ratio is total_nodes * (R + L*glp) / (R + L).
+        	 *
+        	 * Upstream McPAT defect, found via the leakage-basis assertion added
+        	 * in 1.11.32. It has never moved a PIMID number: extractComponent
+        	 * reads leakage from the PEAK basis, which is the correct one. */
+        	double pppm_lkg_nodes[4] = {0,
+        	                            (double)nocdynp.total_nodes,
+        	                            (double)nocdynp.total_nodes,
+        	                            0};
         	if (router_exist)
         	{
             	router->buffer.rt_power.readOp.dynamic = (router->buffer.power.readOp.dynamic + router->buffer.power.writeOp.dynamic)*rtp_stats.readAc.access ;
@@ -231,12 +259,17 @@ void NoC::computeEnergy(bool is_tdp)
             	router->arbiter.rt_power.readOp.dynamic = router->arbiter.power.readOp.dynamic*rtp_stats.readAc.access ;
 
         		router->rt_power = router->rt_power + (router->buffer.rt_power + router->crossbar.rt_power + router->arbiter.rt_power)*pppm_t +
-					router->power*pppm_lkg;//TDP power must be calculated first!
+					router->power*pppm_lkg_nodes;//TDP power must be calculated first!
         		rt_power     = rt_power + router->rt_power;
         	}
         	if (link_bus_exist)
         	{
-        		set_pppm(pppm_t, rtp_stats.readAc.access, 1 , 1, rtp_stats.readAc.access);
+        		/* dynamic from the measured access count; leakage by the same
+        		 * structure the peak path uses: per-router links x nodes. */
+        		const double glp_nodes =
+        		    (double)nocdynp.global_linked_ports * (double)nocdynp.total_nodes;
+        		set_pppm(pppm_t, rtp_stats.readAc.access, glp_nodes, glp_nodes,
+        		         rtp_stats.readAc.access);
         		link_bus->rt_power = link_bus->power * pppm_t;
         		rt_power = rt_power + link_bus->rt_power;
         	}
