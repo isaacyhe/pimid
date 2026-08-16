@@ -7,6 +7,58 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.36 -- a phase is counted once (E14)
+
+PhaseActivity counts, per component, how many PHASES it was busy in; idle
+residency is 1 - activePhases/totalPhases, and that is the fraction of gating
+saving the component is credited. lastActivePhase is the "have I already
+counted this phase?" marker.
+
+- **The marker could walk BACKWARDS.** touch() CAS'd it to whatever phase the
+  calling thread held, so a thread carrying a stale number could rewind it and
+  the next touch of an already-counted phase would count again:
+        phase 5: A touches -> marker=5, count=1
+                 B (holding a stale 4) touches -> marker=4
+                 A touches again -> 4 != 5 -> count=2
+  An inflated activePhases makes a component look busier than it was, so its
+  idle residency comes out too LOW and it is credited LESS gating saving than
+  it earned. The in-code comment claimed "a lost race undercounts one phase,
+  negligible" -- the real failure was over-counting, by an amount depending on
+  thread interleaving.
+
+- **The update is now monotonic**: the marker never rewinds, and a lost CAS
+  retries instead of falling through.
+
+- **Scope, checked before changing it.** Cores hold their own tracker
+  (core.h pgAct) and cannot race; only the five SHARED trackers are exposed --
+  anyCore, sharedCache, noc, hostMC, devMC[] -- which are exactly the ones the
+  reported residencies come from. And numPhases advances inside the
+  scheduler's BARRIER callback, so threads agree on the phase for essentially
+  all of it and the stale window is a few instructions. Real, but rare.
+
+- **Trade-off, stated**: refusing to rewind drops a lagging thread's touch of
+  an older phase. The barrier has left that phase, so another thread has almost
+  certainly counted it; where it has not, the result is a bounded UNDER-count,
+  which under-credits gating rather than over-crediting it.
+
+- **What this does NOT buy: reproducibility.** Which thread wins the CAS still
+  depends on interleaving, so the count is bounded and never inflated, not
+  identical run to run. Per-thread trackers would give that, at the cost of
+  deciding what "the phase was active" means when threads disagree -- logged
+  rather than assumed.
+
+TESTED BY A TEST THAT DISCRIMINATES. A simulation gate cannot exercise this:
+our cells are 1-PE and nothing races. _1147gate/phaseact_test.cpp drives the
+tracker directly, including the exact interleaving the bug needed, and the gate
+builds BOTH versions:
+    fixed  PASS  backwards touch does not double-count   (got 1, want 1)
+    old    FAIL  backwards touch does not double-count   (got 3, want 1)
+Concurrent stress -- 8 threads, half deliberately stale, 2000 phases -- counts
+82, never exceeding the ceiling.
+
+DATA IMPACT: none. Gate 1147 5/5 with the shipped cell bit-identical
+(0.0499777 W, 10164680 cycles), because 1-PE cells never raced.
+
 ## 1.11.35 -- the frequency guard calculates its own bound (E13)
 
 E13 observed that the area factor uses l_phy (device LENGTH) while CACTI's
