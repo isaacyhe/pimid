@@ -1671,12 +1671,31 @@ IOTechParam::IOTechParam(InputParameter * g_ip, Mem_IO_type io_type1, int num_me
    //SWING AND TERMINATION CALCULATIONS
 
    //R|| calculation
+   recomputeSwing();
+}
+
+/* PIMID 1.11.41: the termination-network and swing math, factored out of the
+ * constructor so a caller can supply BETTER ELECTRICAL PARAMETERS and have the
+ * derived values follow.
+ *
+ * Why: CACTI-IO's per-io_type tables carry one electrical set each, and
+ * technologies postdating the model (DDR5, LPDDR5, GDDR6, HBM) have to borrow a
+ * neighbour's. PIMID already holds SOURCED electrical values for all of them --
+ * VDDQ, RTT and RON cited to JESD79-3D T38/T41, JESD8-24 POD12, POD11, POD135
+ * and the Micron LPDDR5 datasheets. Overwriting vdd_io/rtt/r_on and re-deriving
+ * is strictly better than borrowing a neighbour's rail voltage: LPDDR5 runs at
+ * VDDQ 0.5 V against LPDDR2's, and that ratio enters every swing as V^2.
+ *
+ * This recomputes ONLY what the electrical parameters determine. Capacitances,
+ * bias/leakage currents, PHY coefficients and the area polynomial stay as
+ * CACTI-IO's family values -- PIMID has no sourced replacements for those, and
+ * inventing them is the thing this whole exercise exists to stop. */
+void IOTechParam::recomputeSwing()
+{
    rpar_write =(rtt1_dq_write + rs1_dq)*(rtt2_dq_write + rs2_dq)/
         (rtt1_dq_write + rs1_dq + rtt2_dq_write + rs2_dq);
    rpar_read =(rtt1_dq_read)*(rtt2_dq_read + rs2_dq)/
         (rtt1_dq_read + rtt2_dq_read + rs2_dq);
-
-	
 
    //Swing calculation
    v_sw_data_read_load1 =vdd_io * (rtt1_dq_read)*(rtt2_dq_read + rs2_dq) / 
@@ -1690,7 +1709,6 @@ IOTechParam::IOTechParam(InputParameter * g_ip, Mem_IO_type io_type1, int num_me
    v_sw_data_write_load2 =vdd_io * (rtt2_dq_write)*(rtt1_dq_write + rs1_dq) / 
       ((rtt1_dq_write + rs1_dq + rtt2_dq_write + rs2_dq)*(r_on + rpar_write));
    v_sw_data_write_line =vdd_io * rpar_write / (r_on + rpar_write); 
-
 }
 
 

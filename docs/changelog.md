@@ -7,6 +7,93 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.41 -- CACTI-IO covers five of seven memory technologies (N8)
+
+**Also in this release -- pim.mc.pg is split into three flags (user ruling).**
+One flag drove three unrelated mechanisms; a user could not enable the one they
+meant and the reported saving mixed them:
+    pim.mc.pg          controller LOGIC gating (Vdd cut, state lost)
+    memory.power_down  DRAM JEDEC precharge power-down (IDD2P). NOT gating:
+                       the array is never unpowered -- cells are capacitors and
+                       must refresh -- so "power gating DRAM" is a category
+                       error the old flag name encoded.
+    memory.array_pg    array-PERIPHERY gating. Retention-free on NVM
+                       (non-volatile cells hold state unpowered); on SRAM the
+                       periphery gates and the cell array goes to RETENTION.
+
+**SRAM gains a retention path, from CACTI's own figures.** CACTI defines
+Vcc_min for a memory cell as "the lowest vcc for data retention" and derives it
+per node: sram_cell.Vcc_min = 0.65*Vdd, peri_global.Vcc_min = 0.35*Vdd
+(parameter.cc). Its power-gating model drops a block to Vcc_min, not to zero
+(decoder.cc, detalV = Vdd - Vcc_min) -- so the tool's "gated" state IS a
+retention state, and the model PIMID lacked was already inside the tool.
+Previously the SRAM cell array was held at full Vdd during idle (a stated lower
+bound); it now sits at its retention voltage, keeping data:
+    leakage = cells*((1-r) + 0.65*r) + periphery*((1-r) + 0.35*r)
+Using the VOLTAGE ratio as the LEAKAGE ratio is the conservative direction --
+subthreshold leakage falls faster than linearly in Vdd (DIBL), so the credited
+saving is an under-estimate. Both ratios are CACTI per-node values, not ours.
+
+**E20 (user ruling: add, do not replace) -- and its completion.** The
+byte-driven link energy ASSIGNED over McPAT's PCIe controller runtime dynamic,
+justified as "end-to-end pJ/bit". The sourced figures are SerDes papers -- PHY
+measurements -- so the controller's digital protocol engine (LTSSM, replay,
+flit assembly) is different silicon, and the assignment became an addition.
+Gating exposed that the addition alone was INERT: perc_load was forced to 0,
+which had already zeroed the controller dynamic before the byte term arrived.
+perc_load now carries the MEASURED duty (E19), so controller digital work is
+charged at real activity at BOTH ends (each end's logic processes every flit;
+the SerDes energy is still charged once, end-to-end). Measured on the reference
+co-sim cell: host controller dynamic 0.011 -> 0.015 W, device end 0 -> 0.0032 W
+-- about 7 mW of digital link power that was previously deleted.
+
+**Found while gating, logged not fixed:** HBM3 at HOST_MC placement fails in
+Ramulator preset generation ("timing nRFCSB is not specified"), on old and new
+binaries alike -- a pre-existing config-path gap, now audit N9. The HBM3
+no-change claim is instead proven by the BANK-placement cell (gate 1156,
+bit-identical).
+
+1.11.40 harnessed CACTI-IO but could only SUBSTITUTE for DDR3 and DDR4, because
+every other technology had to borrow a neighbour's electrical parameters and a
+borrowed rail voltage is not a model. PIMID already held the missing values.
+
+**PIMID's sourced electricals are injected into CACTI-IO.** VDDQ, RTT and RON
+per technology, cited in pimid_energy.h to JESD79-3D T38/T41 (DDR3 SSTL-15,
+RZQ=240 so RTT=RZQ/6 and RON=RZQ/7), JESD8-24 POD12 (DDR4), POD11 (DDR5),
+JESD8-21C POD135 (GDDR6, RTT programmable via MR6) and the Micron LPDDR5
+datasheets (LVSTL, VDDQ 0.5 V ODT-on, RON 40). `IOTechParam::recomputeSwing()`
+was factored out of the constructor so the termination network and every swing
+re-derive from the injected values. LPDDR5's 0.5 V rail against LPDDR2's enters
+each swing as V^2, which was the single largest error in the borrowed setup.
+
+    tech     termination nJ/64B      driver+PHY nJ/64B   IO area mm2
+             hand -> CACTI-IO        (never modelled)
+    DDR3     2.43243 -> 12.57894     19.42374            3.1360
+    DDR4     1.30909 ->  2.13733      9.70775            2.6979
+    DDR5     0.73333 ->  1.20052      7.79051            3.4289
+    LPDDR5   0.03571 ->  0.07380      3.58644            withheld
+    GDDR6    0.33326 ->  0.67124     15.25356            withheld
+    HBM2/3   cross-check only -- unterminated interposer, no network to inject
+
+**This fixes the 142x LPDDR5 defect 1.11.40 recorded but could not repair.**
+The hand table gave 0.0349 pJ/bit because it modelled only static termination,
+which is exactly what LVSTL exists to eliminate. With the electricals injected
+LPDDR5 lands near 7.1 pJ/bit total, against a published 3-6 band.
+
+**Area has a narrower valid range than power, and no longer shares its limit.**
+The area polynomial's cubic term equals its linear term at sqrt(k1/k3) = 3162
+MHz and is 4.9x it by 7000 MHz, which produced an implausible 10.81 mm2 for a
+32-bit GDDR6 interface. Above the crossover the area is withheld and says so;
+power is unaffected because nothing in the power path reads that polynomial.
+
+**Still borrowed, and stated at every call:** capacitances, bias and leakage
+currents, PHY coefficients and the area polynomial remain the neighbouring
+family's values. PIMID has no sourced replacements, and inventing them is the
+defect this work exists to remove. An injected technology is better-grounded
+than a borrowed one, not fully sourced. LPDDR5's RTT=240 is flagged UNSOURCED
+in the result, the same way pimid_energy.h flags it -- Micron defers the ohm
+table to an AC/DC document we do not hold.
+
 ## 1.11.40 -- quantities the simulation reveals stop being constants
 
 One principle, five changes. A value the run can produce must not be a

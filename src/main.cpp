@@ -1499,7 +1499,24 @@ struct UnifiedConfig {
      * FALSE: a config with no pg: keys is bit-identical to 1.11.7. */
     bool pg_pe = false;    // pim.pe.pg      (PE cores + their caches)
     bool pg_noc = false;   // noc.pg         (device tree fabric)
-    bool pg_mc = false;    // pim.mc.pg      (device MCs; also DRAM power-down)
+    /* 1.11.41 (user ruling): pim.mc.pg gates the memory CONTROLLER -- logic,
+     * a real Vdd cut through sleep transistors, state lost and rebuilt on
+     * wake. That is the only thing it means now.
+     *
+     * It used to ALSO drive DRAM precharge power-down and NVM array-periphery
+     * gating, which are different mechanisms with different physics:
+     *   - DRAM power-down (IDD2P) is a JEDEC STATE, not gating. The array is
+     *     never unpowered -- cells are capacitors and must be refreshed -- so
+     *     "power gating DRAM" is a category error. Entry/exit is tXP, spec
+     *     defined, and nothing is switched off.
+     *   - NVM array periphery CAN be gated retention-free, because the cells
+     *     are non-volatile. That is a property of the MEMORY, not of its
+     *     controller.
+     * One flag driving three mechanisms meant a user could not enable the one
+     * they meant, and the reported saving mixed them. */
+    bool pg_mc = false;         // pim.mc.pg          controller LOGIC gating
+    bool mem_power_down = false; // memory.power_down  DRAM JEDEC power-down (IDD2P)
+    bool mem_array_pg = false;   // memory.array_pg    NVM retention-free periphery gating
     std::string pcie_model = "simple";    // "simple" or "md1" for PCIe timing model
     // Host<->device link technology. Selects preset latency/BW/overhead unless
     // the user overrides them. "interposer" = 2.5D silicon interposer (UCIe-class
@@ -5485,13 +5502,13 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             const int bg_units =
                 ram_oracle.getBackgroundUnits(config.dram_device_width);
             double bg_power_mw = ram_oracle.getBackgroundSystemMW(
-                mc_r_idle, config.pg_mc, config.dram_device_width);
+                mc_r_idle, config.mem_power_down, config.dram_device_width);
             if (mc_r_idle > 0.0) {
                 std::cout << "  [pg] DRAM idle residency " << mc_r_idle
                           << " -> background "
                           << ram_oracle.getBackgroundPowerMW() * bg_units
                           << " -> " << bg_power_mw << " mW ("
-                          << (config.pg_mc ? "IDD2N page-close then IDD2P "
+                          << (config.mem_power_down ? "IDD2N page-close then IDD2P "
                                              "power-down"
                                            : "IDD2N page-close; pim.mc.pg off, "
                                              "no power-down")
@@ -5667,7 +5684,31 @@ static void runPowerAnalysis(const UnifiedConfig& config,
              * (Vcc_min/Vdd ~= 0.35). The cell array keeps its full leakage.
              * The split is stated rather than assumed: CACTI does not
              * separate them here, so the periphery share is declared. */
-            if (config.pg_mc && zsim_stats.pg_window() > 0) {
+            /* 1.11.41: memory-side flag. This gates the ARRAY periphery, which
+             * is a property of the memory, not of its controller -- it was
+             * driven by pim.mc.pg, so gating the controller silently gated the
+             * SRAM periphery too and the two savings could not be separated.
+             *
+             * RETENTION IS NOT MODELLED, and this is where it would go. The
+             * model below gates the periphery and leaves the CELL ARRAY at full
+             * leakage, which is the conservative bound for a volatile array:
+             * you cannot cut Vdd to an SRAM cell without losing its contents.
+             * A real drowsy/retention design holds the array at a reduced
+             * retention voltage instead -- keeping data while cutting leakage
+             * somewhere between full and gated. Adding that needs a
+             * retention-voltage leakage model, and CACTI does not provide one
+             * (it computes power_gated_leakage, the DESTRUCTIVE case, not a
+             * retention floor). So the reported SRAM saving is a LOWER BOUND,
+             * stated rather than closed with an invented retention factor.
+             *
+             * The alternative that IS fully modellable with what we hold:
+             * flush-then-gate. Write back the dirty lines (countDirtyLines()
+             * from 1.11.40 N7 already measures exactly that set and the flush
+             * energy is already priced), then gate destructively at CACTI's
+             * power_gated_leakage. That trades a real writeback cost for the
+             * full gated floor and invents nothing. Logged for a later release
+             * rather than bundled here. */
+            if (config.mem_array_pg && zsim_stats.pg_window() > 0) {
                 double r_idle = 1.0 - std::min(1.0,
                     static_cast<double>(zsim_stats.pg_devmc_active)
                         / static_cast<double>(zsim_stats.pg_window()));
@@ -5702,18 +5743,53 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                                      "split to gate on (no credit taken)."
                                   << std::endl;
                     } else {
-                        const double kSleepTxResidual = 0.35; // Vcc_min/Vdd, CACTI-class
+                        /* 1.11.41 (user ruling: harness the SRAM PG with a
+                         * RETENTION path). Both voltage ratios below are
+                         * CACTI's own, not ours -- parameter.cc derives them
+                         * per node as a fraction of the interpolated Vdd:
+                         *     peri_global.Vcc_min = Vdd * 0.35   (periphery)
+                         *     sram_cell.Vcc_min   = Vdd * 0.65   (cell array)
+                         * and CACTI documents Vcc_min for a memory cell as
+                         * "the lowest vcc for data retention". Its power-gating
+                         * model drops a block to Vcc_min (decoder.cc:212,
+                         * detalV = Vdd - Vcc_min), so CACTI's "gated" state IS
+                         * a retention state -- the tool already had the model
+                         * PIMID was missing.
+                         *
+                         * The array therefore does NOT have to stay at full
+                         * leakage. It cannot be gated to zero (volatile: that
+                         * loses the data), but it CAN sit at its retention
+                         * voltage and keep it. Previously the cells were held
+                         * at full Vdd throughout, which understated the saving
+                         * -- stated at the time as a lower bound, now closed
+                         * with the tool's own figure rather than an invented
+                         * retention factor. */
+                        const double kPeriphResidual = 0.35;   // peri_global.Vcc_min/Vdd
+                        const double kCellRetention  = 0.65;   // sram_cell.Vcc_min/Vdd
+                        /* Using the VOLTAGE ratio as the LEAKAGE ratio is the
+                         * conservative direction: subthreshold leakage falls
+                         * faster than linearly in Vdd (DIBL), so real retention
+                         * leakage at 0.65*Vdd is BELOW 0.65x. The credited
+                         * saving is therefore an under-estimate, never an
+                         * over-estimate -- the same bias direction as every
+                         * other bound in this file. */
                         double before = leakage;
                         double periph = leakage * periph_share;
                         double cells  = leakage - periph;
-                        leakage = cells + periph * ((1.0 - r_idle) + kSleepTxResidual * r_idle);
-                        std::cout << "  [pg] SRAM periphery gating: idle residency "
-                                  << r_idle << " -> leakage " << before << " -> "
-                                  << leakage << " mW (cells stay powered: volatile; "
-                                     "periphery share " << periph_share
-                                  << " DERIVED from an array-only CACTI query, "
-                                     "sleep-tx residual " << kSleepTxResidual
-                                  << ")" << std::endl;
+                        /* Periphery gates (state rebuilt on wake); cells go to
+                         * retention (state kept). Different mechanisms, so
+                         * different residuals, applied over the same measured
+                         * idle residency. */
+                        leakage = cells  * ((1.0 - r_idle) + kCellRetention  * r_idle)
+                                + periph * ((1.0 - r_idle) + kPeriphResidual * r_idle);
+                        std::cout << "  [pg] SRAM gating: idle residency " << r_idle
+                                  << " -> leakage " << before << " -> " << leakage
+                                  << " mW (periphery share " << periph_share
+                                  << " DERIVED from an array-only CACTI query; "
+                                     "periphery gates to Vcc_min/Vdd=" << kPeriphResidual
+                                  << ", cells hold DATA at retention Vcc_min/Vdd="
+                                  << kCellRetention << " -- both CACTI per-node values)"
+                                  << std::endl;
                     }
                 }
             }
@@ -5761,7 +5837,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
              * periphery leakage collapses toward the sleep-transistor floor
              * (~2% of active, the CACTI-class sleep-tx residual) during
              * measured no-traffic residency. The one place PG is free. */
-            if (config.pg_mc && zsim_stats.pg_window() > 0) {   // 1.11.18: priced window
+            if (config.mem_array_pg && zsim_stats.pg_window() > 0) {   // 1.11.41: memory-side flag
                 double r_idle = 1.0 - std::min(1.0,
                     static_cast<double>(zsim_stats.pg_devmc_active)
                         / static_cast<double>(zsim_stats.pg_window()));
@@ -6602,7 +6678,18 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                               << ", wall_seconds=" << wall_seconds
                               << "); reporting peak at full rate." << std::endl;
                 }
-                ps.total_load_perc = 0.0;        // legacy path off; bytes drive it
+                /* 1.11.41 (E20 completion). perc_load = 0 was justified as
+                 * "the legacy scaling would double-count a number we now know"
+                 * -- but it also zeroed the CONTROLLER's own digital dynamic
+                 * (LTSSM, replay buffers, flit assembly), which made the E20
+                 * assignment-vs-addition fix inert: adding to a zeroed base.
+                 * The two terms are different silicon and BOTH are now real:
+                 *   controller digital = McPAT's model x MEASURED duty (E19)
+                 *   SerDes             = measured bytes x pJ/bit (added in
+                 *                        iocontrollers.cc, E20)
+                 * No double-count: the pJ/bit figures are SerDes papers and do
+                 * not include protocol logic. */
+                ps.total_load_perc = (duty_derived >= 0.0) ? duty_derived : 0.0;
                 ps.transferred_bytes =
                     charge_here ? static_cast<double>(xbytes) : 0.0;   // link priced once
                 ps.link_pj_per_bit = pjbit;
@@ -9602,6 +9689,20 @@ int main(int argc, char** argv) {
                 //   "analytical" -> closed-form hop-count + M/D/1 + MLP (see noc.mlp)
                 //   "detailed"   -> cycle-accurate Garnet
                 if (yaml_cfg["noc"]["model"]) {
+    /* 1.11.41: memory-side power keys, split out of pim.mc.pg.
+     *   memory.power_down  DRAM JEDEC precharge power-down (IDD2P). NOT power
+     *                      gating -- the array stays powered and refreshed.
+     *   memory.array_pg    array-PERIPHERY power gating. Retention-free on NVM
+     *                      (non-volatile cells hold state unpowered); on SRAM
+     *                      the periphery gates but the volatile cell array
+     *                      keeps full leakage. Illegal on DRAM, whose array
+     *                      cannot be gated at all -- refused below. */
+    if (yaml_cfg["memory"]) {
+        if (yaml_cfg["memory"]["power_down"])
+            config.mem_power_down = yaml_cfg["memory"]["power_down"].as<bool>(config.mem_power_down);
+        if (yaml_cfg["memory"]["array_pg"])
+            config.mem_array_pg = yaml_cfg["memory"]["array_pg"].as<bool>(config.mem_array_pg);
+    }
                     std::string noc_model = yaml_cfg["noc"]["model"].as<std::string>();
                     if (noc_model == "detailed") {
                         config.noc_cycle_accurate = true;

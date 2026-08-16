@@ -240,6 +240,50 @@ struct DramIOMap {
     const char* note;
 };
 
+/* PIMID'S OWN SOURCED ELECTRICAL LAYER, injected into CACTI-IO.
+ *
+ * CACTI-IO carries one electrical set per io_type, so DDR5/LPDDR5/GDDR6/HBM had
+ * to borrow a neighbour's rail voltage and termination -- which is why they were
+ * cross-check-only. PIMID already holds these values, sourced, in
+ * pimid_energy.h: VDDQ, RTT and RON cited to JESD79-3D T38/T41 (DDR3 SSTL-15,
+ * RZQ=240 so RTT=RZQ/6, RON=RZQ/7), JESD8-24 POD12 (DDR4), POD11 (DDR5),
+ * JESD8-21C POD135 (GDDR6, RTT programmable via MR6), and the Micron LPDDR5
+ * datasheets (LVSTL, VDDQ 0.5 V ODT-on, RON 40).
+ *
+ * Injecting them and re-deriving the swings is strictly better than borrowing:
+ * LPDDR5's 0.5 V rail against LPDDR2's enters every swing as V^2, which is the
+ * single biggest error in the borrowed configuration.
+ *
+ * WHAT IS STILL BORROWED, and must stay stated: capacitances, bias and leakage
+ * currents, PHY coefficients and the area polynomial remain CACTI-IO's family
+ * values. PIMID has no sourced replacement for those. So an injected technology
+ * is better-grounded than a borrowed one but is not fully sourced, and it says
+ * so in `source`.
+ *
+ * RTT for LPDDR5 is the one UNSOURCED input, flagged the same way pimid_energy.h
+ * flags it: Micron defers the ohm table to a separate AC/DC document we do not
+ * have, so 240 (RZQ, the LPDDR4/5 ODT reference) stands in. */
+struct PimidElectrical {
+    double vddq;      // IO rail -> vdd_io
+    double rtt;       // termination -> rtt1_dq_*
+    double ron;       // driver on-resistance -> r_on
+    double mts;       // transfer rate
+    bool   sourced;   // is every electrical value cited?
+    const char* note;
+};
+
+bool pimidElectricalFor(const std::string& t, PimidElectrical& e) {
+    if (t == "DDR3")   { e = {1.5,  40,  34, 1600,  true,  "SSTL-15, JESD79-3D T38/T41 (RZQ=240)"};      return true; }
+    if (t == "DDR4")   { e = {1.2,  48,  40, 3200,  true,  "POD12, JESD8-24"};                            return true; }
+    if (t == "DDR5")   { e = {1.1,  48,  40, 4800,  true,  "POD11, same family as JESD8-24"};             return true; }
+    if (t == "GDDR6")  { e = {1.35, 60,  40, 14000, true,  "POD135, JESD8-21C Cl.D (RTT via MR6)"};       return true; }
+    if (t == "LPDDR5") { e = {0.5,  240, 40, 6400,  false, "LVSTL, Micron LPDDR5 datasheets; RTT=240 (RZQ) UNSOURCED"}; return true; }
+    /* HBM rides an interposer: JESD238B cl.9.1, unterminated, so there is no
+     * termination network to inject. It keeps WideIO's low-swing electricals,
+     * which is the physically right family for a wide unterminated bus. */
+    return false;
+}
+
 bool dramIOMapFor(const std::string& t, DramIOMap& m) {
     if (t == "DDR3")   { m = {DDR3,   true,  "DDR3, exact"}; return true; }
     if (t == "DDR4")   { m = {DDR4,   true,  "DDR4, exact"}; return true; }
@@ -252,8 +296,11 @@ bool dramIOMapFor(const std::string& t, DramIOMap& m) {
      * which is exactly what WideIO models. The closest map in the set. */
     if (t == "HBM2" || t == "HBM3")
                        { m = {WideIO, false, "HBM -> WideIO (wide low-swing parallel on interposer; per-channel stack structure unmodelled)"}; return true; }
-    /* GDDR6 has no counterpart: POD135 at 14-16 Gb/s is far outside every
-     * parameter set here, and picking a neighbour would be a guess. */
+    /* GDDR6: POD135, same signalling family as DDR4/DDR5, so DDR4's structural
+     * and PHY coefficients apply once PIMID's POD135 electricals are injected.
+     * Its 14 Gb/s rate is still checked against the fit range below and will be
+     * refused there -- the map exists, the RATE is what disqualifies it. */
+    if (t == "GDDR6")  { m = {DDR4, false, "GDDR6 -> DDR4 structure + PIMID POD135 electricals"}; return true; }
     return false;
 }
 
@@ -361,6 +408,20 @@ LinkIOResult CactiIOWrapper::computeDramIO(const std::string& tech,
 
     try {
         IOTechParam iop(g_ip, m.type, 8, 8, num_dq, 0, 1, freq_mhz);
+        /* INJECT PIMID'S SOURCED ELECTRICALS and re-derive. This is what lets a
+         * technology CACTI-IO predates be modelled rather than merely borrowed:
+         * the rail voltage, termination and driver impedance come from JEDEC and
+         * the vendor datasheets, and recomputeSwing() propagates them through the
+         * termination network into every swing the power model reads. */
+        PimidElectrical el;
+        bool injected = pimidElectricalFor(tech, el);
+        if (injected) {
+            iop.vdd_io        = el.vddq;
+            iop.rtt1_dq_read  = el.rtt;
+            iop.rtt1_dq_write = el.rtt;
+            iop.r_on          = el.ron;
+            iop.recomputeSwing();
+        }
         Extio io(&iop);
         {
             StdoutSilencer quiet;
@@ -370,7 +431,17 @@ LinkIOResult CactiIOWrapper::computeDramIO(const std::string& tech,
             io.extio_power_dynamic();
             io.extio_eye();
         }
-        r.io_area_mm2          = io.getIOAreaMM2();
+        /* AREA HAS A NARROWER VALID RANGE THAN POWER, and they must not share
+         * one limit. Power scales linearly in frequency; the AREA polynomial's
+         * cubic term equals its linear term at sqrt(k1/k3) = 3162 MHz and is
+         * 4.9x it by 7000 MHz (GDDR6's clock), which is what produced an
+         * implausible 10.8 mm^2 for a 32-bit GDDR6 interface. Above the
+         * crossover the area is an extrapolation dominated by the cubic, so it
+         * is withheld rather than reported -- power stays, because nothing in
+         * the power path depends on that polynomial. */
+        const double kAreaValidMaxMHz = 3162.0;   // cubic == linear
+        const bool area_credible = (freq_mhz <= kAreaValidMaxMHz);
+        r.io_area_mm2          = area_credible ? io.getIOAreaMM2() : 0.0;
         r.io_power_term_mw     = io.getIOPowerTermMW();
         r.io_power_dynamic_mw  = io.getIOPowerDynamicMW();
         r.phy_power_mw         = io.getPHYPowerMW();
@@ -385,11 +456,27 @@ LinkIOResult CactiIOWrapper::computeDramIO(const std::string& tech,
             r.energy_pj_per_bit_term = r.io_power_term_mw / payload_gbps;
         }
         r.valid  = true;
-        r.exact_map = m.exact;
-        r.source = std::string("CACTI-IO ") + (m.exact ? "" : "APPROXIMATE map: ") + m.note;
-        r.not_modelled = m.exact
-            ? "refresh, array access, and controller logic -- IO only"
-            : "the mapping gap named above, plus refresh/array/controller -- IO only";
+        /* An INJECTED technology is no longer merely borrowed: its electrical
+         * layer is sourced, only the capacitance/PHY/area coefficients come
+         * from the neighbouring family. That is good enough to substitute, and
+         * it is what extends coverage past DDR3/DDR4. A map with neither an
+         * exact set nor an injection stays cross-check-only. */
+        r.exact_map = m.exact || injected;
+        r.source = std::string("CACTI-IO ")
+                 + (m.exact ? "" : "structure from " + std::string(m.note) + "; ")
+                 + (injected
+                      ? std::string("ELECTRICALS INJECTED from PIMID: ") + el.note
+                        + (el.sourced ? "" : " [contains an UNSOURCED value]")
+                      : std::string("family electricals"));
+        r.not_modelled = std::string(
+            area_credible ? "" : "IO AREA WITHHELD: above 3162 MHz the area "
+                                 "polynomial's cubic term exceeds its linear "
+                                 "term and the value is an extrapolation; ")
+            + std::string("refresh, array access and controller logic -- IO only")
+            + (injected
+                 ? "; capacitances, bias/leak currents, PHY coefficients and the "
+                   "area polynomial are still the neighbouring family's, not sourced"
+                 : "");
     } catch (...) {
         r.valid = false;
         r.source = "CACTI-IO threw during evaluation";

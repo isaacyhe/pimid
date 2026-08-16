@@ -352,7 +352,23 @@ void PCIeController::computeEnergy(bool is_tdp)
     		double units = (XML->sys.pcie.number_units > 0) ?
     		               (double)XML->sys.pcie.number_units : 1.0;
     		double denom = units * ((pciep.clockRate > 0) ? pciep.clockRate : 1.0);
-    		rt_power.readOp.dynamic = joules / execTimeSec / denom;
+    		/* PIMID 1.11.41 (audit E20, user ruling): ADD, do not replace.
+    		 *
+    		 * This used to ASSIGN, discarding the perc_load result above it on
+    		 * the rationale that pJ/bit is "an end-to-end link figure". The
+    		 * figures actually sourced in 1.11.40 do not support that reading:
+    		 * they are SerDes measurements -- "a 32Gb/s NRZ 37dB SerDes in 10nm
+    		 * CMOS", "PCIe Gen5/SAS4 SerDes IP on Samsung 8LPP", the 11.4 one
+    		 * explicitly "including PLL and clocking". PHY-side numbers.
+    		 *
+    		 * What McPAT computes here is the DIGITAL protocol engine: LTSSM,
+    		 * replay buffers, flit assembly, DMA. Different silicon from the
+    		 * SerDes, so charging both is not double-counting -- the same
+    		 * argument that put the coherence flush on the link AND in the DRAM
+    		 * array in E18. Assigning deleted the controller's dynamic power on
+    		 * every co-sim run while leaving its area and leakage in place, so
+    		 * the reported controller had area, leaked, and did no work. */
+    		rt_power.readOp.dynamic += joules / execTimeSec / denom;
     	}
     }
 }

@@ -45,6 +45,9 @@ class IOTechParam
 		IOTechParam(InputParameter *);
 		// connection : 0(bob-dimm), 1(host-dimm), 2(on-dimm)
 		IOTechParam(InputParameter *, Mem_IO_type io_type, int num_mem_dq, int mem_data_width, int num_dq, int connection, int num_loads, double freq) ;
+		/* PIMID 1.11.41: re-derive the termination network and swings after a
+		 * caller overrides vdd_io / rtt* / r_on with sourced values. */
+		void recomputeSwing();
 		~IOTechParam();
 		double num_mem_ca; /* Number of loads on the address bus
 			based on total number of memories in the channel.For 
