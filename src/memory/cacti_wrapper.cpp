@@ -185,8 +185,14 @@ InputParameter* CACTIWrapper::createCACTIInput(const SRAMConfig& config) {
     input->tag_arr_ram_cell_tech_type = 0;  // Tags always SRAM
     input->tag_arr_peri_global_tech_type = 0;
 
-    // Interconnect (1 = conservative, matching CACTI's default)
-    input->ic_proj_type = 1;      // Conservative (required for reliable results)
+    /* 1.11.30 (user ruling E5): from the CALLER, so CACTI and McPAT model one
+     * metal stack. This was pinned to 1 here while McPAT defaulted to 0, so the
+     * same die had lossier wires in its arrays than in its cores. The original
+     * note read "Conservative (required for reliable results)" -- conservative
+     * remains the DEFAULT, now for a stated physical reason: the aggressive
+     * column sets barrier_thickness = 0 at every node, and a copper wire with
+     * no diffusion barrier cannot be built. */
+    input->ic_proj_type = (config.ic_proj_type == 0) ? 0 : 1;
     input->wire_is_mat_type = 2;  // Semi-global
     input->wire_os_mat_type = 2;  // Semi-global
     input->wt = (Wire_type)0;     // Global wires with repeaters

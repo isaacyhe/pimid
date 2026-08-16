@@ -319,6 +319,7 @@ static int getCacheLatencyCycles(int size_kb, int ways, int line_size,
     cfg.banks = std::max(1, size_kb / 64);
     cfg.is_cache = true;
     cfg.tech_node_nm = cacti_tech;
+
     cfg.output_width_bits = line_size * 8;
     cfg.quiet = true;  // latency-only query: energies are not consumed
     try {
@@ -1172,6 +1173,23 @@ struct UnifiedConfig {
      * corner for LPDDR5 periphery cannot be derived from tables that do not
      * contain them, so the request is refused there and says why. */
     std::string device_corner = "hp";   // power.device_corner: hp|lstp|lop
+    /* 1.11.30 (user ruling E5): ONE interconnect projection for the whole die.
+     * CACTI was pinned to conservative and McPAT defaulted to aggressive, so
+     * the same metal stack was modelled two ways -- arrays and caches lossier,
+     * cores/NoC/controllers idealised.
+     *
+     * Default CONSERVATIVE, on physics rather than caution: the aggressive
+     * column sets barrier_thickness = 0 at EVERY node (22/32/45nm), and a
+     * copper wire with no diffusion barrier is not manufacturable -- Cu
+     * diffuses into SiO2 and the barrier does not scale with the wire. It also
+     * holds alpha_scatter = 1.00, i.e. no surface/grain-boundary scattering,
+     * which measurement contradicts once wire dimensions approach the electron
+     * mean free path (hence conservative's 1.05 at 22nm and 1.00 at 32/45).
+     * Aggressive is the ITRS TARGET projection; the industry did not meet it
+     * on interconnect resistivity. Conservative describes silicon that exists,
+     * which is also what our FIMDRAM/Sohn area anchors are measurements of.
+     * 0 = aggressive, 1 = conservative. */
+    int interconnect_projection = 1;   // power.interconnect_projection
     int  pe_imem_bytes = 4096;
     /* Datapath WIDTH is deliberately absent here. It already exists as
      * alu_operand_width (pim.pe.operand_width), which the timing model reads as
@@ -4873,7 +4891,8 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     }
     mcfg.longer_channel_device = ov_get_int("longer_channel_device", 1);
     mcfg.number_hardware_threads = ov_get_int("number_hardware_threads", 1);
-    mcfg.interconnect_projection_type = ov_get_int("interconnect_projection_type", 0);
+    mcfg.interconnect_projection_type =
+        ov_get_int("interconnect_projection_type", config.interconnect_projection);  // 1.11.30 E5
 
     bool alu_only = (config.pe_type == "alu_core" || config.pe_type == "alu");
     if (alu_only) {
@@ -5366,6 +5385,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             // DRAM die area via CACTI 7 (commercial DRAM cell model)
             try {
                 pimid::CACTIWrapper::SRAMConfig dram_cfg;
+                dram_cfg.ic_proj_type = config.interconnect_projection;   // 1.11.30 E5: one metal stack
                 uint64_t chip_bytes = ram_oracle.getChipSizeMB() * 1024ULL * 1024ULL;
                 uint32_t total_banks = ram_oracle.getBanksPerBankGroup()
                                      * ram_oracle.getBankGroupsPerChip();
@@ -5475,6 +5495,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             // the extensive quantities (leakage, area) by the bank count. Per-access
             // energy is already per-bank -- one access hits one bank.
             pimid::CACTIWrapper::SRAMConfig sram_cfg;
+                sram_cfg.ic_proj_type = config.interconnect_projection;   // 1.11.30 E5: one metal stack
             sram_cfg.capacity_bytes = 64 * 1024;  // one bank
             sram_cfg.line_size = config.cache_line_size;
             sram_cfg.associativity = 1;
@@ -6123,7 +6144,8 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
         mcfg.device_type = ov_get_int("device_type", 0);
         mcfg.longer_channel_device = ov_get_int("longer_channel_device", 1);
         mcfg.number_hardware_threads = ov_get_int("number_hardware_threads", 1);
-        mcfg.interconnect_projection_type = ov_get_int("interconnect_projection_type", 0);
+        mcfg.interconnect_projection_type =
+        ov_get_int("interconnect_projection_type", config.interconnect_projection);  // 1.11.30 E5
 
         // Caches
         if (is_alu) {
@@ -9622,6 +9644,23 @@ int main(int argc, char** argv) {
                     yaml_cfg["power"]["host_tech_node_nm"].as<int>(config.host_tech_node_nm);
             }
             // 1.11.2: subarray bitline-pitch area knob (default unity)
+            /* 1.11.30 (E5): power.interconnect_projection -- one setting for
+             * both tools. Validated at parse like every other process knob. */
+            if (yaml_cfg["power"] && yaml_cfg["power"]["interconnect_projection"]) {
+                std::string ip =
+                    yaml_cfg["power"]["interconnect_projection"].as<std::string>("conservative");
+                if (ip == "conservative")      config.interconnect_projection = 1;
+                else if (ip == "aggressive")   config.interconnect_projection = 0;
+                else {
+                    std::cerr << "ERROR: power.interconnect_projection '" << ip
+                              << "' is invalid. Valid: conservative | aggressive.\n"
+                              << "  conservative is the default and describes a "
+                                 "manufacturable stack; aggressive sets the copper "
+                                 "barrier thickness to zero, which no process can "
+                                 "build.\n";
+                    std::exit(1);
+                }
+            }
             if (yaml_cfg["power"] && yaml_cfg["power"]["device_corner"]) {
                 config.device_corner =
                     yaml_cfg["power"]["device_corner"].as<std::string>(config.device_corner);
@@ -10376,7 +10415,8 @@ int main(int argc, char** argv) {
                 };
                 mcfg.device_type = ov_get_int("device_type", 0);
                 mcfg.longer_channel_device = ov_get_int("longer_channel_device", 1);
-                mcfg.interconnect_projection_type = ov_get_int("interconnect_projection_type", 0);
+                mcfg.interconnect_projection_type =
+        ov_get_int("interconnect_projection_type", config.interconnect_projection);  // 1.11.30 E5
 
                 McPAT mcpat(mcfg);
                 mcpat.setDeviceProfile(McPAT::DeviceProfile::DEVICE_ALU);

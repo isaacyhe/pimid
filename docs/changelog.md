@@ -7,6 +7,44 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.30 -- one die, one metal stack (E5)
+
+User ruling on E5: the interconnect projection must MATCH between the two
+tools and be user-settable. PIMID pinned CACTI to ic_proj_type = 1
+(conservative, commented "required for reliable results") while McPAT
+defaulted to 0 (aggressive) and nothing overrode it -- so the same die's wires
+were modelled in two ITRS projections: arrays and caches lossier, cores, NoC
+and controllers idealised.
+
+- **power.interconnect_projection** (conservative | aggressive) is now one
+  surface feeding both tools, validated at parse, with an invalid value refused
+  rather than silently defaulted.
+
+- **The default is CONSERVATIVE, on physics rather than caution.** The
+  aggressive column sets barrier_thickness = 0 at EVERY node (22/32/45 nm),
+  and a copper wire with no diffusion barrier cannot be built -- Cu diffuses
+  into SiO2 and the barrier does not scale with the wire. It also holds
+  alpha_scatter = 1.00, i.e. no surface or grain-boundary scattering, which
+  measurement contradicts once wire dimensions approach the electron mean free
+  path (hence conservative's 1.05 at 22 nm against 1.00 at 32/45). Aggressive
+  is the ITRS TARGET projection; the industry did not meet it on interconnect
+  resistivity. Conservative describes silicon that exists -- which is also what
+  the FIMDRAM and Sohn anchors we calibrate area against are measurements of.
+
+DATA IMPACT, measured: the on-die HBM3 cell moves 0.0499058 -> 0.0499777 W,
++0.144%. Only McPAT's side moves; CACTI was already conservative, so the die
+area is bit-equal at 112.00 mm^2 and every array/cache number validated this
+week is unchanged. Timing untouched.
+
+PREDICTION vs MEASUREMENT, recorded: I predicted "a few percent on
+wire-dominated components". The actual delta is 0.144%, an order of magnitude
+smaller. Direction and sign were right -- conservative is lossier, so power
+rises -- the magnitude was not. Setting aggressive explicitly reproduces the
+1.11.29 value EXACTLY (0.0499058), which is what proves the knob is a real
+toggle and not a renamed constant.
+
+Gate 1141: 5/5.
+
 ## 1.11.29 -- the link controller is reported, and harnessed to our interconnect model
 
 User ruling: instantiate the link controller, report components and totals,

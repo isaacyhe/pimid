@@ -22,6 +22,12 @@ public:
     enum CellType { SRAM_HP = 0, SRAM_LSTP = 1, SRAM_LOP = 2, LP_DRAM = 3, COMM_DRAM = 4 };
 
     struct SRAMConfig {
+        /* 1.11.30 (user ruling E5): the interconnect projection, supplied by
+         * the caller so CACTI and McPAT model ONE metal stack. Was pinned to 1
+         * inside the wrapper while McPAT defaulted to 0. 0 = aggressive,
+         * 1 = conservative (default; the aggressive column sets copper barrier
+         * thickness to 0, which is not manufacturable). */
+        int ic_proj_type = 1;
         // Capacity and organization
         uint64_t capacity_bytes;     // Total capacity in bytes
         uint32_t line_size;          // Cache line size in bytes
