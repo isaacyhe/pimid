@@ -4233,6 +4233,46 @@ static DRAMGenClass getDRAMGenClass(const std::string& tech) {
              pimid::CACTIWrapper::generationTableNm(tech) };
 }
 
+/* 1.11.28 (user ruling E3): ONE owner for the placement x technology process
+ * family. It was decided in the device path and NOWHERE else, so the synthetic
+ * in-memory NoC probe -- which builds its own McPAT config and declares
+ * device_scope=true -- silently defaulted to family 0 and priced the on-die
+ * fabric in a LOGIC process while the PEs beside it, on the same die, priced
+ * as DRAM-periphery. Two copies of a decision is how they drift; this is the
+ * single copy.
+ *
+ * Returns true when the caller sits on DRAM silicon. The caller supplies the
+ * placement level, because the probe and the PE path answer that differently
+ * (the probe describes the fabric AT a placement, not a PE at one). */
+static bool applyProcessFamily(pimid::McPATWrapper::SystemConfig& mcfg,
+                               const UnifiedConfig& config,
+                               int pe_hierarchy_level,
+                               bool quiet) {
+    const bool dram_family_tech =
+        !(config.memory_tech == "SRAM" || config.memory_tech == "STT_MRAM" ||
+          config.memory_tech == "PCM"  || config.memory_tech == "RERAM");
+    const bool channel_centric =
+        config.memory_tech.rfind("LPDDR", 0) == 0 ||
+        config.memory_tech.rfind("GDDR", 0) == 0 ||
+        config.memory_tech.rfind("HBM", 0) == 0;
+    const bool on_dram = dram_family_tech &&
+        ((pe_hierarchy_level >= 0 && pe_hierarchy_level <= 3) ||
+         (pe_hierarchy_level == 5 && channel_centric));
+    if (on_dram) {
+        mcfg.process_family = 1;
+        DRAMGenClass gc = getDRAMGenClass(config.memory_tech);
+        mcfg.dram_periph_table_nm = gc.cacti_table_nm;
+        if (!quiet)
+            std::cout << "  [tech] process family: DRAM-periphery (placement "
+                      << pe_hierarchy_level << " on " << config.memory_tech
+                      << ", class " << gc.cls << ")" << std::endl;
+    } else {
+        mcfg.process_family = 0;
+    }
+    return on_dram;
+}
+
+
 /**
  * Map memory technology to McPAT MC parameters.
  */
@@ -10284,10 +10324,26 @@ int main(int argc, char** argv) {
                 mcfg.num_memory_controllers = 0;
                 mcfg.mc_clock_mhz = result.clockMhz / 2.0;
                 mcfg.tech_node_nm = validateTechNodeNm(config.tech_node_nm, "device NoC probe");
-                mcfg.temperature_k = 350;
+                /* 1.11.28 (E3): left at the McPAT default, which is 350 K --
+                 * the same value the device path uses. UnifiedConfig carries no
+                 * temperature surface today, so there is nothing to inherit;
+                 * the literal is removed rather than duplicated, so if a
+                 * temperature knob is ever added both paths pick it up. */
                 mcfg.has_noc = true;
                 // 1.9.32: a synthetic probe of the IN-MEMORY network.
                 mcfg.device_scope = true;
+                /* 1.11.28 (user ruling E3): price this fabric as the silicon it
+                 * SITS ON. The probe declared device_scope and then defaulted to
+                 * family 0, so the in-memory network was priced in a logic
+                 * process while the PEs on the same die priced as DRAM-periphery
+                 * -- one fabric, two processes, in one run. The family decision
+                 * now has a single owner (applyProcessFamily) that both paths
+                 * call, so they cannot drift again.
+                 * NOTE this became safe only with 1.11.22: the factor is a ratio
+                 * across two tables, and until both ends were named a family-1
+                 * probe at tech_node_nm would have been mispriced. */
+                applyProcessFamily(mcfg, config, config.pe_hierarchy_level,
+                                   /*quiet=*/true);
 
                 // Map topology to McPAT type
                 int mcpat_noc_type = (topo_str == "BUS") ? 0 : 1;

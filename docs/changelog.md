@@ -7,6 +7,42 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.28 -- one fabric, one process (E3)
+
+User ruling on E3: the synthetic in-memory NoC probe derives its process family
+from the same owner the device path uses, instead of hand-building a config.
+
+- **The defect.** The probe (main.cpp, method == "synthetic") built its own
+  McPAT config, declared device_scope = true and commented "a synthetic probe
+  of the IN-MEMORY network" -- then never set process_family, so it defaulted
+  to 0. The same on-die fabric was priced in a LOGIC process while the PEs
+  beside it, on the same die, priced as DRAM-periphery: one fabric, two
+  processes, in one run.
+
+- **The fix is a single owner.** applyProcessFamily() now holds the
+  placement x technology decision and both the device path and the probe call
+  it. Two copies of a decision is how they drifted; there is one copy now. The
+  probe also stops hardcoding temperature_k = 350, so a temperature surface
+  added later reaches both paths rather than one.
+
+- **This became safe only because of 1.11.22.** The factor is a ratio across
+  two CACTI tables; until both ends were named, a family-1 probe running at
+  tech_node_nm would have been mispriced. E3 was raised before that and had to
+  wait for it.
+
+DATA IMPACT: NONE, and stated precisely. The probe runs only under
+method == "synthetic", a standalone NoC-characterisation mode; every corpus
+cell uses the trace/exec path and never constructs it. Gate 1138 confirms the
+on-die cell unchanged at 0.0499058 W and 10164680 cycles, and that an off-die
+(RANK) placement still prices as LOGIC -- the arm that would catch an
+over-broad fix.
+
+GATE NOTE, recorded because it nearly went the other way: W1 was written to
+assert the on-die power MOVED, against a baseline of 0.0498939. That is the
+1.11.21/22 value; the cell has read 0.0499058 since 1.11.23. The arm passed on
+a stale reference while the number had not moved at all. The conclusion above
+comes from tracing the probe's guard, not from that arm.
+
 ## 1.11.27 -- the area factor gets a silicon anchor, and it is not the pessimistic one
 
 The DRAM-periphery area factor has shipped since 1.11.2 with an uncertainty
