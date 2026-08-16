@@ -7,6 +7,54 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.43 -- the FPU flag is a property of the core group (E23, E24)
+
+peHasFpu/fpEmulCycles were ONE GLOBAL (zinfo->hierarchy) consulted by all
+three charging core models, so a co-sim host would take the device PE's
+soft-float penalty on its own FP instructions -- pim.pe.fp_emulation_cycles is
+a PE property that leaked simulation-wide. Verification sharpened the finding:
+in SYSTEM scope the FPU keys were never parsed at all, so the feature was
+unreachable in co-sim and the leak sat armed for whoever added the parse.
+
+- Per-group capability: hasFpu/fpEmulCycles are per-core-group config keys,
+  stored on each core at construction (setFpuCapability) and charged from
+  members. Host groups always emit hasFpu=true (RULING DEFAULT, revisitable:
+  a host-side FPU-less machine is not currently expressible). The old globals
+  survive only as defaults, so previously emitted configs keep their meaning.
+- Per-node reachability: system-scope device nodes now parse
+  pim.pe.floating_point / fp_emulation_cycles (like pg), and the emission
+  reads the node's values.
+- E24 closes as a verified side effect: emitZSimHierarchyBlock returns early
+  when the hierarchy is disabled, taking the old global keys with it -- but
+  the per-group keys ride the CORES block, which every scope emits
+  unconditionally. The knob can no longer silently disappear.
+
+**Host FPU configurable (user ruling), and E25: the legacy in-order path is
+honest WITH decode.** The host's FPU is now a host-node key (floating_point /
+fp_emulation_cycles at host level), symmetric with the device; an FPU-less
+host charges its own emulation cycles. Verified in the emitted config
+(host_cores: hasFpu=false, fpEmulCycles=30 -- gate 1158c H4).
+
+E25 verified live and fixed by DECOUPLING: PIMID_INORDER_NODECODE used to
+select the legacy IPC=1 timing AND disable the plugin's decoder, so the legacy
+path's mixAdd() and the 1.11.11 soft-float charge only ever saw zero class
+counts -- deliberately added code that never once executed with nonzero input.
+The env now selects the TIMING PATH only; classification stays on. Under the
+legacy env the device census now covers 6700/6701 instructions per core
+(99.99%, accepted via the <5%-deficit branch). With fp_emulation_cycles = 0
+the legacy timing is unchanged by construction: mix counters do not feed
+timing. Gate arms note: the host retires ~1 real instruction in this ROI
+(glue only, bounded by the gate), so host-side mix claims rest on the device
+census plus the per-node plumbing.
+
+Gate 1158, 3/3: reference co-sim inert (host 17082, within N6 noise of
+1157b's 17076); an FPU-less device slows 726402 -> 811537 cycles (~68k/core
+predicted from the 1707 fp/core census x 40 emul cycles, plus contention);
+host bit-identical (17082 = 17082). STATED LIMIT: the host retires zero FP
+instructions in this ROI, so the host arm proves no regression but cannot by
+itself distinguish global from per-group -- that claim rests on the plumbing
+plus the device arm proving the group flag is live.
+
 ## 1.11.42 -- the link controller clock is derived (E21)
 
 The link controller clock was a two-valued literal: gen3 got 500 MHz,

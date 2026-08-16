@@ -416,9 +416,9 @@ void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
         if (!bblInfo->synth) { uint64_t _ph = zinfo->numPhases;
             pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); }
         mixAdd(bblInfo);  // 1.11.10 measured instruction mix
-        if (!zinfo->hierarchy.peHasFpu && zinfo->hierarchy.fpEmulCycles &&
+        if (!coreHasFpu_ && coreFpEmulCycles_ &&
             bblInfo->nFp) {   // 1.11.11 (#113): soft-float on an FPU-less element
-            curCycle += (uint64_t)bblInfo->nFp * zinfo->hierarchy.fpEmulCycles;
+            curCycle += (uint64_t)bblInfo->nFp * coreFpEmulCycles_;
         }
         curCycle += bblInfo->instrs;
         Address endBblAddr = bblAddr + bblInfo->bytes;
@@ -454,9 +454,9 @@ void InOrderCore::bblAndRecord(Address bblAddr, BblInfo* bblInfo) {
      * (the exact counter pair the deficit guard compares), and the FP charge
      * landed for a block whose execution had not been simulated yet. */
     mixAdd(sim);  // 1.11.10 measured instruction mix
-    if (!zinfo->hierarchy.peHasFpu && zinfo->hierarchy.fpEmulCycles &&
+    if (!coreHasFpu_ && coreFpEmulCycles_ &&
         sim->nFp) {   // 1.11.11 (#113): soft-float on an FPU-less element
-        curCycle += (uint64_t)sim->nFp * zinfo->hierarchy.fpEmulCycles;
+        curCycle += (uint64_t)sim->nFp * coreFpEmulCycles_;
     }
     bbls++;
 

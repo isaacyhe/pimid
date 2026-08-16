@@ -1614,6 +1614,10 @@ struct UnifiedConfig {
          * their own devices[].pim.pe.pg / devices[].pim.mc.pg /
          * devices[].noc.pg (default false = bit-identical). */
         bool pg_pe  = false;
+        /* 1.11.43 (E23): per-node FPU capability -- a PE property that must
+         * not leak onto the host through a global. */
+        bool     pe_has_fpu = true;
+        uint32_t pe_fp_emul_cycles = 0;
         bool pg_noc = false;
         bool pg_mc  = false;
         /* 1.11.20 (user decision D7): HOST role. One flag, hosts[].pg,
@@ -7321,6 +7325,10 @@ public:
         cfg << "        pim_pes = {\n";
         cfg << "            type = \"" << core_type << "\";\n";
         cfg << "            cores = " << config_.num_pes << ";\n";
+        /* 1.11.43 (E23): per-group FPU keys; in device scope every core IS a
+         * PE, so the group carries the configured PE values directly. */
+        cfg << "            hasFpu = " << (config_.pe_has_fp ? "true" : "false") << ";\n";
+        cfg << "            fpEmulCycles = " << config_.pe_fp_emul_cycles << ";\n";
         if (core_type == "ALU") {
             cfg << std::fixed << std::setprecision(2);
             cfg << "            computeFactor = " << config_.alu_compute_factor << ";\n";
@@ -7969,6 +7977,19 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
         cfg << "        " << group_name << " = {\n";
         cfg << "            type = \"" << core_type << "\";\n";
         cfg << "            cores = " << node.num_cores << ";\n";
+        /* 1.11.43 (audit E23): the FPU flag is a property of THIS GROUP's
+         * cores, not of the simulation. It was one global
+         * (sys.hierarchy.peHasFpu), so a co-sim HOST with an in-order core
+         * charged the DEVICE's soft-float penalty on its own FP instructions
+         * -- pim.pe.fp_emulation_cycles is a PE property that leaked onto a
+         * host with a real FPU. Emitted per group: device groups carry the
+         * configured PE values; host groups always have an FPU. */
+        /* 1.11.43 (user ruling): BOTH roles carry their own node's FPU
+         * capability -- the host is configurable too (host-level
+         * floating_point / fp_emulation_cycles keys), defaulting to a real
+         * FPU. No role forces the other's value. */
+        cfg << "            hasFpu = " << (node.pe_has_fpu ? "true" : "false") << ";\n";
+        cfg << "            fpEmulCycles = " << node.pe_fp_emul_cycles << ";\n";
 
         if (is_alu) {
             // ALU factors are clock-INVARIANT: a device PE's cycle count must be
@@ -10405,6 +10426,12 @@ int main(int argc, char** argv) {
                         // canonicalized + validated in resolveMemoryTopology.
                         // bandwidth_gbs / channels are optional per-channel
                         // overrides (auto-derived from tech when absent).
+                        /* 1.11.43 (E23, user ruling): the host's FPU is
+                         * CONFIGURABLE, symmetric with the device. A host
+                         * without one charges its own fp_emulation_cycles --
+                         * per node, so neither side's setting leaks. */
+                        node.pe_has_fpu = h["floating_point"].as<bool>(node.pe_has_fpu);
+                        node.pe_fp_emul_cycles = h["fp_emulation_cycles"].as<uint32_t>(node.pe_fp_emul_cycles);
                         if (h["mem"]) {
                             node.host_mem_present = true;
                             if (h["mem"]["technology"])
@@ -10495,6 +10522,13 @@ int main(int argc, char** argv) {
                                     node.alu_operand_width = pim["pe"]["operand_width"].as<int>(node.alu_operand_width);
                                     node.alu_energy_factor = pim["pe"]["energy_factor"].as<double>(node.alu_energy_factor);
                                     node.pg_pe = pim["pe"]["pg"].as<bool>(node.pg_pe);  // 1.11.16 (#84)
+                                    /* 1.11.43 (E23): the FPU keys were only
+                                     * parsed in DEVICE scope, so co-sim could
+                                     * not configure an FPU-less PE at all --
+                                     * and a global would have leaked it onto
+                                     * the host. Per node, like pg. */
+                                    node.pe_has_fpu = pim["pe"]["floating_point"].as<bool>(node.pe_has_fpu);
+                                    node.pe_fp_emul_cycles = pim["pe"]["fp_emulation_cycles"].as<uint32_t>(node.pe_fp_emul_cycles);
                                 }
                                 if (pim["mc"]) {
                                     node.pe_mc_type = pim["mc"]["type"].as<std::string>(node.pe_mc_type);

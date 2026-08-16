@@ -3313,12 +3313,24 @@ int qemu_plugin_install(qemu_plugin_id_t id,
      * basic block. PIMID_NODECODE=1 restores the old gating as an escape
      * hatch (value-checked: PIMID_NODECODE=0 means decode-always). */
     const char* nodecode_env = getenv("PIMID_NODECODE");
+    /* 1.11.43 (audit E25, user ruling: make the in-order legacy path honest
+     * WITH decode). PIMID_INORDER_NODECODE used to control TWO unrelated
+     * things: the core's timing model (legacy IPC=1 vs decoded pipeline) AND
+     * this decoder gate. The interlock made the legacy path's mix counting
+     * and soft-float charge structurally inert -- every BblInfo arrived with
+     * zero class counts, so mixAdd() added zeros and the 1.11.11 FP charge
+     * (added to that path deliberately) never once executed with nonzero
+     * input. The env now selects the TIMING PATH ONLY; classification stays
+     * on, so the legacy path counts a real mix and the FP charge is live.
+     * With fp_emulation_cycles = 0 (default) legacy timing remains
+     * byte-identical: the mix counters do not feed timing.
+     * The OOO escape is unchanged -- an OOO core cannot execute without
+     * uops, so its decode kill-switch is genuinely about decode. */
     if (nodecode_env && nodecode_env[0] && strcmp(nodecode_env, "0") != 0) {
         g_decode_enabled = (g_ooo_present && !g_ooo_decode_disabled) ||
-                           (g_inorder_present && !g_inorder_decode_disabled);
+                           g_inorder_present;
     } else {
-        g_decode_enabled = !(g_ooo_present && g_ooo_decode_disabled) &&
-                           !(g_inorder_present && g_inorder_decode_disabled);
+        g_decode_enabled = !(g_ooo_present && g_ooo_decode_disabled);
     }
     if (g_ooo_present) {
         info("[ZSim] OOO core present: x86 decode -> DynUops enabled (real out-of-order path)%s",

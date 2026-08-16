@@ -1369,6 +1369,15 @@ static void InitSystem(Config& config) {
             string prefix = string("sys.cores.") + group + ".";
             uint32_t cores = config.get<uint32_t>(prefix + "cores", 1);
             string type = config.get<const char*>(prefix + "type", "Simple");
+            /* 1.11.43 (audit E23): the FPU flag is PER GROUP, not global. The
+             * old sys.hierarchy.peHasFpu applied the device PE's soft-float
+             * penalty to every core in the simulation, host included. The
+             * global keys survive as the default so old emitted configs keep
+             * their meaning; a group key overrides for that group only. */
+            bool grpHasFpu = config.get<bool>(prefix + "hasFpu",
+                                              zinfo->hierarchy.peHasFpu);
+            uint32_t grpFpEmul = config.get<uint32_t>(prefix + "fpEmulCycles",
+                                              zinfo->hierarchy.fpEmulCycles);
 
             //Build the core group
             union {
@@ -1431,13 +1440,16 @@ static void InitSystem(Config& config) {
 
                     //Build the core
                     if (type == "Simple") {
-                        core = new (&simpleCores[j]) SimpleCore(ic, dc, name);
+                        SimpleCore* score = new (&simpleCores[j]) SimpleCore(ic, dc, name);
+                        score->setFpuCapability(grpHasFpu, grpFpEmul);   // 1.11.43 (E23)
+                        core = score;
                     } else if (type == "InOrder") {
                         uint32_t domain = j*zinfo->numDomains/cores;
                         // In-order superscalar issue width (YAML pim.pe.issue_width;
                         // PIMID_INORDER_WIDTH env overrides inside the ctor). Default 2.
                         uint32_t issueWidth = config.get<uint32_t>(prefix + "issueWidth", 2);
                         InOrderCore* tcore = new (&inOrderCores[j]) InOrderCore(ic, dc, domain, name, issueWidth);
+                        tcore->setFpuCapability(grpHasFpu, grpFpEmul);   // 1.11.43 (E23)
                         zinfo->eventRecorders[coreIdx] = tcore->getEventRecorder();
                         zinfo->eventRecorders[coreIdx]->setSourceId(coreIdx);
                         core = tcore;
@@ -1506,9 +1518,11 @@ static void InitSystem(Config& config) {
                         }
                         if (miIdx < rawMIs.size()) mi = rawMIs[miIdx];
                     }
-                    Core* core = new (&aluCores[j]) ALUCore(name, computeFactor, accessFactor,
+                    ALUCore* acore = new (&aluCores[j]) ALUCore(name, computeFactor, accessFactor,
                                                              throughputFactor, operandWidth, energyFactor,
                                                              mi, coreIdx, bitSerial);
+                    acore->setFpuCapability(grpHasFpu, grpFpEmul);   // 1.11.43 (E23)
+                    Core* core = acore;
                     coreMap[group].push_back(core);
                     coreIdx++;
                     aluCoreIdx++;

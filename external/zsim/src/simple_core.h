@@ -35,6 +35,18 @@
 class FilterCache;
 
 class SimpleCore : public Core {
+    private:
+        /* 1.11.43 (audit E23): per-core FPU capability. Was the GLOBAL
+         * zinfo->hierarchy.peHasFpu/fpEmulCycles, which applied the device
+         * PE's soft-float penalty to every core in the simulation -- a co-sim
+         * host with a real FPU included. Set per group by init.cpp. */
+        bool coreHasFpu_ = true;
+        uint32_t coreFpEmulCycles_ = 0;
+    public:
+        void setFpuCapability(bool hasFpu, uint32_t emulCycles) {
+            coreHasFpu_ = hasFpu; coreFpEmulCycles_ = emulCycles;
+        }
+
     protected:
         FilterCache* l1i;
         FilterCache* l1d;
