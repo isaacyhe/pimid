@@ -25,7 +25,7 @@ system:
     - name: host
       core_type: in_order_core
       num_cores: 1
-      frequency_mhz: 2000
+      frequency_mhz: 2000    # host: logic process
       tech_node_nm: 22
       cache:
         l1d_kb: 32
@@ -38,7 +38,10 @@ system:
     - name: device
       type: compute
       attachment: internal     # on-package; use links for pcie/interposer
-      frequency_mhz: 2000
+      frequency_mhz: 500     # device: DRAM-periphery silicon. Was 2000 --
+                             # the host clock copied down. No DRAM-periphery
+                             # PE has run near that: FIMDRAM 300 MHz (ISSCC
+                             # 2021 25.4), UPMEM DPU 350-466 MHz.
       tech_node_nm: 22
       pe_type: alu_core
       num_pes: 8

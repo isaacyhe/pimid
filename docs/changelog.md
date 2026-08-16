@@ -7,6 +7,60 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.35 -- the frequency guard calculates its own bound (E13)
+
+E13 observed that the area factor uses l_phy (device LENGTH) while CACTI's
+I_on says the periphery device drives less current per micron of WIDTH -- two
+different quantities, only one applied. Following it produced a better guard
+and corrected three numbers along the way, two of them mine.
+
+- **The bound is CALCULATED, not cited.** A DRAM-periphery PE is slower than
+  a logic one by its CV/I delay ratio, computed from the same columns the area
+  and dynamic factors already use:
+        t = (C_g_ideal + C_fringe) * Vdd / I_on
+        22 nm  hp 1.179e-13 s   comm-dram 2.491e-13 s   -> 2.113x
+        32 nm                                           -> 1.291x
+  ceiling = logic reference / that ratio. Published parts now CHECK the bound
+  instead of setting it.
+
+- **CORRECTION 1, mine: the delay penalty is 2.113x, not 2.885x.** An earlier
+  draft of this guard used the I_on ratio alone. That overstates it by 37%,
+  because the periphery device also has LOWER gate capacitance (1.99e-16
+  against 3.27e-16 F/um), which partly offsets its weaker drive. Drive alone
+  is not delay.
+
+- **CORRECTION 2, inherited: "UPMEM DPU: 350-466 MHz" appears in no source we
+  hold.** It was in the code comment and I repeated it. Devaux, Hot Chips 31
+  (misc/) says "4Gb DDR4 2400 DRAM + 8 DPUs @500MHz" (p3, p4) and "14 pipe
+  stages needed to reach 500 MHz" (p10). The demonstrated band is 300 MHz
+  (FIMDRAM, ISSCC 2021 25.4) to 500 MHz (UPMEM).
+
+- **CORRECTION 3, mine: the first calculated guard was CIRCULAR.** It anchored
+  on reference_frequency_mhz, which is the max over ALL nodes -- in device
+  scope that is the PE itself, so the ceiling was always the PE's own clock
+  divided by 2.113 and every device-scope run warned. A 10% "engineering
+  tolerance" added to quiet it was papering over the wrong anchor and has been
+  removed; at the time I wrote that a tolerance chosen to silence our own
+  configs would be the wrong reason, which is what it was.
+
+- **The anchor is now a user SETTING**: power.logic_reference_mhz, the clock of
+  the logic-process design this PE is compared against, validated at parse. In
+  co-sim the host node's clock is used when the setting is absent. With no
+  anchor at all the bound is NOT evaluated and the run says so, rather than
+  inventing a ceiling or comparing the PE against itself.
+
+- **PIMID never derates the clock.** It simulates at the requested frequency
+  and reports "the clock is the hypothesis" -- the guard tells you when the
+  hypothesis is not reachable, it does not silently change it.
+
+- Also fixed: examples/cosim/host_device_basic.yaml set the DEVICE to 2000 MHz
+  -- the host's clock copied down -- which is why that example tripped its own
+  warning. Set to 500 MHz, with the demonstrated band cited in the file.
+
+DATA IMPACT: none. Gate 1146 5/5, the shipped cell bit-identical (0.0499777 W,
+10164680 cycles). This release changes what the model TELLS you, not what it
+computes.
+
 ## 1.11.34 -- the link is not PCIe, and the pitch penalty is not the whole die
 
 E10 and E11 ruled together, plus the link-model gaps the user asked to patch.

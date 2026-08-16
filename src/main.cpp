@@ -1190,6 +1190,18 @@ struct UnifiedConfig {
      * which is also what our FIMDRAM/Sohn area anchors are measurements of.
      * 0 = aggressive, 1 = conservative. */
     int interconnect_projection = 1;   // power.interconnect_projection
+    /* 1.11.35 (user ruling E13): the LOGIC REFERENCE clock, a user setting.
+     * The feasibility bound for a DRAM-periphery PE is calculated -- reference
+     * divided by the CV/I delay ratio read from the CACTI columns -- but a
+     * ratio is dimensionless and needs an anchor, and the anchor cannot come
+     * from the PE's own clock without the test becoming circular (an earlier
+     * draft did exactly that and warned on every device-scope run).
+     * So the user states what logic process this design is being compared
+     * against; PIMID calculates the ceiling from it and warns when the
+     * requested PE clock exceeds it. 0 = unset: in co-sim the host's clock is
+     * used, and in device scope the bound is skipped with a printed reason
+     * rather than invented. */
+    double logic_reference_mhz = 0.0;   // power.logic_reference_mhz
     int  pe_imem_bytes = 4096;
     /* Datapath WIDTH is deliberately absent here. It already exists as
      * alu_operand_width (pim.pe.operand_width), which the timing model reads as
@@ -4751,16 +4763,93 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                       << ", class " << gc.cls << "); factors from CACTI "
                       << gc.cacti_table_nm << "nm hp/comm-dram columns"
                       << std::endl;
-            /* Bounds anchor: UPMEM's DPU, the only shipped bank-level PE,
-             * runs 350-466 MHz. A DRAM-periphery PE clocked far above that
-             * band claims silicon nobody has demonstrated. */
-            if (config.frequency_mhz > 700) {
-                std::cout << "  [tech] WARNING: " << config.frequency_mhz
-                          << " MHz PE in DRAM periphery exceeds the plausible "
-                             "band (UPMEM DPU: 350-466 MHz; CACTI device delay "
-                             "ratio ~2.4x vs logic). Power is reported at the "
-                             "requested clock; the clock itself is the "
-                             "hypothesis." << std::endl;
+            /* 1.11.35 (user ruling E13): the feasible ceiling is CALCULATED,
+             * not cited. The threshold comes from the device physics in the
+             * CACTI tables; published parts are used to CHECK it, never to set
+             * it.
+             *
+             * A DRAM-periphery device is slower than a logic device by its
+             * CV/I delay ratio -- computed from the same two columns the area
+             * and dynamic factors already use:
+             *     t = (C_g_ideal + C_fringe) * Vdd / I_on
+             *     22 nm  hp 1.179e-13 s   comm-dram 2.491e-13 s   -> 2.113x
+             *     32 nm                                           -> 1.291x
+             * NOTE this is NOT the I_on ratio (2.885x at 22 nm). Drive alone
+             * overstates the penalty, because the periphery device also has
+             * LOWER gate capacitance (1.99e-16 against 3.27e-16 F/um), which
+             * partly offsets its weaker drive. An earlier draft of this guard
+             * used I_on alone and was wrong by 37%.
+             *
+             * So the ceiling for a periphery PE is the logic reference clock
+             * this machine runs at, divided by that ratio. Above it, the same
+             * design in a logic process would have to exceed the reference --
+             * the clock is not a cost question, it is unreachable.
+             *
+             * CORROBORATION, deliberately not the threshold: shipped parts sit
+             * well under this bound, because real designs are limited by power,
+             * thermals and pitch as well as by transistor delay --
+             *   UPMEM DPU  500 MHz  (Devaux, Hot Chips 31 p3/p4; p10 notes the
+             *                        14 pipeline stages needed to reach it)
+             *   FIMDRAM    300 MHz  (Kwon, ISSCC 2021 25.4)
+             * An earlier comment here claimed "UPMEM DPU: 350-466 MHz", a
+             * figure that appears in no source we hold. */
+            {
+                const double f = config.frequency_mhz;
+                const double delay_ratio =
+                    (gc.cacti_table_nm == 32) ? 1.291 : 2.113;   // CV/I, CACTI columns
+                /* 1.11.35: the anchor is the USER'S logic reference, or a
+                 * genuine logic node's clock (the host) when co-simulating.
+                 * It is NOT reference_frequency_mhz -- that is the max over ALL
+                 * nodes, which in device scope is the PE itself, making the
+                 * test circular. An earlier draft did that and warned on every
+                 * device-scope run. */
+                double ref = config.logic_reference_mhz;
+                const char* ref_src = "power.logic_reference_mhz";
+                if (!(ref > 0.0)) {
+                    for (const auto& n2 : config.system_nodes)
+                        if (n2.role == UnifiedConfig::SystemNode::HOST &&
+                            n2.frequency_mhz > ref) {
+                            ref = n2.frequency_mhz; ref_src = "host node clock";
+                        }
+                }
+                const double demonstrated_max = 500.0;   // UPMEM, for the note only
+                if (!(ref > 0.0)) {
+                    /* No logic anchor exists. Say so instead of inventing one
+                     * or comparing the PE against itself. */
+                    if (f > demonstrated_max)
+                        std::cout << "  [tech] NOTE: " << f
+                                  << " MHz PE in DRAM periphery. No logic "
+                                     "reference is configured, so the calculated "
+                                     "ceiling (reference / CV/I ratio "
+                                  << delay_ratio << ") cannot be evaluated -- set "
+                                     "power.logic_reference_mhz to enable it. For "
+                                     "context only, demonstrated parts run 300 MHz "
+                                     "(FIMDRAM) to 500 MHz (UPMEM DPU)."
+                                  << std::endl;
+                } else if (f > ref / delay_ratio) {
+                    const double ceiling = ref / delay_ratio;
+                    std::cout << "  [tech] WARNING: " << f
+                              << " MHz PE in DRAM periphery exceeds the "
+                                 "calculated ceiling of " << ceiling
+                              << " MHz (logic reference " << ref
+                              << " MHz from " << ref_src
+                              << " / CV/I delay ratio " << delay_ratio
+                              << " from the " << gc.cacti_table_nm
+                              << "nm hp vs comm-dram columns). The same design "
+                                 "in a logic process would have to beat the "
+                                 "reference clock. Power is reported at the "
+                                 "requested clock; the clock is the hypothesis."
+                              << std::endl;
+                } else if (f > demonstrated_max) {
+                    std::cout << "  [tech] NOTE: " << f
+                              << " MHz is within the calculated ceiling ("
+                              << (ref / delay_ratio) << " MHz) but above every DEMONSTRATED "
+                                 "DRAM-periphery part -- UPMEM DPU 500 MHz "
+                                 "(Hot Chips 31), FIMDRAM 300 MHz (ISSCC 2021 "
+                                 "25.4). Real parts are bounded by power, "
+                                 "thermals and pitch as well as transistor "
+                                 "delay." << std::endl;
+                }
             }
         } else {
             mcfg.process_family = 0;  // LOGIC (native)
@@ -6113,7 +6202,7 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                         std::cout << "  [tech] WARNING: " << node.name << " at "
                                   << node.frequency_mhz
                                   << " MHz in DRAM periphery exceeds the "
-                                     "plausible band (UPMEM DPU: 350-466 MHz). "
+                                     "plausible band (UPMEM DPU 500 MHz). "
                                      "Power is reported at the requested clock; "
                                      "the clock itself is the hypothesis."
                                   << std::endl;
@@ -9717,6 +9806,19 @@ int main(int argc, char** argv) {
                                  "build.\n";
                     std::exit(1);
                 }
+            }
+            if (yaml_cfg["power"] && yaml_cfg["power"]["logic_reference_mhz"]) {
+                const double lr =
+                    yaml_cfg["power"]["logic_reference_mhz"].as<double>(0.0);
+                if (!(lr > 0.0) || lr > 20000.0) {
+                    std::cerr << "ERROR: power.logic_reference_mhz = " << lr
+                              << " is invalid. Give the clock of the LOGIC-process\n"
+                              << "  design this PE is compared against (e.g. 2000 for a\n"
+                              << "  2 GHz core). PIMID divides it by the CV/I delay ratio\n"
+                              << "  from the CACTI tables to bound a DRAM-periphery PE.\n";
+                    std::exit(1);
+                }
+                config.logic_reference_mhz = lr;
             }
             if (yaml_cfg["power"] && yaml_cfg["power"]["device_corner"]) {
                 config.device_corner =
