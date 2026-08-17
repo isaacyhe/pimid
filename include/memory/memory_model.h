@@ -54,10 +54,16 @@ public:
      * getReadEnergy()/getWriteEnergy() are NANOJOULES PER ACCESS at the
      * model's configured access width, getLeakagePower() is WATTS, and
      * getTotalEnergy() is NANOJOULES accumulated since the last resetStats().
-     * The four implementations above do not all obey it yet; converting them
-     * touches five plugin models at once and must be done as one change with
-     * its own gate, not folded into a latent-defect pass. Until then, do NOT
-     * add a consumer that reads these polymorphically. */
+     * 1.11.58: THE FOUR IMPLEMENTATIONS NOW OBEY IT. This was the gated
+     * change this paragraph asked for. What was wrong: the three NVM models
+     * assigned read_energy_/write_energy_ from TWO different units depending
+     * on which path ran -- pJ per byte from the architecture object, nJ per
+     * access from NVSim -- so the field's meaning depended on whether a
+     * characterization was available; and all four added a JOULES leakage
+     * term to a picojoule or nanojoule dynamic sum, then returned the result
+     * under this header's nanojoule contract. Members are normalised to
+     * nJ/access at assignment and getTotalEnergy() returns nanojoules.
+     * A polymorphic consumer is now safe. */
     virtual double getReadEnergy() const = 0;
     virtual double getWriteEnergy() const = 0;
     virtual double getLeakagePower() const = 0;

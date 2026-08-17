@@ -8,6 +8,12 @@
 #include <cmath>
 #include <algorithm>
 
+static inline double bytesPerAccess(uint32_t access_width_bits) {
+    // 64 bits is what initializeNVSim() passes NVSim when the knob is unset.
+    double bytes = (access_width_bits > 0 ? access_width_bits : 64u) / 8.0;
+    return (bytes > 0.0) ? bytes : 8.0;
+}
+
 namespace pimid {
 
 //=============================================================================
@@ -117,8 +123,21 @@ void STTMRAMModel::initialize() {
               << mram_arch_->timing.inner_bank.source << std::endl;
 
     // Use architecture energy values as defaults (may have been extracted from NVSim)
-    read_energy_ = mram_arch_->energy.read_energy_per_byte;
-    write_energy_ = mram_arch_->energy.write_energy_per_byte;
+    /* 1.11.58 (audit D022/D043, the gated unit change memory_model.h asked
+     * for): this member is NANOJOULES PER ACCESS, the contract's unit.
+     *
+     * It used to hold two different quantities depending on which path ran.
+     * The architecture path assigned energy.read_energy_per_byte, which is
+     * PICOJOULES PER BYTE; the NVSim path assigned getReadDynamicEnergy(),
+     * which is NANOJOULES PER ACCESS. One field, two units, differing by
+     * 1000/bytes-per-access -- 125x at the 64-bit default. Whichever path
+     * happened to run decided what the number meant, and nothing downstream
+     * could tell. Normalised at assignment so the field has ONE unit, and
+     * getTotalEnergy() no longer has to guess. */
+    read_energy_ = mram_arch_->energy.read_energy_per_byte
+                   * bytesPerAccess(access_width_bits_) / 1000.0;   // pJ/B -> nJ/access
+    write_energy_ = mram_arch_->energy.write_energy_per_byte
+                    * bytesPerAccess(access_width_bits_) / 1000.0;
     leakage_power_ = mram_arch_->energy.chip_leakage_mw / 1000.0;  // mW to W
 
     std::cout << "[STTMRAMModel] Configuration:" << std::endl;
@@ -240,11 +259,6 @@ static inline Cycle legacyNsAsCycles(double ns) {
  * all five plugin models, and memory_model.h says in as many words that the
  * unit conversion must be one gated change rather than a rider on a
  * latent-defect pass. */
-static inline double bytesPerAccess(uint32_t access_width_bits) {
-    // 64 bits is what initializeNVSim() passes NVSim when the knob is unset.
-    double bytes = (access_width_bits > 0 ? access_width_bits : 64u) / 8.0;
-    return (bytes > 0.0) ? bytes : 8.0;
-}
 
 Cycle STTMRAMModel::access(const MemoryRequest& req) {
     Cycle latency = legacyNsAsCycles(mram_config_.read_latency_ns);  // safe default
@@ -324,13 +338,25 @@ Cycle STTMRAMModel::getLatency(MemoryRequestType type) const {
 }
 
 double STTMRAMModel::getTotalEnergy() const {
-    // 1.11.57 (latent D044): pJ/byte x bytes/access x accesses, not pJ/byte x
-    // accesses. See bytesPerAccess() above.
-    const double bpa = bytesPerAccess(access_width_bits_);
-    double dynamic_energy = (total_reads_ * read_energy_ * bpa) +
-                           (total_writes_ * write_energy_ * bpa);
-    double leakage_energy = leakage_power_ * (current_cycle_ / 1e9);
-    return dynamic_energy + leakage_energy;
+    /* 1.11.58 (audit D022/D043): NANOJOULES, as MemoryModel documents.
+     *
+     * Two errors lived on these three lines. The dynamic term multiplied a
+     * pJ/byte density by an access count and called the product picojoules
+     * (D044, fixed in 1.11.57 by multiplying the bytes back); now the members
+     * are nJ/access at assignment, so the multiply is just a count. The
+     * leakage term added JOULES (watts x seconds) to that sum and the
+     * function returned picojoules under a header documenting nanojoules --
+     * a term 1e9 too small inside a result 1000x too large. Both halves are
+     * nanojoules now.
+     *
+     * The cycle-to-seconds conversion treats one cycle as one nanosecond.
+     * That is not an estimate of a clock -- these models carry none; it is
+     * the same convention legacyNsAsCycles() states, and it is why leakage
+     * in nJ is simply watts x cycles. */
+    double dynamic_nj = (total_reads_ * read_energy_) +
+                        (total_writes_ * write_energy_);
+    double leakage_nj = leakage_power_ * static_cast<double>(current_cycle_);
+    return dynamic_nj + leakage_nj;
 }
 
 void STTMRAMModel::printStats() const {
@@ -370,7 +396,8 @@ void STTMRAMModel::printStats() const {
     std::cout << "  Total Read Energy: " << (total_reads_ * read_energy_ * bpa) << " pJ" << std::endl;
     std::cout << "  Total Write Energy: " << (total_writes_ * write_energy_ * bpa) << " pJ" << std::endl;
     std::cout << "  Leakage Power: " << leakage_power_ << " W" << std::endl;
-    std::cout << "  Total Energy: " << getTotalEnergy() << " pJ" << std::endl;
+    // 1.11.58: nJ, matching the MemoryModel contract getTotalEnergy() now obeys.
+    std::cout << "  Total Energy: " << getTotalEnergy() << " nJ" << std::endl;
     std::cout << "================================\n" << std::endl;
 }
 

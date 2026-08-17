@@ -365,14 +365,24 @@ Cycle SRAMModel::getLatency(MemoryRequestType type) const {
 }
 
 double SRAMModel::getTotalEnergy() const {
-    // Total energy = dynamic energy + leakage energy
-    double dynamic_energy = (total_reads_ * read_energy_) +
-                           (total_writes_ * write_energy_);
-
-    // Leakage energy = leakage_power * time
-    double leakage_energy = leakage_power_ * (current_cycle_ / 1e9); // Assuming 1 GHz
-
-    return dynamic_energy + leakage_energy;
+    /* 1.11.58 (audit D022/D043): NANOJOULES, as MemoryModel documents.
+     *
+     * SRAM's per-access members were already nanojoules on both paths (CACTI's
+     * getDynamicReadEnergy() and the YAML read_energy_nj key), so the dynamic
+     * term was right. The leakage term was not: it added JOULES (watts x
+     * seconds) to a nanojoule sum, a term 1e9 too small, under a comment
+     * that noted the 1 GHz assumption and not the unit. The three NVM models
+     * had the same defect and a unit-confused dynamic term besides; all four
+     * are converted together, which is the single gated change memory_model.h
+     * asked for rather than a rider on a latent pass.
+     *
+     * One cycle is one nanosecond here -- the convention legacyNsAsCycles()
+     * states, not an estimate of a clock these models do not have -- so
+     * leakage in nanojoules is watts x cycles. */
+    double dynamic_nj = (total_reads_ * read_energy_) +
+                        (total_writes_ * write_energy_);
+    double leakage_nj = leakage_power_ * static_cast<double>(current_cycle_);
+    return dynamic_nj + leakage_nj;
 }
 
 void SRAMModel::printStats() const {

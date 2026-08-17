@@ -2994,6 +2994,11 @@ static void reportStatedConstants(const UnifiedConfig& config) {
                     "(none)",
                     "the NoC link latency, and with it every hierarchy "
                     "traversal, on the analytical AND detailed paths"});
+    rows.push_back({"bank-group port width",
+                    "the bank serialisation width x 2 (an interleaving assumption)",
+                    "(none -- no architecture object carries this field)",
+                    "the L2 rung of the hierarchy link ladder: its width, its "
+                    "bandwidth, and every level-2 crossing derived from them"});
     rows.push_back({"bandwidth reference anchor",
                     "HBM3's per-channel and L0 bandwidth, read from its preset",
                     "(derived, not a constant -- listed so the normalisation is visible)",
@@ -3432,7 +3437,20 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
                       << w[4] << "/" << w[5] << "/" << w[6] << "\n"
                       << "    (this REPLACES the per-level table printed above,"
                          " which is the technology placeholder the network is"
-                         " constructed with)\n";
+                         " constructed with)\n"
+                      /* 1.11.58: name the rung that is NOT sourced. The
+                       * architecture object carries no bank-group datapath
+                       * field, and L2's width and bandwidth are both the bank
+                       * figure times an asserted 2. That is a plausible
+                       * reading of bank-group interleaving, not a
+                       * specification value -- nothing in JEDEC fixes a
+                       * bank-group port width, because a bank group is not an
+                       * interface boundary. Six of the seven rungs are
+                       * sourced; saying "from the architecture object" without
+                       * this line would claim seven. */
+                      << "    L2 (bank group) is ASSERTED, not sourced: it is"
+                         " L1 x 2, an interleaving assumption. The other six"
+                         " rungs come from the architecture object.\n";
         } catch (const std::exception& e) {
             std::cerr << "[hierarchy] WARNING: the " << tech << " architecture "
                          "object is unavailable (" << e.what() << "), so the "
@@ -7227,7 +7245,21 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             double wr_energy = ram_oracle.getArrayWriteEnergyNJ();
             bool crosses_dq = crossesOffPackageDQ(config.pe_hierarchy_level,
                                                   config.memory_tech);  // 1.11.52 (A018)
-            double iface_energy = crosses_dq ? ram_oracle.getTerminationEnergyNJ() : 0.0;
+            /* 1.11.58: the DQ interface is DRIVER SWITCHING + PHY + TERMINATION.
+             *
+             * PIMID has charged termination alone since it had an interface at
+             * all. 1.11.40 modelled the other two terms and left the accessor
+             * without a caller, so the correction sat in the code and reached
+             * no reported number -- the audit found it with no caller anywhere
+             * in src/ or include/. Termination is the SMALL term on a modern
+             * bus: LVSTL exists precisely to make it negligible, which is why
+             * leaving driver and PHY out understates LPDDR5's interface by
+             * roughly two orders of magnitude. Both halves are charged now,
+             * and reported separately so the split is visible rather than
+             * folded into one number. */
+            const double iface_term_nj = crosses_dq ? ram_oracle.getTerminationEnergyNJ() : 0.0;
+            const double iface_drv_nj  = crosses_dq ? ram_oracle.getInterfaceDynamicEnergyNJ() : 0.0;
+            double iface_energy = iface_term_nj + iface_drv_nj;
             /* 1.11.8, corrected 1.11.56 (audit A028): with memory.power_down
              * the idle controller descends the DRAM into precharge power-down
              * (IDD2P) during measured no-traffic residency; refresh always
@@ -7316,10 +7348,22 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             std::cout << "  Technology:      " << config.memory_tech << " (Ramulator2 energy model)" << std::endl;
             std::cout << "  Per-access:      read=" << std::fixed << std::setprecision(3)
                       << rd_energy << " nJ, write=" << wr_energy << " nJ" << std::endl;
-            std::cout << "  Termination:     " << iface_energy << " nJ/access ("
+            std::cout << "  DQ interface:    " << iface_energy << " nJ/access ("
                       << (crosses_dq ? "accesses cross the DQ pins at this placement"
-                                     : "on-die placement: no DQ crossing, no termination")
+                                     : "on-die placement: no DQ crossing, no interface charge")
                       << ")" << std::endl;
+            if (crosses_dq) {
+                std::cout << "    termination:   " << iface_term_nj
+                          << " nJ  driver+PHY: " << iface_drv_nj
+                          << " nJ  (1.11.58: driver and PHY are charged now;"
+                             " before this release the interface was"
+                             " termination only)" << std::endl;
+                if (iface_drv_nj <= 0.0)
+                    std::cout << "    NOTE: no driver/PHY figure for this"
+                                 " technology -- CACTI-IO has no exact"
+                                 " parameter map for it, so the interface is"
+                                 " still termination only here." << std::endl;
+            }
             std::cout << "  Array incl act+col in read/write terms above" << std::endl;
             /* 1.11.56 (audit A029): these three lines are one quantity seen
              * three ways, and the old labels invited adding them. Refresh is a
@@ -7464,7 +7508,26 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                  * scopes reported non-comparable totals for one machine.
                  * Same populated basis as the system total (L237). ADDS a
                  * line; existing lines unchanged. */
+                /* 1.11.58: the IO AREA joins the total.
+                 *
+                 * getInterfaceAreaMM2() has had no caller since 1.11.40 added
+                 * it, so the DQ interface's silicon -- which PIMID's own
+                 * report used to list as "unmodelled" -- was absent from every
+                 * area total the simulator has printed. It is per-die IO, so
+                 * it is added to the per-die figure before the population
+                 * scaling, and reported separately so the change is visible
+                 * rather than folded into the die number. */
                 if (die_area_reported > 0.0) {
+                    const double io_area = ram_oracle.getInterfaceAreaMM2();
+                    if (io_area > 0.0) {
+                        std::cout << "    + IO area:     " << std::fixed
+                                  << std::setprecision(3) << io_area
+                                  << " mm^2/die (DQ interface silicon, charged"
+                                     " from 1.11.58; it was absent from every"
+                                     " earlier total)" << std::defaultfloat
+                                  << std::endl;
+                        die_area_reported += io_area;
+                    }
                     int dies = memorySystemDieCount(config.memory_tech,
                                                     config.dram_device_width,
                                                     config.hierarchy_ranks_per_channel,
@@ -8323,7 +8386,10 @@ static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
             (r_idle > 0.0 ? r_idle : 0.0), pg_enabled, device_width,
             ranks_per_channel, channels);
         /* 1.11.20 (D6): DQ termination, placement-aware like 1.11.5. */
-        const double iface_nj = crosses_dq ? ram_oracle.getTerminationEnergyNJ() : 0.0;
+        // 1.11.58: driver switching + PHY + termination, as device scope.
+        const double iface_term_nj = crosses_dq ? ram_oracle.getTerminationEnergyNJ() : 0.0;
+        const double iface_drv_nj  = crosses_dq ? ram_oracle.getInterfaceDynamicEnergyNJ() : 0.0;
+        const double iface_nj = iface_term_nj + iface_drv_nj;
 
         const double total_rd_mj = rd_nj * static_cast<double>(mem_rd) / 1e6;
         const double total_wr_mj = wr_nj * static_cast<double>(mem_wr) / 1e6;
@@ -8355,11 +8421,15 @@ static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
         std::cout << "    (this figure already includes refresh, and it IS the "
                      "array's leakage -- these are one quantity, not three)"
                   << std::endl;
-        std::cout << "  Termination:   " << std::setprecision(3) << iface_nj
+        std::cout << "  DQ interface:  " << std::setprecision(3) << iface_nj
                   << " nJ/access ("
                   << (crosses_dq ? "accesses cross the DQ pins at this placement"
-                                 : "on-die placement: no DQ crossing, no termination")
+                                 : "on-die placement: no DQ crossing, no interface charge")
                   << ")" << std::endl;
+        if (crosses_dq)
+            std::cout << "    termination: " << iface_term_nj
+                      << " nJ  driver+PHY: " << iface_drv_nj
+                      << " nJ  (1.11.58)" << std::endl;
         std::cout << "  Array dynamic: " << std::setprecision(3)
                   << (total_rd_mj + total_wr_mj + total_term_mj)
                   << " mJ (rd=" << total_rd_mj

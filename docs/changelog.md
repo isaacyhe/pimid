@@ -7,6 +7,88 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.58 -- the interface correction reaches a number, and the units are one
+
+Three items that 1.11.57 left explicitly open, each flagged at the time as
+needing a decision rather than a silent change.
+
+### The DQ interface stops being termination-only
+
+`getInterfaceDynamicEnergyNJ()` and `getInterfaceAreaMM2()` had NO CALLERS.
+1.11.40 modelled driver switching, PHY and IO area, and the accessors were
+never consumed -- so the correction sat in the source and reached no reported
+number. Every DQ-interface figure this simulator has ever printed, including
+the corpus behind the manuscript, was TERMINATION ONLY.
+
+Both are wired in now, at device and system scope, and the split is printed
+rather than folded into one number. Measured on a DDR4 RANK cell:
+
+  termination 3.070 nJ + driver/PHY 9.889 nJ = 12.959 nJ per access (4.2x)
+  IO area 2.444 mm^2/die; the comparable total 28.36 -> 47.91 mm^2
+
+Termination was always the small term -- driver and PHY are 76% of the
+interface on this part -- which is what the 1.11.40 note meant and what no
+result showed.
+
+WHAT THIS DOES NOT FIX, stated plainly because it is the case the original
+correction existed for: the accessors return zero unless CACTI-IO has an EXACT
+parameter map, which exists for DDR3, DDR4 and DDR5 and not for LPDDR5, GDDR6
+or HBM. LPDDR5 -- the technology the 1.11.40 note says was understated by
+roughly 71x -- receives NOTHING from this change: measured, driver+PHY 0.000
+nJ, interface unchanged at 0.036 nJ. What changed for it is that the run now
+SAYS the interface is still termination-only and why, instead of reporting
+termination as though it were the whole interface. Closing it needs LPDDR5
+driver/PHY parameters this tree has no source for, and none were invented.
+
+### One field, one unit (D022/D043 -- the gated change memory_model.h asked for)
+
+The recorded finding was that `getTotalEnergy()` adds JOULES to a picojoule
+sum and returns picojoules under a nanojoule contract. Tracing the assignments
+found something worse underneath it: in all three NVM models
+`read_energy_`/`write_energy_` held TWO DIFFERENT UNITS depending on which
+path ran -- picojoules per byte from the architecture object, nanojoules per
+access from NVSim. One field, two meanings, differing by 1000/bytes-per-access
+(125x at the 64-bit default). Whichever path happened to execute decided what
+the number meant, and no consumer could tell.
+
+All four models are normalised to nanojoules per access AT ASSIGNMENT, so the
+field has one unit; `getTotalEnergy()` returns nanojoules with the leakage
+term converted (watts x cycles, one cycle being one nanosecond -- the
+convention legacyNsAsCycles() states, not an estimate of a clock these models
+do not have); and the three `printStats` lines that said "pJ" say "nJ".
+`memory_model.h`'s contract paragraph, which asked for exactly this as one
+gated change rather than a rider on a latent pass, records that the
+implementations now obey it. A polymorphic consumer is safe for the first
+time.
+
+### The bank-group rung is declared, not invented
+
+`getBankGroupPortBits()` multiplies the bank serialisation width by an
+unsourced 2, and since 1.11.56 that reaches a reported number through the
+hierarchy link ladder. The architecture object carries no bank-group datapath
+field, and nothing in JEDEC fixes a bank-group port width -- a bank group is
+not an interface boundary. Adding a field with a "source" would have been
+fabrication, so the assumption is DECLARED instead: the ladder line now states
+that L2 is asserted, not sourced, and that the other six rungs come from the
+architecture object, and the assumption is entered in the stated-constant
+register. Six of seven rungs are sourced; the provenance line no longer claims
+seven. No number moves.
+
+### Data impact
+
+Every DRAM cell whose accesses cross the DQ pins gets a higher interface
+energy (4.2x on DDR4) and a larger area total (1.69x on the same cell). This
+is a correction of an omission, not a re-attribution: the term was absent, not
+mis-assigned. LPDDR5, GDDR6 and HBM are unchanged and now say why. The
+NVM-model unit normalisation moves nothing today -- those accessors still have
+no reachable consumer -- but it is what makes one safe.
+
+Gate 1168A, then 1168B. M4's first form asserted only that LPDDR5 "completes
+and reports a number" and passed while the correction was doing nothing at
+all for it -- the same weak-arm failure as a vacuous pass, in a quieter form.
+It was rewritten to assert the substantive claim (driver+PHY > 0 with no note
+for DDR4; == 0 WITH the note for LPDDR5) and re-run.
+
 ## 1.11.57 -- audit round 3, and the latent traps closed
 
 Round 3 audited the tree again, four auditors in parallel, and found **50 REAL
