@@ -18,9 +18,24 @@ namespace cache {
 
 namespace {
 
-// Bump when the cached artifact format / characterization semantics change,
-// so the manifest can distinguish entries produced by older PIMID builds.
-const char* kToolVersion = "1.0.0";
+/* Bump when the cached artifact format / characterization semantics change,
+ * so the manifest can distinguish entries produced by older PIMID builds.
+ *
+ * 1.11.57 (latent C014): this had never been bumped, through three releases
+ * that each changed what an entry MEANS or which inputs produce it -- 1.11.49
+ * added the device corner to the key, 1.11.52 added the temperature, and
+ * 1.11.56 put the configured cache line width into the query and rewrote the
+ * NVSim delay accessors. Nothing reachable differed, because the corner and
+ * the temperature also went into the FILENAME, so a stale entry could not be
+ * served for a different one. The trap is the semantic change that does NOT
+ * move the filename -- 1.11.56's line width and accessor rewrite are exactly
+ * that shape -- and the legacy-store copy-forward is the path that would
+ * import such an entry from a pre-1.11.52 tree.
+ *
+ * Set to the release that last changed characterization semantics. The rule
+ * from here: this string moves whenever a release changes what a cached
+ * artifact means, whether or not the filename moves with it. */
+const char* kToolVersion = "1.11.57";
 
 struct State {
     Mode mode = Mode::RW;

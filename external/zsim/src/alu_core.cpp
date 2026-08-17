@@ -84,8 +84,17 @@ void ALUCore::initStats(AggregateStat* parentStat) {
     // Emitted ONLY in a co-sim run (host + device cores coexist). In a
     // device-scope run every core is an ALU PE, protocolTail is always 0, and
     // appending an extra LambdaStat here would shift heap layout and perturb the
-    // contention sim's address-ordered tie-breaking -- breaking device-scope
-    // bit-identity vs the 1.6/1.8.6 baseline. zinfo->cores is fully populated
+    // contention sim's address-ordered tie-breaking.
+    /* 1.11.57 (latent F031): what that perturbation is and is NOT. This note
+     * used to finish "-- breaking device-scope bit-identity vs the 1.6/1.8.6
+     * baseline", a guarantee D14 withdrew. core.h states the honest form: SAME
+     * BINARY plus same config reproduces bit-identically, always; a DIFFERENT
+     * BUILD of the same source may drift a few cycles (6 cycles measured on
+     * identical 1.11.15 source). So the reason to keep the stat conditional is
+     * that it perturbs a cross-build comparison that is already only
+     * approximately stable -- not that it breaks an exact guarantee the
+     * project no longer makes. */
+    // zinfo->cores is fully populated
     // before this initStats pass (init.cpp), so the host-core probe is safe.
     bool cosimRun = false;
     for (uint32_t c = 0; c < zinfo->numCores; c++)

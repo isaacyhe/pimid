@@ -88,9 +88,28 @@ void OOOCore::initStats(AggregateStat* parentStat) {
     mixInitStats(coreStat);   // 1.11.10 measured instruction mix
 
     // Report cycles/instrs RELATIVE to the ROI baseline (roi_begin); roiBase* are
-    // 0 until roi_begin, so non-ROI workloads are unaffected. cCycles/uops/bbls/
-    // approxInstrs/mispredBranches are left absolute as diagnostic counters, not
-    // ROI duration metrics.
+    // 0 until roi_begin, so non-ROI workloads are unaffected.
+    /* 1.11.57 (latent F026/F027): WHICH COUNTERS ARE ON WHICH WINDOW.
+     *
+     * This note used to end "cCycles/uops/bbls/approxInstrs/mispredBranches
+     * are left absolute as diagnostic counters" -- naming four counters that
+     * 1.9.33 and 1.11.9 subsequently windowed. cCycles, uops, bbls and
+     * mispredBranches are all LambdaStats against a roiBase below; only
+     * approxInstrs is still a raw ProxyStat. A reader trusting the comment
+     * would have believed four ROI-windowed numbers were whole-run.
+     *
+     * The counters that ARE whole-run, and are emitted in this same block
+     * beside the windowed ones, are the raw ProxyStats: approxInstrs,
+     * decodedBbls, syntheticBbls, memMismatch{Loads,Stores},
+     * repDrained{Loads,Stores}, indirBranches, indirMispreds, rasReturns,
+     * rasMispreds, depStalls, issueStalls, mispredStallCycles. Their
+     * descriptions now say so, because nothing else in the output does:
+     * docs/cores.md lists them next to instrs with no base annotation, and a
+     * ratio taken across the two bases divides an ROI numerator by a
+     * whole-run denominator. No consumer forms such a ratio today (none of
+     * these names appears in src/main.cpp or src/power/), so this is a reader
+     * trap rather than a live number -- which is precisely why the trap is
+     * closed in the label rather than by rebasing counters nothing reads. */
     auto x = [this]() {
         uint64_t c = cRec.getUnhaltedCycles(curCycle);
         c = (c > pimidPhantomWait) ? (c - pimidPhantomWait) : 0;   // 1.6.1 wall-free
@@ -129,30 +148,30 @@ void OOOCore::initStats(AggregateStat* parentStat) {
     LambdaStat<decltype(zbr)>* branchesStat = new LambdaStat<decltype(zbr)>(zbr);
     branchesStat->init("branches", "Resolved branches fed to the predictor");
     ProxyStat* approxInstrsStat = new ProxyStat();
-    approxInstrsStat->init("approxInstrs", "Instrs with approx uop decoding", &approxInstrs);
+    approxInstrsStat->init("approxInstrs", "Instrs with approx uop decoding [whole run]", &approxInstrs);
     auto zm = [this]() -> uint64_t { return mispredBranches - roiBaseMispred; };
     LambdaStat<decltype(zm)>* mispredBranchesStat = new LambdaStat<decltype(zm)>(zm);
     mispredBranchesStat->init("mispredBranches", "Mispredicted branches");
     ProxyStat* decodedBblsStat = new ProxyStat();
-    decodedBblsStat->init("decodedBbls", "BBLs run through the decoded dataflow OOO path", &decodedBbls);
+    decodedBblsStat->init("decodedBbls", "BBLs run through the decoded dataflow OOO path [whole run]", &decodedBbls);
     ProxyStat* syntheticBblsStat = new ProxyStat();
-    syntheticBblsStat->init("syntheticBbls", "BBLs run through the synthetic 1-CPI fallback", &syntheticBbls);
+    syntheticBblsStat->init("syntheticBbls", "BBLs run through the synthetic 1-CPI fallback [whole run]", &syntheticBbls);
     ProxyStat* memMismatchLoadsStat = new ProxyStat();
-    memMismatchLoadsStat->init("memMismatchLoads", "Decoded/runtime load-count divergences drained", &memMismatchLoads);
+    memMismatchLoadsStat->init("memMismatchLoads", "Decoded/runtime load-count divergences drained [whole run]", &memMismatchLoads);
     ProxyStat* memMismatchStoresStat = new ProxyStat();
-    memMismatchStoresStat->init("memMismatchStores", "Decoded/runtime store-count divergences drained", &memMismatchStores);
+    memMismatchStoresStat->init("memMismatchStores", "Decoded/runtime store-count divergences drained [whole run]", &memMismatchStores);
     ProxyStat* repDrainedLoadsStat = new ProxyStat();
-    repDrainedLoadsStat->init("repDrainedLoads", "Expected rep-string loads drained (block-copy model)", &repDrainedLoads);
+    repDrainedLoadsStat->init("repDrainedLoads", "Expected rep-string loads drained (block-copy model) [whole run]", &repDrainedLoads);
     ProxyStat* repDrainedStoresStat = new ProxyStat();
-    repDrainedStoresStat->init("repDrainedStores", "Expected rep-string stores drained (block-copy model)", &repDrainedStores);
+    repDrainedStoresStat->init("repDrainedStores", "Expected rep-string stores drained (block-copy model) [whole run]", &repDrainedStores);
     ProxyStat* indirBranchesStat = new ProxyStat();
-    indirBranchesStat->init("indirBranches", "Indirect jmp/call resolutions fed to the BTB", &indirBranches);
+    indirBranchesStat->init("indirBranches", "Indirect jmp/call resolutions fed to the BTB [whole run]", &indirBranches);
     ProxyStat* indirMispredsStat = new ProxyStat();
-    indirMispredsStat->init("indirMispreds", "Indirect jmp/call target mispredictions", &indirMispreds);
+    indirMispredsStat->init("indirMispreds", "Indirect jmp/call target mispredictions [whole run]", &indirMispreds);
     ProxyStat* rasReturnsStat = new ProxyStat();
-    rasReturnsStat->init("rasReturns", "Returns resolved against the RAS", &rasReturns);
+    rasReturnsStat->init("rasReturns", "Returns resolved against the RAS [whole run]", &rasReturns);
     ProxyStat* rasMispredsStat = new ProxyStat();
-    rasMispredsStat->init("rasMispreds", "Return-target mispredictions (RAS miss)", &rasMispreds);
+    rasMispredsStat->init("rasMispreds", "Return-target mispredictions (RAS miss) [whole run]", &rasMispreds);
 
     coreStat->append(cyclesStat);
     coreStat->append(cCyclesStat);

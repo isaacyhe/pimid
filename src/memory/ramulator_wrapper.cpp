@@ -26,9 +26,6 @@ RamulatorWrapper::RamulatorWrapper(const std::string& config_path, const std::st
       banks_per_rank_(8),
       total_reads_(0),
       total_writes_(0),
-      row_hits_(0),
-      row_misses_(0),
-      row_conflicts_(0),
       cached_read_energy_(0.0),
       cached_write_energy_(0.0),
       cached_leakage_power_(0.0),
@@ -61,6 +58,22 @@ void RamulatorWrapper::initialize() {
     // Auto-populate DRAM architecture for timing/power queries.
     // This ensures getTRCD(), getTCAS(), energy methods etc. return
     // calibrated values even without calling enablePIMSupport().
+    /* 1.11.57 (audit C004): the SUBSTITUTION SAYS SO.
+     *
+     * Only DDR4, DDR5, HBM2 and HBM3 have an architecture object. DDR3,
+     * LPDDR5 and GDDR6 fall into the else and are handed DDR4-2400's -- a
+     * different part, a different speed bin, a different channel width -- and
+     * the else said nothing. Every caller then read timings, widths and
+     * bandwidths off an object describing DDR4 while believing it described
+     * the technology it asked for; main.cpp's ladder printed exactly that, as
+     * "the ladder from the GDDR6 architecture object".
+     *
+     * The adoption site now gates on the reconciliation check, so the false
+     * ladder no longer reaches the model. This is the other half: the wrapper
+     * records WHICH part the object it holds actually describes, exposes it
+     * (getArchitectureTechnology()), and announces the substitution once.
+     * Fabricating architecture objects for the three missing technologies
+     * would be the dishonest repair; saying which part is being read is not. */
     if (!dram_arch_) {
         std::string dt = dram_type_;
         std::transform(dt.begin(), dt.end(), dt.begin(), ::toupper);
@@ -72,6 +85,79 @@ void RamulatorWrapper::initialize() {
             dram_arch_ = pimid::memory::createHBM3_Verified();
         } else {
             dram_arch_ = pimid::memory::createDDR4_2400_Verified();
+            if (!dt.empty() && dt != "DDR4") {
+                static bool announced_substitution = false;
+                if (!announced_substitution) {
+                    announced_substitution = true;
+                    std::cerr << "[mem] NOTE: there is no " << dt
+                              << " architecture object in this tree, so the "
+                                 "DDR4-2400 one is being read in its place. "
+                                 "Every width, internal bandwidth and derived "
+                                 "hierarchy figure this wrapper reports for "
+                              << dt << " describes DDR4-2400, not " << dt
+                              << ". getArchitectureTechnology() reports the "
+                                 "part actually being read." << std::endl;
+                }
+            }
+        }
+    }
+
+    /* 1.11.57 (audit round 3, C002): this check RUNS now.
+     *
+     * It was written in 1.11.56 to catch exactly the drift that release
+     * fixed, and it sat inside parseConfiguration() behind `if (dram_arch_)`
+     * -- but initialize() calls parseConfiguration() first and only
+     * populates dram_arch_ afterwards, so the pointer was always null and
+     * the guard always false. It never executed once. Gate 1166D's K11 arm
+     * reported "mismatch warnings=0" and that was a vacuous pass: zero
+     * warnings because nothing ran, not because nothing was wrong. Moved
+     * below the population, where it would have caught C001 (the CACTI-IO
+     * rate table still at DDR5-4800 and HBM2-2000) on its first run. */
+    /* 1.11.56: ONE PART, ONE SPEED BIN -- checked, not trusted.
+     *
+     * The Ramulator preset above decides the cycles this simulator
+     * counts. The DRAM architecture object beside it decides every
+     * bandwidth the simulator REPORTS -- chip I/O, rank, channel, and
+     * since 1.11.56 the whole per-level hierarchy link ladder. Nothing
+     * held the two together, and three of the four had drifted: HBM2
+     * 2000 vs the 2400 preset, DDR5 4800 vs the 3200 preset, HBM3 4000
+     * vs the 6400 preset. That is D002's defect (DDR4 array at 2400,
+     * termination at 3200) repeated at three more technologies, and it
+     * is how a device's reported memory bandwidth came to describe a
+     * part 1.6x faster than the one whose cycles were being counted.
+     *
+     * The aggregate is the arithmetic the preset implies, so it is the
+     * cross-check: channel_databus_bits x data_rate x channels / 8 must
+     * reproduce bandwidth_. A future preset change that forgets the
+     * architecture object now fails here instead of quietly re-describing the
+     * part. */
+    /* 1.11.57 (audit C007): the aggregate is now channel width x rate x
+     * CHANNELS. It used to be channel width x rate alone, which was the same
+     * arithmetic only because the HBM objects stored the whole stack in a
+     * field named for one channel. With that field holding one channel for
+     * every family, the channel count has to appear explicitly -- and it comes
+     * from the preset above, which is the authority for how many channels this
+     * run counts cycles for. DDR keeps channels_ = 1, so nothing moves there. */
+    if (dram_arch_) {
+        std::string dt = dram_type_;
+        std::transform(dt.begin(), dt.end(), dt.begin(), ::toupper);
+        double implied_mbs =
+            (dram_arch_->datapath.channel_databus_bits.value_bits / 8.0) *
+            dram_arch_->timing.data_rate_mtps *
+            static_cast<double>(channels_ > 0 ? channels_ : 1);
+        if (bandwidth_ > 0 && implied_mbs > 0.0 &&
+            std::fabs(implied_mbs - static_cast<double>(bandwidth_)) >
+                0.02 * static_cast<double>(bandwidth_)) {
+            std::cerr << "[ramulator] WARNING: " << dt
+                      << " speed-bin mismatch. The simulated preset implies "
+                      << bandwidth_ << " MB/s aggregate, but the architecture "
+                         "object's channel databus x data rate x channels "
+                         "gives " << implied_mbs
+                      << " MB/s (" << dram_arch_->timing.data_rate_mtps
+                      << " MT/s). Cycles come from the preset and reported "
+                         "bandwidths come from the architecture object, so "
+                         "this run counts one part and prices another."
+                      << std::endl;
         }
     }
 
@@ -187,41 +273,6 @@ void RamulatorWrapper::parseConfiguration() {
             bandwidth_ = 19200;  // 19.2 GB/s for DDR4-2400
         }
 
-        /* 1.11.56: ONE PART, ONE SPEED BIN -- checked, not trusted.
-         *
-         * The Ramulator preset above decides the cycles this simulator
-         * counts. The DRAM architecture object beside it decides every
-         * bandwidth the simulator REPORTS -- chip I/O, rank, channel, and
-         * since 1.11.56 the whole per-level hierarchy link ladder. Nothing
-         * held the two together, and three of the four had drifted: HBM2
-         * 2000 vs the 2400 preset, DDR5 4800 vs the 3200 preset, HBM3 4000
-         * vs the 6400 preset. That is D002's defect (DDR4 array at 2400,
-         * termination at 3200) repeated at three more technologies, and it
-         * is how a device's reported memory bandwidth came to describe a
-         * part 1.6x faster than the one whose cycles were being counted.
-         *
-         * The aggregate is the arithmetic the preset implies, so it is the
-         * cross-check: channel_databus_bits x data_rate / 8 must reproduce
-         * bandwidth_. A future preset change that forgets the architecture
-         * object now fails here instead of quietly re-describing the part. */
-        if (dram_arch_) {
-            double implied_mbs =
-                (dram_arch_->datapath.channel_databus_bits.value_bits / 8.0) *
-                dram_arch_->timing.data_rate_mtps;
-            if (bandwidth_ > 0 && implied_mbs > 0.0 &&
-                std::fabs(implied_mbs - static_cast<double>(bandwidth_)) >
-                    0.02 * static_cast<double>(bandwidth_)) {
-                std::cerr << "[ramulator] WARNING: " << dt
-                          << " speed-bin mismatch. The simulated preset implies "
-                          << bandwidth_ << " MB/s aggregate, but the architecture "
-                             "object's databus x data rate gives " << implied_mbs
-                          << " MB/s (" << dram_arch_->timing.data_rate_mtps
-                          << " MT/s). Cycles come from the preset and reported "
-                             "bandwidths come from the architecture object, so "
-                             "this run counts one part and prices another."
-                          << std::endl;
-            }
-        }
     } else {
         // Load configuration from file
         std::ifstream config_file(config_path_);
@@ -341,9 +392,19 @@ Ramulator::Request RamulatorWrapper::createRamulatorRequest(
 }
 
 void RamulatorWrapper::handleRequestCompletion(Ramulator::Request& req) {
-    // Update statistics based on completed request
-    // Row buffer statistics would come from Ramulator's internal stats
-    // This is a placeholder for now
+    /* 1.11.57 (latent D009): this is where the row-buffer counters were meant
+     * to be updated, and the "placeholder for now" that stood here was the
+     * whole of their implementation -- so getRowHits()/getRowMisses()/
+     * getRowConflicts() returned 0 for the lifetime of every wrapper while
+     * four consumers treated them as measurements. The counters are gone
+     * (see ramulator_wrapper.h); this hook stays because it is the callback
+     * Ramulator2 invokes on completion and a real instance would need it.
+     * There is nothing to read yet: no Ramulator2 instance is ever created in
+     * this tree, because every construction site passes an empty config path.
+     * Whoever gives this wrapper a live instance should populate the row
+     * statistics from req/the controller HERE, and should add the counters
+     * back at the same time rather than reviving the empty ones. */
+    (void)req;
 }
 
 double RamulatorWrapper::getReadEnergy() const {
@@ -375,15 +436,19 @@ double RamulatorWrapper::getActivationEnergy() const {
         activation_energy_per_op_nJ = dram_arch_->energy.bank_energy_pJ * 0.6 / 1000.0;
     }
 
-    // Estimate number of row activations
-    // In worst case, every access causes activation (0% row hit rate)
-    // In best case, only row misses cause activation
-    uint64_t estimated_activations = row_misses_ + row_conflicts_;
-    if (estimated_activations == 0) {
-        // If no statistics, assume activations proportional to total accesses
-        // with typical row buffer locality (assume 50% hit rate)
-        estimated_activations = (total_reads_ + total_writes_) / 2;
-    }
+    /* 1.11.57 (latent D009): the activation count came from row_misses_ +
+     * row_conflicts_, two counters that were never incremented, so the sum was
+     * always 0 and the "if no statistics" branch was the ONLY branch: every
+     * activation count this function ever returned was accesses/2, i.e. a
+     * hardcoded 50% row-miss rate wearing the clothes of a measurement. The
+     * run does measure the row-miss fraction, it just arrives by another road
+     * (setRowMissFraction, from the PE memory interface); use it, and fall
+     * back to the stated 0.5 only when the run carried no measurement -- the
+     * same convention arrayReadNJ() uses for the same quantity. */
+    const double miss_frac = (row_miss_frac_ >= 0.0 && row_miss_frac_ <= 1.0)
+                             ? row_miss_frac_ : 0.5;
+    double estimated_activations =
+        static_cast<double>(total_reads_ + total_writes_) * miss_frac;
 
     return estimated_activations * activation_energy_per_op_nJ;
 }
@@ -407,11 +472,12 @@ double RamulatorWrapper::getPrechargeEnergy() const {
     }
 
     // Estimate number of precharges (roughly equal to activations)
-    uint64_t estimated_precharges = row_misses_ + row_conflicts_;
-    if (estimated_precharges == 0) {
-        // If no statistics, assume precharges proportional to total accesses
-        estimated_precharges = (total_reads_ + total_writes_) / 2;
-    }
+    // 1.11.57 (latent D009): same substitution as getActivationEnergy above --
+    // the two counters this used to read were structurally 0.
+    const double miss_frac = (row_miss_frac_ >= 0.0 && row_miss_frac_ <= 1.0)
+                             ? row_miss_frac_ : 0.5;
+    double estimated_precharges =
+        static_cast<double>(total_reads_ + total_writes_) * miss_frac;
 
     return estimated_precharges * precharge_energy_per_op_nJ;
 }
@@ -435,17 +501,32 @@ double RamulatorWrapper::getRefreshEnergy() const {
         refresh_energy_per_row_nJ = dram_arch_->energy.bank_energy_pJ * 0.6 / 1000.0;
     }
 
-    // Calculate number of refresh cycles
-    // tREFI for DDR4 = 7.8us = 7800ns
-    // At 1ns cycle time (typical for modeling), tREFI = 7800 cycles
-    // At actual DRAM clock (1.2GHz = 0.833ns), tREFI = 9360 cycles
+    /* 1.11.57 (latent D014): tREFI IS PER TECHNOLOGY, and this function used
+     * DDR4's 7.8 us for all seven. pimid_energy.h's IDD table has carried a
+     * trefi_ns column since 1.9.10 -- DDR5 and HBM refresh every 3.9 us, GDDR6
+     * every 1.9 us -- so an HBM3 run counted half the refreshes it should and
+     * a GDDR6 run counted a quarter. It was invisible because this function's
+     * only caller is getTotalEnergy(), whose only caller is printStats() and
+     * an unreachable PowerModelManager; no reported refresh number comes from
+     * here (the reported one is getRefreshPowerMW(), which reads the same
+     * per-tech column correctly). Read the column instead of restating one
+     * technology's value as if it were all of them.
+     *
+     * RESIDUAL, stated: current_cycle_ is this wrapper's own tick count, and
+     * nothing in this tree ticks it, so refresh_count is 0 in practice. The
+     * clock domain is the DRAM clock from the architecture object, which is
+     * the domain tREFI is specified in. */
+    const double trefi_ns =
+        Ramulator::pimid_energy::iddFor(dram_type_).trefi_ns;
 
     double clock_period_ns = 1.0;  // Default 1ns modeling cycle
     if (dram_arch_) {
         clock_period_ns = 1000.0 / dram_arch_->timing.clock_freq_mhz;
     }
 
-    double tREFI_cycles = 7800.0 / clock_period_ns;  // 7.8us refresh interval
+    double tREFI_cycles = (trefi_ns > 0.0 && clock_period_ns > 0.0)
+                          ? (trefi_ns / clock_period_ns) : 0.0;
+    if (!(tREFI_cycles >= 1.0)) return 0.0;
     uint64_t refresh_count = current_cycle_ / static_cast<uint64_t>(tREFI_cycles);
 
     // Total refresh energy = refreshes x banks x energy_per_refresh
@@ -459,9 +540,37 @@ double RamulatorWrapper::getLeakagePower() const {
 }
 
 double RamulatorWrapper::getTotalEnergy() const {
-    return getReadEnergy() + getWriteEnergy() +
-           getActivationEnergy() + getPrechargeEnergy() +
-           getRefreshEnergy() + (getLeakagePower() * current_cycle_ / 1000000.0);
+    /* 1.11.57 (latent D015): ACTIVATE AND PRECHARGE ARE NOT ADDED HERE ANY
+     * MORE, because they were already inside the read and write terms. All
+     * three come from the same source: updateEnergyMetrics() sets the per
+     * access read energy to bank_energy_pJ x 64 B, which is the FULL access --
+     * activate, column access and precharge -- while getActivationEnergy() and
+     * getPrechargeEnergy() return a further 0.6 and 0.4 of the same
+     * bank_energy_pJ per row miss. Summing all four charged the array roughly
+     * twice for every row miss. main.cpp's own intensive path states the rule
+     * this now follows ("getArrayReadEnergyNJ folds activation and column
+     * access, so act/pre are NOT added separately"); this function predates it
+     * and contradicted it. It was invisible because getTotalEnergy() is
+     * reached only from printStats() (no callers) and from
+     * PowerModelManager::... (never instantiated, and which additionally reads
+     * this nJ value into a variable named total_energy_j).
+     *
+     * The two accessors are kept -- DRAMModel::tick() reports them as their own
+     * line items, which is legitimate -- they simply must not be summed with a
+     * total that already contains them. */
+    /* 1.11.57 (latent D015, second unit): the leakage term was
+     * getLeakagePower() * current_cycle_ / 1e6, which is 1000x too small.
+     * getLeakagePower() returns MILLIWATTS and this total is in NANOJOULES:
+     * mW x ns = 1e-3 W x 1e-9 s = 1e-12 J = 1e-3 nJ, so the divisor is 1e3,
+     * not 1e6. The cycle period is the DRAM clock the wrapper's other
+     * cycle-domain arithmetic uses, rather than an unstated 1 ns. */
+    double clock_period_ns = 1.0;
+    if (dram_arch_ && dram_arch_->timing.clock_freq_mhz > 0.0)
+        clock_period_ns = 1000.0 / dram_arch_->timing.clock_freq_mhz;
+    const double leakage_nJ =
+        getLeakagePower() * (static_cast<double>(current_cycle_) *
+                             clock_period_ns) / 1000.0;
+    return getReadEnergy() + getWriteEnergy() + getRefreshEnergy() + leakage_nJ;
 }
 
 Cycle RamulatorWrapper::getAverageLatency() const {
@@ -492,17 +601,15 @@ Cycle RamulatorWrapper::getAverageLatency() const {
         tRP_cycles = std::ceil(dram_arch_->timing.tRP_ns / clock_period_ns);
     }
 
-    // Calculate row buffer hit rate
-    uint64_t total_accesses = total_reads_ + total_writes_;
-    double hit_rate = 0.0;
-
-    if (row_hits_ > 0 || row_misses_ > 0 || row_conflicts_ > 0) {
-        // Use actual statistics from Ramulator
-        hit_rate = static_cast<double>(row_hits_) / total_accesses;
-    } else {
-        // Conservative estimate: assume 50% hit rate if no statistics available
-        hit_rate = 0.5;
-    }
+    /* 1.11.57 (latent D009): the hit rate came from row_hits_ against three
+     * counters that were never incremented, so the "use actual statistics from
+     * Ramulator" branch could never be taken and every average latency this
+     * function returned used the 0.5 in the else. The measured quantity is
+     * row_miss_frac_, set by the caller from the run's own PE-memory-interface
+     * row statistics; use it, and keep 0.5 only as the stated fallback for a
+     * run that carried no measurement. */
+    double hit_rate = (row_miss_frac_ >= 0.0 && row_miss_frac_ <= 1.0)
+                      ? (1.0 - row_miss_frac_) : 0.5;
 
     // Row hit latency (just column access)
     Cycle hit_latency = static_cast<Cycle>(tCAS_cycles);
@@ -552,18 +659,48 @@ double RamulatorWrapper::getTerminationEnergyNJ() const {
      * off-chip IO model built from extracted parameters -- instead of the
      * hand-written SSTL/POD/LVSTL scheme table in pimid_energy.h.
      *
-     * WHY THE SWITCH MATTERS, measured (gate 1155b, pJ/bit, this term only):
+     * WHY THE SWITCH MATTERS, measured at gate 1155b (pJ/bit, this term only):
      *     tech     hand table   CACTI-IO   ratio
      *     DDR3       4.7508      (model)    ~2.6x on the FULL interface
      *     DDR4       2.5568                 ~2.1x
      *     DDR5       1.4323                 ~3.3x
      *     LPDDR5     0.0349      4.9547     142x on the full interface
+     *
+     * 1.11.57 (latent D010): NOT ONE OF THOSE FOUR ROWS REPRODUCES ANY MORE.
+     * They are kept above as the historical measurement they are -- gate 1155b
+     * ran against the 1.11.40 scheme table -- and must not be read as a
+     * current property of the code. Recomputed from today's terminationNJ()
+     * and today's rate table:
+     *     DDR3   (1.35/2)^2 / 74 / 1.6e9   = 3.848  pJ/bit, not 4.7508
+     *            (4.7508 was the pre-1.11.46 SSTL-15 1.5 V part; 1.11.46 moved
+     *             DDR3 to the 1.35 V DDR3L the IDD row already described)
+     *     DDR4   0.5*1.2^2 / 88 / 2.4e9    = 3.409  pJ/bit, not 2.5568
+     *            (2.5568 is the 3200 MT/s figure; 1.11.52 moved DDR4 to the
+     *             DDR4-2400 part this tree simulates)
+     *     DDR5   0.5*1.1^2 / 88 / 3.2e9    = 2.148  pJ/bit, not 1.4323
+     *            (1.4323 is the 4800 MT/s figure; 1.11.57 C001/D017 moved DDR5
+     *             to the simulated DDR5_3200AN preset)
+     *     LPDDR5 0.5*0.5^2 / 280 / 6.4e9   = 0.0698 pJ/bit, not 0.0349
+     *            (exactly 2x: the 1.11.26 LVSTL rework introduced the 0.5 HIGH
+     *             duty this row lacked)
+     * Three of the four moved because the SPEED BIN was corrected, which is
+     * the point: a measured comparison table is only valid against the inputs
+     * it was measured with, and this one outlived three of them.
+     *
+     * The 142x that the paragraph below builds on therefore rests on a
+     * superseded LPDDR5 row. The ARGUMENT survives -- 0.0698 pJ/bit against
+     * CACTI-IO's 4.9547 is still 71x, and still a number with no physical
+     * meaning for a mobile DQ interface -- but the factor is 71, not 142.
+     * All of this was invisible because it is a source comment: nothing prints
+     * it and no emitted value is derived from it.
      * The DDR gaps are the hand table modelling ONLY termination while the
-     * interface also burns driver-switching and PHY energy. LPDDR5's 142x is a
-     * different failure: LVSTL exists precisely to eliminate static
-     * termination current, so the one term the table modelled is the one term
-     * LVSTL makes negligible, and 0.0349 pJ/bit is a number with no physical
-     * meaning. Real mobile DRAM interfaces sit near 3-6 pJ/bit.
+     * interface also burns driver-switching and PHY energy. LPDDR5's gap (71x
+     * on today's numbers, 142x as originally measured) is a different failure:
+     * LVSTL exists precisely to eliminate static termination current, so the
+     * one term the table modelled is the one term LVSTL makes negligible, and
+     * a per-bit termination energy of 0.07 pJ is a number with no physical
+     * meaning for a DQ interface. Real mobile DRAM interfaces sit near
+     * 3-6 pJ/bit.
      *
      * TERM-BY-TERM, not aggregate: this call is the TERMINATION line, so it
      * takes CACTI-IO's termination component alone. Substituting the model's
@@ -573,11 +710,18 @@ double RamulatorWrapper::getTerminationEnergyNJ() const {
      * The explicit override still wins, and CACTI-IO refusing (GDDR6 has no
      * parameter set) falls back to the scheme table with that stated -- a
      * refusal must not silently become zero. */
-    if (energy_term_override_pJ_per_bit_ >= 0.0)
-        return Ramulator::pimid_energy::terminationNJ(dram_type_,
-                                                      energy_term_override_pJ_per_bit_);
-
+    /* 1.11.57 (latent D017): the transfer rate is handed to the scheme table
+     * instead of the scheme table keeping its own copy. dramRateMTs() is the
+     * one place in the tree that answers "what rate is this part", and it is
+     * already what the bandwidth, the burst time and the CACTI-IO termination
+     * figure come from -- the duplicate column inside pimid_energy.h had
+     * already drifted to DDR5-4800 after C001 moved this table to the
+     * simulated DDR5_3200AN preset. */
     const double rate = PIMID::CactiIOWrapper::dramRateMTs(dram_type_);
+    if (energy_term_override_pJ_per_bit_ >= 0.0)
+        return Ramulator::pimid_energy::terminationNJ(
+            dram_type_, energy_term_override_pJ_per_bit_, rate);
+
     const int    ndq  = PIMID::CactiIOWrapper::dramChannelWidthBits(dram_type_);
     if (rate > 0.0 && ndq > 0) {
         /* activity = 1.0: this is an energy PER ACCESS, so the interface is
@@ -619,14 +763,36 @@ double RamulatorWrapper::getTerminationEnergyNJ() const {
                          "sourced value." << std::endl;
         }
     }
-    return Ramulator::pimid_energy::terminationNJ(dram_type_, energy_term_override_pJ_per_bit_);
+    return Ramulator::pimid_energy::terminationNJ(
+        dram_type_, energy_term_override_pJ_per_bit_, rate);   // 1.11.57 (D017)
 }
 
+/* 1.11.57 (latent D011): THESE TWO ARE COMPUTED AND NOBODY READS THEM.
+ *
+ * getInterfaceDynamicEnergyNJ() and getInterfaceAreaMM2() have no caller
+ * anywhere in src/ or include/ -- grep finds only these definitions and their
+ * declarations in ramulator_wrapper.h. The two reported DQ-interface numbers,
+ * main.cpp's device-scope and system-scope interface lines, both consume
+ * getTerminationEnergyNJ() alone. So the DQ interface in every PIMID result is
+ * still TERMINATION ONLY, and the 1.11.40 correction these functions carry --
+ * that driver switching and PHY are the terms that matter, and that leaving
+ * them out understates LPDDR5's interface by roughly two orders of magnitude
+ * (see the measured table above) -- is present in the code and absent from
+ * every number the simulator prints.
+ *
+ * They are kept, not deleted: they are a correct model of a term PIMID does
+ * not yet charge, and deleting them would delete the correction rather than
+ * land it. What is fixed here is the silence -- an interface-energy header
+ * that advertises a fix no reported number receives is worse than no header.
+ * Wiring them in belongs in main.cpp (an owner of that file must add them to
+ * the interface line and re-derive, because it MOVES every DRAM interface
+ * energy the corpus reports), which is why it is not done here. */
 double RamulatorWrapper::getInterfaceDynamicEnergyNJ() const {
     /* 1.11.40: driver switching + PHY, per 64 B. PIMID has never modelled
      * these -- the interface was termination-only -- so this is new accounting
      * rather than a re-attribution. Zero when CACTI-IO has no parameter set,
-     * which is honest: we do not know it, rather than it being absent. */
+     * which is honest: we do not know it, rather than it being absent.
+     * UNUSED AND UNVALIDATED as of 1.11.57 -- see the note above. */
     const double rate = PIMID::CactiIOWrapper::dramRateMTs(dram_type_);
     const int    ndq  = PIMID::CactiIOWrapper::dramChannelWidthBits(dram_type_);
     if (rate <= 0.0 || ndq <= 0) return 0.0;
@@ -638,7 +804,8 @@ double RamulatorWrapper::getInterfaceDynamicEnergyNJ() const {
 }
 
 double RamulatorWrapper::getInterfaceAreaMM2() const {
-    /* 1.11.40: IO area, which PIMID reported as unmodelled. */
+    /* 1.11.40: IO area, which PIMID reported as unmodelled.
+     * UNUSED AND UNVALIDATED as of 1.11.57 -- see the D011 note above. */
     const double rate = PIMID::CactiIOWrapper::dramRateMTs(dram_type_);
     const int    ndq  = PIMID::CactiIOWrapper::dramChannelWidthBits(dram_type_);
     if (rate <= 0.0 || ndq <= 0) return 0.0;
@@ -696,47 +863,64 @@ void RamulatorWrapper::updateEnergyMetrics() const {
         return;  // Already updated this cycle (do NOT skip the initial cycle-0 pass)
     }
 
-    // Energy per memory access from DRAM architecture and literature
-    // Based on NVIDIA-HPCA17, DAS-MICRO15, and JEDEC power specs
-    //
-    // DDR4 typical values at 1.2V (from literature):
-    //   Read:  2.0-2.5 nJ per access (activate + column read + precharge)
-    //   Write: 2.5-3.0 nJ per access (higher due to write recovery)
-    //
-    // HBM2 typical values (from papers):
-    //   Read:  1.0-1.5 nJ per access (TSV reduces energy)
-    //   Write: 1.2-1.8 nJ per access
+    // Energy per memory access, from the intensive IDD path in
+    // external/ramulator/src/dram/pimid_energy.h (see below).
 
-    double read_energy_per_access = 2.5;   // Default DDR4 value (nJ)
-    double write_energy_per_access = 3.0;  // Default DDR4 value (nJ)
-    double leakage_power_per_gb = 0.8;     // Default DDR4 value (mW per GB)
+    /* 1.11.57 (latent D012 + D013): THE TOOL ANSWERS BOTH OF THESE.
+     *
+     * D013: write energy was read x 1.2 under a comment reading "writes are
+     * typically 15-20% higher than read" -- the same unsourced ratio 1.11.5
+     * removed from the intensive path when it wired writes to IDD4W. The
+     * wrapper already exposes the IDD-derived pair, so the ratio does not have
+     * to be asserted: getArrayWriteEnergyNJ()/getArrayReadEnergyNJ() is the
+     * ratio JEDEC's own IDD4W/IDD4R implies for this technology (about 1.07 on
+     * DDR4's row, not 1.20). Take the pair directly.
+     *
+     * D012: the leakage literals contradicted the comment above them by 100x.
+     * The comment states "DDR4: ~80-100 mW/GB, HBM2: ~50-60 mW/GB" and the
+     * code assigned 0.85 and 0.55 mW/GB -- two orders of magnitude apart, with
+     * no way to tell which was meant. Neither is measured, and the tool has a
+     * real answer: standby power for the whole memory system is exactly what
+     * pimid_energy's IDD path computes (backgroundSystemMW), and it is per
+     * device, not per gigabyte. Derive the per-GB figure from the sourced
+     * IDD2N/IDD3N background instead of choosing between two literals that
+     * disagree with each other.
+     *
+     * Both were invisible because cached_write_energy_ and
+     * cached_leakage_power_ leave this class only through getWriteEnergy() and
+     * getLeakagePower(), whose callers are DRAMModel::tick() -- never called --
+     * and printStats(), which has no callers. */
+    const double BYTES_PER_ACCESS = 64.0;
+    double read_energy_per_access  = getArrayReadEnergyNJ();
+    double write_energy_per_access = getArrayWriteEnergyNJ();
+    double capacity_gb = capacity_ / (1024.0 * 1024.0 * 1024.0);
 
-    // Use actual energy from DRAM architecture if available
-    if (dram_arch_) {
-        // Bank energy (pJ/byte) includes activation + column access + data transfer
-        // Convert to nJ per 64-byte access (typical cache line)
-        const double BYTES_PER_ACCESS = 64.0;
-        read_energy_per_access = dram_arch_->energy.bank_energy_pJ * BYTES_PER_ACCESS / 1000.0;
-
-        // Write energy is typically 15-20% higher than read
-        write_energy_per_access = read_energy_per_access * 1.2;
-
-        // Leakage power scales with capacity
-        // DDR4: ~80-100 mW/GB, HBM2: ~50-60 mW/GB (better due to lower voltage)
-        if (dram_arch_->technology == "HBM2" || dram_arch_->technology == "HBM3") {
-            leakage_power_per_gb = 0.55;  // Lower for HBM
-        } else {
-            leakage_power_per_gb = 0.85;  // DDR4/DDR5
-        }
+    if (dram_arch_ && read_energy_per_access <= 0.0) {
+        /* The IDD path refused (no row for this technology); the architecture
+         * object's bank energy is the remaining tool-sourced figure. */
+        read_energy_per_access =
+            dram_arch_->energy.bank_energy_pJ * BYTES_PER_ACCESS / 1000.0;
+        write_energy_per_access = read_energy_per_access;
     }
+
+    /* Background power for the memory system this wrapper describes, divided
+     * by its capacity -- a derived mW/GB, with the derivation visible. r_idle
+     * = 0 and power gating off: this is the standby floor, not a residency
+     * weighted figure, which is what a leakage line means. */
+    double leakage_power_mw = getBackgroundSystemMW(0.0, false, device_width_,
+                                                    ranks_per_channel_,
+                                                    channels_);
 
     // Calculate total energy
     cached_read_energy_ = total_reads_ * read_energy_per_access;
     cached_write_energy_ = total_writes_ * write_energy_per_access;
 
-    // Leakage power (mW) = capacity (GB) x leakage_per_GB
-    double capacity_gb = capacity_ / (1024.0 * 1024.0 * 1024.0);
-    cached_leakage_power_ = capacity_gb * leakage_power_per_gb;
+    /* 1.11.57 (D012): mW for the memory system as configured. The old form
+     * was capacity_gb x a literal mW/GB whose two candidate values differed
+     * by 100x; capacity_gb is kept only to report the implied per-GB figure
+     * to anyone who wants it. */
+    (void)capacity_gb;
+    cached_leakage_power_ = leakage_power_mw;
 
     last_energy_update_ = current_cycle_;
 }
@@ -745,14 +929,18 @@ void RamulatorWrapper::printStats() const {
     std::cout << "\n=== Ramulator DRAM Statistics ===" << std::endl;
     std::cout << "Total Reads:     " << total_reads_ << std::endl;
     std::cout << "Total Writes:    " << total_writes_ << std::endl;
-    std::cout << "Row Hits:        " << row_hits_ << std::endl;
-    std::cout << "Row Misses:      " << row_misses_ << std::endl;
-    std::cout << "Row Conflicts:   " << row_conflicts_ << std::endl;
-
-    if (total_reads_ + total_writes_ > 0) {
-        double hit_rate = static_cast<double>(row_hits_) /
-                         (total_reads_ + total_writes_) * 100.0;
-        std::cout << "Row Hit Rate:    " << hit_rate << "%" << std::endl;
+    /* 1.11.57 (latent D009): the Row Hits / Row Misses / Row Conflicts lines
+     * and the hit rate derived from them are gone. They printed three counters
+     * that were never incremented, so this block reported "Row Hit Rate: 0%"
+     * for every run that had any traffic at all -- a fabricated statistic in a
+     * block headed "Statistics". What the wrapper actually knows about row
+     * behaviour is the miss fraction the caller measured and handed in, and
+     * whether it was measured at all. */
+    if (row_miss_frac_ >= 0.0 && row_miss_frac_ <= 1.0) {
+        std::cout << "Row Miss Frac:   " << row_miss_frac_
+                  << " (measured by the caller)" << std::endl;
+    } else {
+        std::cout << "Row Miss Frac:   not measured in this run" << std::endl;
     }
 
     std::cout << "\n=== Energy Metrics ===" << std::endl;
@@ -775,9 +963,6 @@ void RamulatorWrapper::printStats() const {
 void RamulatorWrapper::resetStats() {
     total_reads_ = 0;
     total_writes_ = 0;
-    row_hits_ = 0;
-    row_misses_ = 0;
-    row_conflicts_ = 0;
     cached_read_energy_ = 0.0;
     cached_write_energy_ = 0.0;
     cached_leakage_power_ = 0.0;
@@ -843,11 +1028,23 @@ void RamulatorWrapper::initializePIMComponents() {
     // Create PIM controller plugin
     pim_plugin_ = std::make_shared<PIMControllerPlugin>(dram_arch_, dram_type_);
 
-    // Initialize with DRAM organization
-    // Use organization from Ramulator if available, otherwise use defaults
-    int num_subarrays = 16;  // Typical
+    /* 1.11.57 (latent D019): ASK THE ACCESSORS THAT ARE RIGHT HERE.
+     *
+     * This block hardcoded "int num_subarrays = 16;  // Typical" and, below,
+     * "8  // chips per rank (typical)" -- two organization facts stated as
+     * literals a few hundred lines above getSubarraysPerBank() and
+     * getChipsPerRank(), which resolve exactly those quantities from the
+     * architecture object this function has already dereferenced. The literals
+     * are wrong for most of the technologies this wrapper serves: HBM2/HBM3
+     * are single-die-per-channel parts, and the subarray count is per
+     * technology in the architecture object. It was invisible because
+     * initializePIMComponents() runs only from enablePIMSupport(), which has
+     * no callers anywhere in the tree -- the PIM plugin, the bandwidth tracker
+     * and the internal network are never constructed in a PIMID run. */
+    int num_subarrays = static_cast<int>(getSubarraysPerBank());
     int num_bank_groups = dram_arch_->organization.bank_groups_per_chip;
     int num_banks = dram_arch_->organization.banks_per_bank_group * num_bank_groups;
+    int chips_per_rank = static_cast<int>(getChipsPerRank());
 
     bandwidth_tracker_->initialize(
         channels_,
@@ -871,7 +1068,7 @@ void RamulatorWrapper::initializePIMComponents() {
         num_subarrays,
         dram_arch_->organization.banks_per_bank_group,
         num_bank_groups,
-        8  // chips per rank (typical)
+        chips_per_rank   // 1.11.57 (latent D019): was the literal 8
     );
 
     std::cout << "PIM components initialized:\n";
@@ -880,6 +1077,7 @@ void RamulatorWrapper::initializePIMComponents() {
     std::cout << "  Bank Groups: " << num_bank_groups << "\n";
     std::cout << "  Banks: " << num_banks << "\n";
     std::cout << "  Subarrays: " << num_subarrays << "\n";
+    std::cout << "  Chips per rank: " << chips_per_rank << "\n";
 }
 
 bool RamulatorWrapper::sendPIM(Address addr, MemoryRequestType type,
@@ -1040,16 +1238,16 @@ double RamulatorWrapper::getTRAS() const {
     return 32.0;  // DDR4-2400 default
 }
 
-double RamulatorWrapper::getTRRD() const {
-    // tRRD (Row to Row Delay) - minimum time between consecutive ACTIVATE commands
-    // Typically ~5-7ns for DDR4
-    // Use tRAS/4 as approximation if not directly available
-    if (dram_arch_) {
-        return dram_arch_->timing.tRAS_ns / 4.0;  // Approximation
-    }
-    return 5.0;  // DDR4-2400 default
-}
-
+/* 1.11.57 (latent D020): getTRRD() is DELETED. It returned tRAS/4 under the
+ * word "Approximation" -- an invented relation between two JEDEC timings that
+ * are independently specified (DDR4-2400's tRRD_S is 3.3 ns against a tRAS of
+ * 32 ns, so the quarter rule overstates it by 2.4x) -- and it had no callers
+ * anywhere in src/, include/ or tools/: only its own definition and its
+ * declaration in the header. Nothing could read the wrong number, which is why
+ * it survived four releases of timing work. Deleted rather than corrected,
+ * because the correct value is a per-technology JEDEC figure this wrapper does
+ * not carry, and a caller who needs tRRD should have it sourced then, not
+ * inherit a division that looks like one. */
 double RamulatorWrapper::getTRC() const {
     // tRC = tRAS + tRP
     return getTRAS() + getTRP();
@@ -1155,11 +1353,39 @@ int RamulatorWrapper::getBankPortBits() const {
 }
 
 int RamulatorWrapper::getBankGroupPortBits() const {
+    /* 1.11.57 (latent D020, PROMOTED -- this one is LIVE): the x2 below is an
+     * unsourced multiplier, and since 1.11.56 it reaches a reported number.
+     * The audit recorded it as latent on the grounds that this accessor had no
+     * callers; that stopped being true when buildHierarchy started taking the
+     * per-level link ladder from the architecture object (src/main.cpp, the
+     * "Hierarchy link ladder from the <tech> architecture object" line), where
+     * w[2] is this value. It is left AT ITS PRESENT VALUE deliberately -- a
+     * silent change here would move every hierarchy level-2 link width and
+     * bandwidth in the corpus -- but it no longer passes as sourced.
+     *
+     * What it is: the architecture object carries no bank-group datapath
+     * field. The only sourced neighbour is the bank serialization width, and
+     * the x2 asserts that a bank group's port is twice a bank's. That is a
+     * plausible reading of bank-group interleaving and it is not a
+     * specification value; nothing in JEDEC fixes a bank-group port width,
+     * because a bank group is not an interface boundary. The honest fix is a
+     * bank_group_port_bits field in DRAMArchitectureV2 with a source string
+     * per technology, which is a change to the architecture objects and to
+     * every number they feed. */
+    static bool announced = false;
+    if (!announced) {
+        announced = true;
+        std::cerr << "[mem] NOTE: the bank-group port width is bank "
+                     "serialization width x 2 -- an UNSOURCED multiplier, not "
+                     "a JEDEC value; a bank group is not an interface boundary "
+                     "and no specification fixes its port width. It sets "
+                     "hierarchy level 2's link width and bandwidth."
+                  << std::endl;
+    }
     if (dram_arch_) {
-        // Bank group port is same as bank serialization for DDR4
         return dram_arch_->datapath.bank_serialization_bits.value_bits * 2;
     }
-    return 16;  // DDR4 default
+    return 16;  // DDR4 default (8-bit bank serialization x 2)
 }
 
 int RamulatorWrapper::getChipIOBits() const {
@@ -1176,11 +1402,34 @@ int RamulatorWrapper::getRankDataBits() const {
     return 64;  // DDR4 default (8 x x8 chips)
 }
 
+/* 1.11.57 (audit C007): ONE CHANNEL for every family. The HBM objects used to
+ * hold the whole stack in this field, so this accessor answered "the channel"
+ * with 8 or 16 channels' worth and the ladder's channel rung sat 8x/16x above
+ * the rung beneath it. The aggregate is channel x channels, which is what the
+ * system root is for.
+ *
+ * ONE THING THIS DOES NOT FIX, stated so nobody reads the ladder as finished:
+ * the system root (L6) is built by the caller as this width x
+ * hierarchy_channels_per_system, which is the multi-DEVICE count and is 1 for
+ * a single stack -- the DRAM channel count is hierarchy_dram_channels. With
+ * the stack no longer smuggled into the channel rung, L6 is now one channel
+ * wide on HBM rather than the stack. Correcting it means multiplying by the
+ * DRAM channel count at that site, which is src/main.cpp's to make. */
 int RamulatorWrapper::getChannelDataBits() const {
     if (dram_arch_) {
         return dram_arch_->datapath.channel_databus_bits.value_bits;
     }
     return 64;  // DDR4 default
+}
+
+/* 1.11.57 (audit C004): WHICH PART is this wrapper's architecture object
+ * describing? For DDR3, LPDDR5 and GDDR6 the answer is "DDR4", because no
+ * object exists for them and the DDR4-2400 one is read instead. A caller that
+ * is about to attribute widths, bandwidths or a link ladder to the technology
+ * it asked for can compare this against that technology first. */
+std::string RamulatorWrapper::getArchitectureTechnology() const {
+    if (dram_arch_) return dram_arch_->technology;
+    return "";
 }
 
 double RamulatorWrapper::getSubarrayBandwidth() const {
@@ -1194,19 +1443,28 @@ double RamulatorWrapper::getSubarrayBandwidth() const {
     return (256.0 / 8.0) * 1.2;  // 38.4 GB/s internal
 }
 
+/* 1.11.57 (audit C003): these two used to return a stored literal while their
+ * five neighbours in this block compute a width times a clock. The ladder in
+ * main.cpp reads all seven and back-derives each rung's CLOCK as BW * 8 /
+ * width, so a literal that had stopped tracking the core clock did not present
+ * as a wrong bandwidth -- it presented as a wrong frequency, and then as a
+ * wrong transfer time on every crossing of that rung. Derived at the source
+ * now (DRAMArchitectureV2::getBankEffectiveBW), so the two rungs follow a
+ * speed-bin change like the rest of the ladder. The no-object fallbacks below
+ * are DDR4's own derivation, 8 bits / 8 x 1.2 GHz and its x2. */
 double RamulatorWrapper::getBankBandwidth() const {
     if (dram_arch_) {
-        // Bank bandwidth limited by serialization path
-        return dram_arch_->bandwidth_limits.bank_effective_bw_GBs;
+        // Bank bandwidth limited by the serialization path, at the core clock
+        return dram_arch_->getBankEffectiveBW();
     }
-    return 1.2;  // ~1.2 GB/s effective bank bandwidth for DDR4
+    return 1.2;  // 8 bits / 8 x 1.2 GHz, the DDR4-2400 default
 }
 
 double RamulatorWrapper::getBankGroupBandwidth() const {
     if (dram_arch_) {
-        return dram_arch_->bandwidth_limits.bank_group_effective_bw_GBs;
+        return dram_arch_->getBankGroupEffectiveBW();
     }
-    return 2.4;  // ~2.4 GB/s
+    return 2.4;  // 16 bits / 8 x 1.2 GHz, the DDR4-2400 default
 }
 
 double RamulatorWrapper::getChipIOBandwidth() const {
@@ -1248,14 +1506,14 @@ double RamulatorWrapper::getBankEnergyPerByte() const {
     return 2.0;  // 2 pJ/byte DDR4 default
 }
 
-double RamulatorWrapper::getBankGroupEnergyPerByte() const {
-    if (dram_arch_) {
-        // Approximate as slightly higher than bank energy
-        return dram_arch_->energy.bank_energy_pJ * 1.5;
-    }
-    return 3.0;  // 3 pJ/byte DDR4 default
-}
-
+/* 1.11.57 (latent D020): getBankGroupEnergyPerByte() is DELETED. It returned
+ * the bank energy x 1.5 as "approximate as slightly higher than bank energy" --
+ * a 50% surcharge for crossing a boundary that costs nothing in the energy
+ * model, asserted with no source -- and it had no callers: only its definition
+ * and its header declaration. The energy ladder that IS consumed
+ * (architecture_extractor.h) reads the architecture object's own per-tier
+ * fields, never this. A caller who needs bank-group energy should get a
+ * sourced field on DRAMArchitectureV2, not a multiplier. */
 double RamulatorWrapper::getChipEnergyPerByte() const {
     if (dram_arch_) {
         return dram_arch_->energy.chip_energy_pJ;
@@ -1270,13 +1528,11 @@ double RamulatorWrapper::getRankEnergyPerByte() const {
     return 10.0;  // 10 pJ/byte DDR4 default
 }
 
-double RamulatorWrapper::getChannelEnergyPerByte() const {
-    if (dram_arch_) {
-        // Channel energy includes rank + controller overhead
-        return dram_arch_->energy.rank_energy_pJ * 1.5;
-    }
-    return 15.0;  // 15 pJ/byte DDR4 default
-}
+/* 1.11.57 (latent D020): getChannelEnergyPerByte() is DELETED, for the same
+ * reason as getBankGroupEnergyPerByte() above -- rank energy x 1.5 as
+ * "channel energy includes rank + controller overhead", an unsourced 50%
+ * controller allowance, with no callers anywhere in the tree. The memory
+ * controller's energy is McPAT's to report, and it is reported there. */
 
 /* 1.11.23: these four were CIRCULAR. Each returned the architecture field
  * that architecture_extractor.h assigns FROM it, so the "primary" branch was
@@ -1328,13 +1584,15 @@ double RamulatorWrapper::getRankAccessLatency() const {
     return 80.0;  // Typical DDR4
 }
 
-double RamulatorWrapper::getChannelAccessLatency() const {
-    if (dram_arch_) {
-        // Channel adds MC overhead
-        return dram_arch_->timing.rank_access_ns * 1.2;
-    }
-    return 100.0;  // Typical DDR4
-}
+/* 1.11.57 (latent D020): getChannelAccessLatency() is DELETED. It returned the
+ * rank access latency x 1.2 with the comment "Channel adds MC overhead" -- a
+ * 20% controller penalty with no source, charged uniformly to every
+ * technology -- and it had no callers. Note that getBankGroupAccessLatency()
+ * two functions up already REFUSED the same shape of number in 1.11.23,
+ * dropping its 1.1x and returning the bank latency as an honest floor with the
+ * missing term named (tCCD_L - tCCD_S); this function kept the pattern that
+ * one abandoned. The controller's queueing and overhead are modelled in the
+ * hierarchy/NoC path and in McPAT, not by a multiplier on a JEDEC timing. */
 
 const pimid::memory::DRAMArchitectureV2* RamulatorWrapper::getDRAMArchitecture() const {
     return dram_arch_.get();

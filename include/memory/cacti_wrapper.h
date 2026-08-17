@@ -47,7 +47,21 @@ public:
          * CACTI at all. 0=HP, 1=LSTP, 2=LOP; periphery/tag flavors only --
          * the data-array CELL type (SRAM vs comm-dram) is a different axis. */
         int device_corner;
-        uint32_t temperature;        // Operating temperature in Celsius
+        /* 1.11.57 (latent D035): KELVIN, not Celsius. This line read
+         * "// Operating temperature in Celsius" while the constructor below
+         * initialises it to 350 with the comment "350K = ~77C" and
+         * createCACTIInput forwards it RAW to CACTI's input->temp, which
+         * CACTI checks as "Temperature must be between 300 and 400 Kelvin and
+         * multiple of 10" (external/cacti/io.cc) and EXITS on failure. So a
+         * caller who obeyed the declaration and passed 85 would not get a
+         * wrong number, it would kill the process mid-run. It was invisible
+         * because no caller anywhere sets SRAMConfig::temperature -- every
+         * query in the tree takes the 350 K default. The declaration is
+         * corrected and validateConfiguration() now enforces CACTI's own
+         * window, so a wrong unit is refused by this wrapper with a readable
+         * message instead of by CACTI with an exit. */
+        uint32_t temperature;        // Operating temperature in KELVIN
+                                     // (300-400, multiple of 10 -- CACTI's rule)
 
         // Access mode and type
         bool is_cache;               // true for cache, false for scratchpad

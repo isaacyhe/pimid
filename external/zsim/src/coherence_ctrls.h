@@ -27,6 +27,7 @@
 #define COHERENCE_CTRLS_H_
 
 #include <bitset>
+#include <vector>
 #include "constants.h"
 #include "g_std/g_string.h"
 #include "g_std/g_vector.h"
@@ -59,15 +60,42 @@ class CC : public GlobAlloc {
         //Repl policy interface
         virtual uint32_t numSharers(uint32_t lineId) = 0;
         virtual bool isValid(uint32_t lineId) = 0;
-        /* 1.11.40 (audit N7): how many lines in this cache are MODIFIED,
-         * i.e. would have to be written back by a flush. The coherence
-         * flush footprint is exactly this quantity and it is measurable;
-         * it was a 16 MiB constant, which is 56.9x the whole host cache
-         * hierarchy and therefore not merely unmeasured but impossible. */
-        virtual uint64_t countDirtyLines() const = 0;
-        /* 1.11.55 (audit F017): a WRITEBACK flush leaves the lines clean.
-         * Returns the number of lines it transitioned M -> E. */
-        virtual uint64_t cleanDirtyLines() = 0;
+        /* Coherence-flush footprint interface.
+         *
+         * 1.11.40 (audit N7) introduced countDirtyLines(): the flush moves the
+         * lines in M, and that is measurable rather than a 16 MiB constant.
+         * 1.11.55 (F017) added cleanDirtyLines() so the flush actually left the
+         * lines clean. Both were UNLOCKED walks of the MESI state array.
+         *
+         * 1.11.57 (audit D001/D002/D003): those two entry points are replaced
+         * by one LOCKED, FUSED operation. Three reasons, all of them defects
+         * the split interface made possible:
+         *  - D003: cleanDirtyLines() writes array[i] while another rank is
+         *    still retiring guest memory operations against the same cache. An
+         *    array[i] = E landing on a line another thread has just driven to M
+         *    silently deletes a dirty bit, and it can land inside the window
+         *    between coherence_ctrls.cpp's "*state = M;" and its compiled-in
+         *    assert_msg(*state == M, "Wrong final state on GETX"), aborting the
+         *    run through log.h's *(int*)0 = 42. takeDirtyLineIds() must be
+         *    called with flushLock() held -- the SAME lock the access path
+         *    takes in startAccess() -- which closes both windows.
+         *  - D002: a count taken separately from the clean cannot be trusted to
+         *    match what the clean removed. Fusing them means every line that
+         *    leaves M is reported exactly once, ever.
+         *  - The caller needs LINE IDS, not a count, because only the caller
+         *    (Cache, which owns the tag array) can turn a line id into an
+         *    ADDRESS and so de-duplicate the same dirty line held at several
+         *    levels of an inclusive hierarchy.
+         *
+         * takeDirtyLineIds(): append the ids of every line currently in M to
+         * `out` and transition those lines M -> E (a writeback flush: memory
+         * becomes current, the line stays valid and exclusively held -- not a
+         * wbinvd, which would also throw the lines away). The caller must hold
+         * flushLock() across the call AND across its own use of the ids, so
+         * that a concurrent eviction cannot re-tag a line id under it. */
+        virtual void flushLock() = 0;
+        virtual void flushUnlock() = 0;
+        virtual void takeDirtyLineIds(std::vector<uint32_t>& out) = 0;
 };
 
 
@@ -110,28 +138,15 @@ class MESIBottomCC : public GlobAlloc {
         PAD();
 
     public:
-        /* 1.11.40 (N7): count lines in M. Only M is dirty -- E is exclusive
-         * but CLEAN and needs no writeback, which is the distinction a
-         * capacity-based estimate cannot make. */
-        uint64_t cleanDirtyLines() {
-            /* 1.11.55 (audit F017): M -> E, the state a writeback flush
-             * leaves behind: the data is now current in memory and the line
-             * is still valid and exclusively held. Without this the flush
-             * MEASURED the dirty set and never cleaned it, so every later
-             * offload re-charged the same working set -- host cycles and
-             * flush bytes both grew linearly in the number of offloads for
-             * data a real flush had already written back once. (Not M -> I:
-             * our flush is "make memory current", the transfer/prep cost,
-             * not a wbinvd that also throws the lines away.) */
-            uint64_t n = 0;
+        /* 1.11.40 (N7) / 1.11.55 (F017) / 1.11.57 (D001-D003): the fused,
+         * lock-protected flush walk. Only M is dirty -- E is exclusive but
+         * CLEAN and needs no writeback, which is the distinction a
+         * capacity-based estimate cannot make. The caller holds ccLock through
+         * lock()/unlock() below, which is the same lock startAccess() takes,
+         * so no guest access can observe or race a half-done walk. */
+        void takeDirtyLineIds(std::vector<uint32_t>& out) {
             for (uint32_t i = 0; i < numLines; i++)
-                if (array[i] == M) { array[i] = E; n++; }
-            return n;
-        }
-        uint64_t countDirtyLines() const {
-            uint64_t n = 0;
-            for (uint32_t i = 0; i < numLines; i++) if (array[i] == M) n++;
-            return n;
+                if (array[i] == M) { array[i] = E; out.push_back(i); }
         }
                 MESIBottomCC(uint32_t _numLines, uint32_t _selfId, bool _nonInclusiveHack) : numLines(_numLines), selfId(_selfId), nonInclusiveHack(_nonInclusiveHack) {
             array = gm_calloc<MESIState>(numLines);
@@ -434,8 +449,13 @@ class MESICC : public CC {
         //Repl policy interface
         uint32_t numSharers(uint32_t lineId) {return tcc->numSharers(lineId);}
         bool isValid(uint32_t lineId) {return bcc->isValid(lineId);}
-        uint64_t countDirtyLines() const {return bcc->countDirtyLines();}  // 1.11.40 (N7)
-        uint64_t cleanDirtyLines() {return bcc->cleanDirtyLines();}        // 1.11.55 (F017)
+        /* 1.11.57 (audit D003): the flush walk takes the BOTTOM cc lock only.
+         * The access path takes tcc then bcc (startAccess above), so a thread
+         * blocked on bcc while holding tcc simply waits for us; we acquire
+         * nothing else while holding bcc, so no cycle exists. */
+        void flushLock() {bcc->lock();}
+        void flushUnlock() {bcc->unlock();}
+        void takeDirtyLineIds(std::vector<uint32_t>& out) {bcc->takeDirtyLineIds(out);}
 };
 
 // Terminal CC, i.e., without children --- accepts GETS/X, but not PUTS/X
@@ -524,8 +544,10 @@ class MESITerminalCC : public CC {
         //Repl policy interface
         uint32_t numSharers(uint32_t lineId) {return 0;} //no sharers
         bool isValid(uint32_t lineId) {return bcc->isValid(lineId);}
-        uint64_t countDirtyLines() const {return bcc->countDirtyLines();}  // 1.11.40 (N7)
-        uint64_t cleanDirtyLines() {return bcc->cleanDirtyLines();}        // 1.11.55 (F017)
+        /* 1.11.57 (audit D003): see MESICC::flushLock. */
+        void flushLock() {bcc->lock();}
+        void flushUnlock() {bcc->unlock();}
+        void takeDirtyLineIds(std::vector<uint32_t>& out) {bcc->takeDirtyLineIds(out);}
 };
 
 #endif  // COHERENCE_CTRLS_H_

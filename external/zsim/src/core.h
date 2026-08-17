@@ -171,8 +171,14 @@ class Core : public GlobAlloc {
             struct M { const char* n; const char* d; uint64_t* v; };
             /* ROI-relative like instrs: the deltas are what the power model
              * consumes, and mixing bases is the defect 1.11.9 root-caused. */
-            static thread_local uint64_t dummy;
-            (void)dummy;
+            /* 1.11.57 (latent F030): a `static thread_local uint64_t dummy;`
+             * followed by `(void)dummy;` used to sit here. It was read by
+             * nothing, written by nothing and named after nothing -- the
+             * residue of an earlier shape of this function -- and a
+             * deliberately-unused variable in a stats emitter reads as a
+             * layout pin someone must not touch. It is not one: it is TLS,
+             * not heap, so it cannot influence the stats-object addresses the
+             * contention sim's tie-breaking is sensitive to. Deleted. */
             auto add = [&](const char* n, const char* d, uint64_t* cur, uint64_t* base) {
                 auto fn = [cur, base]() -> uint64_t {
                     return (*cur > *base) ? (*cur - *base) : 0;
@@ -190,6 +196,15 @@ class Core : public GlobAlloc {
             /* 1.11.18: PG residency, ROI-relative and emitted HERE so all
              * five core types share one definition (the five per-core
              * ProxyStat copies were whole-run). */
+            /* 1.11.57 (latent F030): the cast STRIPS volatile from a counter
+             * that PhaseActivity::touch advances with __sync_fetch_and_add
+             * under a CAS. That is safe here and only here: the pointer is
+             * dereferenced exclusively by the LambdaStat above, which runs at
+             * stats-dump time on one thread with the simulation quiesced, so
+             * there is no concurrent writer for the compiler to have cached
+             * around. Said out loud because a volatile-stripping cast in a
+             * multi-threaded counter path is otherwise exactly the shape of a
+             * defect. */
             add("pgActivePhases", "Phases with retirement (PG residency)",
                 (uint64_t*)&pgAct.activePhases, &roiBasePgActive);
             /* 1.11.16: flag-based, all core types. OOOCore's own oooBbl-null

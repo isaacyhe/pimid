@@ -48,6 +48,21 @@ class CacheArray : public GlobAlloc {
          */
         virtual void postinsert(const Address lineAddr, const MemReq* req, uint32_t lineId) = 0;
 
+        /* 1.11.57 (audit D002): the address currently tagged at `lineId`.
+         * The coherence flush has to count DISTINCT dirty lines, and the same
+         * dirty line is resident at every level of an inclusive hierarchy --
+         * so the only way to de-duplicate it is by address. Counting by level
+         * instead (1.11.55's F015 fix) is only correct while "child in M =>
+         * parent in M" holds, and zsim breaks that invariant on purpose: a
+         * GETX hitting an E line upgrades to M SILENTLY in the child
+         * (coherence_ctrls.cpp, "it's OK not to transition if L2+"), so a
+         * read-then-write line is M in the L1D and E in the LLC. That made the
+         * last-level count blind to the whole load-modify-store working set,
+         * and 1.11.55's own M -> E clean widened the blindness to everything
+         * re-dirtied after the first flush. Reading tags is off the access
+         * path (flush time only), so no fast path pays for this. */
+        virtual Address getLineAddr(uint32_t lineId) const = 0;
+
         virtual void initStats(AggregateStat* parent) {}
 };
 
@@ -71,6 +86,7 @@ class SetAssocArray : public CacheArray {
         int32_t lookup(const Address lineAddr, const MemReq* req, bool updateReplacement);
         uint32_t preinsert(const Address lineAddr, const MemReq* req, Address* wbLineAddr);
         void postinsert(const Address lineAddr, const MemReq* req, uint32_t candidate);
+        Address getLineAddr(uint32_t lineId) const {return array[lineId];}  // 1.11.57 (D002)
 };
 
 /* The cache array that started this simulator :) */
@@ -104,6 +120,8 @@ class ZArray : public CacheArray {
         //zcache-specific, since timing code needs to know the number of swaps, and these depend on idx
         //Should be called after preinsert(). Allows intervening lookups
         uint32_t getLastCandIdx() const {return lastCandIdx;}
+
+        Address getLineAddr(uint32_t lineId) const {return array[lineId];}  // 1.11.57 (D002)
 
         void initStats(AggregateStat* parentStat);
 };

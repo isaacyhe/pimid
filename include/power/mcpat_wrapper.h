@@ -50,8 +50,38 @@ public:
         double total_dynamic;
         double total_power;
 
-        // Energy (nJ)
-        double total_energy;
+        /* 1.11.57 (latent C026): `double total_energy;` -- commented "Energy
+         * (nJ)" -- is DELETED from this struct, along with its
+         * zero-initialiser.
+         *
+         * What was wrong: the field was declared, zero-initialised in this
+         * constructor, and never assigned ANYWHERE. extractResults() fills
+         * every other member of every PowerMetrics it builds and skips this
+         * one, and the blob transported between the forked child and the
+         * parent copies the struct verbatim, so a zero went in and a zero
+         * came out. It nevertheless had a consumer that read it as a live
+         * measurement: power_model_manager.cpp did
+         * `metrics.total_energy_j = mcpat_metrics.total_energy;` -- assigning
+         * a permanently-zero nanojoule field into a joule field, so a
+         * PowerEstimate labelled MCPAT would have reported exactly 0 J of
+         * energy for any component, with two independent errors (never
+         * assigned, and nJ read as J) that happen to be invisible together
+         * because zero times any unit conversion is still zero.
+         *
+         * Why it was invisible: PowerModelManager is compiled but never
+         * instantiated -- grep for it outside its own .cpp/.h finds only the
+         * CMakeLists line. main.cpp's real energy path is
+         * McPATWrapper::getEnergyForPeriod(), which multiplies a measured
+         * power by a caller-supplied period and is unaffected by any of this.
+         *
+         * DELETED rather than assigned, because there is no honest value to
+         * assign: an energy needs a time base, McPAT's per-component
+         * rt_power is already a power at the Processor level, and this struct
+         * carries no period. A member that cannot be filled correctly must
+         * not be left readable -- a zero read as a measurement is the exact
+         * failure mode this project treats most seriously. The consumer was
+         * fixed in the same change to derive energy from total_power_w and
+         * the run's elapsed time, which is a quantity it does have. */
 
         PowerMetrics()
             : subthreshold_leakage(0.0)
@@ -60,7 +90,6 @@ public:
             , total_leakage(0.0)
             , total_dynamic(0.0)
             , total_power(0.0)
-            , total_energy(0.0)
         {}
     };
 
@@ -618,6 +647,18 @@ private:
      * memory-controller structural literals that have no configuration
      * surface. */
     mutable bool warned_mc_structure_ = false;
+    /* 1.11.57 (latent C035): latch for the one-time warning that busy cycles
+     * exceed total cycles, which used to make the idle-cycle subtraction wrap
+     * around instead of reporting the inconsistency. */
+    mutable bool warned_busy_exceeds_total_ = false;
+    /* 1.11.57 (latent C018): latch for the one-time warning that the legacy
+     * single-NoC branch had no NoC activity and is pricing the fabric from
+     * memory-controller transaction counts instead. */
+    mutable bool warned_noc_substitution_ = false;
+    /* 1.11.57 (latent C015): latch for the one-time CACTI tech-node clamp
+     * warning, so hoisting the clamp into the parent does not print it twice
+     * (the child inherits the latch across fork()). */
+    bool warned_tech_clamp_ = false;
     /* 1.9.36: per-core intra-core power split, transported from the forked child
      * (which alone holds the model object). Diagnostic only -- nothing consumes
      * these -- but they are what makes the ALU-versus-core error MEASURABLE
@@ -717,6 +758,20 @@ private:
     // Helper functions
     void runMcPAT();
     void validateConfiguration();
+    /* 1.11.57 (latent C015): the CACTI tech-node clamp, extracted from
+     * runMcPAT() so the PARENT can apply it before fork(). runMcPAT() runs
+     * only in the forked child, so the clamp used to mutate a config_ that
+     * died with the child -- see the definition for what that hid. Idempotent
+     * and latched, so calling it from both sides is safe and silent the
+     * second time. */
+    void clampTechNodeForCacti();
+    /* 1.11.57 (latent C012): a 64-bit hash of everything that changes a McPAT
+     * answer -- every SystemConfig field plus every setter's state. It goes
+     * into the result-blob filename, into the archived XML's filename, and
+     * into the blob itself, where the parent verifies it against its own
+     * recomputation before believing a single number in the file. See the
+     * definition for what the pid-only key could not distinguish. */
+    uint64_t inputFingerprint() const;
     void createMcPATInput();
     /* 1.11.56 (audit C014): the XML path the parent chose for the next
      * computePower(). The child writes there, so a caller can archive the

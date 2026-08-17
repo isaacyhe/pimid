@@ -1,6 +1,35 @@
 /**
  * @file internal_memory_network.cpp
- * @brief Implementation of generic internal memory network for all technologies
+ * @brief Memory-technology naming helpers.
+ *
+ * 1.11.57 (latent D066 + D067): this file's factory function,
+ * createInternalMemoryNetwork(), is DELETED. What is left is the technology
+ * enum and its two string conversions.
+ *
+ * D066 -- IT PASSED THE WRONG ARGUMENT. Its third parameter was named
+ * num_banks and meant the TOTAL bank count -- its own validation proved that
+ * reading, rejecting configurations where num_banks % num_bank_groups != 0 --
+ * and it forwarded that total straight into createInternalDRAMNetwork()'s
+ * third parameter, which is num_banks_per_bg (internal_dram_network.h). On a
+ * DDR4 part that is 16 passed where 4 belongs, so every bank-level endpoint
+ * count and every bank-to-bank distance in the resulting network would have
+ * been four times too large. The live callers do it correctly -- src/main.cpp
+ * and RamulatorWrapper::initializePIMComponents both pass
+ * banks_per_bank_group -- which is exactly why this copy was never noticed.
+ *
+ * D067 -- IT ANNOUNCED CONFIGURATION IT DID NOT PERFORM. The switch that
+ * followed printed "[InternalMemoryNetwork] STT-MRAM configuration applied",
+ * "PCM configuration applied", "ReRAM configuration applied" and so on, each
+ * sitting over a comment saying the configuration was "already handled"
+ * elsewhere. No case did anything at all. A log line asserting that a
+ * technology-specific configuration was applied, printed by a branch that
+ * applies nothing, is a false statement in the run record.
+ *
+ * Deleted rather than repaired because it had NO CALLERS anywhere in src/ or
+ * include/ -- nothing in the tree even includes this header -- so there is no
+ * behaviour to preserve and no number to re-derive. Anyone who needs a
+ * technology-generic factory should call createInternalDRAMNetwork() directly
+ * with the per-bank-group count, as the two live sites do.
  */
 
 #include "memory/internal_memory_network.h"
@@ -40,136 +69,6 @@ std::string getMemoryTechnologyName(MemoryTechnologyType type) {
         case MemoryTechnologyType::RERAM: return "ReRAM";
         default: return "Unknown";
     }
-}
-
-std::shared_ptr<InternalDRAMNetwork> createInternalMemoryNetwork(
-    const std::string& memory_tech,
-    int num_subarrays,
-    int num_banks,
-    int num_bank_groups,
-    int num_chips
-) {
-    // ========================================
-    // Input Validation
-    // ========================================
-
-    // Validate memory technology string
-    if (memory_tech.empty()) {
-        throw std::invalid_argument("Memory technology type cannot be empty");
-    }
-
-    // Validate positive counts
-    if (num_subarrays <= 0) {
-        throw std::invalid_argument("Number of subarrays must be positive (got " +
-                                   std::to_string(num_subarrays) + ")");
-    }
-
-    if (num_banks <= 0) {
-        throw std::invalid_argument("Number of banks must be positive (got " +
-                                   std::to_string(num_banks) + ")");
-    }
-
-    if (num_bank_groups <= 0) {
-        throw std::invalid_argument("Number of bank groups must be positive (got " +
-                                   std::to_string(num_bank_groups) + ")");
-    }
-
-    if (num_chips <= 0) {
-        throw std::invalid_argument("Number of chips must be positive (got " +
-                                   std::to_string(num_chips) + ")");
-    }
-
-    // Validate reasonable upper bounds to catch configuration errors
-    const int MAX_SUBARRAYS = 1024;
-    const int MAX_BANKS = 256;
-    const int MAX_BANK_GROUPS = 64;
-    const int MAX_CHIPS = 128;
-
-    if (num_subarrays > MAX_SUBARRAYS) {
-        throw std::invalid_argument("Number of subarrays exceeds reasonable limit (got " +
-                                   std::to_string(num_subarrays) + ", max " +
-                                   std::to_string(MAX_SUBARRAYS) + ")");
-    }
-
-    if (num_banks > MAX_BANKS) {
-        throw std::invalid_argument("Number of banks exceeds reasonable limit (got " +
-                                   std::to_string(num_banks) + ", max " +
-                                   std::to_string(MAX_BANKS) + ")");
-    }
-
-    if (num_bank_groups > MAX_BANK_GROUPS) {
-        throw std::invalid_argument("Number of bank groups exceeds reasonable limit (got " +
-                                   std::to_string(num_bank_groups) + ", max " +
-                                   std::to_string(MAX_BANK_GROUPS) + ")");
-    }
-
-    if (num_chips > MAX_CHIPS) {
-        throw std::invalid_argument("Number of chips exceeds reasonable limit (got " +
-                                   std::to_string(num_chips) + ", max " +
-                                   std::to_string(MAX_CHIPS) + ")");
-    }
-
-    // Validate logical consistency: banks should be multiple of bank groups
-    if (num_banks % num_bank_groups != 0) {
-        throw std::invalid_argument("Number of banks (" + std::to_string(num_banks) +
-                                   ") must be evenly divisible by number of bank groups (" +
-                                   std::to_string(num_bank_groups) + ")");
-    }
-
-    std::cout << "[InternalMemoryNetwork] Creating network for " << memory_tech << std::endl;
-    std::cout << "  Organization: " << num_subarrays << " subarrays, "
-              << num_banks << " banks, " << num_bank_groups << " bank groups, "
-              << num_chips << " chips" << std::endl;
-
-    // Get technology type (may throw std::runtime_error if unknown)
-    MemoryTechnologyType tech_type = getMemoryTechnologyType(memory_tech);
-
-    // Create network using existing InternalDRAMNetwork infrastructure
-    // (it's generic enough to work for all memory types!)
-    auto network = createInternalDRAMNetwork(
-        memory_tech,
-        num_subarrays,
-        num_banks,
-        num_bank_groups,
-        num_chips
-    );
-
-    // Technology-specific configuration adjustments
-    switch (tech_type) {
-        case MemoryTechnologyType::SRAM:
-            std::cout << "[InternalMemoryNetwork] SRAM configuration applied" << std::endl;
-            std::cout << "  - Fast on-chip interconnects" << std::endl;
-            std::cout << "  - Low latency, high bandwidth" << std::endl;
-            // SRAM already configured in createInternalDRAMNetwork
-            break;
-
-        case MemoryTechnologyType::STT_MRAM:
-            std::cout << "[InternalMemoryNetwork] STT-MRAM configuration applied" << std::endl;
-            std::cout << "  - Asymmetric read/write paths" << std::endl;
-            std::cout << "  - Write latency >> read latency" << std::endl;
-            // STT-MRAM configuration already handled
-            break;
-
-        case MemoryTechnologyType::PCM:
-            std::cout << "[InternalMemoryNetwork] PCM configuration applied" << std::endl;
-            std::cout << "  - Phase change material delays" << std::endl;
-            std::cout << "  - Write latency >> read latency" << std::endl;
-            // PCM configuration already handled
-            break;
-
-        case MemoryTechnologyType::RERAM:
-            std::cout << "[InternalMemoryNetwork] ReRAM configuration applied" << std::endl;
-            std::cout << "  - Resistive switching delays" << std::endl;
-            std::cout << "  - Moderate asymmetry" << std::endl;
-            // ReRAM configuration already handled
-            break;
-
-        case MemoryTechnologyType::DRAM:
-            // Already handled by createInternalDRAMNetwork
-            break;
-    }
-
-    return network;
 }
 
 } // namespace pimid

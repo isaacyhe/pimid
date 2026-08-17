@@ -110,6 +110,8 @@ class IdealLRUArray : public CacheArray {
             lruList.push_front(e);
         }
 
+        Address getLineAddr(uint32_t lineId) const {return array[lineId].lineAddr;}  // 1.11.57 (D002)
+
         ReplPolicy* getRP() const {return rp;}
         void setCC(CC* _cc) {cc = _cc;}
 };
@@ -282,6 +284,8 @@ class IdealLRUPartArray : public CacheArray {
             rp->replaced(lineId);
             rp->update(lineId, req);
         }
+
+        Address getLineAddr(uint32_t lineId) const {return lineAddrs[lineId];}  // 1.11.57 (D002)
 };
 
 #endif  // IDEAL_ARRAYS_H_

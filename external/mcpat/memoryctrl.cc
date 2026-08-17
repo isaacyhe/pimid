@@ -221,9 +221,23 @@ void MCPHY::compute()
 		   * smaller than an off-package one. That is a STATED scaling, not
 		   * a measured die photo -- flagged as such in docs/power.md. */
 		  const double kInterposerPHY = 2.28e-3;   // 0.5 pJ/bit @22nm/0.8V
+		  /* PIMID 1.11.57 (latent E013): the AREA ratio is pinned to the
+		   * LVDS baseline the argument above is written against, instead of
+		   * tracking whichever constant mcp.LVDS selects. The dynamic term
+		   * became LVDS-INDEPENDENT when phy_class==1 overwrote
+		   * power_per_gb_per_s outright, so a ratio that still divided by
+		   * the LVDS-selected constant made the same interposer PHY report
+		   * two different areas (0.228x and 0.057x, a 4x swing) for one
+		   * unchanged dynamic figure. The "~4.4x cheaper" sentence twelve
+		   * lines up is 2.28e-3/0.01 -- the LVDS number -- so that is the
+		   * baseline the stated scaling actually comes from. Latent because
+		   * PIMID pins LVDS=1 at emission and the parser defaults it true,
+		   * so 0.04 is unreachable today. This remains a pJ/bit ratio reused
+		   * as an area ratio, which the comment above concedes. */
+		  const double kOffPackagePHY = 0.01;      // the LVDS driver it replaces
 		  double phy_area_scale = 1.0;
 		  if (mcp.phy_class == 1) {
-			  phy_area_scale = kInterposerPHY / (mcp.LVDS ? 0.01 : 0.04);
+			  phy_area_scale = kInterposerPHY / kOffPackagePHY;
 			  power_per_gb_per_s = kInterposerPHY;
 		  }
 		  //Based on die photos from Niagara 1 and 2.
@@ -577,7 +591,20 @@ MemoryController::MemoryController(ParseXML *XML_interface,InputParameter* inter
    * type=1 -- which silently swapped the BACKEND cost model (Cadence
    * full-MC fit -> embedded DDR3-Lite fit, ~15x area drop at 22nm). The
    * backend basis must stay uniform across the placement ladder, so the
-   * driver is now the only thing that varies. */
+   * driver is now the only thing that varies.
+   *
+   * PIMID 1.11.57 (latent E010): what that costs the SHIPPED REFERENCE XMLs.
+   * Niagara1/Niagara2/Penryn/Xeon/Alpha21364 all declare type=0 withPHY=0,
+   * and before D3 a type=0 MC built its PHY regardless -- so under this gate
+   * those inputs now report an MC with no PHY area, no PHY dynamic and no
+   * PHY leakage, and no longer reproduce McPAT's published validation
+   * numbers. Nothing in this tree notices: CMakeLists excludes main.cc, the
+   * fork builds as libmcpat.a only, the sole entry point is McPATWrapper and
+   * nothing under src/ names ProcessorDescriptionFiles. The gate is correct
+   * for PIMID (an on-die element controller must be able to drop its
+   * off-chip driver without switching backend cost models); the reference
+   * XMLs are stale inputs for a binary this fork does not build, and are
+   * recorded as such here rather than quietly re-tuned. */
   if (mcp.withPHY)
   {
 	  PHY = new MCPHY(&interface_ip, mcp, mc_type);

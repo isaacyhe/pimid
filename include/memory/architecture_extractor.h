@@ -32,6 +32,7 @@
 #include <memory>
 #include <string>
 #include <cmath>
+#include <iostream>   // 1.11.57 (latent D061): refusals are announced, not silent
 
 namespace pimid {
 namespace memory {
@@ -299,7 +300,17 @@ inline std::unique_ptr<STTMRAMArchitecture> extractSTTMRAMArchitecture(
     arch->timing.chip_read_ns  = arch->timing.bank_read_ns;
     arch->timing.chip_write_ns = arch->timing.bank_write_ns;
 
-    // Inner-bank breakdown (EXTRACTED from NVSim!)
+    /* Inner-bank breakdown.
+     * 1.11.57 (latent C011): ONLY WHEN THERE IS A BREAKDOWN TO READ. NVSim's
+     * per-component accessors need nvsim_result_, and a CACHE HIT -- the normal
+     * path, since characterizations are pregenerated -- leaves that null and
+     * returns 0.0 from all five. So this block was writing five zeros and then
+     * stamping them "NVSim: decoder/wordline/bitline/sense-amp/column-mux",
+     * which made getTotalReadLatency() the sum of the three ASSERTED I/O
+     * constants alone (1.6 ns) under a tool's name. A zero presented as a
+     * measurement is worse than the fraction 1.11.56 replaced. When the
+     * breakdown is absent, say so in the provenance string instead. */
+    const bool stt_has_components = nvsim_wrapper.hasComponentBreakdown();
     arch->timing.inner_bank.row_decoder_ns = nvsim_wrapper.getDecoderDelay() * 1e9;
     arch->timing.inner_bank.wordline_ns = nvsim_wrapper.getWordlineDelay() * 1e9;
     arch->timing.inner_bank.bitline_read_ns = nvsim_wrapper.getBitlineDelay() * 1e9;
@@ -323,13 +334,27 @@ inline std::unique_ptr<STTMRAMArchitecture> extractSTTMRAMArchitecture(
      * getCellWriteLatency. NOT tool-read: local_io_ns, global_io_ns,
      * bank_output_drv_ns -- NVSim exposes no equivalent, so the block is
      * INFERRED, not VERIFIED, until they are sourced or removed. */
-    arch->timing.inner_bank.verification_status = VerificationStatus::INFERRED;
-    arch->timing.inner_bank.source =
-        "NVSim: decoder/wordline/bitline/sense-amp/column-mux/cell-write; "
-        "ASSERTED (unsourced): local_io, global_io, bank_output_drv -- "
-        + arch->process_node;
+    arch->timing.inner_bank.verification_status =
+        stt_has_components ? VerificationStatus::INFERRED
+                           : VerificationStatus::UNKNOWN;
+    arch->timing.inner_bank.source = stt_has_components
+        ? ("NVSim: decoder/wordline/bitline/sense-amp/column-mux/cell-write; "
+           "ASSERTED (unsourced): local_io, global_io, bank_output_drv -- "
+           + arch->process_node)
+        : ("NOT SOURCED: this characterization came from the NVSim result "
+           "CACHE, which carries only the top-level figures, so the "
+           "per-component delays are ZERO and the inner-bank total is the "
+           "ASSERTED local_io/global_io/bank_output_drv terms alone. "
+           "Re-characterize (empty the nvsim cache) to obtain them -- "
+           + arch->process_node);
 
     // ===== ENERGY (EXTRACTED from NVSim!) =====
+    /* 1.11.57 (latent D059): the five component-energy accessors are NVSim's
+     * own terms now (they were 10/20/40/20/10 percentages of one mat scalar);
+     * they are also PER SUBARRAY now, which is what this field claims to be.
+     * On the cache path they are zero for the same reason as the delays above,
+     * so this field is 0 rather than a fraction of something invented -- and
+     * energy_source below says which case a run is in. */
     arch->energy.subarray_read_energy_pJ = nvsim_wrapper.getDecoderEnergy() * 1000.0 +
                                             nvsim_wrapper.getWordlineEnergy() * 1000.0 +
                                             nvsim_wrapper.getBitlineEnergy() * 1000.0 +
@@ -349,9 +374,12 @@ inline std::unique_ptr<STTMRAMArchitecture> extractSTTMRAMArchitecture(
     arch->energy.write_energy_per_byte = arch->energy.bank_write_energy_pJ / bytes_per_access;
 
     // Leakage (EXTRACTED from NVSim!)
-    arch->energy.subarray_leakage_mw = nvsim_wrapper.getSenseAmpLeakage() /
-                                        (arch->organization.banks_per_chip *
-                                         arch->organization.subarrays_per_bank);
+    /* 1.11.57 (latent D059): NO SECOND DIVISION. getSenseAmpLeakage() used to
+     * be 30% of the MAT leakage, so this divided by banks * subarrays to get
+     * back to one subarray. It now returns NVSim's own
+     * subarray.senseAmp.leakage, which already IS per subarray -- dividing
+     * again would report a sense amplifier as a fraction of itself. */
+    arch->energy.subarray_leakage_mw = nvsim_wrapper.getSenseAmpLeakage();
     /* 1.11.56 (audit D058): ONE BASIS FOR NVSIM'S LEAKAGE, AND IT IS PER-BANK.
      *
      * This block used to read NVSim's figure as a WHOLE-CHIP number: chip =
@@ -378,21 +406,45 @@ inline std::unique_ptr<STTMRAMArchitecture> extractSTTMRAMArchitecture(
     arch->energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower() *
                                    arch->organization.banks_per_chip;
 
-    arch->energy.energy_source = "NVSim extraction, " + arch->process_node;
+    /* 1.11.57 (latent D059): the bank/chip figures are tool reads; the
+     * subarray read energy and leakage are only tool reads when there was a
+     * result tree to break down. Say which. */
+    arch->energy.energy_source = stt_has_components
+        ? ("NVSim extraction, " + arch->process_node)
+        : ("NVSim extraction (bank/chip only; subarray components ABSENT -- "
+           "cached characterization), " + arch->process_node);
 
     // ===== DATAPATH =====
+    /* 1.11.57 (latent D057): NVSim REPORTS NO DATAPATH WIDTH. Two of these
+     * three are literals and the third is an input echoed back, yet the block
+     * stamped itself VERIFIED and attributed the lot to "NVSim extraction" --
+     * a provenance claim about values no tool produced, which is worse than an
+     * uncommented literal because the field asserts the opposite of the truth.
+     * Nothing reads verification_status today, so no number moved; the stamp
+     * would have been believed the first time a consumer appeared. */
     arch->datapath.subarray_local_io_bits = 64;
     arch->datapath.bank_io_bits = config.word_width_bits > 0 ? config.word_width_bits : 64;
     arch->datapath.chip_io_bits = arch->datapath.bank_io_bits * 4;
 
-    arch->datapath.verification_status = VerificationStatus::VERIFIED;
-    arch->datapath.source = "NVSim extraction";
+    arch->datapath.verification_status = VerificationStatus::ESTIMATED;
+    arch->datapath.source =
+        "ASSERTED (unsourced): subarray_local_io_bits = 64, chip_io_bits = "
+        "4 x bank; bank_io_bits is the CONFIGURED word width, not a tool "
+        "output. NVSim reports no datapath width.";
 
     // ===== ENDURANCE =====
+    /* 1.11.57 (latent D063): NVSim MODELS NO ENDURANCE. The source string
+     * said "NVSim + STT-MRAM literature" over three literals, half-crediting a
+     * tool that has no endurance model at all and naming no paper for the
+     * other half. Neither number nor citation is sourceable here, so the field
+     * says exactly that. Note the models do not read these; PCMModel carries
+     * its own copy of the endurance literal. */
     arch->endurance.write_cycles = 1e15;  // STT-MRAM typical
     arch->endurance.retention_years = 10.0;
     arch->endurance.ecc_required = true;
-    arch->endurance.endurance_source = "NVSim + STT-MRAM literature";
+    arch->endurance.endurance_source =
+        "ASSERTED (unsourced literals): NVSim does not model endurance or "
+        "retention. No citation is attached to 1e15 cycles / 10 years.";
 
     return arch;
 }
@@ -441,39 +493,20 @@ inline void updateSRAMArchitectureFromCACTI(
     arch.timing.inner_bank.source = "CACTI 7.0 extraction (updated)";
 }
 
-/**
- * @brief Update an existing STT-MRAM architecture with NVSim-extracted values
- */
-inline void updateSTTMRAMArchitectureFromNVSim(
-    STTMRAMArchitecture& arch,
-    const NVSimWrapper& nvsim_wrapper) {
-
-    if (!nvsim_wrapper.isValid()) return;
-
-    // Update timing breakdown
-    arch.timing.inner_bank.row_decoder_ns = nvsim_wrapper.getDecoderDelay() * 1e9;
-    arch.timing.inner_bank.wordline_ns = nvsim_wrapper.getWordlineDelay() * 1e9;
-    arch.timing.inner_bank.bitline_read_ns = nvsim_wrapper.getBitlineDelay() * 1e9;
-    arch.timing.inner_bank.sense_amp_ns = nvsim_wrapper.getSenseAmpDelay() * 1e9;
-    arch.timing.inner_bank.column_mux_ns = nvsim_wrapper.getColumnDecoderDelay() * 1e9;
-
-    // Update access times
-    arch.timing.subarray_read_ns = nvsim_wrapper.getReadLatency() * 1e9;
-    arch.timing.subarray_write_ns = nvsim_wrapper.getWriteLatency() * 1e9;
-
-    // Update energy
-    arch.energy.bank_read_energy_pJ = nvsim_wrapper.getReadDynamicEnergy() * 1000.0;
-    arch.energy.bank_write_energy_pJ = nvsim_wrapper.getWriteDynamicEnergy() * 1000.0;
-    arch.energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower();
-
-    // Update verification status
-    /* 1.11.23: see the STT-MRAM block -- the component delays are tool-read,
-     * the local/global I/O and output-driver terms are not, so the block is
-     * INFERRED. A VERIFIED stamp over asserted values is a false provenance
-     * claim, which is the defect this release removes. */
-    arch.timing.inner_bank.verification_status = VerificationStatus::INFERRED;
-    arch.timing.inner_bank.source = "NVSim extraction (updated)";
-}
+/* 1.11.57 (latent D045-adjacent): updateSTTMRAMArchitectureFromNVSim,
+ * updatePCMArchitectureFromNVSim and updateReRAMArchitectureFromNVSim are
+ * DELETED. All three had zero callers anywhere in the tree, and all three were
+ * stale duplicates of the extract*() functions above that still carried the
+ * defects those were repaired for: the PCM one assigned
+ * `subarray_reset_ns = write_ns * 0.3`, the assertion 1.11.23 removed from the
+ * extractor and whose release note said it was gone; all three assigned
+ * getReadLatency() (NVSim's BANK figure) straight into subarray_*, the tier
+ * collapse 1.11.23 corrected; all three stamped
+ * "NVSim extraction (updated)" over the per-component delays that are ZERO on
+ * the cached path (latent C011). A dead function is how a removed number gets
+ * back in: it looks like the maintained API, so the next caller reintroduces
+ * every defect at once. If an in-place update is ever wanted, call the
+ * corresponding extract*() and assign the result. */
 
 //=============================================================================
 // PCM Architecture Extraction from NVSim
@@ -530,8 +563,27 @@ inline std::unique_ptr<PCMArchitecture> extractPCMArchitecture(
     arch->timing.clock_freq_ghz = clock_freq_ghz;
 
     // Read latencies
+    /* 1.11.57 (latent D061): REFUSE, DO NOT FILL. This read `if
+     * (read_latency_ns <= 0) read_latency_ns = 8.0;  // PCM typical` and, below,
+     * `= 100.0;  // PCM SET typical` -- two unmarked literals on the path whose
+     * whole doctrine (1.11.24) is that a failed tool binding must refuse rather
+     * than report invented specs. They are unreachable today only because
+     * pcm_model.cpp gates extraction on isValid() and every valid wrapper
+     * returns a positive cached or computed latency; a corrupt or zeroed cache
+     * entry would have silently priced this array at 8 ns / 100 ns while every
+     * log line said NVSim. A non-positive latency from NVSim means the
+     * characterization is broken, so return nullptr and let the model throw
+     * with its existing message. */
     double read_latency_ns = nvsim_wrapper.getReadLatency() * 1e9;
-    if (read_latency_ns <= 0) read_latency_ns = 8.0;  // PCM typical
+    if (read_latency_ns <= 0) {
+        std::cerr << "[extractPCMArchitecture] NVSim returned a non-positive "
+                     "read latency (" << read_latency_ns << " ns). Refusing to "
+                     "substitute the old 8.0 ns literal: the characterization "
+                     "is broken (most likely a corrupt or zeroed NVSim cache "
+                     "entry). Delete the cache entry and re-characterize."
+                  << std::endl;
+        return nullptr;
+    }
     /* 1.11.23: same tier correction as STT-MRAM. getReadLatency() is NVSim's
      * BANK figure, so it IS the bank tier; the subarray is the sum of the
      * component delays NVSim resolves inside the array; the chip tier is bank
@@ -558,8 +610,15 @@ inline std::unique_ptr<PCMArchitecture> extractPCMArchitecture(
     arch->timing.chip_read_ns     = read_latency_ns;
 
     // Write latencies (PCM has VERY asymmetric SET/RESET)
+    // 1.11.57 (latent D061): refuse, do not fill -- see the read path above.
     double write_latency_ns = nvsim_wrapper.getWriteLatency() * 1e9;
-    if (write_latency_ns <= 0) write_latency_ns = 100.0;  // PCM SET typical
+    if (write_latency_ns <= 0) {
+        std::cerr << "[extractPCMArchitecture] NVSim returned a non-positive "
+                     "write latency (" << write_latency_ns << " ns). Refusing "
+                     "to substitute the old 100.0 ns literal; re-characterize."
+                  << std::endl;
+        return nullptr;
+    }
 
     // SET is slowest (crystallization), RESET is faster (amorphization)
     /* 1.11.23: SET is a path NVSim resolves (FunctionUnit::setLatency); it was
@@ -603,7 +662,12 @@ inline std::unique_ptr<PCMArchitecture> extractPCMArchitecture(
         }
     }
 
-    // Inner-bank breakdown (EXTRACTED from NVSim!)
+    /* Inner-bank breakdown.
+     * 1.11.57 (latent C011): only when there IS a breakdown -- see the
+     * STT-MRAM block. On a cache hit these five accessors return 0.0 and the
+     * inner-bank total collapses to the asserted bus/IO constants, so the
+     * provenance string below must not keep saying NVSim. */
+    const bool pcm_has_components = nvsim_wrapper.hasComponentBreakdown();
     arch->timing.inner_bank.row_decoder_ns = nvsim_wrapper.getDecoderDelay() * 1e9;
     arch->timing.inner_bank.wordline_ns = nvsim_wrapper.getWordlineDelay() * 1e9;
     arch->timing.inner_bank.bitline_read_ns = nvsim_wrapper.getBitlineDelay() * 1e9;
@@ -625,13 +689,22 @@ inline std::unique_ptr<PCMArchitecture> extractPCMArchitecture(
      * the local/global I/O and output-driver terms are not, so the block is
      * INFERRED. A VERIFIED stamp over asserted values is a false provenance
      * claim, which is the defect this release removes. */
-    arch->timing.inner_bank.verification_status = VerificationStatus::INFERRED;
-    arch->timing.inner_bank.source = "NVSim extraction, " + arch->process_node + " PCM";
+    arch->timing.inner_bank.verification_status =
+        pcm_has_components ? VerificationStatus::INFERRED
+                           : VerificationStatus::UNKNOWN;
+    arch->timing.inner_bank.source = pcm_has_components
+        ? ("NVSim extraction, " + arch->process_node + " PCM")
+        : ("NOT SOURCED: cached characterization -- the per-component delays "
+           "are ZERO and the inner-bank total is the ASSERTED bus/IO terms "
+           "alone. Re-characterize to obtain them. " + arch->process_node
+           + " PCM");
 
     // ===== ENERGY (EXTRACTED from NVSim!) =====
     double read_energy_nJ = nvsim_wrapper.getReadDynamicEnergy();
     double write_energy_nJ = nvsim_wrapper.getWriteDynamicEnergy();
 
+    /* 1.11.57 (latent D059): NVSim's own per-subarray component energies, not
+     * percentages of a mat scalar; zero when the run came from the cache. */
     arch->energy.subarray_read_energy_pJ = (nvsim_wrapper.getDecoderEnergy() +
                                              nvsim_wrapper.getWordlineEnergy() +
                                              nvsim_wrapper.getBitlineEnergy() +
@@ -658,8 +731,9 @@ inline std::unique_ptr<PCMArchitecture> extractPCMArchitecture(
                                            arch->energy.bank_reset_energy_pJ * 0.5) / bytes_per_access;
 
     // Leakage
-    arch->energy.subarray_leakage_mw = nvsim_wrapper.getSenseAmpLeakage() /
-                                        (num_banks * arch->organization.mats_per_bank);
+    /* 1.11.57 (latent D059): no second division -- getSenseAmpLeakage() is
+     * NVSim's own per-subarray sense-amp leakage now, not 30% of the mat. */
+    arch->energy.subarray_leakage_mw = nvsim_wrapper.getSenseAmpLeakage();
     /* 1.11.56 (audit D058): ONE BASIS FOR NVSIM'S LEAKAGE, AND IT IS PER-BANK.
      *
      * This block used to read NVSim's figure as a WHOLE-CHIP number: chip =
@@ -685,64 +759,44 @@ inline std::unique_ptr<PCMArchitecture> extractPCMArchitecture(
     arch->energy.bank_leakage_mw = nvsim_wrapper.getLeakagePower();
     arch->energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower() * num_banks;
 
-    arch->energy.energy_source = "NVSim extraction, " + arch->process_node + " PCM";
+    // 1.11.57 (latent D059): say whether the subarray terms are tool reads.
+    arch->energy.energy_source = pcm_has_components
+        ? ("NVSim extraction, " + arch->process_node + " PCM")
+        : ("NVSim extraction (bank/chip only; subarray components ABSENT -- "
+           "cached characterization), " + arch->process_node + " PCM");
 
     // ===== ENDURANCE =====
+    /* 1.11.57 (latent D063): NVSim models no endurance and no retention -- see
+     * the STT-MRAM block. "NVSim + PCM literature" half-credited a tool that
+     * supplied neither number and named no paper for the other half. */
     arch->endurance.write_cycles = 1e8;  // PCM limited endurance
     arch->endurance.retention_years = 10.0;
     arch->endurance.mlc_support = true;  // PCM can support MLC
-    arch->endurance.endurance_source = "NVSim + PCM literature";
+    arch->endurance.endurance_source =
+        "ASSERTED (unsourced literals): NVSim does not model endurance or "
+        "retention. No citation is attached to 1e8 cycles / 10 years.";
 
     // ===== DATAPATH =====
+    /* 1.11.57 (latent D057): NVSim reports no datapath width -- see the
+     * STT-MRAM block. mat_io_bits is a literal, chip_io_bits is bank echoed,
+     * bank_io_bits is the configured word width. None of it is a tool output,
+     * and the block used to stamp itself VERIFIED / "NVSim extraction". */
     arch->datapath.mat_io_bits = 64;
     arch->datapath.bank_io_bits = config.word_width_bits > 0 ? config.word_width_bits : 64;
     arch->datapath.chip_io_bits = arch->datapath.bank_io_bits;
 
-    arch->datapath.verification_status = VerificationStatus::VERIFIED;
-    arch->datapath.source = "NVSim extraction";
+    arch->datapath.verification_status = VerificationStatus::ESTIMATED;
+    arch->datapath.source =
+        "ASSERTED (unsourced): mat_io_bits = 64, chip_io_bits = bank_io_bits; "
+        "bank_io_bits is the CONFIGURED word width, not a tool output. NVSim "
+        "reports no datapath width.";
 
     return arch;
 }
 
-/**
- * @brief Update an existing PCM architecture with NVSim-extracted values
- */
-inline void updatePCMArchitectureFromNVSim(
-    PCMArchitecture& arch,
-    const NVSimWrapper& nvsim_wrapper) {
-
-    if (!nvsim_wrapper.isValid()) return;
-
-    // Update timing breakdown
-    arch.timing.inner_bank.row_decoder_ns = nvsim_wrapper.getDecoderDelay() * 1e9;
-    arch.timing.inner_bank.wordline_ns = nvsim_wrapper.getWordlineDelay() * 1e9;
-    arch.timing.inner_bank.bitline_read_ns = nvsim_wrapper.getBitlineDelay() * 1e9;
-    arch.timing.inner_bank.sense_amp_external_ns = nvsim_wrapper.getSenseAmpDelay() * 1e9;
-    arch.timing.inner_bank.column_mux_ns = nvsim_wrapper.getColumnDecoderDelay() * 1e9;
-
-    // Update access times
-    double read_ns = nvsim_wrapper.getReadLatency() * 1e9;
-    double write_ns = nvsim_wrapper.getWriteLatency() * 1e9;
-    if (read_ns > 0) arch.timing.subarray_read_ns = read_ns;
-    if (write_ns > 0) {
-        arch.timing.subarray_set_ns = write_ns;
-        arch.timing.subarray_reset_ns = write_ns * 0.3;
-    }
-
-    // Update energy
-    arch.energy.bank_read_energy_pJ = nvsim_wrapper.getReadDynamicEnergy() * 1000.0;
-    arch.energy.bank_set_energy_pJ = nvsim_wrapper.getWriteDynamicEnergy() * 1000.0;
-    arch.energy.bank_reset_energy_pJ = arch.energy.bank_set_energy_pJ * 0.55;
-    arch.energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower();
-
-    // Update verification status
-    /* 1.11.23: see the STT-MRAM block -- the component delays are tool-read,
-     * the local/global I/O and output-driver terms are not, so the block is
-     * INFERRED. A VERIFIED stamp over asserted values is a false provenance
-     * claim, which is the defect this release removes. */
-    arch.timing.inner_bank.verification_status = VerificationStatus::INFERRED;
-    arch.timing.inner_bank.source = "NVSim extraction (updated)";
-}
+/* 1.11.57 (latent D045-adjacent): updatePCMArchitectureFromNVSim deleted --
+ * see the note above the PCM section. It was the surviving copy of
+ * `reset = write * 0.3`. */
 
 //=============================================================================
 // ReRAM Architecture Extraction from NVSim
@@ -805,8 +859,17 @@ inline std::unique_ptr<ReRAMArchitecture> extractReRAMArchitecture(
     arch->timing.clock_freq_ghz = clock_freq_ghz;
 
     // Read latencies
+    /* 1.11.57 (latent D061, same class): the 5.0 ns / 12.0 ns literals here
+     * were the ReRAM copies of the PCM fallbacks -- unmarked substitutions on
+     * a path whose doctrine is refuse-never-fill. Refuse. */
     double read_latency_ns = nvsim_wrapper.getReadLatency() * 1e9;
-    if (read_latency_ns <= 0) read_latency_ns = 5.0;  // ReRAM typical
+    if (read_latency_ns <= 0) {
+        std::cerr << "[extractReRAMArchitecture] NVSim returned a non-positive "
+                     "read latency (" << read_latency_ns << " ns). Refusing to "
+                     "substitute the old 5.0 ns literal; re-characterize."
+                  << std::endl;
+        return nullptr;
+    }
     /* 1.11.23: same tier correction (see the STT-MRAM block). */
     /* 1.11.25 CORRECTION: this was the sum of five wrapper accessors that look
      * like NVSim reads and, at the time, were not -- getDecoderDelay() and
@@ -828,8 +891,15 @@ inline std::unique_ptr<ReRAMArchitecture> extractReRAMArchitecture(
     arch->timing.chip_read_ns     = read_latency_ns;
 
     // Write latencies (ReRAM has fast writes!)
+    // 1.11.57 (latent D061, same class): refuse, do not fill.
     double write_latency_ns = nvsim_wrapper.getWriteLatency() * 1e9;
-    if (write_latency_ns <= 0) write_latency_ns = 12.0;  // ReRAM typical
+    if (write_latency_ns <= 0) {
+        std::cerr << "[extractReRAMArchitecture] NVSim returned a non-positive "
+                     "write latency (" << write_latency_ns << " ns). Refusing "
+                     "to substitute the old 12.0 ns literal; re-characterize."
+                  << std::endl;
+        return nullptr;
+    }
     arch->timing.bank_write_ns     = write_latency_ns;
     arch->timing.subarray_write_ns =
         rer_sub_read_ns + nvsim_wrapper.getCellWriteLatency() * 1e9;
@@ -842,7 +912,10 @@ inline std::unique_ptr<ReRAMArchitecture> extractReRAMArchitecture(
         arch->timing.analog_compute_ns = 0.0;
     }
 
-    // Inner-bank breakdown (EXTRACTED from NVSim!)
+    /* Inner-bank breakdown.
+     * 1.11.57 (latent C011): only when there IS a breakdown -- see the
+     * STT-MRAM block. Zero on the cached path. */
+    const bool rer_has_components = nvsim_wrapper.hasComponentBreakdown();
     arch->timing.inner_bank.row_decoder_ns = nvsim_wrapper.getDecoderDelay() * 1e9;
     arch->timing.inner_bank.wordline_ns = nvsim_wrapper.getWordlineDelay() * 1e9;
     arch->timing.inner_bank.bitline_ns = nvsim_wrapper.getBitlineDelay() * 1e9;
@@ -872,13 +945,22 @@ inline std::unique_ptr<ReRAMArchitecture> extractReRAMArchitecture(
      * the local/global I/O and output-driver terms are not, so the block is
      * INFERRED. A VERIFIED stamp over asserted values is a false provenance
      * claim, which is the defect this release removes. */
-    arch->timing.inner_bank.verification_status = VerificationStatus::INFERRED;
-    arch->timing.inner_bank.source = "NVSim extraction, " + arch->process_node + " ReRAM";
+    arch->timing.inner_bank.verification_status =
+        rer_has_components ? VerificationStatus::INFERRED
+                           : VerificationStatus::UNKNOWN;
+    arch->timing.inner_bank.source = rer_has_components
+        ? ("NVSim extraction, " + arch->process_node + " ReRAM")
+        : ("NOT SOURCED: cached characterization -- the per-component delays "
+           "are ZERO and the inner-bank total is the ASSERTED H-tree/IO terms "
+           "alone. Re-characterize to obtain them. " + arch->process_node
+           + " ReRAM");
 
     // ===== ENERGY (EXTRACTED from NVSim!) =====
     double read_energy_nJ = nvsim_wrapper.getReadDynamicEnergy();
     double write_energy_nJ = nvsim_wrapper.getWriteDynamicEnergy();
 
+    /* 1.11.57 (latent D059): NVSim's own per-subarray component energies, not
+     * percentages of a mat scalar; zero when the run came from the cache. */
     arch->energy.subarray_read_energy_pJ = (nvsim_wrapper.getDecoderEnergy() +
                                              nvsim_wrapper.getWordlineEnergy() +
                                              nvsim_wrapper.getBitlineEnergy() +
@@ -905,8 +987,9 @@ inline std::unique_ptr<ReRAMArchitecture> extractReRAMArchitecture(
     arch->energy.write_energy_per_byte = arch->energy.bank_write_energy_pJ / bytes_per_access;
 
     // Leakage
-    arch->energy.subarray_leakage_mw = nvsim_wrapper.getSenseAmpLeakage() /
-                                        (num_banks * arch->organization.subarrays_per_bank);
+    /* 1.11.57 (latent D059): no second division -- getSenseAmpLeakage() is
+     * NVSim's own per-subarray sense-amp leakage now, not 30% of the mat. */
+    arch->energy.subarray_leakage_mw = nvsim_wrapper.getSenseAmpLeakage();
     /* 1.11.56 (audit D058): ONE BASIS FOR NVSIM'S LEAKAGE, AND IT IS PER-BANK.
      *
      * This block used to read NVSim's figure as a WHOLE-CHIP number: chip =
@@ -932,62 +1015,44 @@ inline std::unique_ptr<ReRAMArchitecture> extractReRAMArchitecture(
     arch->energy.bank_leakage_mw = nvsim_wrapper.getLeakagePower();
     arch->energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower() * num_banks;
 
-    arch->energy.energy_source = "NVSim extraction, " + arch->process_node + " ReRAM";
+    // 1.11.57 (latent D059): say whether the subarray terms are tool reads.
+    arch->energy.energy_source = rer_has_components
+        ? ("NVSim extraction, " + arch->process_node + " ReRAM")
+        : ("NVSim extraction (bank/chip only; subarray components ABSENT -- "
+           "cached characterization), " + arch->process_node + " ReRAM");
 
     // ===== ENDURANCE =====
+    /* 1.11.57 (latent D063): NVSim models no endurance and no retention -- see
+     * the STT-MRAM block. */
     arch->endurance.write_cycles = 1e11;  // Good for ReRAM
     arch->endurance.retention_years = 10.0;
     arch->endurance.mlc_support = analog_capable;
     arch->endurance.analog_capable = analog_capable;
-    arch->endurance.endurance_source = "NVSim + ReRAM literature";
+    arch->endurance.endurance_source =
+        "ASSERTED (unsourced literals): NVSim does not model endurance or "
+        "retention. No citation is attached to 1e11 cycles / 10 years.";
 
     // ===== DATAPATH =====
+    /* 1.11.57 (latent D057): NVSim reports no datapath width -- see the
+     * STT-MRAM block. All four of these are asserted or echoed inputs, and the
+     * block used to stamp itself VERIFIED / "NVSim extraction". */
     arch->datapath.subarray_local_io_bits = analog_capable ? 128 : 64;  // Wider for analog
     arch->datapath.bank_io_bits = config.word_width_bits > 0 ? config.word_width_bits : 64;
     arch->datapath.chip_io_bits = arch->datapath.bank_io_bits * 2;
     arch->datapath.crossbar_analog_bits = analog_capable ? 8 : 0;  // 8-bit analog resolution
 
-    arch->datapath.verification_status = VerificationStatus::VERIFIED;
-    arch->datapath.source = "NVSim extraction";
+    arch->datapath.verification_status = VerificationStatus::ESTIMATED;
+    arch->datapath.source =
+        "ASSERTED (unsourced): subarray_local_io_bits (64/128 by analog "
+        "capability), chip_io_bits = 2 x bank, crossbar_analog_bits = 8; "
+        "bank_io_bits is the CONFIGURED word width, not a tool output. NVSim "
+        "reports no datapath width.";
 
     return arch;
 }
 
-/**
- * @brief Update an existing ReRAM architecture with NVSim-extracted values
- */
-inline void updateReRAMArchitectureFromNVSim(
-    ReRAMArchitecture& arch,
-    const NVSimWrapper& nvsim_wrapper) {
-
-    if (!nvsim_wrapper.isValid()) return;
-
-    // Update timing breakdown
-    arch.timing.inner_bank.row_decoder_ns = nvsim_wrapper.getDecoderDelay() * 1e9;
-    arch.timing.inner_bank.wordline_ns = nvsim_wrapper.getWordlineDelay() * 1e9;
-    arch.timing.inner_bank.bitline_ns = nvsim_wrapper.getBitlineDelay() * 1e9;
-    arch.timing.inner_bank.sense_amp_ns = nvsim_wrapper.getSenseAmpDelay() * 1e9;
-    arch.timing.inner_bank.column_mux_ns = nvsim_wrapper.getColumnDecoderDelay() * 1e9;
-
-    // Update access times
-    double read_ns = nvsim_wrapper.getReadLatency() * 1e9;
-    double write_ns = nvsim_wrapper.getWriteLatency() * 1e9;
-    if (read_ns > 0) arch.timing.subarray_read_ns = read_ns;
-    if (write_ns > 0) arch.timing.subarray_write_ns = write_ns;
-
-    // Update energy
-    arch.energy.bank_read_energy_pJ = nvsim_wrapper.getReadDynamicEnergy() * 1000.0;
-    arch.energy.bank_write_energy_pJ = nvsim_wrapper.getWriteDynamicEnergy() * 1000.0;
-    arch.energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower();
-
-    // Update verification status
-    /* 1.11.23: see the STT-MRAM block -- the component delays are tool-read,
-     * the local/global I/O and output-driver terms are not, so the block is
-     * INFERRED. A VERIFIED stamp over asserted values is a false provenance
-     * claim, which is the defect this release removes. */
-    arch.timing.inner_bank.verification_status = VerificationStatus::INFERRED;
-    arch.timing.inner_bank.source = "NVSim extraction (updated)";
-}
+/* 1.11.57 (latent D045-adjacent): updateReRAMArchitectureFromNVSim deleted --
+ * see the note above the PCM section. */
 
 //=============================================================================
 // DRAM Architecture Extraction from Ramulator
@@ -1144,12 +1209,14 @@ inline std::unique_ptr<DRAMArchitectureV2> extractDRAMArchitecture(
     arch->timing.chip_access_ns = ramulator_wrapper.getChipAccessLatency();
     arch->timing.rank_access_ns = ramulator_wrapper.getRankAccessLatency();
 
-    // ===== BANDWIDTH LIMITS (from Ramulator) =====
-    arch->bandwidth_limits.bank_effective_bw_GBs = ramulator_wrapper.getBankBandwidth();
-    arch->bandwidth_limits.bank_group_effective_bw_GBs = ramulator_wrapper.getBankGroupBandwidth();
-    arch->bandwidth_limits.chip_internal_bw_GBs = ramulator_wrapper.getChipIOBandwidth();
+    /* ===== BANDWIDTH LIMITS =====
+     * 1.11.57 (audit C003): nothing to copy. The bank and bank-group figures
+     * are no longer stored fields to be filled in from somewhere else; they
+     * are derived on read from the datapath width and the core clock this
+     * function has just written above, which is the only way the width and
+     * the bandwidth of a rung cannot end up describing different parts. */
     arch->bandwidth_limits.inference_method =
-        "Extracted from Ramulator simulation and architecture queries";
+        "DERIVED on read from the extracted datapath widths and clock";
     arch->bandwidth_limits.confidence_level = "High - based on Ramulator model";
 
     // ===== ENERGY (from Ramulator) =====
@@ -1213,9 +1280,10 @@ inline void updateDRAMArchitectureFromRamulator(
     arch.timing.subarray_access_ns = ramulator_wrapper.getSubarrayAccessLatency();
     arch.timing.bank_access_ns = ramulator_wrapper.getBankAccessLatency();
 
-    // Update bandwidth limits
-    arch.bandwidth_limits.bank_effective_bw_GBs = ramulator_wrapper.getBankBandwidth();
-    arch.bandwidth_limits.bank_group_effective_bw_GBs = ramulator_wrapper.getBankGroupBandwidth();
+    /* 1.11.57 (audit C003): the bank and bank-group bandwidths are derived on
+     * read from this object's own width and clock, so there is nothing here to
+     * update -- and no way for an update to leave them describing a different
+     * part from the datapath beside them. */
 
     // Update energy
     arch.energy.subarray_energy_pJ = ramulator_wrapper.getSubarrayEnergyPerByte();

@@ -1834,6 +1834,14 @@ void ParseXML::initialize() //Initialize all
 	sys.mc.memory_reads=1;
 	sys.mc.memory_writes=1;
 	sys.mc.LVDS=true;
+	/* PIMID 1.11.57 (latent E014): sys.mc.withPHY had no default, unlike
+	 * sys.pcie.withPHY and sys.flashc.withPHY three blocks away, and since
+	 * 1.11.19 (D3) it decides whether the MCPHY object is CONSTRUCTED at
+	 * all -- an unset field would silently delete the PHY's area, dynamic
+	 * and leakage. It read false only through the wrapper's value-initialised
+	 * `new ParseXML()`, i.e. by accident. Stated explicitly, matching its two
+	 * siblings; PIMID always emits the parameter, so no run moves. */
+	sys.mc.withPHY = false;   /* PIMID 1.11.57 (E014) */
 	sys.mc.phy_class=0;   /* PIMID 1.11.19: off-package DDR unless said otherwise */
 	sys.mc.type=1;
 	sys.mc.vdd =0;
@@ -1862,7 +1870,28 @@ void ParseXML::initialize() //Initialize all
 	 * logic exactly as before. */
 	sys.dram_periph_family=0; sys.dram_periph_area=1.0;
 	sys.core_pitch_factor=1.0;   /* PIMID 1.11.51 (N1) */
-	sys.dram_periph_gate_leak=1.0;   /* PIMID 1.11.54 (E004) */
+	/* PIMID 1.11.57 (latent D011): 0.0, NOT 1.0. The consumer
+	 * (processor.cc) reads this as
+	 *   fg = (dram_periph_gate_leak > 0.0) ? dram_periph_gate_leak : fl
+	 * and documents the else-arm as "defaults to fl when the emitter did
+	 * not supply one (older XMLs), so nothing changes silently". A default
+	 * of 1.0 passes that guard, so an XML that omitted the parameter got
+	 * fg = 1.0 -- gate leakage left UNTRANSFORMED, which is neither the
+	 * stated fallback nor the pre-1.11.54 behaviour of scaling it by fl.
+	 * initialize() runs on every parse(), so the omission could not be
+	 * detected any other way. Latent only because PIMID's wrapper writes
+	 * this parameter inside the same block that emits dram_periph_family=1,
+	 * and processor.cc reads it only under family 1; a hand-written XML or
+	 * a second emitter would have had gate leakage jump by 1/fl, which the
+	 * corpus measures at 6.81e-06 -- a factor of ~1.5e5 into total_leakage. */
+	sys.dram_periph_gate_leak=0.0;   /* PIMID 1.11.54 (E004), 1.11.57 (D011) */
+	/* PIMID 1.11.57 (latent E007): dram_periph_pitch had no line here at
+	 * all, while every sibling did. It read 0.0 only because ParseXML has no
+	 * user-declared constructor and the single `new ParseXML()` in the
+	 * wrapper value-initialises the aggregate -- an accident of how the
+	 * object happens to be built, not a decision. 1.0 is the identity the
+	 * consumer's `> 0.0` guard falls back to, stated explicitly. */
+	sys.dram_periph_pitch=1.0;   /* PIMID 1.11.57 (E007) */
 	sys.dram_periph_dyn=1.0;  sys.dram_periph_leak=1.0;
 	/* PIMID 1.11.56 (audit C010): dram_periph_scope's default is gone with
 	 * the field itself -- see the parse loop above. */

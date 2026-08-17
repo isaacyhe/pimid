@@ -105,7 +105,14 @@ protected:
      * never armed, i.e. dramRowBytes == 0). */
     Counter profRowHits_;
     Counter profRowMisses_;
-    std::vector<uint64_t> lastRow_;   // per unit; ~0ull = no open row yet
+    /* 1.11.57 (audit D006, D007, D008): one open-row register per BANK, sized
+     * ONCE at construction, indexed by a row number computed on the RANK's
+     * address stripe rather than on one device's page. See noteRowAccess()
+     * for what each of those three corrections was fixing. ~0ull = no open
+     * row yet. */
+    std::vector<uint64_t> lastRow_;
+    uint64_t rowStrideBytes_ = 0;     // system bytes one ACT makes resident
+    uint32_t rowSlotsPerUnit_ = 1;    // independent open rows inside one unit
 
 public:
     // Contiguous coverage
@@ -126,6 +133,7 @@ public:
         futex_init(&updateLock_);
         double bytesPerCycle = (bandwidthMBs > 0) ? (bandwidthMBs * 1e6) / (freqMHz * 1e6) : 0.0;
         maxRequestsPerCycle_ = (bytesPerCycle > 0.0) ? bytesPerCycle / lineSize : 0.0;
+        initRowModel_();   // 1.11.57 (D007): size the open-row table off the access path
     }
 
     // Non-contiguous coverage
@@ -152,6 +160,7 @@ public:
         futex_init(&updateLock_);
         double bytesPerCycle = (bandwidthMBs > 0) ? (bandwidthMBs * 1e6) / (freqMHz * 1e6) : 0.0;
         maxRequestsPerCycle_ = (bytesPerCycle > 0.0) ? bytesPerCycle / lineSize : 0.0;
+        initRowModel_();   // 1.11.57 (D007): size the open-row table off the access path
     }
 
     bool isLocalAddress(Address lineAddr) const {
@@ -719,12 +728,38 @@ public:
                 zinfo->hierarchy.banksPerBG, zinfo->hierarchy.bgPerChip,
                 zinfo->hierarchy.chipsPerRank, zinfo->hierarchy.ranksPerChannel);
 
-            // Wormhole serialization: body flits pipeline behind head (1 cycle each)
-            uint32_t serLat = (zinfo->hierarchy.nocFlitsPerPacket > 1)
-                ? (zinfo->hierarchy.nocFlitsPerPacket - 1) : 0;
-
-            // One-way = hierarchy traversal + serialization; RTT = 2×
-            uint32_t networkLat = 2 * (hierLat + serLat);
+            /* 1.11.57 (audit D013): THE 64 B LINE IS SERIALISED ONCE, BY THE
+             * LADDER. This site used to add a wormhole term on top --
+             * (nocFlitsPerPacket - 1) cycles each way, with flits_per_packet =
+             * ceil(576/128) = 5 from a hardcoded 128-bit link width in
+             * src/main.cpp -- so every remote access carried 2 * 4 = 8 PE
+             * cycles of serialisation beyond whatever the tiers charged.
+             *
+             * That was not a double charge until 1.11.56. Before it, B041
+             * flattened the whole seven-tier ladder to one scalar on any
+             * analytical DRAM run, so this WAS the only serialisation term.
+             * B041 stopped flattening (the flattening made an analytical run
+             * compare a different hierarchy model against detailed, not a
+             * different network model), and since then computeHierTraversal
+             * sums per-tier latencies that each already contain
+             * ceil(64*8 / tier_width) at the tier's SOURCED width --
+             * InternalDRAMNetwork::getTransferLatencyNs over the D064 ladder,
+             * converted once at the PE clock. The tiers know the DDR4 chip-DQ
+             * tier is 8 bits wide and the rank tier 64; the literal 128 here
+             * contradicted both, and it was invisible because each half looks
+             * correct in its own file and the release that made them overlap
+             * changed neither.
+             *
+             * Removing THIS one rather than the ladder's: the ladder's width
+             * came from the DRAM oracle per tier, the 128 is a Garnet flit
+             * size that the fork otherwise never reads (nocLinkWidthBits is
+             * parsed into zinfo->hierarchy at init.cpp and consumed nowhere),
+             * and it survives only through flits_per_packet.
+             * nocFlitsPerPacket still sets the M/M/1 service time below, which
+             * is a different quantity (packets per service, not latency), and
+             * is left alone. */
+            // One-way = hierarchy traversal (serialisation included per tier); RTT = 2x
+            uint32_t networkLat = 2 * hierLat;
             uint32_t nocContentionLat = networkContentionLatency();
 
             uint32_t totalLat;
@@ -885,7 +920,10 @@ public:
     void initStats(AggregateStat* parentStat) override {
         AggregateStat* s = new AggregateStat();
         s->init(name_.c_str(), "PE memory interface stats");
-        profRowHits_.init("rowHits", "Accesses hitting the unit's open row (measured)");
+        /* 1.11.57 (audit D008): "the unit's open row" was the claim a single
+         * register per placement unit could support; the model now holds one
+         * per BANK inside the unit, which is what the part does. */
+        profRowHits_.init("rowHits", "Accesses hitting the bank's open row (measured)");
         s->append(&profRowHits_);
         profRowMisses_.init("rowMisses", "Accesses opening a different row (measured)");
         s->append(&profRowMisses_);
@@ -1122,18 +1160,129 @@ protected:
         return 2 * zinfo->hierarchy.nocAvgOneWayLatency;
     }
 
-    /* 1.11.52 (D003): one last-open-row register per unit. A row hit is an
-     * access to the row already open in that unit; anything else is a miss
-     * that pays activate+precharge. Armed only when the row size is known
+    /* 1.11.52 (D003): a last-open-row register. A row hit is an access to a row
+     * already open in that unit; anything else is a miss that pays
+     * activate+precharge. Armed only when the row size is known
      * (zinfo->hierarchy.dramRowBytes > 0), so nothing is claimed for a
-     * configuration where the row geometry was never established. */
+     * configuration where the row geometry was never established.
+     *
+     * 1.11.57 (audit D006): THE ROW NUMBER IS COMPUTED ON THE RANK'S ADDRESS
+     * SPACE, NOT ON ONE DEVICE'S PAGE. `lineAddr << 6` is a SYSTEM byte
+     * address, but dramRowBytes is the PER-DEVICE page (1 KB for DDR3/4/5),
+     * and on a DDR-class 64-bit rank a single 64 B access engages every chip
+     * in the rank at once -- which the energy layer this measurement feeds
+     * already knows and prices (pimid_energy.h devicesPerAccess(): "a 64 B
+     * access on a DDR-class 64-bit rank engages EVERY chip in the rank
+     * simultaneously"). One ACT therefore opens chipsPerRank chip-rows that
+     * together span chipsPerRank KB of system address space, while the old
+     * `addr / 1024` declared a NEW row every 1 KB. The two PIMID additions
+     * contradicted each other about the same access, and the disagreement was
+     * invisible because each looks self-consistent in its own file: the miss
+     * fraction is printed as MEASURED, so nobody re-derived it. For a pure
+     * 64 B sequential stream at x8 it reported 0.0625 where the part delivers
+     * 0.0078 -- 8x -- and on DDR4 (e_actpre ~1.42 nJ against e_rd ~0.39 nJ)
+     * that is roughly +19% on per-access read energy.
+     *
+     * 1.11.57 (audit D008): ONE OPEN ROW PER BANK, NOT PER PLACEMENT UNIT.
+     * `unit` is addrToUnit()'s index at the CONFIGURED PLACEMENT LEVEL. At
+     * BANK placement a unit is a bank and a single register is right; at CHIP,
+     * RANK or CHANNEL placement a unit contains 4-16 banks, each holding its
+     * own open row in the part being priced, and one register reported a miss
+     * every time the stream alternated banks -- biasing the fraction toward
+     * 1.0 at exactly the coarse placements the corpus uses. The bank index is
+     * taken from the standard JEDEC field order (column low, bank/bank-group
+     * next, row high), i.e. bank = stripe_index % banks_in_unit and
+     * row = stripe_index / banks_in_unit.
+     *
+     * 1.11.57 (audit D007): NO RESIZE ON THE ACCESS PATH. lastRow_ was grown
+     * with resize() from access(), which several PE threads enter concurrently
+     * whenever pesPerMC > 1 (init.cpp maps miIdx = aluCoreIdx / pesPerMC), and
+     * `unit` ranges over ALL units because remote call sites pass their target
+     * -- so the vector reallocated while other threads dereferenced
+     * lastRow_[unit]: a read of freed storage, not merely a lost count. The
+     * table is now sized once, at construction, from the unit count the
+     * interface is built with, and the per-slot update uses relaxed atomics.
+     * A concurrent update can still cost one classification (two PEs racing on
+     * the same bank slot), which is a counter question, not a memory-safety
+     * one, and the two Counters on this path are already incremented without a
+     * lock. */
     inline void noteRowAccess(uint32_t unit, Address lineAddr) {
-        const uint32_t rowBytes = zinfo->hierarchy.dramRowBytes;
-        if (rowBytes == 0) return;
-        if (lastRow_.size() <= unit) lastRow_.resize(unit + 1, ~0ull);
-        const uint64_t row = (uint64_t)(lineAddr << 6) / rowBytes;
-        if (lastRow_[unit] == row) profRowHits_.inc();
-        else { profRowMisses_.inc(); lastRow_[unit] = row; }
+        if (rowStrideBytes_ == 0 || lastRow_.empty()) return;
+        const uint64_t stripe = (uint64_t)(lineAddr << 6) / rowStrideBytes_;
+        const uint32_t bank = (uint32_t)(stripe % rowSlotsPerUnit_);
+        const uint64_t row = stripe / rowSlotsPerUnit_;
+        const size_t slot = (size_t)unit * rowSlotsPerUnit_ + bank;
+        if (slot >= lastRow_.size()) return;   // out-of-range unit: claim nothing
+        if (__atomic_load_n(&lastRow_[slot], __ATOMIC_RELAXED) == row) {
+            profRowHits_.inc();
+        } else {
+            profRowMisses_.inc();
+            __atomic_store_n(&lastRow_[slot], row, __ATOMIC_RELAXED);
+        }
+    }
+
+    /* 1.11.57 (audit D006/D007/D008): the row model's geometry, resolved once
+     * at construction so nothing on the access path has to allocate.
+     *
+     * rowStrideBytes_ -- system bytes made resident by one ACT. On a DDR-class
+     * rank that is the per-device page times the number of devices the access
+     * engages; everywhere else it is the page itself. The DDR classes are the
+     * ones the emitter gives a 1 KB page (src/main.cpp emits 1024 for
+     * DDR3/DDR4/DDR5 and 2048 for LPDDR5/GDDR6/HBM2/HBM3), and they are
+     * exactly the classes with devicesPerAccess > 1: LPDDR5 and GDDR6 already
+     * arrive with chipsPerRank = 1, and for HBM chipsPerRank carries the
+     * channels-per-stack count (src/main.cpp says so where it sets it), which
+     * is NOT a set of devices striped across one access. Keying on the page
+     * size is therefore exact for every technology the emitter whitelists
+     * today; the durable form is for the emitter to send the stripe itself,
+     * which is a change on the PIMID side of the boundary.
+     *
+     * rowSlotsPerUnit_ -- how many independent open rows a placement unit
+     * holds, i.e. the banks below the placement level. Level codes follow the
+     * emitter: 0 subarray, 1 bank, 2 bank group, 3 chip, 4 rank, 5 channel.
+     * At and below BANK a unit is one row buffer. Above it, the banks
+     * multiply; the chip level does NOT multiply on a striped rank, because
+     * the chips of a rank operate in lock step and their same-numbered banks
+     * are one logical bank as far as the address stream is concerned. */
+    void initRowModel_() {
+        const uint32_t rowBytes = zinfo ? zinfo->hierarchy.dramRowBytes : 0;
+        if (rowBytes == 0) { rowStrideBytes_ = 0; return; }
+        const uint32_t chips = (zinfo->hierarchy.chipsPerRank > 0)
+                               ? zinfo->hierarchy.chipsPerRank : 1u;
+        const uint32_t devicesPerAccess = (rowBytes == 1024) ? chips : 1u;
+        rowStrideBytes_ = (uint64_t)rowBytes * devicesPerAccess;
+
+        const uint32_t bpg = (zinfo->hierarchy.banksPerBG > 0)
+                             ? zinfo->hierarchy.banksPerBG : 1u;
+        const uint32_t bgc = (zinfo->hierarchy.bgPerChip > 0)
+                             ? zinfo->hierarchy.bgPerChip : 1u;
+        const uint32_t rpc = (zinfo->hierarchy.ranksPerChannel > 0)
+                             ? zinfo->hierarchy.ranksPerChannel : 1u;
+        uint32_t slots = 1;
+        switch (zinfo->hierarchy.placementLevel) {
+            case 0: case 1: slots = 1; break;              // subarray, bank
+            case 2: slots = bpg; break;                    // bank group
+            case 3: slots = bpg * bgc; break;              // chip
+            case 4: slots = bpg * bgc; break;              // rank (chips lock-step)
+            default: slots = bpg * bgc * rpc; break;       // channel and above
+        }
+        if (slots == 0) slots = 1;
+        /* Bound the table: the product is the number of row buffers the whole
+         * placement level holds, which is a physical count, but a hand-written
+         * config could make it absurd. 1 Mi slots is 8 MB and far past any
+         * real part; beyond that, fall back to one register per unit and say
+         * so rather than allocating without limit. */
+        uint64_t total = (uint64_t)totalUnits_ * slots;
+        if (total > (1ull << 20)) {
+            info("[%s] row-buffer model: %llu open-row registers exceeds the "
+                 "1Mi bound; falling back to one per unit (the measured "
+                 "row-miss fraction will be biased high at this placement).",
+                 name_.c_str(), (unsigned long long)total);
+            slots = 1;
+            total = totalUnits_;
+        }
+        rowSlotsPerUnit_ = slots;
+        lastRow_.assign((size_t)total, ~0ull);
     }
 
     uint32_t addrToUnit(Address lineAddr) const {

@@ -172,25 +172,13 @@ public:
      */
     void resetStats();
 
-    /**
-     * @brief Calculate local capacity for a PE at given granularity
-     * @param granularity PIM granularity level
-     * @param pe_id PE identifier
-     * @return Local capacity in bytes
+    /* 1.11.57 (latent D072): calculateLocalCapacity() and
+     * determineDataLocality() are REMOVED. The first divided a hardcoded 8 GB
+     * rank -- written six times over, along with a literal "8 chips, typical
+     * DDR4" -- by the organization counts, for a capacity that is configured
+     * per run and is 4 GB on the HBM presets; the second existed only to feed
+     * it. Neither had a caller. See pim_bandwidth_tracker.cpp for the account.
      */
-    uint64_t calculateLocalCapacity(PIMGranularity granularity, int pe_id) const;
-
-    /**
-     * @brief Determine if data access is local or requires network
-     * @param payload PIM request with PE location
-     * @param data_bank Bank where data resides
-     * @param data_bg Bank group where data resides
-     * @param data_chip Chip where data resides
-     * @return Data locality classification
-     */
-    DataLocality determineDataLocality(
-        const PIMRequestPayload& payload,
-        int data_bank, int data_bg, int data_chip) const;
 
     /**
      * @brief Calculate data reach breakdown (local vs remote)
@@ -240,24 +228,37 @@ private:
     int num_banks_;
     int num_subarrays_;
 
+    /* 1.11.57 (latent D070): EVERY MEMBER BELOW NOW HAS AN INITIALIZER.
+     *
+     * None of them appeared in the constructor's initializer list, and the
+     * only place that assigned them, initializeBandwidthLimits(), returns
+     * early when dram_arch_ is null -- printing "ERROR: DRAM architecture not
+     * set!" and leaving all thirteen INDETERMINATE. initialize() then printed
+     * three of them, and calculateTransferLatency() DIVIDES by
+     * getEffectiveBandwidthPerPE(), so a run down that path read uninitialized
+     * memory and divided by whatever it found. Zero-initialized here so the
+     * state after a refusal is defined and obviously empty rather than random;
+     * the refusal itself is now a throw (see the .cpp), because a bandwidth
+     * limit of 0 GB/s is a division by zero one frame later.
+     * Invisible because PIMBandwidthTracker is never constructed. */
     // Bandwidth limits (GB/s) for each level
-    double subarray_bw_limit_;
-    double bank_bw_limit_;
-    double bank_group_bw_limit_;
-    double chip_bw_limit_;
-    double rank_bw_limit_;
-    double mc_bw_limit_;
+    double subarray_bw_limit_ = 0.0;
+    double bank_bw_limit_ = 0.0;
+    double bank_group_bw_limit_ = 0.0;
+    double chip_bw_limit_ = 0.0;
+    double rank_bw_limit_ = 0.0;
+    double mc_bw_limit_ = 0.0;
 
     // Port bitwidths (bits) for each level
-    int subarray_port_bits_;    // GSA + prefetch
-    int bank_port_bits_;        // Bank serialization (CRITICAL!)
-    int bank_group_port_bits_;  // BG aggregation
-    int chip_port_bits_;        // Chip I/O
-    int rank_port_bits_;        // Rank interface
-    int mc_port_bits_;          // Memory controller
+    int subarray_port_bits_ = 0;    // GSA + prefetch
+    int bank_port_bits_ = 0;        // Bank serialization (CRITICAL!)
+    int bank_group_port_bits_ = 0;  // BG aggregation
+    int chip_port_bits_ = 0;        // Chip I/O
+    int rank_port_bits_ = 0;        // Rank interface
+    int mc_port_bits_ = 0;          // Memory controller
 
     // Clock frequency
-    double clock_freq_GHz_;
+    double clock_freq_GHz_ = 0.0;
 
     // PE registration: maps (granularity, target_id) -> list of PE IDs
     std::map<std::pair<PIMGranularity, int>, std::vector<int>> pe_registry_;

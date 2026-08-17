@@ -13,6 +13,7 @@
 #include <sys/types.h>
 #include <cstdio>
 #include <cstring>
+#include <cstdint>
 #include <cerrno>
 #include <fcntl.h>
 
@@ -685,19 +686,71 @@ void McPATWrapper::createMcPATInput() {
     std::cerr << "  Generated XML configuration: " << temp_xml << std::endl;  // 1.11.56 (C014)
 }
 
-void McPATWrapper::runMcPAT() {
-    // CACTI reliably supports tech nodes 22-180nm. Clamp before XML generation.
+/* 1.11.57 (latent C015): the CACTI tech-node clamp, LIFTED OUT of runMcPAT()
+ * so that it can be applied in the parent process. Answering the finding's
+ * question -- "make the clamp visible to the parent, or make the parent stop
+ * believing it applied" -- with the FIRST option, and here is why.
+ *
+ * WHAT WAS WRONG. runMcPAT() is called from exactly one place: inside the
+ * forked child in computePower(). The clamp wrote config_.tech_node_nm = 22
+ * in the CHILD's address space. The child serialises power and area numbers
+ * back through the result blob and then _Exit()s; config_ does not travel.
+ * So the parent kept the node the caller asked for while every number it
+ * received had been priced at the clamped node -- and printDetailedResults()
+ * prints "Technology: <config_.tech_node_nm> nm" from the parent's copy. A
+ * 16 nm request would have been validated at 16, printed at 16, and priced
+ * at 22, with the warning line the only evidence and nothing tying it to the
+ * report. The same stale field also feeds periphFamilyFactorsCfg() in the
+ * parent's block-split, so the two halves could have disagreed about which
+ * node's device tables applied.
+ *
+ * WHY IT WAS INVISIBLE. No reachable path can request a sub-22 nm node any
+ * more. Every McPATWrapper construction in main.cpp routes its node through
+ * validateTechNodeNm(), which accepts only {22, 32, 45, 65, 90} and exits
+ * otherwise, and the process-family pins can only reassign 22 or 32. So the
+ * clamp has not fired since that validator landed, and the wrapper's own
+ * 7-90 nm window in validateConfiguration() is never the binding constraint.
+ *
+ * WHY VISIBLE RATHER THAN REMOVED. The clamp is a real CACTI limit, not a
+ * fallback we invented, and this class is constructible from outside main.cpp
+ * (it is a public API with public setters). Keeping the clamp and making the
+ * parent see it is the option that stays correct if someone constructs a
+ * wrapper directly; making the parent "stop believing it applied" would mean
+ * refusing out-of-range nodes here, which duplicates main.cpp's validator and
+ * turns a survivable case into a hard failure for a caller that never asked
+ * for one. Latched so the parent's warning is not repeated by the child that
+ * inherits it across fork(). */
+void McPATWrapper::clampTechNodeForCacti() {
+    // CACTI reliably supports tech nodes 22-180nm.
     if (config_.tech_node_nm < 22) {
-        std::cerr << "[McPATWrapper] Warning: " << config_.tech_node_nm
-                  << "nm not supported by CACTI (min 22nm). Clamping to 22nm for power estimation."
-                  << std::endl;
+        if (!warned_tech_clamp_) {
+            warned_tech_clamp_ = true;
+            std::cerr << "[McPATWrapper] Warning: " << config_.tech_node_nm
+                      << "nm not supported by CACTI (min 22nm). Clamping to 22nm for power estimation."
+                      << " The configuration now READS 22nm everywhere, including"
+                      << " the printed report -- the priced node and the reported"
+                      << " node are the same number by construction."
+                      << std::endl;
+        }
         config_.tech_node_nm = 22;
     } else if (config_.tech_node_nm > 180) {
-        std::cerr << "[McPATWrapper] Warning: " << config_.tech_node_nm
-                  << "nm not supported by CACTI (max 180nm). Clamping to 180nm for power estimation."
-                  << std::endl;
+        if (!warned_tech_clamp_) {
+            warned_tech_clamp_ = true;
+            std::cerr << "[McPATWrapper] Warning: " << config_.tech_node_nm
+                      << "nm not supported by CACTI (max 180nm). Clamping to 180nm for power estimation."
+                      << " The configuration now READS 180nm everywhere, including"
+                      << " the printed report."
+                      << std::endl;
+        }
         config_.tech_node_nm = 180;
     }
+}
+
+void McPATWrapper::runMcPAT() {
+    /* 1.11.57 (latent C015): still applied here, but computePower() has
+     * already applied it in the parent, so this call is a no-op in the normal
+     * flow and exists only for a direct caller of runMcPAT(). */
+    clampTechNodeForCacti();
 
     // Regenerate XML with current stats (uses clamped tech_node_nm)
     createMcPATInput();
@@ -814,6 +867,16 @@ void McPATWrapper::runMcPAT() {
 // ---------------------------------------------------------------------------
 namespace {
 struct ResultBlob {
+    /* 1.11.57 (latent C012): SELF-IDENTIFYING HEADER. The blob used to carry
+     * no statement of what question it answered -- see inputFingerprint()
+     * below for the failure that made possible. `magic` catches a file that
+     * is not one of ours or was written by a differently-laid-out build;
+     * `fingerprint` must equal the parent's own recomputation over the inputs
+     * it configured, or the parent refuses the file instead of unpacking it
+     * into its result cache. Both are first so a short/truncated file fails
+     * on them rather than on a plausible-looking double. */
+    uint64_t magic;
+    uint64_t fingerprint;
     // Cached PowerMetrics for ComponentType enum entries we extract.
     // 7 entries today: CORE, L1_CACHE, L2_CACHE, L3_CACHE, MEMORY_CONTROLLER,
     // NOC, PCIE. Fixed-size to keep the blob layout trivially POD.
@@ -850,7 +913,161 @@ constexpr McPATWrapper::ComponentType kComponentOrder[ResultBlob::kNumComponents
     McPATWrapper::ComponentType::NOC,
     McPATWrapper::ComponentType::PCIE,
 };
+
+/* 1.11.57 (latent C012): the blob's format stamp. Bump it whenever the layout
+ * of ResultBlob changes, so a file written by a different build is rejected
+ * rather than reinterpreted. */
+constexpr uint64_t kResultBlobMagic = 0x50494D4944425031ULL;  // "PIMIDBP1"
+
+/* FNV-1a over raw bytes. Not a cryptographic hash and does not need to be:
+ * its job is to make two DIFFERENT input sets collide with negligible
+ * probability, not to resist an adversary. */
+struct FnvHash {
+    uint64_t h = 1469598103934665603ULL;
+    void bytes(const void* p, size_t n) {
+        const unsigned char* b = static_cast<const unsigned char*>(p);
+        for (size_t i = 0; i < n; i++) { h ^= b[i]; h *= 1099511628211ULL; }
+    }
+    void operator()(uint64_t v)    { bytes(&v, sizeof v); }
+    void operator()(int v)         { int64_t w = v; bytes(&w, sizeof w); }
+    void operator()(bool v)        { unsigned char c = v ? 1 : 0; bytes(&c, 1); }
+    void operator()(double v)      { bytes(&v, sizeof v); }
+    void operator()(const std::string& s) { bytes(s.data(), s.size()); (*this)(0); }
+};
+
 }  // namespace
+
+/* 1.11.57 (latent C012): EVERYTHING THAT CHANGES A McPAT ANSWER, hashed.
+ *
+ * WHAT WAS WRONG. computePower()'s result blob was keyed on the process id
+ * alone -- "/tmp/pimid_mcpat_blob_<pid>.bin" -- and the archived XML on a
+ * per-process counter. Neither key contained a single INPUT. The complete
+ * list of inputs that move a McPAT number is the body of this function: every
+ * SystemConfig field (core count and clock, pipeline depth, the pe_* datapath
+ * description, issue width and functional-unit counts, device scope, the four
+ * cache sizes, controller count and clock, the NoC block, tech node,
+ * temperature, process family and its DRAM-periphery table, subarray pitch,
+ * MC PHY tier, CACTI device corner, long-channel flag, thread count and
+ * interconnect projection) plus every setter's state (total and busy cycles,
+ * instruction count, the measured mix, the four cache access sets, MC reads
+ * and writes, the MC technology block, the NoC level vector, the legacy NoC
+ * activity struct, the PCIe stats, the power-gating spec and the device
+ * profile). A key holding none of them cannot tell one question from
+ * another, which is the definition of a cache that may answer a question it
+ * was not asked.
+ *
+ * WHY IT WAS INVISIBLE. Within one process the calls are fully serialised by
+ * waitpid() and the blob is std::remove()d on every exit path, and across
+ * processes the pid differs, so no reachable configuration collides TODAY.
+ * That is exactly why it was recorded as latent rather than fixed: the
+ * protection is an accident of the current call pattern, not a property of
+ * the key. Two threads calling computePower() on two wrappers -- the obvious
+ * way to speed up a per-node cosim sweep -- would compute the same path from
+ * the same getpid(), and each parent would read whichever child wrote last.
+ * The result would be a complete, plausible, silently wrong power report for
+ * one of the two nodes, with no diagnostic anywhere.
+ *
+ * THE FIX has two halves. The key now carries the fingerprint AND a
+ * per-call sequence number, so two concurrent calls cannot name the same
+ * file; and the blob carries the fingerprint INSIDE it, which the parent
+ * checks against its own recomputation before unpacking. The second half is
+ * the one that matters: a filename can be made unique, but only a stamped
+ * payload can prove that the numbers in it answer the configuration this
+ * wrapper is holding.
+ *
+ * MAINTENANCE. A field added to SystemConfig or a new setter added to this
+ * class must be added here too. A missing field does not break the build --
+ * it silently narrows the key -- so the rule is: if it reaches the XML, it
+ * belongs in this function. config_.xml_file is deliberately EXCLUDED: it is
+ * an output of createMcPATInput(), not an input, except in the
+ * user_provided_xml_ case, which is hashed as the path string instead. */
+uint64_t McPATWrapper::inputFingerprint() const {
+    FnvHash f;
+
+    // --- SystemConfig: core and datapath ---
+    f(config_.num_cores);         f(config_.core_clock_mhz);
+    f(config_.pipeline_depth);    f(config_.pe_lanes);
+    f(config_.pe_element_bits);   f(config_.pe_has_fp);
+    f(config_.pe_imem_bytes);     f(config_.issue_width);
+    f(config_.num_alus);          f(config_.num_muls);
+    f(config_.num_fpus);          f(config_.fp_emul_cycles);
+    f(config_.device_scope);
+    // --- caches ---
+    f(config_.l1i_size_bytes);    f(config_.l1d_size_bytes);
+    f(config_.l2_size_bytes);     f(config_.l3_size_bytes);
+    // --- memory controllers ---
+    f(config_.num_memory_controllers);  f(config_.mc_clock_mhz);
+    // --- NoC (used when noc_levels_ is empty) ---
+    f(config_.has_noc);           f(config_.noc_topology);
+    f(config_.noc_num_routers);   f(config_.noc_num_rows);
+    f(config_.noc_num_cols);      f(config_.noc_flit_size_bits);
+    f(config_.noc_input_ports);   f(config_.noc_output_ports);
+    f(config_.noc_vcs_per_vnet);  f(config_.noc_vc_buffer_size);
+    f(config_.noc_clock_mhz);
+    // --- technology and family ---
+    f(config_.tech_node_nm);      f(config_.temperature_k);
+    f(config_.process_family);    f(config_.subarray_pitch_factor);
+    f(config_.dram_periph_table_nm);
+    f(static_cast<int>(config_.mc_phy_tier));
+    f(config_.device_type);       f(config_.longer_channel_device);
+    f(config_.number_hardware_threads);
+    f(config_.interconnect_projection_type);
+    /* Only an externally supplied XML is an INPUT; a generated one is an
+     * output of this same configuration and hashing it would be circular. */
+    f(user_provided_xml_);
+    if (user_provided_xml_) f(config_.xml_file);
+
+    // --- setter state: activity ---
+    f(total_cycles_);   f(busy_cycles_);   f(total_instructions_);
+    f(meas_uops_);      f(meas_branches_); f(meas_mispred_);
+    f(meas_int_);       f(meas_mul_);      f(meas_fp_);
+    f(meas_ld_);        f(meas_st_);       f(meas_mix_br_);
+    f(l1i_reads_);      f(l1i_read_misses_);
+    f(l1d_reads_);      f(l1d_writes_);    f(l1d_read_misses_); f(l1d_write_misses_);
+    f(l2_reads_);       f(l2_writes_);     f(l2_read_misses_);  f(l2_write_misses_);
+    f(l3_reads_);       f(l3_writes_);     f(l3_read_misses_);  f(l3_write_misses_);
+    f(mc_reads_);       f(mc_writes_);
+
+    // --- setter state: memory-controller technology ---
+    f(mc_tech_.peak_transfer_rate);  f(mc_tech_.databus_width);
+    f(mc_tech_.number_ranks);        f(mc_tech_.number_mcs);
+    f(mc_tech_.memory_channels_per_mc);
+    f(mc_tech_.req_window_size_per_channel);
+    f(mc_tech_.io_buffer_size_per_channel);
+    f(mc_tech_.block_size_bytes);    f(mc_tech_.addressbus_width);
+
+    // --- setter state: NoC levels (the live path) ---
+    f(static_cast<uint64_t>(noc_levels_.size()));
+    for (const auto& lvl : noc_levels_) {
+        f(lvl.name);            f(lvl.type);
+        f(lvl.horizontal_nodes); f(lvl.vertical_nodes);
+        f(lvl.input_ports);     f(lvl.output_ports);
+        f(lvl.flit_bits);       f(lvl.clock_mhz);
+        f(lvl.chip_coverage);   f(lvl.on_dram_die);
+        f(lvl.total_accesses);  f(lvl.duty_cycle);
+    }
+
+    // --- setter state: legacy NoC activity (the fallback path) ---
+    f(noc_activity_.total_packets);   f(noc_activity_.total_flits);
+    f(noc_activity_.total_hops);      f(noc_activity_.buffer_reads);
+    f(noc_activity_.buffer_writes);   f(noc_activity_.crossbar_traversals);
+    f(noc_activity_.arbiter_events);  f(noc_activity_.link_traversals);
+    f(noc_activity_.total_cycles);    f(noc_activity_.clock_mhz);
+
+    // --- setter state: link/PCIe ---
+    f(pcie_stats_.number_units);      f(pcie_stats_.num_channels);
+    f(pcie_stats_.duty_cycle);        f(pcie_stats_.total_load_perc);
+    f(pcie_stats_.transferred_bytes); f(pcie_stats_.link_pj_per_bit);
+    f(pcie_stats_.link_clock_mhz);    f(pcie_stats_.link_type_name);
+
+    // --- setter state: power gating and profile ---
+    f(pg_spec_.pg_core);  f(pg_spec_.pg_noc);  f(pg_spec_.pg_mc);
+    f(pg_spec_.r_core);   f(pg_spec_.r_noc);   f(pg_spec_.r_mc);
+    f(pg_spec_.r_shared_cache); f(pg_spec_.have_shared_cache);
+    f(static_cast<int>(device_profile_));
+
+    return f.h;
+}
 
 void McPATWrapper::computePower() {
     if (!initialized_) {
@@ -870,16 +1087,42 @@ void McPATWrapper::computePower() {
      * The child still generates the XML it actually parses; nothing else in
      * the parent reads config_.xml_file or valid_ after this point. */
 
-    char blob_path[64];
+    /* 1.11.57 (latent C015): clamp the tech node HERE, in the parent, BEFORE
+     * fork(). runMcPAT() still clamps, but by then it is running in the child
+     * and the mutation dies with it -- see clampTechNodeForCacti(). Applying
+     * it first means the node this wrapper reports and the node McPAT prices
+     * are the same field. Must precede inputFingerprint() so the parent and
+     * the child hash the same node. */
+    clampTechNodeForCacti();
+
+    /* 1.11.57 (latent C012): the blob key carries the INPUTS now -- a
+     * fingerprint over every configuration field and every setter's state --
+     * plus a per-call sequence number, so two concurrent computePower() calls
+     * in one process cannot name the same file. The pid stays because /tmp is
+     * node-local and shared between processes. See inputFingerprint() for the
+     * full input list and for what the pid-only key could not distinguish. */
+    const uint64_t fingerprint = inputFingerprint();
+    static int blob_seq = 0;
+    const int this_seq = blob_seq++;
+    char blob_path[96];
     std::snprintf(blob_path, sizeof(blob_path),
-                  "/tmp/pimid_mcpat_blob_%d.bin", (int)getpid());
+                  "/tmp/pimid_mcpat_blob_%d_%d_%016llx.bin",
+                  (int)getpid(), this_seq,
+                  (unsigned long long)fingerprint);
 
     /* 1.11.56 (audit C014): choose the XML path HERE, in the parent, so
-     * lastInputXmlPath() can tell a caller where the priced inputs went. */
+     * lastInputXmlPath() can tell a caller where the priced inputs went.
+     * 1.11.57 (latent C012): the same fingerprint goes into the XML name, so
+     * an archived input file states which configuration it describes instead
+     * of only which call index produced it. */
     {
         static int parent_xml_idx = 0;
+        char fp_hex[24];
+        std::snprintf(fp_hex, sizeof(fp_hex), "%016llx",
+                      (unsigned long long)fingerprint);
         pending_xml_path_ = "/tmp/mcpat_input_p" + std::to_string((int)getpid()) +
-                            "_" + std::to_string(parent_xml_idx++) + ".xml";
+                            "_" + std::to_string(parent_xml_idx++) +
+                            "_" + fp_hex + ".xml";
     }
 
     pid_t child = fork();
@@ -913,6 +1156,13 @@ void McPATWrapper::computePower() {
             if (!f) std::_Exit(20);
 
             ResultBlob blob{};
+            /* 1.11.57 (latent C012): stamp what this blob answers. The child
+             * recomputes the fingerprint from its OWN state rather than
+             * copying the parent's variable, so a child that mutated the
+             * configuration on its way through runMcPAT() produces a stamp
+             * that no longer matches and the parent refuses the file. */
+            blob.magic       = kResultBlobMagic;
+            blob.fingerprint = inputFingerprint();
             for (int i = 0; i < ResultBlob::kNumComponents; i++) {
                 auto it = component_power_.find(kComponentOrder[i]);
                 if (it != component_power_.end()) blob.component_power[i] = it->second;
@@ -1041,6 +1291,34 @@ void McPATWrapper::computePower() {
         std::fclose(f);
         std::remove(blob_path);
         throw std::runtime_error("[McPATWrapper] Short read on result blob");
+    }
+    /* 1.11.57 (latent C012): CHECK THAT THIS BLOB ANSWERS OUR QUESTION before
+     * a single number out of it reaches the result cache. The filename is now
+     * unique per call and per input, but a unique name only prevents a
+     * collision -- it cannot prove that the bytes at that name were produced
+     * from the configuration this wrapper is holding. The stamp can, so it is
+     * verified rather than trusted. Throwing is correct here: there is no
+     * degraded answer to fall back to, and silently accepting a mismatched
+     * blob is precisely the failure this fix exists to make impossible. */
+    if (blob.magic != kResultBlobMagic) {
+        std::fclose(f);
+        std::remove(blob_path);
+        throw std::runtime_error(
+            "[McPATWrapper] Result blob has the wrong format stamp -- it was "
+            "not written by this build. Refusing to read power numbers out of "
+            "it.");
+    }
+    if (blob.fingerprint != fingerprint) {
+        std::fclose(f);
+        std::remove(blob_path);
+        char detail[192];
+        std::snprintf(detail, sizeof(detail),
+                      "[McPATWrapper] Result blob answers a DIFFERENT "
+                      "configuration (blob %016llx, expected %016llx). "
+                      "Refusing to report it.",
+                      (unsigned long long)blob.fingerprint,
+                      (unsigned long long)fingerprint);
+        throw std::runtime_error(detail);
     }
     component_power_.clear();
     for (int i = 0; i < ResultBlob::kNumComponents; i++) {
@@ -1333,7 +1611,10 @@ void McPATWrapper::extractResults() {
      * on those two paths, downward, by the stubs' leakage. What it does not
      * move is getTotalArea(), which is McPAT's own Processor area and would
      * have to be rebuilt from the parts to be gated the same way; the stub's
-     * area is still inside it. */
+     * area is still inside it.
+     * 1.11.57 (audit C012): peak_power_ was the OTHER one this note should
+     * have named, and it is gated the same way now -- see the peak block
+     * below. getTotalArea() remains the single exception. */
     system_power_ = PowerMetrics();
     for (const auto& pair : component_power_) {
         if (!componentIsDescribed(pair.first)) continue;
@@ -1374,15 +1655,37 @@ void McPATWrapper::extractResults() {
         peak_dyn += core_pd;
         peak_leak += core_pl;
     }
-    peak_dyn += peakDynamic(mcpat_processor_->l2);
-    peak_leak += peakLeakage(mcpat_processor_->l2);
-    peak_dyn += peakDynamic(mcpat_processor_->l3);
-    peak_leak += peakLeakage(mcpat_processor_->l3);
-    peak_dyn += peakDynamic(mcpat_processor_->mcs);
-    peak_leak += peakLeakage(mcpat_processor_->mcs);
-    peak_dyn += peakDynamic(mcpat_processor_->noc);
-    peak_leak += peakLeakage(mcpat_processor_->noc);
-    if (mcpat_processor_->pcie) {
+    /* 1.11.57 (audit C012): the SAME PREDICATE as the runtime total.
+     *
+     * C032 (1.11.56) applied "report only what the described system has" to
+     * the breakdown and to system_power_, and named the one quantity it did
+     * not move: getTotalArea(). peak_power_ was the other one, and nobody
+     * named it -- so on the two paths C032 is about (the dual-McPAT host, with
+     * has_noc false and no setNoCLevels, and the NoC probe with zero memory
+     * controllers) the printed "Peak Power" still included the positional
+     * stubs that the printed breakdown and the printed system total both
+     * excluded. Two totals a few lines apart described two different machines,
+     * and 1.11.56's own C006 fix had just made reported PEAK the number that
+     * moves. Small in watts -- a 1x1 zero-activity chip_coverage=0 NoC stub is
+     * mostly leakage -- but it is the difference between a total that sums its
+     * parts and one that does not. */
+    if (componentIsDescribed(ComponentType::L2_CACHE)) {
+        peak_dyn += peakDynamic(mcpat_processor_->l2);
+        peak_leak += peakLeakage(mcpat_processor_->l2);
+    }
+    if (componentIsDescribed(ComponentType::L3_CACHE)) {
+        peak_dyn += peakDynamic(mcpat_processor_->l3);
+        peak_leak += peakLeakage(mcpat_processor_->l3);
+    }
+    if (componentIsDescribed(ComponentType::MEMORY_CONTROLLER)) {
+        peak_dyn += peakDynamic(mcpat_processor_->mcs);
+        peak_leak += peakLeakage(mcpat_processor_->mcs);
+    }
+    if (componentIsDescribed(ComponentType::NOC)) {
+        peak_dyn += peakDynamic(mcpat_processor_->noc);
+        peak_leak += peakLeakage(mcpat_processor_->noc);
+    }
+    if (mcpat_processor_->pcie && componentIsDescribed(ComponentType::PCIE)) {
         peak_dyn += peakDynamic(mcpat_processor_->pcies);   // 1.11.7: aggregated
         peak_leak += peakLeakage(mcpat_processor_->pcies);
     }
@@ -1783,7 +2086,31 @@ std::string McPATWrapper::generateXMLConfig() const {
         const bool has_fpu_here = config_.pe_has_fp && (config_.num_fpus != 0);
         phy_regs_frf   = has_fpu_here ? (8 * lanes) : 1;  // 0 aborts CACTI
         issue_width    = lanes;
-        fp_issue_width = has_fpu_here ? lanes : 0;
+        /* 1.11.57 (latent C029): `fp_issue_width = has_fpu_here ? lanes : 0;`
+         * used to sit here and is DELETED rather than emitted.
+         *
+         * What was wrong: it computed a value that had no exit. The parameter
+         * is written into the XML only under `if (is_ooo)` a few hundred
+         * lines below, and this whole block is the is_alu branch, where
+         * is_ooo is false by construction. So the assignment ran, produced
+         * `lanes`, and the variable was then re-read only by an emission that
+         * cannot happen -- dead work wearing the shape of configuration.
+         *
+         * Why it was invisible: the value could not reach McPAT, so no number
+         * moved. The trap was for the next reader: a live-looking assignment
+         * next to issue_width invites "we compute this, why not emit it", and
+         * emitting it would NOT be neutral. ParseXML would set
+         * fp_issue_width, core.cc:4313-4314 would copy it into
+         * coredynp.fp_issueW and fp_decodeW, and those size the FP issue
+         * queue and the FP rename structures -- which the in-order machine
+         * type does not build. The profiles that skip the emission are
+         * exactly the profiles that have nothing to size with it.
+         *
+         * Deleted, not emitted, for that reason. fp_issue_width keeps its
+         * is_ooo initialiser of 0 through this branch, so the generated XML
+         * is byte-identical. The element's FP capability is already carried
+         * where it belongs: num_fpus and phy_regs_frf, both set just below
+         * from the same has_fpu_here. */
         store_buffer   = 1;      // request issue only; no queueing, no cache
         load_buffer    = 1;
         lsu_order      = "inorder";
@@ -1988,9 +2315,60 @@ std::string McPATWrapper::generateXMLConfig() const {
     xml << "    <param name=\"physical_address_width\" value=\"48\"/>\n";
     xml << "    <param name=\"virtual_memory_page_size\" value=\"4096\"/>\n";
 
+    /* 1.11.57 (latent C035): IDLE CYCLES, COMPUTED ONCE AND UNABLE TO WRAP.
+     *
+     * WHAT WAS WRONG. Both emission sites (here and the per-core stat block
+     * below) wrote `total_cycles_ - busy_cycles_` directly. Both operands are
+     * uint64_t, they have independent setters -- setTotalCycles() and
+     * setBusyCycles() -- and nothing in this class or its callers enforces an
+     * ordering between them. busy > total is therefore representable, and the
+     * subtraction does not go negative in unsigned arithmetic: it wraps. A
+     * one-cycle inversion emits 18446744073709551615 idle cycles; a
+     * ten-thousand-cycle one emits 18446744073709541616. Downstream of that,
+     * McPAT's XML_Parse reads the per-core stat with atof() into
+     * sys.core[i].idle_cycles and core.cc copies it to coredynp.idle_cycles
+     * (:4348) -- in this fork nothing then reads it, and the SYSTEM-level
+     * idle_cycles this line emits is not parsed at all. So the wrap would
+     * today land in the archived XML rather than in a power number: an input
+     * record claiming 1.8e19 idle cycles on a run of a few million, which
+     * discredits the archive and would become a real power error the moment
+     * any consumer -- a newer McPAT, or a PIMID-side reader -- started using
+     * the stat. That is exactly the inheritance this fix prevents.
+     *
+     * WHY IT WAS INVISIBLE. Every reachable caller in main.cpp passes the
+     * SAME value to both setters, so the difference is exactly 0 in every run
+     * this tree has produced. The one asymmetric caller lives in
+     * power_model_manager.cpp, which sets total cycles and never sets busy
+     * cycles at all, and that class is never instantiated. The defect becomes
+     * live the moment a caller aggregates busy cycles across cores while
+     * reporting wall-clock cycles -- the natural thing to do for a multi-PE
+     * device -- because then busy legitimately exceeds total.
+     *
+     * THE FIX clamps at zero and SAYS SO once, rather than clamping quietly:
+     * busy > total is not a rounding artefact, it means the two counters were
+     * measured against different populations or different clocks, and the
+     * caller needs to know that its inputs disagree. Zero is the right
+     * clamped value -- a fully busy core has no idle cycles -- but it is a
+     * consequence of the inconsistency, not a measurement of it. */
+    uint64_t idle_cycles = 0;
+    if (total_cycles_ >= busy_cycles_) {
+        idle_cycles = total_cycles_ - busy_cycles_;
+    } else if (!warned_busy_exceeds_total_) {
+        warned_busy_exceeds_total_ = true;
+        std::cerr << "[power] WARNING: busy_cycles (" << busy_cycles_
+                  << ") exceeds total_cycles (" << total_cycles_
+                  << "). idle_cycles is emitted as 0; the unclamped unsigned "
+                     "subtraction would have wrapped to "
+                  << (total_cycles_ - busy_cycles_)
+                  << ". The two counters disagree -- most likely one is a "
+                     "per-core sum and the other a wall-clock count -- and no "
+                     "idle figure derived from them is meaningful until that "
+                     "is reconciled." << std::endl;
+    }
+
     // System statistics
     xml << "    <stat name=\"total_cycles\" value=\"" << total_cycles_ << "\"/>\n";
-    xml << "    <stat name=\"idle_cycles\" value=\"" << (total_cycles_ - busy_cycles_) << "\"/>\n";
+    xml << "    <stat name=\"idle_cycles\" value=\"" << idle_cycles << "\"/>\n";
     xml << "    <stat name=\"busy_cycles\" value=\"" << busy_cycles_ << "\"/>\n";
 
     // Core component -- homogeneous_cores=1 means emit exactly ONE core template
@@ -2251,7 +2629,10 @@ std::string McPATWrapper::generateXMLConfig() const {
         xml << "      <stat name=\"committed_fp_instructions\" value=\"" << fp_per_core << "\"/>\n";
         xml << "      <stat name=\"pipeline_duty_cycle\" value=\"" << pipeline_duty_cycle << "\"/>\n";
         xml << "      <stat name=\"total_cycles\" value=\"" << total_cycles_ << "\"/>\n";
-        xml << "      <stat name=\"idle_cycles\" value=\"" << (total_cycles_ - busy_cycles_) << "\"/>\n";
+        /* 1.11.57 (latent C035): the clamped value computed above, not a
+         * second unguarded subtraction. This is the site McPAT actually
+         * parses. */
+        xml << "      <stat name=\"idle_cycles\" value=\"" << idle_cycles << "\"/>\n";
         xml << "      <stat name=\"busy_cycles\" value=\"" << busy_cycles_ << "\"/>\n";
         xml << "      <stat name=\"ROB_reads\" value=\"" << (is_ooo ? inst_per_core : 0ULL) << "\"/>\n";
         xml << "      <stat name=\"ROB_writes\" value=\"" << (is_ooo ? inst_per_core : 0ULL) << "\"/>\n";
@@ -2517,8 +2898,60 @@ std::string McPATWrapper::generateXMLConfig() const {
         int grid = static_cast<int>(std::sqrt(config_.num_cores));
         if (grid < 1) grid = 1;
         int noc_type = (config_.noc_topology == 2) ? 0 : 1;  // bus=0, else router=1
-        uint64_t noc_accesses = (noc_activity_.total_packets > 0) ? noc_activity_.total_packets
-                                : (mc_reads_ + mc_writes_);
+        /* 1.11.57 (latent C018): THE SUBSTITUTION ANNOUNCES ITSELF NOW.
+         *
+         * WHAT WAS WRONG. When no NoC activity had been supplied this branch
+         * silently fell back to `mc_reads_ + mc_writes_` and emitted the
+         * result as the fabric's total_accesses and duty cycle -- a number
+         * that looks in every way like a measurement of the network and is
+         * not one. It is wrong twice over. It is the wrong POPULATION:
+         * memory-controller transactions are the subset of traffic that
+         * reached DRAM, while a fabric also carries PE-to-PE, cache-to-cache
+         * and control packets that never touch an MC. And it is the wrong
+         * UNIT: McPAT charges a router access per traversal, so a packet
+         * crossing N routers is N accesses -- which is why the live
+         * per-level path in main.cpp feeds total_hops and not packet counts,
+         * and why that change measured a 2.04x difference. Substituting MC
+         * transactions understates router activity on both counts at once.
+         *
+         * WHY IT WAS INVISIBLE. This entire `else if (config_.has_noc)`
+         * branch is unreachable. Every reachable construction that sets
+         * has_noc also calls setNoCLevels() with a non-empty vector, which
+         * routes to the per-level branch above: device scope gates both on
+         * the same `num_pes > 1 || hierarchy_enabled` condition, the co-sim
+         * and probe paths always call it, and the host sets has_noc = false
+         * and takes the stub below. setNoCActivity() has no caller in src/ at
+         * all, so noc_activity_.total_packets is 0 in every run -- meaning
+         * the ternary has only ever been capable of selecting the fallback,
+         * in a branch nothing enters.
+         *
+         * ANNOUNCED RATHER THAN REFUSED. Emitting 0 accesses would be its own
+         * fabrication (a NoC that carried nothing), and refusing would fail a
+         * legacy path that a caller may deliberately want as a coarse
+         * estimate. So the substitution stands and says what it is, once per
+         * wrapper. If the path is ever made live, the correct repair is to
+         * call setNoCLevels() with measured traversals -- not to trust this
+         * number. */
+        uint64_t noc_accesses = noc_activity_.total_packets;
+        if (noc_accesses == 0) {
+            noc_accesses = mc_reads_ + mc_writes_;
+            if (!warned_noc_substitution_) {
+                warned_noc_substitution_ = true;
+                std::cerr << "[power] WARNING: legacy single-NoC path has NO "
+                             "measured NoC activity; SUBSTITUTING "
+                             "memory-controller transactions ("
+                          << mc_reads_ << " reads + " << mc_writes_
+                          << " writes = " << noc_accesses
+                          << ") as the fabric's total_accesses. This is NOT a "
+                             "measurement of the NoC: MC transactions exclude "
+                             "all traffic that never reaches DRAM, and McPAT "
+                             "charges one router access per TRAVERSAL while "
+                             "this counts whole transactions -- so NoC dynamic "
+                             "power below is understated on both counts. Supply "
+                             "setNoCLevels() with measured traversals to price "
+                             "the fabric properly." << std::endl;
+            }
+        }
         double noc_duty_cycle = (total_cycles_ > 0)
             ? static_cast<double>(noc_accesses) / total_cycles_
             : 0.0;

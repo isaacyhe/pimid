@@ -50,7 +50,11 @@ void STTMRAMModel::initialize() {
 
     // Calculate derived parameters
     capacity_ = mram_config_.capacity;
-    bandwidth_ = capacity_ / 100; // Simplified bandwidth model
+    /* 1.11.57 (latent D053): NO FABRICATED BANDWIDTH. This was
+     * `bandwidth_ = capacity_ / 100;` -- a bytes/s figure derived from a capacity by an
+     * unsourced ratio, answering the same contract method DRAMModel answers
+     * from Ramulator. Absent is 0, and getBandwidth() announces it. */
+    bandwidth_ = 0;
     endurance_ = mram_config_.endurance;
 
     // Initialize NVSim FIRST (before architecture creation)
@@ -207,6 +211,41 @@ static inline Cycle legacyNsAsCycles(double ns) {
     return static_cast<Cycle>(std::ceil(ns));   // 1 GHz: no clock is supplied
 }
 
+/* 1.11.57 (latent D044): THE MISSING ACCESS SIZE.
+ *
+ * read_energy_/write_energy_ hold pJ PER BYTE -- the model's own printout says
+ * so ("pJ/byte", initialize()), and the value comes from
+ * STTMRAMArchitecture::energy.read_energy_per_byte, which the extractor
+ * computes as bank_read_energy_pJ / (word_width_bits / 8)
+ * (architecture_extractor.h). getTotalEnergy() and printStats() multiplied
+ * that energy DENSITY by an ACCESS COUNT and printed the product as "pJ",
+ * which understates the dynamic energy by exactly the access size in bytes: 8x
+ * at this model's 64-bit default, 64x at the 512-bit width main.cpp asks the
+ * SRAM path for.
+ *
+ * The consumers want per-access energy, so the arithmetic multiplies the
+ * density back by the same bytes-per-access the extractor divided by -- which
+ * recovers bank_read_energy_pJ exactly, rather than approximating it. The
+ * width has to be read from access_width_bits_ for that identity to hold,
+ * because initializeNVSim() is what feeds it to NVSim in the first place; the
+ * "0 = model default" case is the 64 bits initializeNVSim() substitutes.
+ *
+ * WHY IT WAS INVISIBLE: getTotalEnergy() and printStats() have no reachable
+ * caller on these models, and the counters they multiply are never incremented
+ * because access() is never called either -- the product was 0 * wrong.
+ *
+ * NOT FIXED HERE, and deliberately: the leakage term below adds JOULES
+ * (W x s) to a picojoule sum, and getTotalEnergy() returns picojoules where
+ * MemoryModel documents nanojoules. Those are audit D022 and D043, they span
+ * all five plugin models, and memory_model.h says in as many words that the
+ * unit conversion must be one gated change rather than a rider on a
+ * latent-defect pass. */
+static inline double bytesPerAccess(uint32_t access_width_bits) {
+    // 64 bits is what initializeNVSim() passes NVSim when the knob is unset.
+    double bytes = (access_width_bits > 0 ? access_width_bits : 64u) / 8.0;
+    return (bytes > 0.0) ? bytes : 8.0;
+}
+
 Cycle STTMRAMModel::access(const MemoryRequest& req) {
     Cycle latency = legacyNsAsCycles(mram_config_.read_latency_ns);  // safe default
 
@@ -285,8 +324,11 @@ Cycle STTMRAMModel::getLatency(MemoryRequestType type) const {
 }
 
 double STTMRAMModel::getTotalEnergy() const {
-    double dynamic_energy = (total_reads_ * read_energy_) +
-                           (total_writes_ * write_energy_);
+    // 1.11.57 (latent D044): pJ/byte x bytes/access x accesses, not pJ/byte x
+    // accesses. See bytesPerAccess() above.
+    const double bpa = bytesPerAccess(access_width_bits_);
+    double dynamic_energy = (total_reads_ * read_energy_ * bpa) +
+                           (total_writes_ * write_energy_ * bpa);
     double leakage_energy = leakage_power_ * (current_cycle_ / 1e9);
     return dynamic_energy + leakage_energy;
 }
@@ -317,10 +359,16 @@ void STTMRAMModel::printStats() const {
     std::cout << "  Chip Write: " << getChipWriteLatency() << " ns" << std::endl;
 
     std::cout << "\nEnergy Consumption:" << std::endl;
+    // 1.11.57 (latent D044): the totals below are per-byte energy x the access
+    // size x the access count. They used to omit the access size entirely.
+    const double bpa = bytesPerAccess(access_width_bits_);
     std::cout << "  Read Energy (per byte): " << read_energy_ << " pJ" << std::endl;
     std::cout << "  Write Energy (per byte): " << write_energy_ << " pJ" << std::endl;
-    std::cout << "  Total Read Energy: " << (total_reads_ * read_energy_) << " pJ" << std::endl;
-    std::cout << "  Total Write Energy: " << (total_writes_ * write_energy_) << " pJ" << std::endl;
+    std::cout << "  Access Width: " << (bpa * 8.0) << " bits (" << bpa << " B)" << std::endl;
+    std::cout << "  Read Energy (per access): " << (read_energy_ * bpa) << " pJ" << std::endl;
+    std::cout << "  Write Energy (per access): " << (write_energy_ * bpa) << " pJ" << std::endl;
+    std::cout << "  Total Read Energy: " << (total_reads_ * read_energy_ * bpa) << " pJ" << std::endl;
+    std::cout << "  Total Write Energy: " << (total_writes_ * write_energy_ * bpa) << " pJ" << std::endl;
     std::cout << "  Leakage Power: " << leakage_power_ << " W" << std::endl;
     std::cout << "  Total Energy: " << getTotalEnergy() << " pJ" << std::endl;
     std::cout << "================================\n" << std::endl;
@@ -527,6 +575,29 @@ void STTMRAMModel::setTechNodeNm(int nm) {
 
 void STTMRAMModel::setAccessWidthBits(uint32_t bits) {
     if (bits >= 8 && bits <= 1024) access_width_bits_ = bits;
+}
+
+
+/* 1.11.57 (latent D053): the bandwidth this model can source is NONE.
+ * `bandwidth_ = capacity_ / 100` was an invented bytes/s figure -- no tool, no
+ * measurement, no unit stated -- answering the same MemoryModel::getBandwidth()
+ * that DRAMModel answers from Ramulator's own number. It reached no result
+ * only because nothing calls getBandwidth() on these objects today. 0 is the
+ * absent value; the note fires once per process so a future caller cannot read
+ * the 0 as a measured zero. */
+uint64_t STTMRAMModel::getBandwidth() const {
+    static bool announced = false;
+    if (!announced) {
+        announced = true;
+        std::cerr << "[STTMRAMModel] getBandwidth() returns 0 = NOT SOURCED. This model "
+                     "characterizes latency, energy and area through its tool; "
+                     "it has no sustained-bandwidth model, and the literal that "
+                     "used to stand here (capacity_ / 100) was fabricated. Compose a "
+                     "bandwidth from the tier latency and the access width at "
+                     "the call site, or add a sourced model here."
+                  << std::endl;
+    }
+    return 0;
 }
 
 } // namespace pimid

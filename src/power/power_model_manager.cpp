@@ -458,7 +458,40 @@ PowerEstimate PowerModelManager::tryMcPAT(PowerComponent component,
         metrics.dynamic_power_w = mcpat_metrics.runtime_dynamic;
         metrics.leakage_power_w = mcpat_metrics.total_leakage;
         metrics.total_power_w = mcpat_metrics.total_power;
-        metrics.total_energy_j = mcpat_metrics.total_energy;
+        /* 1.11.57 (latent C026): this line used to read
+         * `metrics.total_energy_j = mcpat_metrics.total_energy;`.
+         *
+         * WHAT WAS WRONG. McPATWrapper::PowerMetrics::total_energy was
+         * declared, zero-initialised in its constructor, and assigned
+         * NOWHERE -- extractResults() fills every other member and skips that
+         * one, and the fork's result blob copies the struct verbatim, so the
+         * zero survived the round trip. This assignment therefore reported
+         * exactly 0 J of energy for every component, under a
+         * PowerModelSource::MCPAT label, as though it were a measurement. It
+         * carried a second, independent error on top: the field was
+         * documented as nanojoules and was being read into a joules field, so
+         * even had it been populated the value would have been out by 1e9.
+         * Two errors that cancel only because zero survives any unit
+         * conversion is the worst kind of quiet -- a zero read as a
+         * measurement is the failure mode this project treats most seriously.
+         *
+         * WHY IT WAS INVISIBLE. PowerModelManager is compiled but never
+         * instantiated anywhere in this tree; main.cpp's real energy path is
+         * McPATWrapper::getEnergyForPeriod(). So the zero never reached a
+         * report.
+         *
+         * THE FIX. The field is deleted from McPATWrapper::PowerMetrics --
+         * there is no honest value to give it, because an energy needs a time
+         * base and that struct carries none. Energy is derived HERE instead,
+         * from a power this function does have and the elapsed time of the
+         * activity window, exactly as extractRamulatorPower() and
+         * analyticalFallback() in this same file already do. Same basis,
+         * same units, one expression: watts times seconds is joules. */
+        const double time_s = (tech_params_.frequency_ghz > 0.0)
+            ? (static_cast<double>(stats.total_cycles)
+               / (tech_params_.frequency_ghz * 1e9))
+            : 0.0;
+        metrics.total_energy_j = metrics.total_power_w * time_s;
 
         return PowerEstimate(metrics, PowerModelSource::MCPAT, "McPAT");
 

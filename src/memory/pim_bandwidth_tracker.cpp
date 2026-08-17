@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>   // 1.11.57 (latent D070): the refusal below
 
 namespace pimid {
 
@@ -57,8 +58,23 @@ void PIMBandwidthTracker::initialize(int num_channels, int num_ranks,
 
 void PIMBandwidthTracker::initializeBandwidthLimits() {
     if (!dram_arch_) {
-        std::cerr << "ERROR: DRAM architecture not set!\n";
-        return;
+        /* 1.11.57 (latent D070): REFUSE, DO NOT RETURN. This printed an error
+         * and returned before assigning ANY of the six bandwidth limits, the
+         * six port widths or the clock -- none of which was in the
+         * constructor's initializer list, so they were left indeterminate.
+         * initialize() then printed three of them, and every later
+         * calculateTransferLatency() DIVIDES by a bandwidth limit, so the
+         * object continued running on uninitialized memory after announcing
+         * its own failure. The members are zero-initialized in the header now,
+         * which makes the state defined -- but 0 GB/s is a division by zero,
+         * so a defined state is not enough: a tracker with no architecture
+         * cannot answer any question it exists to answer, and it says so by
+         * failing here rather than by producing infinities later. */
+        throw std::runtime_error(
+            "[PIMBandwidthTracker] refuses to initialize: no DRAM "
+            "architecture object was supplied, so no port width, bandwidth "
+            "limit or clock can be sourced. Every bandwidth answer from this "
+            "object would be fabricated.");
     }
 
     // Get clock frequency
@@ -78,8 +94,20 @@ void PIMBandwidthTracker::initializeBandwidthLimits() {
     // Chip: External I/O (8 bits for x8 DDR4, 1024 bits for HBM2)
     chip_port_bits_ = dram_arch_->datapath.chip_io_bits.value_bits;
 
-    // Bank group: Estimated as 2x bank (16 bits DDR4, 128 bits HBM2)
-    bank_group_port_bits_ = bank_port_bits_ * 2;
+    /* 1.11.57 (latent D071): THE SAME ASSERTION LIVED IN TWO CLASSES.
+     * "bank group port = bank port x 2" is also RamulatorWrapper::
+     * getBankGroupPortBits(), which since 1.11.56 sets hierarchy level 2's
+     * link width in every DRAM run. Two copies of one unsourced multiplier,
+     * in two objects built from the same architecture object, is the exact
+     * shape of the drift this audit round is chasing -- and here the copies
+     * would not even have been comparable, because this one is read by the
+     * PIM bandwidth model and that one by the hierarchy builder. Neither is a
+     * specification value: a bank group is not an interface boundary and no
+     * JEDEC document fixes its port width. Kept at the same value (changing it
+     * would move live level-2 link widths through the other copy), named as
+     * unsourced in both places, and marked here as the copy to delete when
+     * DRAMArchitectureV2 grows a real bank_group_port_bits field. */
+    bank_group_port_bits_ = bank_port_bits_ * 2;   // UNSOURCED -- see above
 
     // Memory controller: Same as rank typically
     mc_port_bits_ = rank_port_bits_;
@@ -325,59 +353,26 @@ void PIMBandwidthTracker::resetStats() {
     window_start_cycle_ = current_cycle_;
 }
 
-uint64_t PIMBandwidthTracker::calculateLocalCapacity(PIMGranularity granularity, int pe_id) const {
-    // Calculate based on DRAM hierarchy and configuration
-    switch (granularity) {
-        case PIMGranularity::SUBARRAY: {
-            // Each subarray: total_rank_capacity / (num_banks * num_subarrays_per_bank)
-            // Typical: 8 GB / (16 banks * 16 subarrays) = 32 MB
-            uint64_t rank_capacity = 8ULL * 1024 * 1024 * 1024; // Assume 8 GB rank
-            return rank_capacity / (num_banks_ * num_subarrays_);
-        }
-        case PIMGranularity::BANK: {
-            // Each bank: total_rank_capacity / num_banks
-            // Typical: 8 GB / 16 banks = 512 MB
-            uint64_t rank_capacity = 8ULL * 1024 * 1024 * 1024;
-            return rank_capacity / num_banks_;
-        }
-        case PIMGranularity::BANK_GROUP: {
-            // Each bank group: total_rank_capacity / num_bank_groups
-            // Typical: 8 GB / 4 BGs = 2 GB
-            uint64_t rank_capacity = 8ULL * 1024 * 1024 * 1024;
-            return rank_capacity / num_bank_groups_;
-        }
-        case PIMGranularity::CHIP: {
-            // Each chip: total_rank_capacity / num_chips
-            // Typical: 8 GB / 8 chips = 1 GB
-            uint64_t rank_capacity = 8ULL * 1024 * 1024 * 1024;
-            int num_chips = 8; // Typical DDR4
-            return rank_capacity / num_chips;
-        }
-        case PIMGranularity::RANK:
-        case PIMGranularity::MEMORY_CONTROLLER: {
-            // Can access entire rank
-            return 8ULL * 1024 * 1024 * 1024; // 8 GB
-        }
-        case PIMGranularity::CPU:
-        default:
-            // CPU can access all memory through MC
-            return UINT64_MAX;
-    }
-}
-
-DataLocality PIMBandwidthTracker::determineDataLocality(
-    const PIMRequestPayload& payload,
-    int data_bank, int data_bg, int data_chip) const {
-
-    int pe_bank = getPELocalBank(payload.granularity, payload.pe_id);
-    int pe_bg = getPEBankGroup(payload.pe_id);
-    int pe_chip = getPEChip(payload.pe_id);
-
-    return PIMRequestPayload::calculateLocality(
-        payload.granularity,
-        pe_bank, pe_bg, pe_chip,
-        data_bank, data_bg, data_chip);
-}
+/* 1.11.57 (latent D072): calculateLocalCapacity() is DELETED.
+ *
+ * It answered "how much memory can a PE at this level reach" by dividing a
+ * hardcoded 8 GB rank -- written out four separate times, plus a fifth
+ * "return 8 GB" and a sixth literal "int num_chips = 8; // Typical DDR4" --
+ * by the organization counts. The capacity is not a constant: this class
+ * holds the architecture object, whose organization block carries the real
+ * chip and bank sizes, and the memory system's capacity is configured per run
+ * (RamulatorWrapper reports 8 GB for the DDR presets and 4 GB for the HBM
+ * ones, so the literal is wrong by 2x for HBM before any hierarchy division).
+ * It had no callers anywhere in src/ or include/ -- only its definition and
+ * its declaration -- so no reachable number was ever divided by a fabricated
+ * rank. Deleted rather than rewritten because "PE reach" is a placement
+ * question that the address-translation layer owns, not a bandwidth tracker,
+ * and reviving it here would recreate a second answer to it.
+ *
+ * determineDataLocality() is DELETED with it: same story, no callers, and it
+ * exists only to feed the locality question calculateLocalCapacity framed.
+ * calculateDataReach() below is kept -- it takes the data distribution as an
+ * argument instead of inventing one. */
 
 void PIMBandwidthTracker::calculateDataReach(
     const PIMRequestPayload& payload,

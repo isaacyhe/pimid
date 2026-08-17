@@ -303,9 +303,36 @@ void InternalDRAMNetwork::initialize(int num_subarrays_per_bank,
     network_configs_[1].num_nodes = num_banks_per_bg_;
     network_configs_[2].num_nodes = num_bg_per_chip_;
     network_configs_[3].num_nodes = num_chips_per_rank_;
-    network_configs_[4].num_nodes = 2;  // ranks per channel (typical)
-    network_configs_[5].num_nodes = 2;  // channels (typical)
+    /* 1.11.57 (audit C006): the top two counts are the LAST two literals in
+     * this ladder, and they are the only ones with no configuration surface at
+     * all -- initialize() carries subarrays, banks, bank-groups and chips, and
+     * overrideLevelConfig() sets width, frequency, latency, topology and router
+     * fields but never num_nodes. So a 16-channel HBM3 stack was modelled with
+     * a 2-node channel network and memory.ranks_per_channel changed nothing at
+     * L4, while the same release taught the PLACEMENT side to resolve both
+     * counts correctly. num_nodes is not decorative: it drives avgHops() in
+     * both transfer-latency paths and in the contention model, and it gates
+     * detailed-Garnet router construction.
+     *
+     * setTopLevelNodeCounts() is the surface that was missing. Until a caller
+     * uses it these stay at 2, which is a DIMM-shaped assumption and is now
+     * announced as one rather than passing for an organisation. */
+    network_configs_[4].num_nodes = 2;  // ranks per channel -- ASSUMED, see above
+    network_configs_[5].num_nodes = 2;  // channels -- ASSUMED, see above
     network_configs_[6].num_nodes = 1;  // system root
+    if (!top_level_nodes_set_) {
+        static bool announced_top_nodes = false;
+        if (!announced_top_nodes) {
+            announced_top_nodes = true;
+            std::cerr << "[hierarchy] NOTE: the rank (L4) and channel (L5) node "
+                         "counts are the assumed 2 and 2 -- a DIMM-shaped "
+                         "default, not this device's organisation. They set the "
+                         "hop term at those two rungs and gate detailed-router "
+                         "construction there. Call setTopLevelNodeCounts() with "
+                         "the run's ranks_per_channel and channel count to "
+                         "replace them." << std::endl;
+        }
+    }
 
     // Set router defaults for all levels (MINIMAL pipeline for internal DRAM)
     for (int i = 0; i < NUM_HIERARCHY_LEVELS; ++i) {
@@ -1396,7 +1423,66 @@ void InternalDRAMNetwork::applySourcedLadder(const int width_bits[7],
         // f = BW * 8 / width reproduces the sourced bandwidth exactly, and
         // lands on the data rate for the DQ tiers and the core clock for the
         // array tiers without this class classifying them.
+        /* 1.11.57 (audit C003): that second sentence is only true because the
+         * bank and bank-group rungs are now derived as a width times the core
+         * clock. While they were frozen literals this line silently invented a
+         * clock for them -- HBM3's array tiers came out at 1.0 GHz against a
+         * 3.2 GHz part -- and the comment asserted the opposite. */
         cfg.frequency_GHz = bandwidth_GBs[i] * 8.0 / static_cast<double>(width_bits[i]);
+    }
+
+    /* 1.11.57 (audit C005): THE BRIDGES FOLLOW THE LEVELS THEY JOIN.
+     *
+     * What was wrong: bridge[i] spans level i and level i+1, and its ingress
+     * and egress links ARE those two levels' links -- that is what a tier
+     * boundary is. But the widths and clocks came from initializeBridgeDefaults(),
+     * a three-class literal table (one branch for all of DDR3/4/5, LPDDR5 and
+     * GDDR6, one for both HBM generations, one for SRAM/NVM) written before the
+     * levels had a source. So on HBM3 the sourced levels are 512/128/256/1024/
+     * 64/64/1024 bits while every bridge was 128 or 256, and no bridge clock in
+     * the table (0.5, 0.8, 1.0, 1.6 GHz) is either of that part's two real
+     * clocks (3.2 GHz core, 6.4 GT/s DQ).
+     *
+     * Why it was invisible: until 1.11.56 the bridge term was a dimensionless
+     * number added into a cycle total, so a wrong clock in it did not read as
+     * a wrong time. B051 made getBridgeLatencyNs() return TIME, which turned
+     * every one of these literals into a divisor of real nanoseconds, and
+     * D064 replaced the LEVEL widths with the architecture object's in the same
+     * release without touching the BRIDGE widths -- so the two halves of one
+     * boundary began describing different buses. On HBM3 the L3<->L4 crossing
+     * serialised a 64 B payload at ceil(512/128)/1.0 = 4.0 ns per side against
+     * the 1024- and 64-bit levels it actually joins.
+     *
+     * Only the two link descriptions are taken from the ladder. The base
+     * latency, the FIFO depth, the parallel-bridge count and the router
+     * parameters stay as the technology table set them: those are not link
+     * properties and this class has no source for them, so they are left where
+     * a reader can still see them for what they are. A YAML level override
+     * applied after this changes the level and not the bridge, which is the
+     * same division of authority as before. */
+    for (int b = 0; b < NUM_TIER_BOUNDARIES; ++b) {
+        const int lo = b, hi = b + 1;
+        if (width_bits[lo] <= 0 || bandwidth_GBs[lo] <= 0.0) continue;
+        if (width_bits[hi] <= 0 || bandwidth_GBs[hi] <= 0.0) continue;
+        bridges_[b].lower_width_bits     = width_bits[lo];
+        bridges_[b].upper_width_bits     = width_bits[hi];
+        bridges_[b].lower_frequency_mhz  = network_configs_[lo].frequency_GHz * 1000.0;
+        bridges_[b].upper_frequency_mhz  = network_configs_[hi].frequency_GHz * 1000.0;
+    }
+}
+
+/* 1.11.57 (audit C006): the configuration surface the rank and channel rungs
+ * never had. Both counts come from the run's own resolved organisation; a
+ * non-positive value is ignored rather than turned into a zero-node network,
+ * because a level with no nodes has no defined hop count. */
+void InternalDRAMNetwork::setTopLevelNodeCounts(int ranks_per_channel, int channels) {
+    if (ranks_per_channel > 0) network_configs_[4].num_nodes = ranks_per_channel;
+    if (channels > 0)          network_configs_[5].num_nodes = channels;
+    if (ranks_per_channel > 0 || channels > 0) {
+        top_level_nodes_set_ = true;
+        std::cout << "  Hierarchy top-tier node counts: L4 (rank) "
+                  << network_configs_[4].num_nodes << ", L5 (channel) "
+                  << network_configs_[5].num_nodes << "\n";
     }
 }
 
@@ -1656,6 +1742,18 @@ uint64_t InternalDRAMNetwork::getBridgeLatency(int boundary, uint64_t data_bytes
     return static_cast<uint64_t>(base + wait_time + 0.5);
 }
 
+/* 1.11.57 (audit C005): these are DEFAULTS ONLY, and on a technology whose
+ * ladder reconciles they no longer survive: applySourcedLadder() overwrites
+ * every ingress and egress width and clock with the two levels each bridge
+ * joins. What is left of this table after that is the base latency, the FIFO
+ * depth, the parallel-bridge count and the router parameters -- none of them a
+ * link property, none of them sourced, and all of them still visible here.
+ * The widths and clocks below stand only where no ladder is adopted, which is
+ * the same case in which the run states that its levels are not tool-sourced.
+ *
+ * The three branches are one for all of DDR3/4/5, LPDDR5 and GDDR6, one for
+ * both HBM generations and one for SRAM/NVM; no clock in them (0.5, 0.8, 1.0,
+ * 1.6 GHz) is any modern part's core clock or data rate. */
 void InternalDRAMNetwork::initializeBridgeDefaults() {
     if (isHBM(technology_)) {
         // HBM: wide TSV interconnects, symmetric links

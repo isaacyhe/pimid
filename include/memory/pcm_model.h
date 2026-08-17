@@ -39,7 +39,14 @@ public:
 
     // Configuration queries
     uint64_t getCapacity() const override { return capacity_; }
-    uint64_t getBandwidth() const override { return bandwidth_; }
+    /* 1.11.57 (latent D053): NOT SOURCED. This returned bandwidth_, which
+     * initialize() set from a literal ratio of the capacity (capacity / 200) --
+     * a fabricated bytes/s figure behind the same contract method the DRAM
+     * model answers from Ramulator. It now returns 0, meaning ABSENT, and
+     * says so on stderr the first time it is asked, because a silent 0 in a
+     * bytes/s field is as easy to mistake for a measurement as the literal
+     * was. Defined out of line so the announcement has somewhere to live. */
+    uint64_t getBandwidth() const override;
     Cycle getLatency(MemoryRequestType type) const override;
 
     // Statistics
@@ -111,7 +118,17 @@ private:
     // Statistics
     uint64_t total_reads_;
     uint64_t total_set_writes_;    // SET operations
-    uint64_t total_reset_writes_;  // RESET operations
+    /* 1.11.57 (latent D056): total_reset_writes_ is DELETED. It was
+     * initialised, summed into every write total and printed as "Total
+     * RESET Writes", and NOTHING ever incremented it -- access() counts
+     * every WRITE and ATOMIC as a SET, because MemoryRequestType has no
+     * RESET to distinguish. So the counter reported a hard zero under a
+     * label that implied a measurement, and the "Total Writes" line it
+     * fed was silently SET-only. It cannot be made to work from this
+     * interface, so it is removed rather than left as a zero that looks
+     * like a count. If RESET traffic ever needs counting, split it at
+     * the request type first (Op::RESET already exists on the tier
+     * query) and reinstate the counter behind that. */
     uint64_t write_cycles_;
 
     // Energy and area from NVSim

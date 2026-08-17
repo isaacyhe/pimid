@@ -21,7 +21,6 @@ PCMModel::PCMModel(const std::string& config_path)
     , pcm_arch_(nullptr)
     , total_reads_(0)
     , total_set_writes_(0)
-    , total_reset_writes_(0)
     , write_cycles_(0)
     , read_energy_(0.0)
     , write_energy_(0.0)
@@ -54,7 +53,11 @@ void PCMModel::initialize() {
 
     // Calculate derived parameters
     capacity_ = pcm_config_.capacity;
-    bandwidth_ = capacity_ / 200;  // Lower bandwidth due to slow writes
+    /* 1.11.57 (latent D053): NO FABRICATED BANDWIDTH. This was
+     * `bandwidth_ = capacity_ / 200;` -- a bytes/s figure derived from a capacity by an
+     * unsourced ratio, answering the same contract method DRAMModel answers
+     * from Ramulator. Absent is 0, and getBandwidth() announces it. */
+    bandwidth_ = 0;
     endurance_ = pcm_config_.endurance;
 
     // Initialize NVSim FIRST (before architecture creation)
@@ -179,6 +182,37 @@ static inline Cycle legacyNsAsCycles(double ns) {
     return static_cast<Cycle>(std::ceil(ns));   // 1 GHz: no clock is supplied
 }
 
+/* 1.11.57 (latent D044): THE MISSING ACCESS SIZE.
+ *
+ * read_energy_/write_energy_ hold pJ PER BYTE -- initialize() prints them as
+ * "pJ/byte", and they come from PCMArchitecture::energy.read_energy_per_byte /
+ * write_energy_per_byte, which the extractor computes as a bank energy divided
+ * by (word_width_bits / 8) (architecture_extractor.h). getTotalEnergy() and
+ * printStats() multiplied that energy DENSITY by an ACCESS COUNT and printed
+ * the product as "pJ", understating the dynamic energy by exactly the access
+ * size in bytes -- 8x at this model's 64-bit default.
+ *
+ * The consumers want per-access energy, so the arithmetic multiplies the
+ * density back by the same bytes-per-access the extractor divided by, which
+ * recovers the bank energy exactly instead of approximating it. The width must
+ * come from access_width_bits_ for that identity to hold, since
+ * initializeNVSim() is what hands it to NVSim; "0 = model default" is the
+ * 64 bits initializeNVSim() substitutes.
+ *
+ * WHY IT WAS INVISIBLE: getTotalEnergy() and printStats() have no reachable
+ * caller, and access() -- the only thing that increments the counters -- is
+ * never called either, so the product was 0 * wrong.
+ *
+ * NOT FIXED HERE, deliberately: the leakage term adds JOULES (W x s) to a
+ * picojoule sum, and getTotalEnergy() returns picojoules where MemoryModel
+ * documents nanojoules. Those are audit D022 and D043; they span all five
+ * plugin models and memory_model.h requires them to be one gated change. */
+static inline double bytesPerAccess(uint32_t access_width_bits) {
+    // 64 bits is what initializeNVSim() passes NVSim when the knob is unset.
+    double bytes = (access_width_bits > 0 ? access_width_bits : 64u) / 8.0;
+    return (bytes > 0.0) ? bytes : 8.0;
+}
+
 Cycle PCMModel::access(const MemoryRequest& req) {
     Cycle latency = legacyNsAsCycles(pcm_config_.read_latency_ns);  // safe default
 
@@ -257,8 +291,11 @@ Cycle PCMModel::getLatency(MemoryRequestType type) const {
 }
 
 double PCMModel::getTotalEnergy() const {
-    double dynamic_energy = (total_reads_ * read_energy_) +
-                           ((total_set_writes_ + total_reset_writes_) * write_energy_);
+    // 1.11.57 (latent D044): pJ/byte x bytes/access x accesses, not pJ/byte x
+    // accesses. See bytesPerAccess() above.
+    const double bpa = bytesPerAccess(access_width_bits_);
+    double dynamic_energy = (total_reads_ * read_energy_ * bpa) +
+                           (total_set_writes_ * write_energy_ * bpa);
     double leakage_energy = leakage_power_ * (current_cycle_ / 1e9);
     return dynamic_energy + leakage_energy;
 }
@@ -268,14 +305,18 @@ void PCMModel::printStats() const {
     std::cout << "Total Cycles: " << current_cycle_ << std::endl;
     std::cout << "Total Reads: " << total_reads_ << std::endl;
     std::cout << "Total SET Writes: " << total_set_writes_ << std::endl;
-    std::cout << "Total RESET Writes: " << total_reset_writes_ << std::endl;
-    std::cout << "Total Writes: " << (total_set_writes_ + total_reset_writes_) << std::endl;
+    /* 1.11.57 (latent D056): the "Total RESET Writes" line is gone with its
+     * counter -- see pcm_model.h. Every write this model sees is priced and
+     * counted as a SET, and the label now says that instead of implying a
+     * split that access() never performed. */
+    std::cout << "Total Writes (all counted as SET): "
+              << total_set_writes_ << std::endl;
     std::cout << "Write Cycles (Endurance): " << write_cycles_ << " / " << endurance_ << std::endl;
 
-    uint64_t total_ops = total_reads_ + total_set_writes_ + total_reset_writes_;
+    uint64_t total_ops = total_reads_ + total_set_writes_;
     if (total_ops > 0) {
         double read_ratio = static_cast<double>(total_reads_) / total_ops;
-        double write_ratio = static_cast<double>(total_set_writes_ + total_reset_writes_) / total_ops;
+        double write_ratio = static_cast<double>(total_set_writes_) / total_ops;
         std::cout << "Read Ratio: " << (read_ratio * 100.0) << "%" << std::endl;
         std::cout << "Write Ratio: " << (write_ratio * 100.0) << "%" << std::endl;
 
@@ -296,15 +337,21 @@ void PCMModel::printStats() const {
     std::cout << "  Chip SET Write: " << getChipSetWriteLatency() << " ns" << std::endl;
 
     std::cout << "\nEnergy Consumption:" << std::endl;
+    // 1.11.57 (latent D044): the totals below are per-byte energy x the access
+    // size x the access count. They used to omit the access size entirely.
+    const double bpa = bytesPerAccess(access_width_bits_);
     std::cout << "  Read Energy (per byte): " << read_energy_ << " pJ" << std::endl;
     // 1.11.56 (audit D046): the ratio is measured here, not asserted.
     std::cout << "  Write Energy (per byte): " << write_energy_ << " pJ";
     if (read_energy_ > 0.0)
         std::cout << " (" << (write_energy_ / read_energy_) << "x read)";
     std::cout << std::endl;
-    std::cout << "  Total Read Energy: " << (total_reads_ * read_energy_) << " pJ" << std::endl;
+    std::cout << "  Access Width: " << (bpa * 8.0) << " bits (" << bpa << " B)" << std::endl;
+    std::cout << "  Read Energy (per access): " << (read_energy_ * bpa) << " pJ" << std::endl;
+    std::cout << "  Write Energy (per access): " << (write_energy_ * bpa) << " pJ" << std::endl;
+    std::cout << "  Total Read Energy: " << (total_reads_ * read_energy_ * bpa) << " pJ" << std::endl;
     std::cout << "  Total Write Energy: "
-              << ((total_set_writes_ + total_reset_writes_) * write_energy_) << " pJ" << std::endl;
+              << (total_set_writes_ * write_energy_ * bpa) << " pJ" << std::endl;
     std::cout << "  Leakage Power: " << leakage_power_ << " W" << std::endl;
     std::cout << "  Total Energy: " << getTotalEnergy() << " pJ" << std::endl;
     std::cout << "================================\n" << std::endl;
@@ -313,7 +360,6 @@ void PCMModel::printStats() const {
 void PCMModel::resetStats() {
     total_reads_ = 0;
     total_set_writes_ = 0;
-    total_reset_writes_ = 0;
     write_cycles_ = 0;
     current_cycle_ = 0;
 }
@@ -652,6 +698,29 @@ void PCMModel::setTechNodeNm(int nm) {
 
 void PCMModel::setAccessWidthBits(uint32_t bits) {
     if (bits >= 8 && bits <= 1024) access_width_bits_ = bits;
+}
+
+
+/* 1.11.57 (latent D053): the bandwidth this model can source is NONE.
+ * `bandwidth_ = capacity_ / 200` was an invented bytes/s figure -- no tool, no
+ * measurement, no unit stated -- answering the same MemoryModel::getBandwidth()
+ * that DRAMModel answers from Ramulator's own number. It reached no result
+ * only because nothing calls getBandwidth() on these objects today. 0 is the
+ * absent value; the note fires once per process so a future caller cannot read
+ * the 0 as a measured zero. */
+uint64_t PCMModel::getBandwidth() const {
+    static bool announced = false;
+    if (!announced) {
+        announced = true;
+        std::cerr << "[PCMModel] getBandwidth() returns 0 = NOT SOURCED. This model "
+                     "characterizes latency, energy and area through its tool; "
+                     "it has no sustained-bandwidth model, and the literal that "
+                     "used to stand here (capacity_ / 200) was fabricated. Compose a "
+                     "bandwidth from the tier latency and the access width at "
+                     "the call site, or add a sourced model here."
+                  << std::endl;
+    }
+    return 0;
 }
 
 } // namespace pimid

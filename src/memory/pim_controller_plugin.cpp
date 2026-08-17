@@ -49,13 +49,32 @@ void PIMControllerPlugin::initialize(int num_channels, int num_ranks,
     bandwidth_tracker_->initialize(num_channels, num_ranks,
                                    num_bank_groups, num_banks, num_subarrays);
 
+    /* 1.11.57 (latent D019): the chips-per-rank literal 8 is gone. It was the
+     * fourth copy of the DDR-x8 population in the tree, stated as "(typical)"
+     * inside a function that has the architecture object in hand -- and it is
+     * simply wrong for HBM2/HBM3, which put one die behind each channel, and
+     * for any x4 or x16 part. The architecture object resolves it. Invisible
+     * because PIMControllerPlugin is never constructed: its only creator is
+     * RamulatorWrapper::initializePIMComponents, reached only from
+     * enablePIMSupport(), which has no callers. */
+    int chips_per_rank = 8;
+    if (dram_arch_ && dram_arch_->organization.chips_per_rank > 0) {
+        chips_per_rank = static_cast<int>(dram_arch_->organization.chips_per_rank);
+    } else {
+        std::cerr << "[PIMControllerPlugin] WARNING: no DRAM architecture "
+                     "object, so chips-per-rank falls back to the DDR-x8 "
+                     "literal 8. That is a SUBSTITUTED organization, wrong for "
+                     "HBM (one die per channel) and for x4/x16 parts."
+                  << std::endl;
+    }
+
     // Create internal DRAM network
     internal_network_ = createInternalDRAMNetwork(
         dram_type_,
         num_subarrays,      // subarrays per bank
         num_banks / num_bank_groups,  // banks per bank group
         num_bank_groups,    // bank groups per chip
-        8                   // chips per rank (typical)
+        chips_per_rank      // 1.11.57 (latent D019): was the literal 8
     );
 
     std::cout << "PIM Controller Plugin initialized for " << dram_type_ << "\n";
@@ -103,12 +122,57 @@ void PIMControllerPlugin::update(bool request_found, Ramulator::ReqBuffer::itera
         data_movement_latency = bandwidth_tracker_->requestBandwidth(
             *pim_payload, pim_payload->data_bytes);
     } else {
-        // Fallback: estimate latency based on typical bandwidth
-        // Assume 10 GB/s for bank-level PIM
-        const double FALLBACK_BANDWIDTH_GBps = 10.0;
-        data_movement_latency = static_cast<uint64_t>(
-            (pim_payload->data_bytes / FALLBACK_BANDWIDTH_GBps) * 1e9  // Convert to ns
-        );
+        /* 1.11.57 (latent D068): THREE ERRORS IN ONE FALLBACK.
+         *
+         * (a) THE MAGNITUDE. The old expression was
+         *       (data_bytes / 10.0 GB/s) * 1e9   // "Convert to ns"
+         * but bytes divided by GB/s is ALREADY nanoseconds: GB/s is 1e9
+         * bytes/s, so bytes/(10 x 1e9 bytes/s) = seconds, and multiplying the
+         * whole quotient by 1e9 converts seconds to ns exactly once -- except
+         * the division by 10.0 was written as if 10.0 were bytes-per-ns, so
+         * the 1e9 was applied a second time. A 64 B transfer came out as
+         * 6.4e9 instead of 6.4 ns: a factor of 1e9.
+         *
+         * (b) THE UNIT. The result, whatever its magnitude, is NANOSECONDS,
+         * and it was assigned to pim_payload->data_movement_cycles, which the
+         * request-completion path adds to a cycle count
+         * (RamulatorWrapper::sendPIM sums depart-arrive with
+         * data_movement_cycles and network_cycles). The bandwidth-tracker
+         * branch beside it returns CYCLES (calculateTransferLatency multiplies
+         * ns by clock_freq_GHz_), so the two branches of one if/else filled
+         * the same field with two different quantities.
+         *
+         * (c) THE INVENTED 10 GB/s. The architecture object this plugin holds
+         * carries the bank-level effective bandwidth for the part being
+         * simulated; DDR4's is about 1.2 GB/s, not 10, and the whole point of
+         * bank-level PIM modelling is that this number is the bottleneck.
+         *
+         * Invisible because PIMControllerPlugin is never constructed, and
+         * within it this branch needs bandwidth_tracker_ to be null, which the
+         * constructor makes impossible. */
+        double bw_GBps = 0.0;
+        double clock_GHz = 0.0;
+        if (dram_arch_) {
+            // 1.11.57 (audit C003): derived from this object's serialization
+            // width and core clock, no longer a stored per-technology literal.
+            bw_GBps  = dram_arch_->getBankEffectiveBW();
+            clock_GHz = dram_arch_->timing.clock_freq_mhz / 1000.0;
+        }
+        if (bw_GBps > 0.0 && clock_GHz > 0.0) {
+            const double latency_ns = pim_payload->data_bytes / bw_GBps;
+            data_movement_latency =
+                static_cast<uint64_t>(latency_ns * clock_GHz);   // ns -> cycles
+        } else {
+            static bool warned_fallback = false;
+            if (!warned_fallback) {
+                warned_fallback = true;
+                std::cerr << "[PIMControllerPlugin] WARNING: no bandwidth "
+                             "tracker and no DRAM architecture, so PIM data "
+                             "movement cannot be priced. Charging 0 cycles -- "
+                             "unmodelled, not free." << std::endl;
+            }
+            data_movement_latency = 0;
+        }
     }
 
     pim_payload->data_movement_cycles = data_movement_latency;
@@ -148,8 +212,19 @@ void PIMControllerPlugin::registerPE(PIMGranularity granularity,
         bandwidth_tracker_->registerPE(granularity, pe_id, target_bank);
     }
 
+    /* 1.11.57 (latent D069): THE LOG LINE NAMED THE WRONG LEVEL, ALWAYS. It
+     * read PIMRequestPayload().getGranularityName() -- a DEFAULT-CONSTRUCTED
+     * payload, whose granularity member is initialised to PIMGranularity::CPU
+     * -- so every registration, at every level, printed "at CPU level" while
+     * the granularity argument sitting in scope was ignored. Registering a
+     * bank-level PE and reading back "CPU" in the log is not a cosmetic
+     * defect: this line is the only record of where a PE was placed, and CPU
+     * placement is the baseline the PIM results are compared against.
+     * Invisible because PIMControllerPlugin is never constructed. */
+    PIMRequestPayload named;
+    named.granularity = granularity;
     std::cout << "Registered PIM PE " << pe_id << " at "
-              << PIMRequestPayload().getGranularityName()
+              << named.getGranularityName()
               << " level, bank " << target_bank << "\n";
 }
 

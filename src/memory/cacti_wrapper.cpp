@@ -2,6 +2,9 @@
 #include <iostream>
 #include <cmath>
 #include <cstring>
+#include <new>       // 1.11.57 (latent D040): placement new for dvs_voltage
+#include <vector>
+#include <set>       // 1.11.57 (audit C015): one table note per technology
 #include <stdexcept>
 #include <unistd.h>
 #include <climits>
@@ -125,15 +128,62 @@ void CACTIWrapper::validateConfiguration() {
         error_message_ = "Technology node out of range (7nm - 90nm)";
         return;
     }
+
+    /* 1.11.57 (latent D035): temperature was the one forwarded input this
+     * function did not check, and it is the one whose declared unit was wrong
+     * (Celsius in the header, Kelvin in the default and in CACTI). CACTI's own
+     * rule is 300-400 K in steps of 10 and it EXITS the process when broken,
+     * so an out-of-window value is not a bad number, it is a dead run with no
+     * message from us. Refuse it here, where the caller can be told which
+     * field and which unit. Cannot fire today: nothing sets the field. */
+    if (config_.temperature < 300 || config_.temperature > 400 ||
+        (config_.temperature % 10) != 0) {
+        valid_ = false;
+        error_message_ = "Temperature must be 300-400 KELVIN and a multiple "
+                         "of 10 (CACTI's own window); note this field is "
+                         "Kelvin, not Celsius";
+        return;
+    }
 }
 
 InputParameter* CACTIWrapper::createCACTIInput(const SRAMConfig& config) {
     InputParameter* input = new InputParameter();
 
-    // Zero-initialize all members to avoid undefined behavior
-    // InputParameter's constructor only initializes a few boolean fields,
-    // leaving most fields uninitialized which can cause segfaults
+    /* Zero-initialize all members to avoid undefined behavior.
+     *
+     * 1.11.57 (latent D040): TWO THINGS ARE WRONG WITH THIS AND ONLY ONE IS
+     * FIXABLE HERE.
+     *
+     * (1) THE UB, which is fixed. InputParameter is NOT a trivial type: it
+     * holds a std::vector<double> dvs_voltage (external/cacti/cacti_interface.h),
+     * and memset writes over that vector's internal pointers. It survives
+     * today only because the constructor leaves the vector EMPTY -- an
+     * all-zero libstdc++ vector happens to read as empty and its destructor
+     * happens to be a no-op -- i.e. the program is correct by accident of one
+     * standard library's layout. The vector is reconstructed in place below,
+     * so after this function the object is a valid vector rather than bytes
+     * that read like one. Nothing numeric changes.
+     *
+     * (2) THE CONSTRUCTOR DEFAULTS THIS WIPES, which are NOT re-applied,
+     * because re-applying them would move live numbers and that is not a
+     * latent-defect change. The real constructor (external/cacti/io.cc) sets
+     * about fifty members; the seven re-applied below are the ones this
+     * wrapper depends on. Everything else is zeroed, including perfloss(0.01),
+     * hp_Vdd/lstp_Vdd/lop_Vdd(1.0), burst_depth(8), io_width(4),
+     * sys_freq_MHz(800), addr_timing/duty_cycle/activity_dq/activity_ca(0.5),
+     * mem_data_width(8), num_mem_dq(2), num_clk(1), load(0.5),
+     * row_buffer_hit_rate(0.5), rd_2_wr_ratio(2.0), io_type(DDR3),
+     * dram_dimm(UDIMM) and first/second/third_metric. Every one of those is
+     * gated off in the queries this wrapper actually makes -- perfloss is read
+     * only under power_gating, which is re-applied as false; the off-chip IO
+     * block needs the IO path this wrapper does not take; the 3DD block needs
+     * is_3d_mem, set false below. THE TRAP for whoever enables one of those
+     * paths: the field will be 0, not CACTI's default, and 0 is a legal-looking
+     * value for most of them. Re-apply the specific default at that point, or
+     * stop memsetting and set the seven overrides on a constructed object. */
     std::memset(input, 0, sizeof(InputParameter));
+    /* Re-establish the one non-trivial member the memset above flattened. */
+    new (&input->dvs_voltage) std::vector<double>();
 
     // Re-apply the defaults that the constructor would have set
     input->array_power_gated = false;
@@ -431,9 +481,24 @@ bool CACTIWrapper::vendorDieDensitySourced(const std::string& tech) {
  * line is then omitted rather than guessed: cell-array efficiency is a
  * per-design figure we have not sourced per technology, and the whole point
  * of D11 is that the array and the die are different quantities. */
+/* 1.11.57 (latent D077): KEPT ON PURPOSE, and now labelled so that nobody
+ * "repairs" it. This function ignores its argument, returns a constant, and
+ * has no callers -- three signatures of dead code -- but it is none of those
+ * things by accident: it is a REFUSAL, and the refusal is the project's stated
+ * discipline for a quantity we have not sourced. Four other files
+ * (sram_model.cpp, sttmram_model.cpp, pcm_model.cpp, reram_model.cpp) and
+ * memory_model.h cite "the vendorArrayFraction() discipline" by name as the
+ * pattern they follow, so deleting it would orphan five comments and remove
+ * the reference implementation of "return a negative value and let the caller
+ * omit the line rather than guess it".
+ *
+ * It stays until a per-technology cell-array efficiency is sourced, at which
+ * point the parameter starts being read. UNUSED AND UNVALIDATED: no caller
+ * consumes it today, and the derived "of which array ~Y mm^2" line it exists
+ * to gate is therefore never printed. */
 double CACTIWrapper::vendorArrayFraction(const std::string& tech) {
-    (void)tech;
-    return -1.0;   // not sourced yet; see docs/power.md
+    (void)tech;   // deliberate: there is no sourced per-technology value yet
+    return -1.0;  // not sourced; callers must omit the array line, not guess
 }
 
 /* 1.11.56 (audit D037): SAY THAT THE CLASSES COLLAPSE ONTO ONE TABLE.
@@ -456,11 +521,19 @@ double CACTIWrapper::vendorArrayFraction(const std::string& tech) {
  * nodes. The absolute scale is divided out by the JEDEC k-calibration
  * (1.11.1); what the table choice supplies is the structure response, which is
  * why one table across five classes is workable and not merely tolerated. */
+/* 1.11.57 (audit C015): announce ONCE PER TECHNOLOGY, not once per process.
+ *
+ * The single latch named only the FIRST technology a run asked about. On a
+ * decoupled system-scope run this function is called per node, so a config
+ * with a DDR3 host memory and an HBM3 device printed "'DDR3' -> CACTI 32 nm"
+ * and never said which table the HBM3 node used -- and DDR3 is the one
+ * technology whose answer differs, so the latch was most misleading exactly
+ * where the note matters. Which technology got named also depended on call
+ * order, since this is a pure lookup that emits stderr as a side effect. */
 int CACTIWrapper::generationTableNm(const std::string& tech) {
     const int table_nm = (tech == "DDR3") ? 32 : 22;
-    static bool announced = false;
-    if (!announced) {
-        announced = true;
+    static std::set<std::string> announced_techs;
+    if (announced_techs.insert(tech).second) {
         std::cerr << "[dram] NOTE: CACTI's DRAM columns exist at 32 nm and "
                      "22 nm only. Every generation class from 1x to 1a/1b is "
                      "characterized from the SAME 22 nm table (DDR3's 3x/2x "
@@ -531,15 +604,23 @@ CACTIWrapper::CalibratedArea CACTIWrapper::getCalibratedDieArea() const {
     return out;
 }
 
+/* 1.11.57 (latent D041): both of these carried the line "// CACTI returns
+ * energy in nJ" directly above a conversion that multiplies by 1e9 -- two
+ * adjacent statements that cannot both be true, and the comment was the false
+ * one. CACTI's power.readOp.dynamic is JOULES; the x1e9 is right and the
+ * accessors do return nJ, as their declarations say. Nothing was ever
+ * computed from the comment, which is why a unit claim could sit wrong for
+ * several releases in the middle of a unit-sensitive file -- but it is exactly
+ * the kind of line a later reader "fixes" by deleting the conversion. */
 double CACTIWrapper::getDynamicReadEnergy() const {
     if (!valid_ || !cacti_result_) return 0.0;
-    // CACTI returns energy in nJ
+    // CACTI reports energy in JOULES; this accessor returns nJ.
     return cacti_result_->power.readOp.dynamic * 1e9;  // Convert J to nJ
 }
 
 double CACTIWrapper::getDynamicWriteEnergy() const {
     if (!valid_ || !cacti_result_) return 0.0;
-    // CACTI returns energy in nJ
+    // CACTI reports energy in JOULES; this accessor returns nJ.
     return cacti_result_->power.writeOp.dynamic * 1e9;  // Convert J to nJ
 }
 

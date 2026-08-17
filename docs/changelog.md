@@ -7,6 +7,182 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.57 -- audit round 3, and the latent traps closed
+
+Round 3 audited the tree again, four auditors in parallel, and found **50 REAL
+defects and 12 latent ones**. The uncomfortable part is where they were: rounds
+1 and 2 audited years-old code and found 60 and 127; round 3 audited mostly the
+previous day's work and found 50, a far higher density per line. Ten of the
+worst were introduced by 1.11.55 and 1.11.56 -- the two releases that closed
+rounds 1 and 2.
+
+This release also closes the **82 LATENT findings** round 2 recorded but did
+not fix, at the user's instruction. A latent defect is one that cannot
+currently produce a wrong number: the path is unreachable, the wrong value is
+multiplied by zero, or the function has no callers. They are fixed so that
+whoever makes such a path live does not inherit a silent defect.
+
+### The knobs that were never read (A001)
+
+`memory.power_down`, `memory.power_down_threshold_ns`, `memory.array_pg` and
+`power.temperature_k/_c`, together with the temperature range validator, sat
+inside `if (yaml_cfg["noc"]["model"])`. The indentation had shown it all along
+-- a 4-space block inside a 16-space body -- but the consequence is
+scope-shaped, and that is why no gate caught it: every DEVICE config in the
+corpus sets a top-level `noc.model`, and every CO-SIM config declares the model
+under `system.devices[].noc.model` instead. So on exactly the shape
+co-simulation uses, all four knobs were read from a branch that never executed.
+
+The 1.11.52 temperature work (D055/C001) and the 1.11.52 `memory.power_down`
+scope-parity fix (A005) were therefore both inert in co-simulation -- the one
+scope they were written for. Measured: the released 1.11.56 binary accepts
+`temperature_k: 999` silently; this one refuses it with exit 2.
+
+### The check that could not run (C002)
+
+1.11.56 added a cross-check so that the DRAM architecture object and the
+Ramulator preset could never again describe different parts. It sat in
+`parseConfiguration()` behind `if (dram_arch_)`, and `initialize()` calls
+`parseConfiguration()` FIRST and populates `dram_arch_` afterwards. The pointer
+was always null. It never executed once.
+
+Gate 1166D's K11 arm reported "mismatch warnings=0" and passed. That was a
+vacuous pass -- zero warnings because nothing ran, not because nothing was
+wrong. Moved below the population, it would have caught C001 on its first run.
+
+### The half-applied speed-bin fix (C001)
+
+1.11.56 changed the three DRAM architecture objects to name the preset this
+tree simulates and left the CACTI-IO rate table at DDR5 4800 and HBM2 2000 --
+a table sitting directly under the D002 comment that states the principle.
+DDR5's electrical map is injected and sourced, so `exact_map` is true and
+CACTI-IO's figure REPLACES the scheme table: DDR5 termination energy was
+quoted for a part 1.5x faster than the one whose cycles are counted.
+
+### The ladder, corrected (B001, B002, C003, C005, C007)
+
+1.11.56's sourced link ladder was right in principle and wrong in five places.
+
+- B001: `RamulatorWrapper` builds an architecture object for DDR4, DDR5, HBM2
+  and HBM3 only, and hands DDR3, LPDDR5 and GDDR6 the DDR4-2400 one from an
+  unannounced else. Measured, DDR3/DDR4/DDR5/LPDDR5/GDDR6 all printed the
+  identical ladder `256/8/16/8/64/64/64` under a line reading "from the GDDR6
+  architecture object" -- a false provenance claim, the category this project
+  treats most seriously, and 1.11.56 wrote that line.
+- B002: the reconciliation check that detects exactly this ran sixty lines
+  later and only warned, after the ladder had consumed the numbers.
+  It now runs FIRST and GATES adoption. A technology whose object does not
+  reconcile with its own simulated preset keeps the per-technology table --
+  which the source already labels a placeholder -- and the run says plainly
+  that its ladder is not tool-sourced. Refusing to claim provenance is the
+  honest outcome; fabricating objects for the three missing technologies is
+  not.
+- C003: the bank and bank-group rungs were stored literals while every other
+  rung derived from width x clock, so back-deriving frequency as
+  `bandwidth*8/width` clocked HBM3's bank tier at 1.0 GHz against its own
+  3.2 GHz core clock. Derived now: HBM3 16.0 -> 51.2 GB/s (a 64 B L1/L2
+  crossing 4.00 -> 1.25 ns), DDR5 2.4 -> 1.6, HBM2 8.0 -> 9.6, DDR4 unchanged
+  as the one self-consistent row.
+- C007: `channel_databus_bits` meant ONE channel for DDR and the WHOLE STACK
+  for HBM. That is the same family-dependent meaning that broke the
+  reconciliation test in 1.11.56. It means one channel for every family now,
+  and the cross-check multiplies by the channel count. HBM3's L5 rung was 16x
+  too wide; HBM2's 8x.
+- C005: the bridges joining those levels were still the placeholder table, so
+  every tier crossing contradicted the levels on both sides of it.
+
+### One clock, asked once (B003, A007)
+
+1.11.56 fixed a unit error in the hierarchy latencies and introduced a clock
+error. The ns-to-cycle conversion used `config.frequency_mhz`, which in system
+scope is the top-level `system.frequency_mhz` -- the adoption block copies the
+device node's technology, PE count, placement, banks and NoC model, and not its
+frequency. On the shipped co-sim example that is 2000 MHz against a 500 MHz
+device: a 4x overcharge on every hierarchy traversal, summed in one integer
+with an array latency correctly quoted at the device clock. The NoC duty-cycle
+window (A016, 1.11.52) had the same defect independently. Both now ask one
+function, so a third site cannot invent a third answer.
+
+### The flush mechanism, replaced (D001, D002, D003)
+
+1.11.55's three coherence-flush fixes were each locally reasonable and jointly
+wrong, so the mechanism is replaced rather than patched.
+
+F016 divided the footprint by the rank count on both the cycle and byte sides;
+F017 then cleaned the GLOBAL registry M->E; and the charge runs once per rank.
+The first rank to arrive charged F/N and wiped the dirty set, and ranks 2..N
+measured nothing -- so the slices summed to **F/N instead of F**, an N-fold
+understatement (16x on a 16-rank cell) of the flush bytes and of the flush's
+DRAM writeback energy, aimed straight at the pecount sweep D4 exists to
+protect. Separately, F015's last-level counting rested on an inclusion argument
+that zsim breaks on purpose: a GETX hitting an E line upgrades silently in the
+child, so an ordinary read-modify-write line is M in the L1D and E in the LLC
+BEFORE any flush. F015 was blind to that working set from its first flush.
+And F017 turned a latent unlocked read walk into an unlocked WRITE while other
+ranks were still executing, which could lose dirty bits and trip a compiled-in
+assert.
+
+Now: measurement and cleaning are ONE locked walk that de-duplicates by
+ADDRESS, which is correct whatever the hierarchy does; the per-rank charge is
+an explicit epoch whose slices sum to the footprint exactly once, with the
+integer remainder to the opener so the sum is exact to the byte; and the walk
+holds each cache's own bottom-CC lock, one at a time, never two at once.
+
+### Everything else
+
+Scope parity: the placement never reached the array query in co-simulation
+(B053, 1.11.56) and the dual-McPAT host read its clock, all four cache sizes,
+memory technology and process node from a legacy block an explicit `system:`
+config never writes (A005) -- 3000 MHz against the node's 2000, a 1024 KB L2
+against its 256, a phantom 8 MB L3, DDR4 controller parameters for a DDR5 host.
+That same host was priced on the "aggressive" metal stack the config validator
+tells users no process can build, applied by omission (A006).
+
+In every co-simulation the memory controller and the M/D/1 service rate were
+derived for SRAM -- the constructor default -- because `getMemControllerConfig`
+ran before the device's technology was adopted (B009). The shipped host/device
+example, with a DDR5 host and a DDR4 device and no SRAM anywhere, opened with
+`SRAM M/D/1 cap = ... 512000 MB/s`.
+
+The row-hit "measurement" indexed a per-device JEDEC page with a rank address
+(D006, up to 8x on the miss fraction, ~19% on DDR4 per-access read energy) and
+tracked one open row per placement UNIT rather than per bank (D008, up to 3.4x
+at RANK/CHANNEL/CHIP). The last site still dividing by an invented NVM access
+time was found and removed (B012). `pages_per_unit` and `num_banks` were both
+corrected where 1.11.56's own slot-count change had broken them (B010, B011).
+
+Of the 82 latent findings: unit errors that were waiting to become live (mW
+into W, J into nJ, a fallback 1e9 too large and in the wrong unit, an unsigned
+underflow); silent fallbacks made to announce themselves or refuse; invented
+values replaced by the tool that could answer, or labelled as unsourced where
+none could; nine YAML keys that were parsed and never read, each now either
+wired up or rejected at parse time; and dead code deleted, including
+`SimConfigParser`/`ComprehensiveSimulator`, which fabricated results under
+external-model banners, and `NVMModel`, which the factory never built.
+
+One latent was fixed the OTHER way: D030 said a wire capacitance and its
+comment disagreed by 1000x. The value was right and the comment's unit was
+wrong -- fixing it as the finding proposed would have introduced a real 1000x
+error.
+
+### Data impact
+
+Everything already true of 1.11.56 remains true, and this release moves more.
+Largest first: the flush footprint and its writeback energy (Nx on multi-rank
+co-sim); the hierarchy traversal clock in co-simulation (4x on the shipped
+example); the HBM bank and channel ladder rungs (3.2x and 16x); the row-miss
+fraction and the per-access array energy that follows it; DDR5 termination
+energy (1.5x); the co-sim memory controller and its M/D/1 cap; the host's
+clock, caches and metal stack on the trace path.
+
+The corpus must be re-simulated on this train. That was already the plan; the
+reasons are now larger.
+
+Gate 1167A. Every arm that tests a diagnostic asserts it FIRES on a case built
+to trip it before asserting it is silent on a case built not to -- three arms
+in the 1166 series passed vacuously, reporting zero warnings from checks that
+could not execute, and twice that hid a real defect.
+
 ## 1.11.56 -- the last 65 of audit round 2, and the tools get asked
 
 The closing block of audit round 2. Round 1 emptied the FIX-PRE-FLEET queue

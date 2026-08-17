@@ -49,9 +49,19 @@ public:
     // Statistics and metrics
     uint64_t getTotalReads() const { return total_reads_; }
     uint64_t getTotalWrites() const { return total_writes_; }
-    uint64_t getRowHits() const { return row_hits_; }
-    uint64_t getRowMisses() const { return row_misses_; }
-    uint64_t getRowConflicts() const { return row_conflicts_; }
+    /* 1.11.57 (latent D009): getRowHits/getRowMisses/getRowConflicts and the
+     * three counters behind them are DELETED. They were never incremented --
+     * handleRequestCompletion() carried a "placeholder for now" comment where
+     * the update belonged, and the only assignments were the constructor's
+     * zeroes and resetStats()' zeroes -- so every consumer read a live-looking
+     * statistic that was structurally 0. They could not be repaired either: no
+     * Ramulator2 instance is ever created in this tree (all construction sites
+     * pass an empty config path), so there are no internal row statistics to
+     * copy. The measured row behaviour PIMID does have arrives by a different
+     * road, setRowMissFraction(), from the PE memory interface's own
+     * rowHits/rowMisses; the consumers that used to divide by zeroed counters
+     * now use that instead. Deleted rather than left at zero so that nobody
+     * treats a permanently-empty counter as a measurement. */
 
     // Energy metrics (from Ramulator statistics)
     double getReadEnergy() const;
@@ -83,8 +93,15 @@ public:
     double getTerminationEnergyNJ() const;   // ODT/termination per 64B, from CACTI-IO
     /* 1.11.40 (N8): interface terms PIMID never modelled -- driver switching
      * and PHY per 64 B, and the IO area. Previously the DQ interface was
-     * termination-only, which understated LPDDR5 by 142x because LVSTL exists
-     * to make termination negligible. */
+     * termination-only, which understated LPDDR5 by ~71x (the 142x quoted here
+     * before rested on a superseded LPDDR5 termination row; see the D010 note
+     * in getTerminationEnergyNJ) because LVSTL exists to make termination
+     * negligible.
+     * 1.11.57 (latent D011): UNUSED AND UNVALIDATED. Neither accessor has a
+     * caller anywhere in src/ or include/; every reported DQ-interface number
+     * still comes from getTerminationEnergyNJ() alone, so the interface is
+     * termination-only in results even though this correction exists in code.
+     * Do not cite the 1.11.40 fix as landed until a caller consumes these. */
     double getInterfaceDynamicEnergyNJ() const;
     double getInterfaceAreaMM2() const;
     // Override termination energy (pJ/bit; <0 = model default, 0 = force no termination).
@@ -125,7 +142,9 @@ public:
     double getTCAS() const;                   // CAS latency
     double getTRP() const;                    // Row precharge time
     double getTRAS() const;                   // Row active time
-    double getTRRD() const;                   // Row to row delay
+    /* 1.11.57 (latent D020): getTRRD() removed -- it returned tRAS/4, an
+     * invented relation between two independently specified JEDEC timings,
+     * and had no callers. */
     double getTRC() const;                    // Row cycle time
     double getTBurst() const;                 // Burst transfer time
 
@@ -148,7 +167,13 @@ public:
     int getBankGroupPortBits() const;
     int getChipIOBits() const;
     int getRankDataBits() const;
-    int getChannelDataBits() const;
+    int getChannelDataBits() const;   // ONE channel, every family (1.11.57 C007)
+
+    /* 1.11.57 (audit C004): the technology the architecture object actually
+     * describes, which is NOT always the technology this wrapper was
+     * constructed for -- DDR3, LPDDR5 and GDDR6 have no object and read
+     * DDR4-2400's. Empty when there is no object at all. */
+    std::string getArchitectureTechnology() const;
 
     // Hierarchical bandwidth (GB/s)
     double getSubarrayBandwidth() const;
@@ -161,10 +186,11 @@ public:
     // Hierarchical energy (pJ per byte)
     double getSubarrayEnergyPerByte() const;
     double getBankEnergyPerByte() const;
-    double getBankGroupEnergyPerByte() const;
     double getChipEnergyPerByte() const;
     double getRankEnergyPerByte() const;
-    double getChannelEnergyPerByte() const;
+    /* 1.11.57 (latent D020): getBankGroupEnergyPerByte() (bank x 1.5) and
+     * getChannelEnergyPerByte() (rank x 1.5) removed -- unsourced tier
+     * surcharges with no callers. */
 
     // Hierarchical latency (ns)
     double getSubarrayAccessLatency() const;
@@ -172,7 +198,8 @@ public:
     double getBankGroupAccessLatency() const;
     double getChipAccessLatency() const;
     double getRankAccessLatency() const;
-    double getChannelAccessLatency() const;
+    /* 1.11.57 (latent D020): getChannelAccessLatency() removed -- rank
+     * latency x 1.2 as an unsourced "MC overhead", with no callers. */
 
     // Get DRAM architecture specification
     const pimid::memory::DRAMArchitectureV2* getDRAMArchitecture() const;
@@ -215,9 +242,8 @@ private:
     // Statistics tracking
     uint64_t total_reads_;
     uint64_t total_writes_;
-    uint64_t row_hits_;
-    uint64_t row_misses_;
-    uint64_t row_conflicts_;
+    // 1.11.57 (latent D009): row_hits_/row_misses_/row_conflicts_ removed --
+    // never incremented, and unincrementable without a Ramulator2 instance.
 
     // Energy tracking
     mutable double cached_read_energy_;

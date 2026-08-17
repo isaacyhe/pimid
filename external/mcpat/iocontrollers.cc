@@ -399,11 +399,28 @@ void PCIeController::computeEnergy(bool is_tdp)
     			 * -- 34.7 mW/channel at gen5 and 217 mW at UALink, against a
     			 * controller term of a few mW. Stderr: the parent's stdout is
     			 * /dev/null in the forked child. */
+    			/* PIMID 1.11.57 (audit D009): PRINT WATTS UNDER THE " W".
+    			 *
+    			 * serdes_rt is ENERGY PER CLOCK CYCLE, not power: SerDer_dyn is
+    			 * divided by pciep.clockRate at construction ("covert to energy
+    			 * per clock cycle") and clockRate is in Hz. Every consumer that
+    			 * wants watts multiplies it back -- displayEnergy does
+    			 * rt_power.readOp.dynamic*pciep.clockRate, and Processor's
+    			 * set_pppm passes number_units*pcie->pciep.clockRate -- but this
+    			 * diagnostic did not, so it printed J/cycle with a " W" suffix.
+    			 * Wrong by the link clock: the comment directly above promises
+    			 * "34.7 mW/channel at gen5" while the line printed ~1.7e-11 at a
+    			 * 2 GHz link clock. Invisible because it is the ONLY audit trail
+    			 * for the correction -- there is no second place printing the
+    			 * same quantity to disagree with, and a number nine orders of
+    			 * magnitude small reads as "negligible", which is the direction
+    			 * a reader is already half-expecting on an idle link. */
+    			const double serdes_rt_w = serdes_rt * pciep.clockRate;
     			static bool said = false;
     			if (!said) {
     				said = true;
     				std::cerr << "[link] E008: removed McPAT's SerDes dynamic ("
-    				          << serdes_rt << " W at measured duty "
+    				          << serdes_rt_w << " W at measured duty "
     				          << pciep.perc_load << ") from the runtime basis;"
     				             " the measured pJ/bit term prices that same"
     				             " silicon. Area and leakage keep it."

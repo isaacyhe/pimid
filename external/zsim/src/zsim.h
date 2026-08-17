@@ -423,7 +423,17 @@ struct GlobSimInfo {
          * unmeasured but physically impossible: a flush writes back dirty lines
          * FROM cache and cannot exceed what the cache holds. */
         uint64_t footprintBytes = 0;          // refused if set; see init.cpp
-        volatile uint64_t footprintMeasured = 0;  // 1.11.40: what the caches held
+        /* 1.11.40: what the caches held. 1.11.57 (audit D015): DIAGNOSTIC
+         * ONLY -- no stat exports it and no consumer reads it, and it used to
+         * be written TWICE per flush from two independent measurements, so
+         * even as a diagnostic it only ever held the second one. It is now
+         * written once per flush EPOCH and holds the GLOBAL distinct-dirty
+         * footprint: the sum of every rank's slice, NOT the per-rank charge
+         * that lands in xing.flushBytes. Anyone promoting it to a stat must
+         * carry that distinction into the name, or D004's confusion (a global
+         * figure printed beside a per-rank charge) reappears in the stats
+         * stream. */
+        volatile uint64_t footprintMeasured = 0;
         double   writebackBytesPerCycle = 0.0;// host cache writeback BW @ ref clock
         uint32_t flushFixedCycles = 0;        // fixed flush/wbinvd latency
         // Stats (accumulated at each charged roi_begin flush)
@@ -456,7 +466,19 @@ struct GlobSimInfo {
         PhaseActivity sharedCache;
         PhaseActivity noc;
         PhaseActivity hostMC;
-        PhaseActivity devMC[64];  // per-channel grand MCs (device)
+        /* 1.11.57 (latent F024): the "[64]" and the words "per-channel"
+         * promise a resolution nothing produces. Only devMC[0] is ever
+         * touched (RamulatorMemory::access and the PE memory interface) and
+         * only devMC[0] is ever exported (init.cpp's pgDevMCActivePhases);
+         * the other 63 entries are inert storage, and the PE-MI states
+         * honestly at its own touch site that it aggregates all channels
+         * into one. The array is left at its declared size rather than cut to
+         * [1] because zinfo's layout feeds the contention sim's
+         * address-ordered tie-breaking (see core.h) and no reported number
+         * depends on the extra slots; what is corrected is the claim. A real
+         * per-channel view needs a channel index at the touch site, which
+         * neither caller has. */
+        PhaseActivity devMC[64];  // ONLY [0] is written or read; see above
         /* 1.11.18 (audit go-through): ROI baselines. The residency is a
          * FRACTION of the priced window, and every activity counter it is
          * weighed against is ROI-relative -- these snapshots (taken at

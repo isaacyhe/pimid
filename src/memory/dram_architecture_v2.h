@@ -118,11 +118,31 @@ struct DRAMDatapathStages {
  *
  * CONSERVATIVE: We use LOWER BOUNDS (worst case for PIM)
  */
+/* 1.11.57 (audit C003): the three STORED bandwidths are GONE from this struct.
+ *
+ * What was wrong: bank_effective_bw_GBs and bank_group_effective_bw_GBs were
+ * frozen literals per technology while every other rung of the same ladder is
+ * a width times a clock (getSubarrayBandwidth uses clock_freq_mhz;
+ * getChipIOBandwidth / getRankBW / getChannelBandwidth use data_rate_mtps).
+ * They matched only the clocks the factories carried before 1.11.56 re-binned
+ * HBM2, DDR5 and HBM3, and nothing re-derived them.
+ *
+ * Why it was invisible: the ladder builder turns a rung into a CLOCK by
+ * f = BW * 8 / width, so a stale bandwidth does not show up as a bandwidth --
+ * it shows up as a frequency, and the comment at that site claimed the
+ * arithmetic "lands on the core clock for the array tiers". Worked through,
+ * HBM3's bank tier came out at 16.0 * 8 / 128 = 1.0 GHz against its own
+ * 3.2 GHz core clock, so every L1 and L2 crossing on the reference cell was
+ * charged 3.2x the time this object's own width and clock imply (DDR5: 0.67x).
+ * Only DDR4 was self-consistent, which is exactly why it never looked wrong.
+ *
+ * The fix derives both rungs the way the neighbours are derived, from fields
+ * this object already carries, so a speed-bin change moves them and no
+ * per-technology bandwidth number is invented anywhere. chip_internal_bw_GBs
+ * went with them: it had no reader at all and its literals (DDR4 4.8 against
+ * chip I/O 8 bits x 2400 MT/s = 2.4) were a second authority waiting to be
+ * believed. See getBankEffectiveBW() / getBankGroupEffectiveBW(). */
 struct InferredBandwidthLimits {
-    double bank_effective_bw_GBs;      // Inferred from measurements
-    double bank_group_effective_bw_GBs;
-    double chip_internal_bw_GBs;
-
     std::string inference_method;       // How we derived these values
     std::string confidence_level;       // "High", "Medium", "Low"
 };
@@ -286,7 +306,27 @@ public:
     void printVerificationReport() const;
 
     // Calculate effective bandwidths
-    double getBankEffectiveBW() const { return bandwidth_limits.bank_effective_bw_GBs; }
+    /* 1.11.57 (audit C003): DERIVED, like every other rung of the ladder.
+     * The bank tier moves the bank serialization width once per CORE clock --
+     * it sits inside the array, before the DQ tiers where the data rate
+     * applies. This is the same form as getSubarrayBandwidth() (GSA width x
+     * core clock) and getRankBW() below (rank bus x data rate); it replaces a
+     * per-technology literal that had stopped tracking either clock. */
+    double getBankEffectiveBW() const {
+        return (datapath.bank_serialization_bits.value_bits / 8.0) *
+               (timing.clock_freq_mhz / 1000.0);
+    }
+    /* 1.11.57 (audit C003 + latent D020): the bank-group tier is the bank tier
+     * at the bank-group PORT width, which RamulatorWrapper::getBankGroupPortBits()
+     * defines as the bank serialization width x 2 -- an UNSOURCED multiplier
+     * that the accessor announces as such, since no specification fixes a
+     * bank-group port width. It is written as x2 of the bank figure here, and
+     * not as an independent number, precisely so that the width and the
+     * bandwidth of that rung cannot disagree: the ladder back-derives its clock
+     * as BW * 8 / width, and the two must divide out to the core clock. */
+    double getBankGroupEffectiveBW() const {
+        return getBankEffectiveBW() * 2.0;
+    }
     double getRankBW() const;
 
     // Get verification confidence
@@ -361,13 +401,16 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR4_2400_Verified() {
 
     // ===== BANDWIDTH LIMITS (INFERRED) =====
 
-    arch->bandwidth_limits.bank_effective_bw_GBs = 1.2;
-    arch->bandwidth_limits.bank_group_effective_bw_GBs = 2.4;
-    arch->bandwidth_limits.chip_internal_bw_GBs = 4.8;
+    /* 1.11.57 (audit C003): the three literals here are gone; the bank and
+     * bank-group rungs are derived by getBankEffectiveBW() /
+     * getBankGroupEffectiveBW() from this object's own serialization width and
+     * core clock. DDR4 is the one technology whose literals AGREED with that
+     * derivation (8 bits / 8 x 1.2 GHz = 1.2 GB/s), which is why the drift at
+     * the other three went unnoticed for as long as it did. */
     arch->bandwidth_limits.inference_method =
-        "Calculated from: (port_bits / 8) x clock_freq_GHz. "
-        "Bank: 8 bits / 8 x 1.2 GHz = 1.2 GB/s. "
-        "CONSERVATIVE: Assumes serialization bottleneck.";
+        "DERIVED: bank = (bank_serialization_bits / 8) x clock_freq_GHz; "
+        "bank group = bank x 2 (the bank-group port multiplier, UNSOURCED). "
+        "CONSERVATIVE: assumes the serialization path is the bottleneck.";
     arch->bandwidth_limits.confidence_level = "Medium - based on estimated internal port widths";
 
     // ===== ORGANIZATION (VERIFIED) =====
@@ -530,22 +573,35 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified() {
         "HBM uses 'channel' terminology instead of 'rank'"
     };
 
+    /* 1.11.57 (audit C007): ONE CHANNEL, like every other family's entry in
+     * this field. This used to hold 1024 -- the whole stack, all 8 channels --
+     * while DDR's entry holds one 64-bit channel, so the field meant two
+     * different things depending on the technology reading it. That was
+     * invisible until 1.11.56 made this field the hierarchy ladder's L5 rung:
+     * the ladder then described a channel 8x wider than the L4 rung directly
+     * beneath it (the 128-bit "rank" IS the channel here), and the system root
+     * above it multiplied by the channel count a second time. The stack figure
+     * is still recoverable, and is now recovered where it belongs -- one
+     * channel x the channel count -- rather than stored under a per-channel
+     * name. */
     arch->datapath.channel_databus_bits = {
-        1024,  // 8 channels x 128 bits
+        128,  // one channel; the stack is 8 of these (JESD235A)
         VerificationStatus::VERIFIED,
-        "JEDEC JESD235A: 8 channels per stack",
-        "Full stack bandwidth"
+        "JEDEC JESD235A: 128-bit channel, 8 channels per stack",
+        "One channel's data bus; stack width = this x channels"
     };
 
     // ===== BANDWIDTH LIMITS (INFERRED) =====
 
-    arch->bandwidth_limits.bank_effective_bw_GBs = 8.0;  // 64 bits / 8 x 1 GHz
-    arch->bandwidth_limits.bank_group_effective_bw_GBs = 16.0;
-    arch->bandwidth_limits.chip_internal_bw_GBs = 64.0;
+    /* 1.11.57 (audit C003): the literals here read "64 bits / 8 x 1 GHz" and
+     * this part's core clock is not 1 GHz -- it was 1.0 GHz when the line was
+     * written and the object has been re-binned since. Derived now, from the
+     * serialization width and clock the object itself carries. */
     arch->bandwidth_limits.inference_method =
-        "Calculated from estimated 64-bit bank paths via TSV. "
-        "TSV enables 8x wider internal paths vs DDR4 wire routing. "
-        "This explains why HBM achieves higher bank-level bandwidth.";
+        "DERIVED: bank = (bank_serialization_bits / 8) x clock_freq_GHz, on an "
+        "estimated 64-bit TSV bank path; bank group = bank x 2 (the bank-group "
+        "port multiplier, UNSOURCED). TSV enables wider internal paths than "
+        "DDR4 wire routing, which is why HBM's bank tier is the faster one.";
     arch->bandwidth_limits.confidence_level = "Medium - TSV width not publicly specified";
 
     // ===== ORGANIZATION (VERIFIED) =====
@@ -722,12 +778,14 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR5_4800_Verified() {
 
     // ===== BANDWIDTH LIMITS (INFERRED) =====
 
-    arch->bandwidth_limits.bank_effective_bw_GBs = 2.4;  // 2x DDR4 due to higher clock
-    arch->bandwidth_limits.bank_group_effective_bw_GBs = 4.8;
-    arch->bandwidth_limits.chip_internal_bw_GBs = 9.6;
+    /* 1.11.57 (audit C003): the retired literal said "DDR5-4800: 8 bits x
+     * 2.4 GHz" -- a bin this tree does not simulate (1.11.56 moved this object
+     * to the DDR5_3200AN preset) and a clock this object does not carry
+     * (clock_freq_mhz is 1600). Derived now. */
     arch->bandwidth_limits.inference_method =
-        "Calculated from estimated 8-bit bank paths at 2x DDR4 frequency. "
-        "DDR5-4800: 8 bits x 2.4 GHz = 2.4 GB/s per bank.";
+        "DERIVED: bank = (bank_serialization_bits / 8) x clock_freq_GHz, on an "
+        "8-bit bank path estimated to be DDR4's; bank group = bank x 2 (the "
+        "bank-group port multiplier, UNSOURCED).";
     arch->bandwidth_limits.confidence_level = "Medium - based on DDR4 scaling";
 
     // ===== ORGANIZATION (VERIFIED) =====
@@ -880,21 +938,29 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM3_Verified() {
         "HBM3 uses pseudo-channels vs full channels"
     };
 
+    /* 1.11.57 (audit C007): ONE channel, not the stack -- see the HBM2 note.
+     * At 16 channels this was the 16x case: the ladder's L5 rung was 1024 bits
+     * / 819.2 GB/s where the rung under it is 64 bits / 51.2 GB/s, and the
+     * system root multiplied that stack figure by 16 again. */
     arch->datapath.channel_databus_bits = {
-        1024,  // 16 pseudo-channels x 64 bits
+        64,  // one channel; the stack is 16 of these (JESD238)
         VerificationStatus::VERIFIED,
-        "JEDEC JESD238: 16 pseudo-channels per stack",
-        "Full stack bandwidth"
+        "JEDEC JESD238: 64-bit channel, 16 channels per stack",
+        "One channel's data bus; stack width = this x channels"
     };
 
     // ===== BANDWIDTH LIMITS (INFERRED) =====
 
-    arch->bandwidth_limits.bank_effective_bw_GBs = 16.0;  // 2x HBM2
-    arch->bandwidth_limits.bank_group_effective_bw_GBs = 32.0;
-    arch->bandwidth_limits.chip_internal_bw_GBs = 128.0;
+    /* 1.11.57 (audit C003): this is the row that cost the most. "16.0 GB/s,
+     * 2x HBM2" against a 128-bit bank path implies a 1.0 GHz array clock; this
+     * object's core clock is 3.2 GHz, so the ladder clocked HBM3's L1 and L2
+     * at a third of the object's own array speed and charged every crossing on
+     * the reference cell accordingly. Derived now: 128 / 8 x 3.2 = 51.2 GB/s,
+     * which is the same statement as "one 128-bit beat per core clock". */
     arch->bandwidth_limits.inference_method =
-        "Calculated from estimated 128-bit bank paths via improved TSV. "
-        "HBM3 achieves 2x HBM2 bandwidth through higher speed and wider internal paths.";
+        "DERIVED: bank = (bank_serialization_bits / 8) x clock_freq_GHz, on an "
+        "estimated 128-bit improved-TSV bank path; bank group = bank x 2 (the "
+        "bank-group port multiplier, UNSOURCED).";
     arch->bandwidth_limits.confidence_level = "Medium - TSV improvements not fully specified";
 
     // ===== ORGANIZATION (VERIFIED) =====
@@ -1044,8 +1110,10 @@ inline void DRAMArchitectureV2::printVerificationReport() const {
 
     std::cout << "\nBANDWIDTH LIMITS (INFERRED):\n";
     std::cout << "----------------------------\n";
-    std::cout << "  Bank effective BW:       " << bandwidth_limits.bank_effective_bw_GBs << " GB/s\n";
-    std::cout << "  Bank Group effective BW: " << bandwidth_limits.bank_group_effective_bw_GBs << " GB/s\n";
+    // 1.11.57 (audit C003): derived on read, so this line cannot print a
+    // bandwidth that the object's own width and clock do not produce.
+    std::cout << "  Bank effective BW:       " << getBankEffectiveBW() << " GB/s\n";
+    std::cout << "  Bank Group effective BW: " << getBankGroupEffectiveBW() << " GB/s\n";
     std::cout << "  Method: " << bandwidth_limits.inference_method << "\n";
     std::cout << "  Confidence: " << bandwidth_limits.confidence_level << "\n";
 

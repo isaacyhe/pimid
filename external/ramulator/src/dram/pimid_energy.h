@@ -37,9 +37,58 @@
 // resistor-network dissipation VDDQ^2/Rtt over the bit period, per I/O standard.
 // ---------------------------------------------------------------------------
 #include <string>
+#include <set>
+#include <iostream>
 
 namespace Ramulator {
 namespace pimid_energy {
+
+/* 1.11.57 (latent D007): SAY IT WHEN A STRING FALLS OFF THE TABLE.
+ *
+ * Three places in this file answer an unrecognised technology with the DDR4
+ * class -- iddFor()'s trailing return, terminationNJ()'s trailing else, and
+ * devicesPerAccess()/backgroundUnits()' trailing return -- and they do not
+ * even agree with each other about what "unrecognised" means: iddFor matches
+ * "HBM2"/"HBM3" exactly while terminationNJ and backgroundUnits match the
+ * three-character prefix "HBM", so a string like "HBM2E" would be given DDR4
+ * currents, zero termination and an HBM channel population, all at once. The
+ * defect is invisible today only because main.cpp hard-whitelists the eleven
+ * technology names and exits on anything else, so no such string can reach
+ * here; the day a technology is added to that whitelist without a row here,
+ * it would be priced as DDR4 in silence. Refuse to be silent instead: each
+ * fallback announces itself once, naming the string and the quantity it
+ * governs, so the missing row is reported rather than substituted. */
+inline void announceUnknownTech(const char* fn, const std::string& tech,
+                                const char* governs) {
+    /* Once per (function, technology): these sit on the per-access energy
+     * path, so an unguarded message would print millions of times and become
+     * noise instead of a disclosure. */
+    static std::set<std::string> announced;
+    if (!announced.insert(std::string(fn) + "/" + tech).second) return;
+    std::cerr << "[power] WARNING: pimid_energy::" << fn
+              << " has no row for memory technology '" << tech
+              << "' and is falling back to the DDR4 class, which governs "
+              << governs << ". This is a SUBSTITUTED value, not a sourced one"
+                 " -- add the technology's row to pimid_energy.h rather than"
+                 " trusting this number." << std::endl;
+}
+
+/* 1.11.57 (latent D075): ONE chips-per-rank table in this file, not two.
+ *
+ * devicesPerAccess() and backgroundUnits() each carried their own copy of the
+ * JEDEC device-width population (x4 -> 16, x8 -> 8, x16 -> 4). They agreed, so
+ * nothing could differ today -- which is exactly the shape of the worst defect
+ * this audit found elsewhere: a duplicated table that drifted from the object
+ * it was meant to mirror. One of the two is the array-energy basis and the
+ * other is the background-power basis; a divergence would have made a single
+ * memory system draw standby current for one population while bursting from
+ * another. There is a THIRD copy, memorySystemDieCount() in src/main.cpp,
+ * which owns the AREA basis; it is outside this file and still separate. */
+inline int devicesPerRank(const std::string& device_width) {
+    if (device_width == "x4")  return 16;
+    if (device_width == "x16") return 4;
+    return 8;                       // x8, the default 64-bit rank
+}
 
 struct IDDSpec {
     double vdd;                                    // V
@@ -53,10 +102,32 @@ struct IDDSpec {
 };
 
 // Per-tech datasheet/JESD IDD-class values (part-number classes in comments; see
-// the assumptions register). Mirrors the per-impl current_presets/voltage_presets.
+// the assumptions register).
+/* 1.11.57 (latent D001): the line that used to close the sentence above --
+ * "Mirrors the per-impl current_presets/voltage_presets" -- is GONE, because
+ * it was withdrawn 25 lines higher up in this same header by the 1.11.46 note
+ * and never removed from the place a reader actually quotes. The two
+ * statements contradicted each other inside one file, and the false one came
+ * first. It is false on the very first row: DDR4.cpp's Default preset in this
+ * tree is {60,50,55,145,145, IDD5B 362} against this table's {58,35,42,140,
+ * 150, IDD5 155}. Nothing printed the claim, which is why it survived a
+ * release that explicitly retracted it; the retraction was reachable only by
+ * reading the file top to bottom. This table is the authoritative INTENSIVE
+ * per-access source and does NOT mirror the upstream command-driven presets.
+ */
 //   DDR5  Micron 16Gb DDR5-4800 (VDD 1.1);  DDR4 Micron 8Gb DDR4-2400 (1.2);
 //   DDR3  Micron 4Gb DDR3L-1600 (1.35);     LPDDR5 Micron 12Gb LPDDR5-6400 (1.05);
 //   GDDR6 Micron 8Gb GDDR6-14000 (1.35);    HBM2 JESD235 (1.2); HBM3 JESD238 (1.1).
+/* 1.11.57 (latent F041): THE DIE DENSITIES ABOVE ARE THE IDD PART CLASSES, NOT
+ * THE SIMULATED ORGANISATION. src/main.cpp emits DDR5_8Gb_x8 and DDR3_8Gb_x8,
+ * against the 16 Gb and 4 Gb classes named on those two rows, so a reader who
+ * takes this list as the machine's configuration gets the wrong die. It is
+ * kept as a PROVENANCE list -- these are the datasheets the currents were read
+ * from, which is what a current column needs -- and the mismatch is stated
+ * rather than papered over by editing the densities to match, which would
+ * misattribute the numbers. The substantive half of the same divergence, the
+ * timing layer and the energy layer describing different parts, is carried
+ * numerically by the trfc_ns/trefi_ns columns and is not a comment question. */
 inline IDDSpec iddFor(const std::string& tech) {
     /* idd2p (last column). 1.11.56 (audit D006): this column is APPROXIMATE
      * and is the one column in the table that is not a datasheet read. The
@@ -76,6 +147,11 @@ inline IDDSpec iddFor(const std::string& tech) {
     if (tech == "GDDR6")  return {1.35,70,45,60,210,230,180, 220.0, 1900.0, 1, 30};
     if (tech == "HBM3")   return {1.1, 30,18,22, 90,100, 70, 160.0, 3900.0, 16, 7};
     if (tech == "HBM2")   return {1.2, 28,17,21, 80, 90, 65, 160.0, 3900.0, 8,  7};
+    /* 1.11.57 (latent D007): unknown -> DDR4 class, and it says so. This
+     * governs the array activate/precharge and burst energy, the background
+     * standby power and the refresh line for the whole run. */
+    announceUnknownTech("iddFor", tech,
+                        "array energy, background standby and refresh power");
     return {1.2, 58,35,42,140,150,155, 350.0, 7800.0, 1, 25};  // unknown -> DDR4 class
 }
 
@@ -91,21 +167,53 @@ inline IDDSpec iddFor(const std::string& tech) {
 inline int devicesPerAccess(const std::string& tech,
                             const std::string& device_width = "") {
     if (tech == "DDR3" || tech == "DDR4" || tech == "DDR5") {
-        if (device_width == "x4")  return 16;
-        if (device_width == "x16") return 4;
-        return 8;                       // x8, the default 64-bit rank
+        return devicesPerRank(device_width);   // 1.11.57 (latent D075)
+    }
+    /* 1.11.57 (latent D007): 1 is the RIGHT answer for every technology this
+     * file knows about that is not DDR-class -- HBM's IDD is per channel and
+     * an access stays in one channel, LPDDR5 and GDDR6 put one die behind one
+     * channel -- but it is also what an unrecognised string gets, and for an
+     * unrecognised string it is a guess. Distinguish the two: the known
+     * technologies fall through silently, anything else says so, because the
+     * consequence is that a rank's worth of array energy is charged once
+     * instead of eight times. */
+    if (tech.substr(0, 3) != "HBM" && tech != "LPDDR5" && tech != "GDDR6") {
+        announceUnknownTech("devicesPerAccess", tech,
+                            "how many devices one 64 B access engages (the "
+                            "whole-rank multiplier on array energy)");
     }
     return 1;
 }
 
-// Array read energy per 64B (act+col, 50% row-hit collapse). bank_override_pJ_per_byte
-// > 0 forces the legacy bank-energy path (user knob); 0 = IDD default.
+// Array read energy per 64B (act+pre weighted by the CALLER'S MEASURED row-miss
+// fraction, plus the read burst). bank_override_pJ_per_byte > 0 forces the
+// legacy bank-energy path (user knob); 0 = IDD default.
+/* 1.11.57 (audit D014): the one-line summary said "50% row-hit collapse" -- the
+ * constant 1.11.52 (D003) removed. Twelve lines below, the code takes the miss
+ * fraction from the caller and falls back to 0.5 only when the run carried no
+ * row measurement, and the block there explains that at length. The summary a
+ * reader sees FIRST still asserted the retired constant, so the file described
+ * two different models of its own dominant term. Live in every DRAM run: this
+ * is the function the power path calls. */
+/* 1.11.57 (latent D004): THE OVERRIDE IS ON THE SAME BASIS AS THE MODEL IT
+ * REPLACES. The knob returned bank_pJ_per_byte x 64 with no devicesPerAccess()
+ * factor while the IDD path beside it multiplied by the whole rank, so setting
+ * the override on a DDR-class part did not merely substitute a value, it also
+ * silently changed the basis and dropped DDR array energy by 8x. The knob is
+ * documented as "override the IDD-derived array energy", so it must land in
+ * the same units the IDD path produces: a per-DEVICE bank figure, scaled to
+ * the devices one access engages. This was invisible because the knob has NO
+ * WRITER -- setBankEnergyOverridePJPerByte() is declared in
+ * ramulator_wrapper.h, the member is initialised to 0.0, and nothing in src/
+ * or include/ or any YAML key ever calls it -- so the 8x lived in a branch
+ * that never runs. It runs the first time anyone wires a YAML key to it. */
 inline double arrayReadNJ(const std::string& tech, double tRC, double tRAS,
                           double tBurst, double bank_override_pJ_per_byte,
                           const std::string& device_width = "",
                           double row_miss_frac = -1.0) {
     if (bank_override_pJ_per_byte > 0.0)
-        return bank_override_pJ_per_byte * 64.0 / 1000.0;
+        return bank_override_pJ_per_byte * 64.0 / 1000.0
+               * devicesPerAccess(tech, device_width);   // 1.11.57 (D004)
     IDDSpec s = iddFor(tech);
     double e_actpre_pJ = s.vdd * (s.idd0 * tRC - s.idd3n * tRAS - s.idd2n * (tRC - tRAS));
     double e_rd_pJ     = s.vdd * (s.idd4r - s.idd3n) * tBurst;
@@ -129,8 +237,21 @@ inline double arrayWriteNJ(const std::string& tech, double tRC, double tRAS,
                            double row_miss_frac = -1.0) {
     /* 1.11.5 (audit): writes consult IDD4W, not read*1.2. Same shape as the
      * read term: activate/precharge share plus the write burst current. */
+    /* 1.11.57 (latent D004): the RETIRED 1.2 is gone from here too. Two lines
+     * under the comment announcing that "writes consult IDD4W, not read*1.2",
+     * the override branch still multiplied the user's number by exactly that
+     * 1.2 -- the ratio 1.11.5 removed as unsourced. A user-supplied array
+     * energy per byte is ONE figure; this file has no sourced write/read ratio
+     * to apply to it (the IDD path gets its write term from IDD4W, which the
+     * override deliberately bypasses), so inventing 20% on top of a number the
+     * user chose is worse than reporting the number the user chose. Writes and
+     * reads therefore take the same override, and the missing write premium is
+     * a stated limitation of the knob rather than a fabricated constant. It
+     * was invisible for the same reason as the read half: the knob has no
+     * writer anywhere in the tree. */
     if (bank_override_pJ_per_byte > 0.0)
-        return bank_override_pJ_per_byte * 64.0 / 1000.0 * 1.2;
+        return bank_override_pJ_per_byte * 64.0 / 1000.0
+               * devicesPerAccess(tech, device_width);   // 1.11.57 (D004)
     IDDSpec s = iddFor(tech);
     double e_actpre_pJ = s.vdd * (s.idd0 * tRC - s.idd3n * tRAS - s.idd2n * (tRC - tRAS));
     double e_wr_pJ     = s.vdd * (s.idd4w - s.idd3n) * tBurst;
@@ -148,7 +269,34 @@ inline double arrayWriteNJ(const std::string& tech, double tRC, double tRAS,
  * (below), which was computed and never charged. */
 
 /* ODT/termination per 64B, per I/O standard. term_override_pJ_per_bit >= 0 =
- * user knob; termination_enable=false forces 0.
+ * user knob.
+ *
+ * 1.11.57 (latent D005): the `bool termination_enable = true` parameter is
+ * GONE. It was a documented knob with no writer: both call sites in
+ * ramulator_wrapper.cpp passed two arguments, nothing in src/ or include/ ever
+ * passed false, and no YAML key reached it. A defaulted parameter that no
+ * caller can set is not a switch, it is a claim in the signature that the
+ * model can be turned off -- and the next person to believe it would have
+ * added the knob at the wrong layer, because "no termination" is a property of
+ * the I/O standard (LVSTL, HBM's unterminated interposer) that this function
+ * already decides from the technology. Deleted rather than wired up.
+ *
+ * 1.11.57 (latent D017): THE RATE COMES FROM THE CALLER, and there is now one
+ * rate table in the tree instead of two. This function used to carry its own
+ * mtps column -- DDR3 1600, DDR4 2400, DDR5 4800, GDDR6 14000, LPDDR5 6400,
+ * and 3200 for anything else -- beside CactiIOWrapper::dramRateMTs(), which
+ * carries the same quantity for the same technologies. The two are the halves
+ * of one access: dramRateMTs decides the bandwidth and the CACTI-IO
+ * termination figure, this column decided the bit period the scheme-table
+ * termination is integrated over. They had already drifted: 1.11.57 (C001)
+ * moved DDR5 to 3200 MT/s in dramRateMTs to match the preset this tree
+ * simulates, and this column stayed at 4800, i.e. a 1.5x error waiting on the
+ * day DDR5 stops taking the exact-map CACTI-IO path. It was invisible because
+ * every technology that reaches this table today either has an exact CACTI-IO
+ * map (DDR3/DDR4/DDR5, whose result replaces this one) or returns before the
+ * rate is read (HBM). The transfer rate is a specification primitive and
+ * belongs in one place; the electricals below (scheme, VDDQ, Rtt, Ron) are
+ * interface-standard properties and stay here, where they are sourced.
  *
  * 1.11.22 (user decision D12) -- DERIVED FROM THE JEDEC I/O STANDARDS the
  * technologies actually cite, replacing a per-scheme fudge factor whose
@@ -208,8 +356,7 @@ inline double arrayWriteNJ(const std::string& tech, double tRC, double tRAS,
  * skews the LOW fraction, so the true duty is data-dependent; D12's IDD
  * cross-check is what pins that residual. */
 inline double terminationNJ(const std::string& tech, double term_override_pJ_per_bit,
-                            bool termination_enable = true) {
-    if (!termination_enable) return 0.0;
+                            double rate_mts) {
     if (term_override_pJ_per_bit >= 0.0)
         return term_override_pJ_per_bit * 512.0 / 1000.0;
 
@@ -221,23 +368,24 @@ inline double terminationNJ(const std::string& tech, double term_override_pJ_per
      * VDDQ. So current flows while the driver holds the line HIGH, duty ~0.5
      * for random data, across a loop of driver pull-up plus terminator. */
     enum Scheme { POD, SSTL, LVSTL, NONE };
-    Scheme sch; double vddq, rtt, rpd, mtps;
+    Scheme sch; double vddq, rtt, rpd;   // 1.11.57 (D017): mtps is the caller's
     /* 1.11.46 (FIX-PRE-FLEET L164): ONE PART per technology. The IDD row
      * above is sourced from Micron 4Gb DDR3L-1600 -- a 1.35 V part -- while
      * this line priced a 1.5 V SSTL-15 DDR3. Array and termination now
      * describe the SAME silicon: DDR3L, SSTL-135 (JESD79-3-1, the DDR3L
      * addendum keeps RZQ=240 and the T38/T41 RTT/RON tables at 1.35 V). */
-    if      (tech=="DDR3")   {sch=SSTL; vddq=1.35; rtt=40;  rpd=34;  mtps=1600;}   // SSTL-135; JESD79-3-1 + T38/T41
-                                                                                   // (RTT40=RZQ/6) + T38
-                                                                                   // (RON34=RZQ/7), RZQ=240
-    /* 1.11.52 (audit D002): mtps is the SIMULATED part's rate (DDR4-2400:
+    if      (tech=="DDR3")   {sch=SSTL; vddq=1.35; rtt=40;  rpd=34;}   // SSTL-135; JESD79-3-1 + T38/T41
+                                                                       // (RTT40=RZQ/6) + T38
+                                                                       // (RON34=RZQ/7), RZQ=240
+    /* 1.11.52 (audit D002): the rate is the SIMULATED part's rate (DDR4-2400:
      * Ramulator preset DDR4_2400R and the architecture object), not a
      * different bin. POD12 (JESD8-24) is the interface standard and applies
-     * at either rate, so vddq/rtt/rpd are untouched. */
-    else if (tech=="DDR4")   {sch=POD;  vddq=1.2;  rtt=48;  rpd=40;  mtps=2400;}   // POD12  (JESD8-24)
-    else if (tech=="DDR5")   {sch=POD;  vddq=1.1;  rtt=48;  rpd=40;  mtps=4800;}   // POD11  (same family)
-    else if (tech=="GDDR6")  {sch=POD;  vddq=1.35; rtt=60;  rpd=40;  mtps=14000;}  // POD135 (JESD8-21C, Cl.D:
-                                                                                   // RTT programmable 48/60 via MR6)
+     * at either rate, so vddq/rtt/rpd are untouched. 1.11.57 (D017): that rate
+     * now arrives as an argument, from the one table that owns it. */
+    else if (tech=="DDR4")   {sch=POD;  vddq=1.2;  rtt=48;  rpd=40;}   // POD12  (JESD8-24)
+    else if (tech=="DDR5")   {sch=POD;  vddq=1.1;  rtt=48;  rpd=40;}   // POD11  (same family)
+    else if (tech=="GDDR6")  {sch=POD;  vddq=1.35; rtt=60;  rpd=40;}   // POD135 (JESD8-21C, Cl.D:
+                                                                       // RTT programmable 48/60 via MR6)
     /* 1.11.26: was NONE ("LVSTL, unterminated") -- wrong. LPDDR5 does
      * terminate; it terminates to VSS. VDDQ 0.5 V is the ODT-ON rail
      * (0.30 V is the ODT-off rail), RON 40 ohm from the same datasheets.
@@ -252,12 +400,33 @@ inline double terminationNJ(const std::string& tech, double term_override_pJ_per
      * 280-ohm loop (a 2x error in it moves LPDDR5 termination energy
      * ~1.75x). It was disclosed only in a comment 45 lines away; the
      * consumer now reports it at the point of use (see terminationNJ). */
-    else if (tech=="LPDDR5") {sch=LVSTL; vddq=0.5; rtt=240; rpd=40; mtps=6400;}
-    else if (tech.substr(0,3)=="HBM") return 0.0;                                  // interposer (JESD238B cl.9.1)
-    else                     {sch=POD;  vddq=1.2;  rtt=48;  rpd=40;  mtps=3200;}
+    else if (tech=="LPDDR5") {sch=LVSTL; vddq=0.5; rtt=240; rpd=40;}
+    else if (tech.substr(0,3)=="HBM") return 0.0;                      // interposer (JESD238B cl.9.1)
+    else {
+        /* 1.11.57 (latent D007): unknown -> POD12/DDR4 electricals, said out
+         * loud. This branch also disagrees with iddFor()'s exact "HBM2"/"HBM3"
+         * match three functions up: a string like "HBM2E" gets zero here (the
+         * substr) and DDR4 currents there. Whitelisting keeps both unreachable
+         * today. */
+        announceUnknownTech("terminationNJ", tech,
+                            "the DQ termination energy per 64 B access");
+        sch=POD;  vddq=1.2;  rtt=48;  rpd=40;
+    }
     if (sch == NONE) return 0.0;
 
-    const double t_bit_s = 1.0 / (mtps * 1e6);
+    /* 1.11.57 (latent D017): the bit period comes from the caller's rate. A
+     * non-positive rate means the caller could not source one, and this
+     * function will not invent a speed bin to keep a number flowing -- it
+     * reports zero termination and says why, which is visibly wrong rather
+     * than plausibly wrong. */
+    if (!(rate_mts > 0.0)) {
+        announceUnknownTech("terminationNJ", tech,
+                            "the DQ termination energy per 64 B access, which "
+                            "is reported as ZERO because no data rate was "
+                            "supplied for this technology");
+        return 0.0;
+    }
+    const double t_bit_s = 1.0 / (rate_mts * 1e6);
     double e_per_bit_pJ;
     if (sch == LVSTL) {
         /* Ground-referenced: the loop conducts while the line is HIGH, so the
@@ -372,10 +541,19 @@ inline int backgroundUnits(const std::string& tech,
         return per_stack * stacks;
     }
     if (tech == "DDR3" || tech == "DDR4" || tech == "DDR5") {
-        int chips = 8;                  // x8, the default 64-bit rank
-        if (device_width == "x4")  chips = 16;
-        if (device_width == "x16") chips = 4;
-        return chips * ranks_per_channel * channels;
+        /* 1.11.57 (latent D075): was a second copy of the x4/x8/x16 table
+         * that devicesPerAccess() also carried. One table now. */
+        return devicesPerRank(device_width) * ranks_per_channel * channels;
+    }
+    /* 1.11.57 (latent D007): one IDD-bearing unit per channel is correct for
+     * LPDDR5 (an x16 die serves its own channel) and GDDR6 (point to point),
+     * and it is a guess for anything this file does not recognise -- where it
+     * silently understates the memory system's whole background power by the
+     * rank population. Known technologies fall through; anything else says so. */
+    if (tech != "LPDDR5" && tech != "GDDR6") {
+        announceUnknownTech("backgroundUnits", tech,
+                            "the population the memory system's background "
+                            "power and refresh line are multiplied by");
     }
     return ranks_per_channel * channels;
 }

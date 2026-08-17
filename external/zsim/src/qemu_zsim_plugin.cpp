@@ -52,7 +52,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 #include "profile_stats.h"
 #include "scheduler.h"
 #include "stats.h"
-#include "cache.h"   // 1.11.40 (N7): zsimAllCaches / dirtyBytes
+#include "cache.h"   // 1.11.40 (N7): zsimAllCaches; 1.11.57 (D001-D003): flushDirtyLines
 #include "zsim.h"
 #include "ooo_core.h"     // CtrlFlowKind codes for the branch/indirect feed
 #include "x86_decoder.h"  // minimal x86-64 decoder -> DynUops for the real OOO path
@@ -811,10 +811,18 @@ static void recordProtocolTailStats() {
  * process lives on to finish its MPI protocol (closing barrier, serving
  * reduces as root). The later real SimEnd (natural guest exit) skips the
  * re-dump. */
-/* 1.11.40 (audit E17): dump the inter-event gap histograms. MEASUREMENT ONLY
- * -- nothing in the power model reads these. They answer the question E17
- * raised before any residency redesign is attempted: does idle time at a
- * gating-relevant scale actually EXIST in these workloads, and how much of it?
+/* 1.11.40 (audit E17): dump the inter-event gap histograms. They answer the
+ * question E17 raised before any residency redesign is attempted: does idle
+ * time at a gating-relevant scale actually EXIST in these workloads, and how
+ * much of it?
+ *
+ * 1.11.57 (audit round 3, residual on F006): "MEASUREMENT ONLY -- nothing in
+ * the power model reads these" is FALSE of the devMC half and has been since
+ * 1.11.51, which reads the devMC buckets back to weight DRAM power-down
+ * residency (init.cpp exports them; src/main.cpp replaces mc_r_idle from
+ * them). 1.11.55 corrected the PRINTED claim below and left this comment
+ * standing, so the file still opened with the retracted sentence. The claim
+ * survives only for the NoC half, where no sourced wake penalty exists.
  *
  * The reported thresholds are the wake penalties a real scheme would pay:
  *   tXP    DRAM precharge power-down exit, ~10 ns. At the device clock that is
@@ -862,7 +870,16 @@ static void dumpGapHistograms() {
                  it.name, b, (double)(1ull << b) * 1000.0 / mhz,
                  (unsigned long)h->count[b], (unsigned long)h->cycles[b]);
         }
-        info("[E17 %s] cycles in gaps total=%lu (%.2f%% of run)", it.name,
+        /* 1.11.57 (audit round 3, residual on F007): "% of run" against an
+         * ROI-SPAN divisor. `total` is spanCycles(), the window the samples
+         * cover -- on the detailed cell the surrounding comment cites, that
+         * is 1016 phases of 7086, so a reader who took the label at face
+         * value was off by ~7x in the reassuring direction. 1.11.55 listed
+         * this among its truth-in-comment corrections and fixed only the
+         * sibling line fourteen lines above; this one kept the wrong word,
+         * which is worse than either -- two lines in one block using "of run"
+         * and "of span" for the same divisor. */
+        info("[E17 %s] cycles in gaps total=%lu (%.2f%% of span)", it.name,
              (unsigned long)inGaps, total ? 100.0 * inGaps / total : 0.0);
         const double ns_thresh[3] = {10.0, 100.0, 1000.0};
         const char*  ns_name[3]   = {"tXP~10ns", "100ns", "1us"};
@@ -2129,90 +2146,167 @@ static uint32_t boundaryTransferCycles(uint32_t transfer_bytes = 0) {
  * Registry scope: alu_core PEs carry no cache, so in a co-sim run every
  * registered cache is a host cache. The count is reported so that assumption is
  * visible; a cache-bearing PE type would require making this role-aware. */
-static uint64_t measuredFlushFootprintBytes() {
+
+/* ------------------------------------------------------------------------
+ * 1.11.57 (audit D001, D002, D003, D004, D005, D015): THE COHERENCE FLUSH,
+ * REDESIGNED AS ONE MECHANISM. State the design before the code, because the
+ * three 1.11.55 fixes this replaces were each locally reasonable and jointly
+ * wrong.
+ *
+ * What 1.11.55 left behind. chargeCoherenceFlush() runs ONCE PER RANK -- each
+ * thread-MPI rank charges its own kernel-entry barrier arrival, deliberately
+ * outside g_migrateMutex, while ranks that have not arrived are still
+ * retiring guest memory operations on their host cores. Over that:
+ *   F016 divided the footprint by the rank count on BOTH the cycle and the
+ *        byte side, on the invariant "the slices sum to the footprint once";
+ *   F017 cleaned the GLOBAL cache registry M -> E inside the same call;
+ *   F015 measured the footprint at the LAST cache level, on the inclusion
+ *        argument "child in M => parent in M".
+ * F016 and F017 are incompatible: the first rank to arrive measured the whole
+ * footprint F, charged F/N, and then wiped the dirty set, so ranks 2..N
+ * measured ~0. The slices summed to F/N, not F -- an N-fold understatement of
+ * xingFlushBytes and hence of the flush's DRAM writeback energy (16x on a
+ * 16-rank cell), plus a host timeline in which rank 0 pays for everyone and
+ * the payer is decided by arrival order. F015 and F017 also break each other:
+ * zsim upgrades E -> M SILENTLY in the child on a GETX hit, so after a clean
+ * (and, in fact, after any plain read-then-write) a line is M in the L1D and E
+ * in the LLC, and a last-level count cannot see it at all.
+ *
+ * The design that replaces them, in three decisions.
+ *
+ * 1. WHO OWNS THE MEASUREMENT. Nobody counts anything twice, because counting
+ *    and cleaning are the SAME operation: measureAndCleanFlushEpoch() walks
+ *    every registered cache once, takes each line that is in M to E, and
+ *    unions the ADDRESSES of those lines into one set. The footprint is the
+ *    size of that set. De-duplicating by address rather than by cache level
+ *    means the number is right whatever the hierarchy does -- inclusive,
+ *    non-inclusive, silently upgraded, three levels or one -- so F015's
+ *    inclusion argument (D002) and its single global "deepest level" choice
+ *    (D005, which zeroed any node shallower than the deepest node anywhere)
+ *    both stop being load-bearing. A line that leaves M is counted exactly
+ *    once, ever: not once per level, and not once per offload.
+ *
+ * 2. WHEN THE CLEAN HAPPENS RELATIVE TO THE PER-RANK CHARGE. The flush is ONE
+ *    event for one shared coherent hierarchy, but the charge is per rank, so
+ *    the two are separated explicitly into an EPOCH. The first rank to arrive
+ *    opens the epoch: it performs the single measure-and-clean, divides the
+ *    footprint by the number of ranks that will charge against it, and stores
+ *    that slice. Every rank of the epoch -- the opener included -- then
+ *    charges the SAME slice, on BOTH the cycle side and the byte side, and
+ *    the epoch closes when the last of them has taken its share. The slices
+ *    therefore sum to the footprint exactly once (D4's invariant, now true
+ *    mechanically rather than by assertion), every rank pays the same amount
+ *    so the host cost no longer depends on who arrived first (D001), and
+ *    whatever a late rank dirties AFTER the walk stays in M and is charged at
+ *    the NEXT offload's epoch instead of being lost. The integer remainder
+ *    F % N goes to the opener so the sum is exact to the byte.
+ *
+ * 3. WHAT LOCKING THE WALK NEEDS. Two locks, at different scopes. A
+ *    plugin-level mutex serialises epoch bookkeeping, so two ranks cannot
+ *    both decide they are the opener and walk the caches at the same time.
+ *    Inside the walk, each cache is entered under its OWN bottom-cc lock (the
+ *    lock MESICC::startAccess takes), one cache at a time, never two at once
+ *    -- so an executing rank blocked on that cache simply waits, and no lock
+ *    cycle can form with the hand-over-hand child -> tcc -> bcc order of the
+ *    access path. That closes D003 in both of its forms: an array[i] = E can
+ *    no longer overwrite a dirty bit another thread has just set, and it can
+ *    no longer land between MESIBottomCC::processAccess's "*state = M" and
+ *    the compiled-in assert_msg(*state == M, "Wrong final state on GETX")
+ *    that would abort the run through *(int*)0 = 42.
+ * ------------------------------------------------------------------------ */
+
+/* Epoch state. g_flushEpochMutex guards all of it. */
+static std::mutex g_flushEpochMutex;
+static uint32_t   g_flushEpochRemaining  = 0;   // ranks yet to take their slice
+static uint64_t   g_flushEpochFootprint  = 0;   // distinct dirty bytes found
+static uint64_t   g_flushEpochSliceBytes = 0;   // per-rank share of the above
+static uint64_t   g_flushEpochCleanedLn  = 0;   // per-level sum, for the log
+static uint64_t   g_flushEpochResidual   = 0;   // footprint % rank count
+static uint64_t   g_flushEpochId         = 0;   // bumped when an epoch opens
+static uint64_t   g_flushEpochSeen[MAX_THREADS] = {0};  // last epoch each tid took
+
+/* How many callers will charge against ONE measure-and-clean. Only thread-MPI
+ * shares a cache registry across ranks; a process-mode rank has its own zsim
+ * instance and its own caches, so dividing by the rank count there would
+ * understate every one of them. (1.11.55 used g_mpi_rank_count unconditionally
+ * -- invisible only because process-mode MPI is device-scope, where
+ * coherence.enabled is false and no flush is ever charged.) */
+static inline uint32_t flushEpochParticipants() {
+    if (!g_mpi_thread_mode) return 1u;
+    return (g_mpi_rank_count > 0) ? g_mpi_rank_count : 1u;
+}
+
+/* The single walk. Caller holds g_flushEpochMutex. Returns distinct dirty
+ * bytes; *cleanedLines gets the per-level line count, which is legitimately
+ * larger and is reported as the different quantity it is (D004). */
+static uint64_t measureAndCleanFlushEpoch(uint64_t* cleanedLines) {
+    *cleanedLines = 0;
     if (!zinfo) return 0;
-    /* 1.11.55 (audit F015): COUNT EACH DIRTY LINE ONCE. Summing dirtyBytes
-     * over every registered cache double-counts an inclusive hierarchy: when
-     * a child writes back, MESIBottomCC::processWritebackOnAccess drives the
-     * PARENT's own state E->M (coherence_ctrls.cpp:153-160), so one dirty
-     * 64 B line is M in both L1D and L2 and was counted as 128 B. With an L3
-     * it is 3x. The footprint drives BOTH the host flush cycles and the
-     * bytes priced as DRAM writebacks, so the error propagated into time and
-     * energy alike.
-     *
-     * The last level holds every dirty line exactly once in an inclusive
-     * hierarchy, so that is the level counted. Levels are read from the
-     * cache names the config emits (<node>_l1d/_l1i/_l2/_l3); the deepest
-     * level present wins. A non-inclusive hierarchy would make this an
-     * under-count -- zsim's nonInclusiveHack exists -- so the assumption is
-     * printed once with the level it chose, rather than left implicit. */
+    std::unordered_set<Address> distinct;
     const g_vector<Cache*>& all = zsimAllCaches();
-    int deepest = 1;
     for (Cache* c : all) {
         if (!c) continue;
-        const char* n = c->getName();
-        if (!n) continue;
-        std::string nm(n);
-        if (nm.find("_l3") != std::string::npos)      deepest = std::max(deepest, 3);
-        else if (nm.find("_l2") != std::string::npos) deepest = std::max(deepest, 2);
-    }
-    const char* tag = (deepest == 3) ? "_l3" : (deepest == 2) ? "_l2" : "_l1";
-    uint64_t bytes = 0;
-    int counted = 0;
-    for (Cache* c : all) {
-        if (!c) continue;
-        const char* n = c->getName();
-        if (!n) continue;
-        std::string nm(n);
-        /* At L1 there is no shared level: count the data caches only (an
-         * instruction cache holds no dirty lines, but naming it out keeps
-         * the intent explicit). */
-        bool take = (deepest == 1) ? (nm.find("_l1d") != std::string::npos)
-                                   : (nm.find(tag) != std::string::npos);
-        if (!take) continue;
-        bytes += c->dirtyBytes(zinfo->lineSize);
-        counted++;
+        *cleanedLines += c->flushDirtyLines(distinct);
     }
     static bool said = false;
     if (!said) {
         said = true;
-        info("[flush] dirty footprint counted at the LAST level (%s, %d cache(s) "
-             "of %d registered): an inclusive hierarchy holds each dirty line "
-             "once there. A non-inclusive hierarchy would make this an "
-             "under-count.", tag, counted, (int)all.size());
+        info("[flush] dirty footprint measured as DISTINCT line addresses over "
+             "all %d registered cache(s), cleaned M -> E in the same locked "
+             "pass. No inclusion assumption: a line held dirty at several "
+             "levels is one line, and a line dirty only in an L1D (zsim "
+             "upgrades E -> M silently in the child) is still seen.",
+             (int)all.size());
     }
-    return bytes;
+    return (uint64_t)distinct.size() * (uint64_t)zinfo->lineSize;
 }
 
-/* The footprint used. No override, no default: the flush moves the dirty lines
- * that exist AT THIS FLUSH, and that is a different number at each one -- the
- * dirty set after offload #1 is not the dirty set after #2. Any constant here,
- * however configurable, asserts that it does not change. */
-static uint64_t effectiveFlushFootprintBytes() {
-    if (!zinfo) return 0;
-    uint64_t measured = measuredFlushFootprintBytes();
-    zinfo->coherence.footprintMeasured = measured;
-    return measured;
-}
-
-static uint64_t coherenceFlushCycles() {
-    if (!zinfo || !zinfo->coherence.enabled) return 0;
-    if (zinfo->coherence.mode != 0) return 0;   // separate = cache bypass, no flush
-    uint64_t cyc = zinfo->coherence.flushFixedCycles;
-    /* 1.11.55 (audit F016): THE SAME SLICE THE BYTES USE. The footprint is
-     * measured over the GLOBAL cache registry while this charge runs ONCE
-     * PER RANK, so the flush TIME was booked as N x footprint while the
-     * flush BYTES were priced (D4) as 1 x footprint / N per rank. The
-     * timing half therefore carried exactly the slope in N that D4 removed
-     * from the energy half -- aimed straight at the pecount sweep, which is
-     * what D4 existed to protect. One working set, one division. */
-    uint64_t fp = effectiveFlushFootprintBytes() /
-                  ((g_mpi_rank_count > 0) ? g_mpi_rank_count : 1u);
-    if (zinfo->coherence.writebackBytesPerCycle > 0.0 && fp > 0) {
-        cyc += (uint64_t)std::ceil(
-            (double)fp / zinfo->coherence.writebackBytesPerCycle);
+/* Take this rank's slice, opening a new epoch if this is the first arrival.
+ * Returns false if the flush is disabled for this run.
+ *
+ * An epoch closes when `participants` charges have been taken against it, OR
+ * when a thread that already took its share of the current epoch comes back --
+ * which is what a SECOND offload looks like when fewer ranks reached the first
+ * one than PIMID_MPI_RANKS advertises. Without the second test a short-handed
+ * offload would leave the epoch half-open and the next offload would re-charge
+ * the stale slice instead of measuring the newly dirtied set. */
+static bool takeFlushEpochSlice(uint32_t tid, uint64_t* sliceBytes,
+                                uint64_t* epochFootprint,
+                                uint64_t* cleanedLines, bool* opened) {
+    if (!zinfo || !zinfo->coherence.enabled) return false;
+    if (zinfo->coherence.mode != 0) return false;  // separate = cache bypass, no flush
+    std::lock_guard<std::mutex> lk(g_flushEpochMutex);
+    *opened = false;
+    const bool repeatCaller = (tid < MAX_THREADS) &&
+                              (g_flushEpochId > 0) &&
+                              (g_flushEpochSeen[tid] == g_flushEpochId);
+    if (g_flushEpochRemaining == 0 || repeatCaller) {
+        const uint32_t n = flushEpochParticipants();
+        uint64_t cleaned = 0;
+        const uint64_t fp = measureAndCleanFlushEpoch(&cleaned);
+        g_flushEpochFootprint  = fp;
+        g_flushEpochCleanedLn  = cleaned;
+        g_flushEpochSliceBytes = fp / n;
+        g_flushEpochResidual   = fp % n;   // to the opener, so the slices are exact
+        g_flushEpochRemaining  = n;
+        /* 1.11.57 (audit D015): footprintMeasured is a DIAGNOSTIC field that
+         * no stat exports and no consumer reads. It used to be written twice
+         * per flush from two separate measurements, so even as a diagnostic it
+         * only ever held the second one. It is now written once per epoch and
+         * holds the GLOBAL footprint -- the sum of every rank's slice, NOT the
+         * per-rank charge. Anyone exporting it as a stat must export it beside
+         * xing.flushBytes under that name, or repeat D004's confusion in the
+         * stats stream. */
+        zinfo->coherence.footprintMeasured = fp;
+        g_flushEpochId++;
+        *opened = true;
     }
-    return cyc;
+    *sliceBytes = g_flushEpochSliceBytes + (*opened ? g_flushEpochResidual : 0);
+    *epochFootprint = g_flushEpochFootprint;
+    *cleanedLines = g_flushEpochCleanedLn;
+    if (tid < MAX_THREADS) g_flushEpochSeen[tid] = g_flushEpochId;
+    g_flushEpochRemaining--;
+    return true;
 }
 
 /**
@@ -2223,8 +2317,22 @@ static uint64_t coherenceFlushCycles() {
  * override addDelay. Accumulates the flush stats.
  */
 static void chargeCoherenceFlush(uint32_t tid) {
-    uint64_t flushCyc = coherenceFlushCycles();
+    uint64_t flushSlice = 0, epochFootprint = 0, cleanedLines = 0;
+    bool opened = false;
+    if (!takeFlushEpochSlice(tid, &flushSlice, &epochFootprint, &cleanedLines,
+                             &opened))
+        return;
+
+    /* Cycles come from the SAME slice as the bytes (1.11.55 F016's symmetry,
+     * kept), but from the slice this rank actually charges rather than from a
+     * second, independent measurement of a set the opener had already wiped. */
+    uint64_t flushCyc = zinfo->coherence.flushFixedCycles;
+    if (zinfo->coherence.writebackBytesPerCycle > 0.0 && flushSlice > 0) {
+        flushCyc += (uint64_t)std::ceil(
+            (double)flushSlice / zinfo->coherence.writebackBytesPerCycle);
+    }
     if (flushCyc == 0) return;
+
     uint32_t fc = (uint32_t)std::min<uint64_t>(flushCyc, 0xFFFFFFFFull);
     BblInfo* bbl = createSimpleBblInfo(fc, 0, true);  // 1.11.7: no phantom fetch; 1.11.16: injected charge
     fPtrs[tid].bblPtr(tid, 0, bbl);
@@ -2234,37 +2342,27 @@ static void chargeCoherenceFlush(uint32_t tid) {
      * -- and since 1.11.16 reattributed the flush to memory writebacks, that
      * N-fold term landed directly in the array energy CAL reads. Worse, it
      * gave a FIXED working set an energy slope in N, aimed straight at the
-     * pecount sweep. The slices now sum to the footprint exactly once. */
-    /* 1.11.40 (N7): slice the MEASURED footprint, not the configured constant.
-     * D4's per-rank slicing is unchanged -- the slices still sum to the whole
-     * footprint exactly once; only the quantity being sliced is now real. */
-    uint64_t flushFootprint = effectiveFlushFootprintBytes();
-    uint64_t flushSlice = flushFootprint /
-                          ((g_mpi_rank_count > 0) ? g_mpi_rank_count : 1u);
+     * pecount sweep. The slices sum to the footprint exactly once. */
     __sync_fetch_and_add(&zinfo->xing.flushBytes, flushSlice);
     __sync_fetch_and_add(&zinfo->xing.count, 1);
     __sync_fetch_and_add(&zinfo->coherence.flushCount, 1);
     __sync_fetch_and_add(&zinfo->coherence.flushCyclesCharged, flushCyc);
-    /* 1.11.55 (audit F017): THE FLUSH ACTUALLY CLEANS. Until now it measured
-     * the dirty set, charged for it, and left every line in M -- so offload
-     * #2 re-measured and re-charged the same working set, and both host
-     * cycles and flushBytes grew linearly in the number of offloads for data
-     * a real flush had written back once. The comment above this function
-     * even argued the dirty set "is a different number at each one", which
-     * is exactly what the code prevented from being true. Lines go M -> E:
-     * memory is current, the line is still valid. */
-    uint64_t cleaned = 0;
-    for (Cache* c : zsimAllCaches())
-        if (c) cleaned += c->cleanDirtyBytes(zinfo->lineSize);
-    /* The two byte figures are DIFFERENT QUANTITIES and are labelled as such:
-     * the charge is UNIQUE dirty data (last level, F015), while cleaning has
-     * to touch every level that holds a copy -- so the cleaned figure is the
-     * per-level sum and is legitimately larger. */
-    info("Thread %d: Case-1 coherence flush (charged %llu B of unique dirty "
-         "data -> %llu cycles; cleaned %llu B of cache lines across %zu caches "
+    /* 1.11.57 (audit D004): print the bytes THIS CALL CHARGED, not the global
+     * figure. The 1.11.55 line printed the undivided footprint under the word
+     * "charged" beside a charge of footprint/N -- at N = 16 it reported 16x
+     * the bytes it had just added -- and that is precisely the line a reader
+     * would use to audit the division. Both quantities are still here, each
+     * under its own name, and the per-level cleaned count is labelled as the
+     * different quantity it is (a dirty line resident at three levels is one
+     * line of charge and three lines of cleaning). */
+    info("Thread %d: Case-1 coherence flush (charged %llu B -> %llu cycles; "
+         "this rank's slice of a %llu B distinct-dirty epoch footprint shared "
+         "by %u charge(s)%s; %llu cache line(s) taken M -> E across %zu caches "
          "at all levels, so the next flush sees only what is re-dirtied)",
-         tid, (unsigned long long)flushFootprint, (unsigned long long)flushCyc,
-         (unsigned long long)cleaned, zsimAllCaches().size());
+         tid, (unsigned long long)flushSlice, (unsigned long long)flushCyc,
+         (unsigned long long)epochFootprint, flushEpochParticipants(),
+         opened ? ", measured here" : ", measured by the first rank in",
+         (unsigned long long)cleanedLines, zsimAllCaches().size());
 }
 
 /**
@@ -2451,6 +2549,19 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
         // Snapshot each core's ROI baseline so the reported cycles/instrs cover
         // ONLY the kernel (roi_begin..roi_end), excluding the serial pre-ROI
         // array-init/setup that otherwise runs on the launcher PE and dominates.
+        /* 1.11.57 (latent F010): ONE THREAD SNAPSHOTS EVERY CORE, and the
+         * condition that makes that reproducible is stated rather than
+         * assumed. Core::markRoiBegin captures instrs, the mix accumulators
+         * and pgAct.activePhases; if another guest thread were retiring BBLs
+         * on another core at this instant, that core's baseline would land at
+         * a schedule-dependent point and the ROI window would differ run to
+         * run. It does not happen in the shipped workloads: they call
+         * zsim_roi_begin() from the single main thread BEFORE any parallel
+         * region, and the shared-memory variants bracket the parallel region
+         * rather than opening the ROI inside it. Nothing tears either -- the
+         * fields are aligned 64-bit stores -- so the exposure is a shifted
+         * baseline, not a corrupt one. The thread-MPI path does not have this
+         * shape at all: it baselines only the calling rank's own core. */
         for (uint32_t c = 0; c < zinfo->numCores; c++)
             if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
         zinfo->pgres.markRoi(zinfo->numPhases, zinfo->globPhaseCycles);   // 1.11.18: PG residency window
@@ -2565,7 +2676,34 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
             // host inside the task window (the workloads here use ROI markers, but
             // the explicit-work offload path prices the launch identically).
             chargeLaunchCost(tid);
-            drainHostCharges(tid);  // retire the launch BBL before migration drops it
+            /* PCIe/CXL offload timing: host -> device transfer latency.
+             *
+             * 1.11.57 (latent D012): CHARGED ON THE HOST CORE, LIKE ITS
+             * MIRROR. This injection used to sit AFTER the detach and the
+             * re-attach under device_mask, so the BBL retired on a device PE
+             * at the DEVICE clock -- while the cycle count inside it was
+             * built by getPCIeLatency from pcie.baseLatencyCycles and
+             * pcie.bytesPerCycle, which 1.11.56 (B061) deliberately re-based
+             * on the HOST/reference clock, saying in as many words that
+             * "these cycles are SPENT by the host cores". At the reference
+             * co-sim ratio (host 3000 MHz, device 500 MHz) every h2d transfer
+             * was spent 6x longer than the nanoseconds it was converted from.
+             * WORK_END already does it correctly -- it restores DOMAIN_HOST
+             * and re-attaches before charging -- and that asymmetry between
+             * two halves of one transfer is what makes this visible at all.
+             * Latent because no shipped guest reaches this opcode: the co-sim
+             * message-passing variants that docs/benchmarks.md says call
+             * zsim_work_begin_sized do not exist in this tree.
+             *
+             * 1.11.7: timing-only BBL -- ZERO fetch bytes. The old pcieLat*4
+             * manufactured phantom ifetch traffic that landed in the
+             * cache/DRAM counters energy is charged from. */
+            uint32_t pcieLat = boundaryTransferCycles(payload_size);
+            if (pcieLat > 0) {
+                BblInfo* bbl = createSimpleBblInfo(pcieLat, 0, true);  // 1.11.16: injected charge
+                fPtrs[tid].bblPtr(tid, 0, bbl);
+            }
+            drainHostCharges(tid);  // retire launch + h2d BBLs before migration drops them
             thread_domain[tid].store(DOMAIN_DEVICE);
             g_in_device_region.store(true);
             uint64_t cnt = ++offload_count;
@@ -2581,15 +2719,6 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
                 clearCid(tid);
             }
             ensureThreadInit(tid);  // will use device_mask
-            /* PCIe/CXL offload timing: host→device transfer latency */
-            uint32_t pcieLat = boundaryTransferCycles(payload_size);
-            if (pcieLat > 0) {
-                /* 1.11.7: timing-only BBL -- ZERO fetch bytes. The old
-                 * pcieLat*4 manufactured phantom ifetch traffic that landed
-                 * in the cache/DRAM counters energy is charged from. */
-                BblInfo* bbl = createSimpleBblInfo(pcieLat, 0, true);  // 1.11.16: injected charge
-                fPtrs[tid].bblPtr(tid, 0, bbl);
-            }
             __sync_fetch_and_add(&zinfo->xing.h2dBytes, (uint64_t)payload_size);
             __sync_fetch_and_add(&zinfo->xing.count, 1);
             info("Thread %d: WORK_BEGIN (device offload #%lu, %u bytes)", tid,
@@ -2721,6 +2850,19 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         // Snapshot each core's ROI baseline so the reported cycles/instrs cover
         // ONLY the kernel (roi_begin..roi_end), excluding the serial pre-ROI
         // array-init/setup that otherwise runs on the launcher PE and dominates.
+        /* 1.11.57 (latent F010): ONE THREAD SNAPSHOTS EVERY CORE, and the
+         * condition that makes that reproducible is stated rather than
+         * assumed. Core::markRoiBegin captures instrs, the mix accumulators
+         * and pgAct.activePhases; if another guest thread were retiring BBLs
+         * on another core at this instant, that core's baseline would land at
+         * a schedule-dependent point and the ROI window would differ run to
+         * run. It does not happen in the shipped workloads: they call
+         * zsim_roi_begin() from the single main thread BEFORE any parallel
+         * region, and the shared-memory variants bracket the parallel region
+         * rather than opening the ROI inside it. Nothing tears either -- the
+         * fields are aligned 64-bit stores -- so the exposure is a shifted
+         * baseline, not a corrupt one. The thread-MPI path does not have this
+         * shape at all: it baselines only the calling rank's own core. */
         for (uint32_t c = 0; c < zinfo->numCores; c++)
             if (zinfo->cores[c]) zinfo->cores[c]->markRoiBegin();
         zinfo->pgres.markRoi(zinfo->numPhases, zinfo->globPhaseCycles);   // 1.11.18: PG residency window
@@ -2826,7 +2968,16 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
         // Kernel LAUNCH cost (1.7.3) charged on the HOST core at the WORK offload
         // doorbell BEFORE the device migration (see the twin handler above).
         chargeLaunchCost(tid);
-        drainHostCharges(tid);  // retire the launch BBL before migration drops it
+        /* PCIe/CXL offload timing: host -> device transfer latency, charged
+         * on the HOST core -- 1.11.57 (latent D012), see the twin handler
+         * above for why the post-migration position spent host-clocked cycles
+         * at the device clock. */
+        uint32_t pcieLat = boundaryTransferCycles(payload_size);
+        if (pcieLat > 0) {
+            BblInfo* bbl = createSimpleBblInfo(pcieLat, 0, true);  // 1.11.7: no phantom fetch; 1.11.16: injected charge
+            fPtrs[tid].bblPtr(tid, 0, bbl);
+        }
+        drainHostCharges(tid);  // retire launch + h2d BBLs before migration drops them
         thread_domain[tid].store(DOMAIN_DEVICE);
         g_in_device_region.store(true);
         uint64_t cnt = ++offload_count;
@@ -2842,12 +2993,6 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
             clearCid(tid);
         }
         ensureThreadInit(tid);
-        /* PCIe/CXL offload timing: host→device transfer latency */
-        uint32_t pcieLat = boundaryTransferCycles(payload_size);
-        if (pcieLat > 0) {
-            BblInfo* bbl = createSimpleBblInfo(pcieLat, 0, true);  // 1.11.7: no phantom fetch; 1.11.16: injected charge
-            fPtrs[tid].bblPtr(tid, 0, bbl);
-        }
         __sync_fetch_and_add(&zinfo->xing.h2dBytes, (uint64_t)payload_size);
         __sync_fetch_and_add(&zinfo->xing.count, 1);
         info("Thread %d: WORK_BEGIN (device offload #%lu, %u bytes)", tid,

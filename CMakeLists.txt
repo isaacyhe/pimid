@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(PIMID VERSION 1.11.56 LANGUAGES CXX)
+project(PIMID VERSION 1.11.57 LANGUAGES CXX)
 
 # The reported version is taken FROM the project version, so the two cannot
 # drift apart again (see release 1.10.2).
@@ -147,7 +147,12 @@ set(PIMID_SOURCES
     src/memory/memory_model.cpp
     src/memory/dram_model.cpp
     src/memory/sram_model.cpp
-    src/memory/nvm_model.cpp
+    # 1.11.57 (latent D051): src/memory/nvm_model.cpp DELETED -- NVMModel had
+    # no constructor anywhere in the tree (the factory routes STT_MRAM/PCM/
+    # ReRAM to their own models) and its 638 lines were a standing re-entry
+    # point for the literals 1.11.24 removed: a "// Ultimate fallback:
+    # hard-coded defaults" block of 0.3/1.0/0.5 nJ reads and 15/12/10 mm^2
+    # areas, sitting directly under a comment stating the refusal policy.
     src/memory/sttmram_model.cpp
     src/memory/pcm_model.cpp
     src/memory/reram_model.cpp

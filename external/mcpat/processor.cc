@@ -343,7 +343,21 @@ Processor::Processor(ParseXML *XML_interface)
 			   * scales as sqrt(area): apply the same factor here. (The
 			   * fabric's own AREA is wire-dominated and stays unscaled by
 			   * applyFam -- length and area are different claims.) */
-			  double bus_len_scale = (XML->sys.dram_periph_family == 1)
+			  /* PIMID 1.11.57 (latent E003): SCOPE IT TO THE DRAM DIE.
+			   * The die that grows by dram_periph_area is the memory die.
+			   * A level that sits on a buffer or base die instead is
+			   * already exempted from the family transform 300 lines below
+			   * (the on_dram_die test in the NoC carve-out), and its wire
+			   * spans a die that did not grow -- so lengthening it here
+			   * would stretch a bus across the wrong silicon. Nothing
+			   * reachable differs today: every family-1 run forces H_TREE
+			   * or CUSTOM, both of which map to type != 0, so the only
+			   * type=0 levels are lvl 0 and lvl 1 and the emitter marks
+			   * those on_dram_die. The test is here so a future flat or
+			   * BUS level off the memory die cannot inherit the stretch
+			   * silently. */
+			  double bus_len_scale = (XML->sys.dram_periph_family == 1 &&
+			                          XML->sys.NoC[i].on_dram_die)
 			      ? sqrt(XML->sys.dram_periph_area) : 1.0;
 			  nocs.push_back(new NoC(XML,i, &interface_ip, 1, sqrt(area.get_area()*XML->sys.NoC[i].chip_coverage)*bus_len_scale));
 			  if (procdynp.homoNOC){
@@ -366,7 +380,22 @@ Processor::Processor(ParseXML *XML_interface)
 	  {
 		  if (nocs[i]->nocdynp.has_global_link && XML->sys.NoC[i].type)
 		  {
-			  nocs[i]->init_link_bus(sqrt(area.get_area()*XML->sys.NoC[i].chip_coverage));//compute global links
+			  /* PIMID 1.11.57 (latent E011): THE SAME DIE-GROWTH STRETCH AS
+			   * THE BUS PATH. A global link is routed across the chip, so
+			   * its length scales with sqrt(die area) exactly as the bus
+			   * length does above -- but 1.11.17's correction was applied
+			   * only to the bus arm, leaving two length computations of the
+			   * same quantity disagreeing by sqrt(dram_periph_area) = 1.563
+			   * at the corpus factor. Nothing reachable differs today
+			   * because PIMID emits has_global_link=0 on every NoC instance
+			   * it writes, so this block never executes; the divergence is
+			   * closed here rather than left for whoever turns global links
+			   * on. Scoped to on_dram_die for the reason given on the bus
+			   * arm. */
+			  double link_len_scale = (XML->sys.dram_periph_family == 1 &&
+			                           XML->sys.NoC[i].on_dram_die)
+			      ? sqrt(XML->sys.dram_periph_area) : 1.0;
+			  nocs[i]->init_link_bus(sqrt(area.get_area()*XML->sys.NoC[i].chip_coverage)*link_len_scale);//compute global links
 			  if (procdynp.homoNOC)
 			  {
 				  noc.area.set_area(noc.area.get_area() + nocs[i]->link_bus_tot_per_Router.area.get_area()
@@ -424,11 +453,18 @@ Processor::Processor(ParseXML *XML_interface)
    * vs comm-dram device columns at the technology's own generation table.
    *
    * It is applied HERE, over the components McPAT owns, rather than by
-   * scaling the outputs afterwards: one owner per model. The scope mask says
-   * which components are on the memory die -- PE cores (1), their caches
-   * (2), the on-die fabric (4), the element controllers (8) -- because a
-   * rank- or channel-level design has its logic on a buffer or base die
-   * instead, and those must stay in the logic family.
+   * scaling the outputs afterwards: one owner per model.
+   *
+   * PIMID 1.11.57 (latent E006): the paragraph that used to sit here
+   * described a dram_periph_scope bitmask -- "PE cores (1), their caches (2),
+   * the on-die fabric (4), the element controllers (8)" -- as if it decided
+   * which components the transform reaches. 1.11.34 (E10) removed that mask
+   * because it had exactly one reachable value, and said so 180 lines below;
+   * this header kept describing it, so the file contained two contradictory
+   * accounts of its own control flow and the false one came first. The mask
+   * is gone from XML_Parse too. What actually scopes the transform now is
+   * per-component: the NoC keeps its logic-process AREA (wire, not device),
+   * and the MC PHY carve-out is gated on NoC[i].on_dram_die.
    *
    * Leakage rebases on PLAIN leakage: the comm-dram ratio already encodes a
    * long-channel device, so stacking McPAT's longer-channel discount on top
@@ -455,8 +491,36 @@ Processor::Processor(ParseXML *XML_interface)
            * pipeline as (share + whole) against a denominator that holds
            * exactly corepipe*num_pipelines. At the emitted num_pipelines=1
            * that is +0.25*corepipe of pure over-count; at N>=2 it flips to an
-           * under-count. The exu share is already in `lg` -- nothing further
-           * to add. */
+           * under-count. */
+          /* PIMID 1.11.57 (audit D010): E001 OVER-CORRECTED. Removing the
+           * `+ corepipe` left the numerator carrying ONLY the exu's share of
+           * the pipeline, P*N/4, while the denominator t still holds all of
+           * it, P*N -- because the other three quarters are sitting inside
+           * ifu, lsu and mmu, and this numerator does not include those units.
+           * The stated intent, three hundred lines below, is "execution unit
+           * MINUS its register-file and scheduler arrays, PLUS pipeline and
+           * the undifferentiated core": the whole pipeline, not a quarter of
+           * it. E001 correctly deleted a +0.25*P over-count and left a
+           * -0.75*P under-count in its place -- the sign flipped and the
+           * magnitude tripled. It was invisible because both versions produce
+           * a plausible share (0.184867 before, 0.183517 after) and the
+           * release measured only that the number moved in the direction it
+           * predicted, not by how much; nothing else computes this share to
+           * disagree with it.
+           *
+           * The shares hidden in ifu/lsu/mmu (and rnu on OOO) are added back
+           * here: take the whole distributed pipeline P*N and subtract the one
+           * share exu already contributed above. Where exu does not exist,
+           * core.cc added no share to it, so nothing is subtracted. */
+          if (c->corepipe) {
+              const double pn = c->corepipe->area.get_area() *
+                                (double)c->coredynp.num_pipelines;
+              const double per_unit =
+                  pn / ((c->coredynp.core_ty == OOO) ? 5.0 : 4.0);
+              const double already_in_exu =
+                  (c->exu && c->exu->exist) ? per_unit : 0.0;
+              lg += pn - already_in_exu;
+          }
           if (c->undiffCore) lg += c->undiffCore->area.get_area();
           double t = c->area.get_area();
           if (lg < 0.0) lg = 0.0;
@@ -731,21 +795,16 @@ Processor::Processor(ParseXML *XML_interface)
       /* Rebuild the processor totals from the transformed components so the
        * aggregate and the parts agree -- the failure mode 1.11.0 found in the
        * NoC census and 1.11.4 found in the CoreBreakdown split. */
-      /* PIMID 1.11.29 (user ruling E8): COMPLETE the rollup. It listed
-       * core + l2 + l3 + noc + mcs by hand and silently omitted l1dir, l2dir,
-       * nius and flashcontrollers -- four component classes that upstream
-       * McPAT does add to the processor total (see the accumulation above:
-       * lines ~208, ~237, ~279, ~295). A hand-listed subset is a trap: every
-       * future component has to remember to appear here.
-       *
-       * Verified before changing it: PIMID never reads this aggregate --
-       * ComponentType::FULL_SYSTEM is declared and never populated, and the
-       * wrapper extracts CORE/NOC/PCIE/L2/L3/MC individually. So this moves no
-       * reported number today. It is completed rather than deleted so the
-       * aggregate is correct if anything ever consumes it.
-       * (1.11.50: audit finding L115 -- "the rebuilt totals are dead
-       * stores" -- is this same fact, resolved by the paragraph above:
-       * kept, correct, and consciously unread.) */
+      /* PIMID 1.11.57 (latent E017): the FIRST of two blocks that both
+       * narrated the E8 rollup fix is deleted here, because only the second
+       * one describes the code. Both opened with the same sentence about
+       * l1dir/l2dir/nius/flashcontrollers; the first ended at "COMPLETE the
+       * rollup" (add them all) and the second at "the fix is not to add them
+       * unconditionally ... each is gated on its configured count", which is
+       * what addIf() below actually does. A reader who stopped at the first
+       * would have believed the aggregate included four components it does
+       * not. The surviving facts from the deleted block are kept below: what
+       * upstream adds, and that PIMID never reads this aggregate. */
       power = core.power + l2.power + l3.power + noc.power + mcs.power;
       rt_power = core.rt_power + l2.rt_power + l3.rt_power
                + noc.rt_power + mcs.rt_power;
@@ -762,7 +821,15 @@ Processor::Processor(ParseXML *XML_interface)
        *
        * flashcontrollers is kept rather than dropped: storage and
        * storage-class compute are on the roadmap, and a controller that only
-       * contributes when configured costs nothing until then. */
+       * contributes when configured costs nothing until then.
+       *
+       * Verified before changing it: PIMID never reads this aggregate --
+       * ComponentType::FULL_SYSTEM is declared and never populated, and the
+       * wrapper extracts CORE/NOC/PCIE/L2/L3/MC individually. So this moves
+       * no reported number today. It is completed rather than deleted so the
+       * aggregate is correct if anything ever consumes it. (1.11.50: audit
+       * finding L115 -- "the rebuilt totals are dead stores" -- is that same
+       * fact: kept, correct, and consciously unread.) */
       auto addIf = [&](bool configured, const Component& c) {
           if (!configured) return;
           power = power + c.power;

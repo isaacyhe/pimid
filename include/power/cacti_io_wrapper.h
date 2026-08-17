@@ -29,10 +29,43 @@
  *   cubic term is 0.003 at 800 MHz and 163.8 at 32 GHz, yielding 61 mm^2 of IO
  *   area for 16 lanes, and even at 8 GT/s the termination power returns
  *   3.97e+280 mW (uninitialised memory).
- *   1.11.40 repairs (2) and (3) in our fork so the path constructs, and
- *   REFUSES above 8000 MHz rather than extrapolating the cubic. It does NOT
+ *   1.11.40 repaired (2) and (3) in our fork so the path constructs, and
+ *   REFUSED above 8000 MHz rather than extrapolating the cubic. It did NOT
  *   repair (4): refitting coefficients for multi-GHz serial rates cannot be
  *   done from published bands alone.
+ *
+ * 1.11.57 (latent C024, and C009 with it): the serial entry point
+ * computeLink() is DELETED -- declaration and body both. What it was: a
+ * public, compiled, documented function with NO caller anywhere in src/,
+ * include/ or tools/ (verified tree-wide; linkBandwidthGBs() and
+ * linkRateGTs() are equally uncalled but are pure specification lookups and
+ * stay). It was invisible for exactly that reason: a wrong number that
+ * nothing asks for cannot appear in a report. It was not, however, harmless
+ * to keep. Its 8000 MHz fit guard admitted exactly ONE of the seven link
+ * types this file knows (pcie_gen3 at 8.0 GT/s lands on the ceiling
+ * precisely; gen4/gen5/cxl/interposer/nvlink/ualink are all refused), so
+ * anyone wiring it up would have found six refusals and one answer -- and
+ * that one answer is fault (4) above, a termination power of 3.97e+280 mW
+ * returned with valid = true and an energy_pj_per_bit derived from it. A
+ * caller taking the valid flag at face value would have priced a link from
+ * uninitialised memory.
+ *
+ * The same deletion retires the C009 claim, which lived inside it. Those two
+ * lines set ron_value = 50 and rtt_value = 50 ohm and called them
+ * "specification facts about the electrical layer -- the one kind of single
+ * value that is legitimately a constant", naming no specification. Nothing in
+ * this tree supports that: no PCIe electrical document is under misc/ (which
+ * holds the JEDEC set the DRAM table cites -- JESD79-3D, JESD8-24, JESD8-21C,
+ * JESD250D -- and no PCI-SIG material), and the only other 50 in the path is
+ * upstream's own untraceable default, extio_technology.cc:874
+ * `r_on = (g_ip->ron_value > 0.0) ? g_ip->ron_value : 50;`. 50/50 ohm
+ * single-ended is a widespread convention for a 100 ohm differential channel;
+ * it is not a fact this tree can cite, and we do not invent a citation for it.
+ * Note also that the Serial branch hardcodes rtt1_dq_read = 50 and never
+ * reads g_ip->rtt_value, so half the assertion was inert even when executed.
+ *
+ * If a serial link model is wanted later, it starts from DSENT or from a
+ * refit of the area polynomial -- not from reviving this function.
  *
  * So PCIe/CXL link energy stays on the 1.11.40 published bands, labelled as
  * literature values rather than model output. DSENT is the candidate model for
@@ -106,17 +139,11 @@ struct LinkIOResult {
 
 class CactiIOWrapper {
 public:
-    /* Evaluate a link.
-     *   link_type   PIMID's link vocabulary (pcie_gen5, cxl_*, interposer, ...)
-     *   num_lanes   signal count -- the thing that scales area and dynamic power
-     *   rate_gt_s   per-lane transfer rate, a specification fact
-     *   duty_cycle  MEASURED activity (1.11.40 E19), not a configured constant
-     * Returns valid=false with `source` explaining why when the link type has
-     * no CACTI-IO counterpart; the caller must not substitute a guess. */
-    static LinkIOResult computeLink(const std::string& link_type,
-                                    int num_lanes,
-                                    double rate_gt_s,
-                                    double duty_cycle);
+    /* 1.11.57 (latent C024/C009): computeLink() was declared HERE. It is gone
+     * -- see the SERIAL PATH note at the top of this file for what it did,
+     * why nothing called it, and why leaving a dead entry point that returns
+     * valid=true on a 3.97e+280 mW termination power was a trap rather than
+     * an unused convenience. */
 
     /* Evaluate a DRAM INTERFACE -- CACTI-IO's validated home range, and the
      * reason this harness is worth having. Replaces the hand-written

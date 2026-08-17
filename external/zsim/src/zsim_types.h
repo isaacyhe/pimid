@@ -191,13 +191,30 @@ struct GapHist {
     /* Cycles sitting in gaps STRICTLY LONGER than a threshold, counted the way
      * a gating scheme would recover them: a gap of length g yields g - thresh
      * usable cycles, because the wake penalty is paid out of the gap itself.
-     * Bucket b holds gaps in [2^b, 2^(b+1)), so a bucket straddling the
-     * threshold is reported as its whole contents -- an OVER-estimate confined
-     * to one bucket, and stated here rather than silently rounded away. */
+     * Bucket b holds gaps in [2^b, 2^(b+1)).
+     *
+     * 1.11.57 (audit round 3, residual on F003): THE BUCKET THAT STRADDLES THE
+     * THRESHOLD IS DROPPED, WHICH UNDER-STATES. The note here used to claim
+     * the opposite -- "reported as its whole contents, an OVER-estimate
+     * confined to one bucket" -- while the loop below has always skipped that
+     * bucket entirely, losing its above-threshold gaps. 1.11.55's release note
+     * listed this among its truth-in-comment corrections; the correction did
+     * not land in the file. It is written down now, in the direction the code
+     * actually goes: conservative, i.e. it under-credits gating and therefore
+     * over-states DRAM background power. That partly offsets F001's merged
+     * gaps, which bias the other way.
+     *
+     * The test is `<` rather than `<=`, which matters at the one threshold
+     * where the two differ: when thresh is exactly 2^b, every gap in the
+     * bucket is at least thresh, so keeping the bucket is EXACT and skipping
+     * it discards a whole bucket for nothing. The model-side re-implementation
+     * of this same quantity in src/main.cpp already used `<`; the two rules
+     * for one quantity, in one release, read as a convention rather than the
+     * divergence it was. They now agree. */
     inline uint64_t cyclesInGapsOver(uint64_t thresh) const {
         uint64_t tot = 0;
         for (int b = 0; b < kBuckets; b++) {
-            if ((1ull << b) <= thresh) continue;          // whole bucket below
+            if ((1ull << b) < thresh) continue;           // whole bucket below
             uint64_t c = cycles[b], n = count[b];
             tot += (c > n * thresh) ? (c - n * thresh) : 0;
         }

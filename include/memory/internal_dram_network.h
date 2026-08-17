@@ -407,7 +407,25 @@ public:
      * rate and the array side at the core clock without this class needing
      * to know which is which. A non-positive entry leaves that level alone.
      */
+    /* 1.11.57 (audit C005): this also re-derives every tier bridge's ingress
+     * and egress link from the two levels it joins. A bridge's two links ARE
+     * those levels' links; the literal table they used to come from described
+     * neither, and since B051 made the bridge return TIME its clocks divide a
+     * real nanosecond figure. Base latency, FIFO depth, bridge count and the
+     * router parameters are untouched -- they are not link properties. */
     void applySourcedLadder(const int width_bits[7], const double bandwidth_GBs[7]);
+
+    /**
+     * @brief Set the rank (L4) and channel (L5) node counts (audit C006).
+     *
+     * These two are the only rungs of the ladder with no other configuration
+     * surface: initialize() carries subarrays/banks/bank-groups/chips and
+     * overrideLevelConfig() does not touch num_nodes, so both sat at a literal
+     * 2 for every technology. num_nodes sets the hop term at that level and
+     * gates detailed-router construction there. Non-positive values are
+     * ignored. Until this is called the run announces that both are assumed.
+     */
+    void setTopLevelNodeCounts(int ranks_per_channel, int channels);
 
     /**
      * @brief Check if network can accept more packets
@@ -598,6 +616,10 @@ private:
     int num_banks_per_bg_;
     int num_bg_per_chip_;
     int num_chips_per_rank_;
+    /* 1.11.57 (audit C006): has a caller supplied the rank and channel node
+     * counts, or are L4 and L5 still on the assumed 2? Governs the notice
+     * initialize() prints; it never silently changes a number. */
+    bool top_level_nodes_set_ = false;
 
     // Custom switch hierarchy configuration (optional)
     SwitchHierarchyConfig custom_switch_config_;

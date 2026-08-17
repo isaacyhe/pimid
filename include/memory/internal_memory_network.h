@@ -45,17 +45,18 @@ enum class MemoryTechnologyType {
     RERAM
 };
 
-/**
- * Generic factory function for creating internal memory networks
- * Works for ALL memory technologies with hierarchical organization
- */
-std::shared_ptr<InternalDRAMNetwork> createInternalMemoryNetwork(
-    const std::string& memory_tech,   // "SRAM", "DDR4", "STT-MRAM", "PCM", "ReRAM"
-    int num_subarrays,
-    int num_banks,
-    int num_bank_groups,  // For hierarchical memories (use 1 if N/A)
-    int num_chips
-);
+/* 1.11.57 (latent D066 + D067): createInternalMemoryNetwork() is REMOVED.
+ * It forwarded a TOTAL bank count into createInternalDRAMNetwork()'s
+ * banks-per-bank-group parameter (4x too large on DDR4) and its
+ * technology switch printed "<tech> configuration applied" from cases that
+ * applied nothing. It had no callers; see internal_memory_network.cpp for the
+ * full account. Call createInternalDRAMNetwork() directly, with the
+ * PER-BANK-GROUP bank count, as src/main.cpp and RamulatorWrapper do.
+ *
+ * The two helpers below are unused as of 1.11.57 -- nothing in the tree
+ * includes this header -- and are kept because they are correct and because
+ * getMemoryTechnologyType() refuses an unknown technology by throwing rather
+ * than classifying it by exclusion. */
 
 /**
  * Get memory technology type from string

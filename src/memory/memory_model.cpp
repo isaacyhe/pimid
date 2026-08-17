@@ -1,7 +1,10 @@
 #include "memory/memory_model.h"
 #include "memory/dram_model.h"
 #include "memory/sram_model.h"
-#include "memory/nvm_model.h"
+/* 1.11.57 (latent D051): memory/nvm_model.h is gone -- NVMModel was never
+ * constructed by this factory or anything else, and carried its own set of
+ * hard-coded fallback energies and areas. STT_MRAM/PCM/ReRAM route to the
+ * three models below, which is what they have always done. */
 #include "memory/sttmram_model.h"
 #include "memory/pcm_model.h"
 #include "memory/reram_model.h"

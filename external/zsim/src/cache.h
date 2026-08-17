@@ -26,6 +26,9 @@
 #ifndef CACHE_H_
 #define CACHE_H_
 
+#include <unordered_set>
+#include <vector>
+
 #include "cache_arrays.h"
 #include "coherence_ctrls.h"
 #include "g_std/g_string.h"
@@ -72,22 +75,29 @@ class Cache : public BaseCache {
 
         virtual uint64_t access(MemReq& req);
 
-        /* 1.11.40 (audit N7): dirty bytes resident in THIS cache -- the
-         * bytes a coherence flush would have to write back. Walks the
-         * MESI state array, so it is O(numLines) and is called ONCE, at
-         * roi_begin, not on any access path. */
-        uint64_t dirtyBytes(uint32_t lineSize) const {
-            return cc->countDirtyLines() * (uint64_t)lineSize;
-        }
-
-        /* 1.11.55 (audit F017): mark this cache's dirty lines written back
-         * (M -> E). Called once per flush, right after the bytes are
-         * measured and charged, so the NEXT flush sees only what has been
-         * re-dirtied since. Same O(numLines) walk, same off-the-access-path
-         * discipline as dirtyBytes(). */
-        uint64_t cleanDirtyBytes(uint32_t lineSize) {
-            return cc->cleanDirtyLines() * (uint64_t)lineSize;
-        }
+        /* 1.11.57 (audit D001/D002/D003): the coherence flush's one entry
+         * point into a cache, replacing dirtyBytes() (1.11.40 N7) and
+         * cleanDirtyBytes() (1.11.55 F017).
+         *
+         * Those two were separate UNLOCKED O(numLines) walks: one counted the
+         * lines in M, the other -- issued later, from a different place --
+         * wrote them back to E. Splitting measurement from cleaning is what
+         * let the first rank of a multi-rank co-sim charge for a dirty set
+         * and then wipe it before the other ranks measured, and it is what
+         * let an array[i] = E land on a line another host thread was driving
+         * to M at that instant.
+         *
+         * Here the two are one locked pass, and it reports ADDRESSES rather
+         * than a count: a dirty line is resident at every level of an
+         * inclusive hierarchy, so the caller unions the addresses across all
+         * caches and gets the number of DISTINCT lines a writeback flush must
+         * move. That is the quantity, and it does not depend on any inclusion
+         * or silent-upgrade argument holding.
+         *
+         * Returns the number of lines THIS cache transitioned M -> E, which
+         * is the per-level sum and is legitimately larger than the distinct
+         * count -- the flush log prints both, labelled. */
+        uint64_t flushDirtyLines(std::unordered_set<Address>& distinctDirty);
 
         //NOTE: reqWriteback is pulled up to true, but not pulled down to false.
         virtual uint64_t invalidate(const InvReq& req) {

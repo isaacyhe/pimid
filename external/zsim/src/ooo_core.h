@@ -516,8 +516,22 @@ class OOOCore : public Core {
          *
          * Tracked separately rather than removed from `instrs`, because `instrs`
          * also feeds the reported IPC and the cycle-based gates; changing its
-         * meaning would move published numbers. The power path subtracts this to
-         * recover the real count; the stats keep their existing definition. */
+         * meaning would move published numbers.
+         *
+         * 1.11.57 (latent F014): THIS COUNTER IS DEAD, AND THE SENTENCE THAT
+         * USED TO CLOSE THE PARAGRAPH -- "the power path subtracts this to
+         * recover the real count" -- NAMED A DIFFERENT COUNTER. 1.11.16
+         * removed the stat that exported this member (it inferred synthetic
+         * blocks from oooBbl == 0, which also misclassified real >1024-insn
+         * fallback TBs) and moved the job to the flag-based Core::mixSyn,
+         * which counts BblInfo::synth and is emitted for every core type by
+         * Core::mixInitStats. So what the power path subtracts is mixSyn;
+         * this member is incremented at retire, rebased at roi_begin, and
+         * read by nothing. It is kept only because the OOO retire path uses
+         * it as a local running total in the same expression that advances
+         * the 1-CPI fallback -- deleting it would be a behavioural edit to
+         * the retire path for a documentation defect. What is corrected is
+         * the claim: no consumer reads this. */
         uint64_t syntheticInstrs = 0;
         uint64_t roiBaseSyntheticInstrs = 0;
         uint64_t memMismatchLoads = 0, memMismatchStores = 0;

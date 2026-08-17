@@ -26,7 +26,38 @@ public:
     virtual bool canAccept(const MemoryRequest& req) = 0;
     virtual void tick() = 0;
 
-    // Energy modeling
+    /* Energy modeling.
+     *
+     * 1.11.57 (latent D043): THESE FOUR HAVE NO AGREED UNITS TODAY, and the
+     * interface said nothing, so a consumer holding a MemoryModel* could not
+     * know what it was being handed. The three bases actually in the tree:
+     *   SRAMModel        getReadEnergy() = nJ PER ACCESS (CACTI's
+     *                    getDynamicReadEnergy)
+     *   DRAMModel        getReadEnergy() = CUMULATIVE nJ over all accesses so
+     *                    far (total_reads_ x per-access)
+     *   STTMRAM/PCM/ReRAM getReadEnergy() = pJ PER BYTE (the architecture
+     *                    object's read_energy_per_byte; their own printStats
+     *                    label it " pJ/byte")
+     * Three quantities, one signature: per-access energy, an accumulating
+     * total, and an energy density differing by the access size and by 1000.
+     * The single consumer that flattens them,
+     * CompositePowerModel::estimatePower, reads all three as "nJ per access"
+     * -- so an NVM device's read energy would be understated by 1000x and a
+     * DRAM device's would grow without bound as the run proceeded.
+     *
+     * WHY NOTHING IS WRONG TODAY: CompositePowerModel is never constructed
+     * (nothing calls addMemoryModel()), and no other caller reads these four
+     * through the base class. The reported memory energy comes from the
+     * RamulatorWrapper/CACTI/NVSim paths directly.
+     *
+     * THE CONTRACT, stated here so the next implementation has one to follow:
+     * getReadEnergy()/getWriteEnergy() are NANOJOULES PER ACCESS at the
+     * model's configured access width, getLeakagePower() is WATTS, and
+     * getTotalEnergy() is NANOJOULES accumulated since the last resetStats().
+     * The four implementations above do not all obey it yet; converting them
+     * touches five plugin models at once and must be done as one change with
+     * its own gate, not folded into a latent-defect pass. Until then, do NOT
+     * add a consumer that reads these polymorphically. */
     virtual double getReadEnergy() const = 0;
     virtual double getWriteEnergy() const = 0;
     virtual double getLeakagePower() const = 0;
@@ -105,7 +136,22 @@ public:
      * NEVER returns a fabricated value: absence is reported, not filled. */
     virtual double getTierLatencyNs(Tier tier, Op op) const = 0;
 
-    /* Does this technology physically have that tier? */
+    /* Does this technology physically have that tier?
+     *
+     * 1.11.57 (latent D025): TWO PREDICATES, TWO QUESTIONS -- stated here
+     * because a reader was entitled to conclude the implementations
+     * contradicted themselves. DRAMModel::hasTier() returns true for
+     * BANKGROUP/RANK/CHANNEL while its getTierLatencyNs() returns -1 for all
+     * three. That is not a contradiction, it is the difference between
+     *
+     *   hasTier(t)             -- the DEVICE has that level of hierarchy
+     *   getTierLatencyNs(t,op) -- this MODEL can source a number for it
+     *
+     * and both answers matter: "DRAM has ranks and we cannot price them" is a
+     * different report from "SRAM has no ranks". Never read hasTier() as
+     * permission to use the latency; always pair it with the latency being
+     * >= 0. The one live consumer does exactly that, and prints "has no
+     * sourceable <tier> tier" when the pair splits. */
     virtual bool hasTier(Tier tier) const = 0;
 
     /* Where the number came from -- the tool and the quantity, e.g.

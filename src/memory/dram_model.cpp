@@ -28,6 +28,44 @@ static const char* dramTechName(MemoryTechnology t) {
     }
 }
 
+/* 1.11.57 (latent D023): the per-access array energy for THIS model's part,
+ * asked of the tools this file already holds instead of restated as a literal.
+ *
+ * Order of authority: the Ramulator wrapper's intensive IDD path (per-64 B,
+ * per technology, whole-rank basis) first; the architecture object's bank
+ * energy second, for the case where the wrapper is absent -- which is the only
+ * case in which the caller of these helpers runs at all. If neither exists
+ * there is nothing to charge and the model says so once rather than inventing
+ * a DDR4 number for whatever part is being simulated.
+ *
+ * The write helper deliberately does NOT apply a read-to-write ratio of its
+ * own: the IDD path derives the write term from IDD4W, and when it is absent
+ * this file has no sourced ratio to substitute -- which is exactly the mistake
+ * the old 2.5/3.0 pair encoded, a 1.2x asserted for every technology. */
+static double dramPerAccessNJ(const RamulatorWrapper* ram,
+                              const memory::DRAMArchitectureV2* arch,
+                              bool is_write) {
+    if (ram) {
+        double e = is_write ? ram->getArrayWriteEnergyNJ()
+                            : ram->getArrayReadEnergyNJ();
+        if (e > 0.0) return e;
+    }
+    if (arch && arch->energy.bank_energy_pJ > 0.0) {
+        const double BYTES_PER_ACCESS = 64.0;
+        return arch->energy.bank_energy_pJ * BYTES_PER_ACCESS / 1000.0;
+    }
+    static bool warned = false;
+    if (!warned) {
+        warned = true;
+        std::cerr << "[DRAMModel] WARNING: no Ramulator wrapper and no DRAM "
+                     "architecture object, so per-access array energy cannot "
+                     "be sourced. Charging 0 nJ per access rather than "
+                     "substituting a literal -- the energy totals from this "
+                     "model are incomplete, not small." << std::endl;
+    }
+    return 0.0;
+}
+
 DRAMModel::DRAMModel(const std::string& config_path, MemoryTechnology tech)
     : MemoryModel(tech, config_path)
     , total_reads_(0)
@@ -43,11 +81,15 @@ DRAMModel::DRAMModel(const std::string& config_path, MemoryTechnology tech)
     , current_cycle_(0) {
 
     // Initialize default DRAM configuration
-    /* 1.11.52 (D024): the standard is the RUN'S technology. The literals
-     * below remain the DDR4-2400 shape and are overwritten by the
-     * architecture extraction in initialize(); what matters is that the
-     * Ramulator wrapper is now constructed for the right part, so the
-     * extracted timing ladder is the technology's own. */
+    /* 1.11.52 (D024): the standard is the RUN'S technology.
+     * 1.11.57 (audit C010): the claim that followed -- "the literals below are
+     * overwritten by the architecture extraction in initialize()" -- was not
+     * true of THESE fields. The extraction fills dram_arch_; these fields are
+     * a separate struct that nothing overwrote, and they were printed. They
+     * are still DDR4-2400's shape, and they still stand only until
+     * initialize() replaces them from the wrapper and the architecture object;
+     * what they are now is a pre-initialisation placeholder, not a
+     * description of anything. */
     dram_config_.standard = dramTechName(tech);
     dram_config_.org = "4Gb_x8";
     dram_config_.channels = 1;
@@ -124,18 +166,83 @@ void DRAMModel::initialize() {
                   << dram_arch_->timing.inner_bank.source << std::endl;
     }
 
+    /* 1.11.57 (audit C010): the block below used to print the CONSTRUCTOR'S
+     * DDR4-2400 literals under the run's own technology name.
+     *
+     * What was wrong: every field here is set once in the constructor and
+     * overwritten only by loadConfig(), which this model is always called with
+     * an empty path (createMemoryModel(mt, "")), so the parse fails, warns and
+     * returns without touching anything. 1.11.52's D024 fix made `standard`
+     * follow the technology, and that is what turned a wrong block into a
+     * MISLEADING one: an HBM3 run printed "Standard: HBM3" above
+     * "Organization: 4Gb_x8 / Channels: 1 / Banks/Rank: 8 / Bandwidth: 25 GB/s
+     * / tCL: 17 cycles" -- the right part's name beside another part's machine,
+     * a few lines from a wrapper reporting 16 channels and 819 GB/s.
+     *
+     * Two unit defects went with it. The capacity and bandwidth were stored in
+     * BYTES and printed over 1024^3, so the comment's "25.6 GB/s" printed as
+     * 25.0: a decimal MB/s figure divided as if it were binary. And tCL/tRCD/
+     * tRP/tRAS were printed as "cycles" with no clock named, which for a part
+     * whose core clock is not 1.2 GHz is not a translatable number at all.
+     *
+     * The fields are populated from the wrapper and the architecture object
+     * that this model already holds, each line says which of the two it came
+     * from, and the JEDEC timings are printed in ns -- the basis they are
+     * specified and stored in -- with the cycle count beside them at the clock
+     * it belongs to. */
+    if (ramulator_instance_) {
+        dram_config_.channels          = ramulator_instance_->getNumChannels();
+        dram_config_.ranks_per_channel = ramulator_instance_->getRanksPerChannel();
+        dram_config_.banks_per_rank    = ramulator_instance_->getBanksPerBankGroup() *
+                                         ramulator_instance_->getBankGroupsPerChip();
+        dram_config_.capacity          = ramulator_instance_->getCapacity();
+        // getBandwidth() is MB/s, decimal. Store bytes/s on the same decimal
+        // basis so the print below cannot re-introduce the 1024^3 confusion.
+        dram_config_.bandwidth         = ramulator_instance_->getBandwidth() * 1000000ULL;
+        dram_config_.org               = std::to_string(ramulator_instance_->getChipSizeMB()) +
+                                         " MB/device x " +
+                                         std::to_string(ramulator_instance_->getChipsPerRank()) +
+                                         " devices/rank, " +
+                                         std::to_string(ramulator_instance_->getChipIOBits()) +
+                                         "-bit device";
+    }
+    if (dram_arch_) {
+        const double core_ghz = dram_arch_->timing.clock_freq_mhz / 1000.0;
+        auto toCycles = [core_ghz](double ns) -> Cycle {
+            return core_ghz > 0.0 ? static_cast<Cycle>(std::ceil(ns * core_ghz)) : 0;
+        };
+        dram_config_.tCL  = toCycles(dram_arch_->timing.tCAS_ns);
+        dram_config_.tRCD = toCycles(dram_arch_->timing.tRCD_ns);
+        dram_config_.tRP  = toCycles(dram_arch_->timing.tRP_ns);
+        dram_config_.tRAS = toCycles(dram_arch_->timing.tRAS_ns);
+    }
+
     std::cout << "[DRAMModel] Configuration:" << std::endl;
     std::cout << "  Standard: " << dram_config_.standard << std::endl;
     std::cout << "  Organization: " << dram_config_.org << std::endl;
-    std::cout << "  Channels: " << dram_config_.channels << std::endl;
-    std::cout << "  Ranks/Channel: " << dram_config_.ranks_per_channel << std::endl;
-    std::cout << "  Banks/Rank: " << dram_config_.banks_per_rank << std::endl;
-    std::cout << "  Capacity: " << (dram_config_.capacity / (1024.0 * 1024 * 1024)) << " GB" << std::endl;
-    std::cout << "  Bandwidth: " << (dram_config_.bandwidth / (1024.0 * 1024 * 1024)) << " GB/s" << std::endl;
-    std::cout << "  tCL: " << dram_config_.tCL << " cycles" << std::endl;
-    std::cout << "  tRCD: " << dram_config_.tRCD << " cycles" << std::endl;
-    std::cout << "  tRP: " << dram_config_.tRP << " cycles" << std::endl;
-    std::cout << "  tRAS: " << dram_config_.tRAS << " cycles" << std::endl;
+    std::cout << "  Channels: " << dram_config_.channels
+              << " (Ramulator preset)" << std::endl;
+    std::cout << "  Ranks/Channel: " << dram_config_.ranks_per_channel
+              << " (architecture object)" << std::endl;
+    std::cout << "  Banks/Rank: " << dram_config_.banks_per_rank
+              << " (architecture object: banks/group x groups/chip)" << std::endl;
+    std::cout << "  Capacity: " << (dram_config_.capacity / (1024.0 * 1024 * 1024))
+              << " GiB (Ramulator preset)" << std::endl;
+    std::cout << "  Bandwidth: " << (dram_config_.bandwidth / 1.0e9)
+              << " GB/s decimal, aggregate (Ramulator preset)" << std::endl;
+    if (dram_arch_) {
+        std::cout << "  JEDEC timings (architecture object, ns; cycles at the "
+                  << dram_arch_->timing.clock_freq_mhz << " MHz core clock):"
+                  << std::endl;
+        std::cout << "    tCL:  " << dram_arch_->timing.tCAS_ns << " ns = "
+                  << dram_config_.tCL << " cycles" << std::endl;
+        std::cout << "    tRCD: " << dram_arch_->timing.tRCD_ns << " ns = "
+                  << dram_config_.tRCD << " cycles" << std::endl;
+        std::cout << "    tRP:  " << dram_arch_->timing.tRP_ns << " ns = "
+                  << dram_config_.tRP << " cycles" << std::endl;
+        std::cout << "    tRAS: " << dram_arch_->timing.tRAS_ns << " ns = "
+                  << dram_config_.tRAS << " cycles" << std::endl;
+    }
     std::cout << "[DRAMModel] Initialization complete" << std::endl;
 }
 
@@ -242,8 +349,13 @@ void DRAMModel::loadConfig(const std::string& config_path) {
     if (config.find("channels.bandwidth_per_channel_gbs") != config.end()) {
         try {
             double bw_per_channel = std::stod(config["channels.bandwidth_per_channel_gbs"]);
+            /* 1.11.57 (audit C010): DECIMAL. A DRAM bandwidth in GB/s is a
+             * decimal figure -- it is a transfer rate times a bus width -- and
+             * multiplying it by 1024^3 stored 7.4% more bytes per second than
+             * the user asked for, which the printed line then divided back out
+             * by 1024^3 and hid. One basis, stated. */
             dram_config_.bandwidth = static_cast<uint64_t>(
-                bw_per_channel * dram_config_.channels * 1024 * 1024 * 1024
+                bw_per_channel * dram_config_.channels * 1.0e9
             );
         } catch (...) {
             std::cerr << "[DRAMModel] Warning: Invalid bandwidth value" << std::endl;
@@ -290,13 +402,27 @@ Cycle DRAMModel::access(const MemoryRequest& req) {
     // Fallback: Calculate access latency
     Cycle latency = calculateLatency(req);
 
-    // Update statistics
+    /* 1.11.57 (latent D023): ASK THE MODEL, DO NOT RESTATE IT. These two lines
+     * were "read_energy_ += 2.5;  // nJ per read (typical DDR4)" and
+     * "write_energy_ += 3.0;", a THIRD independent set of per-access DRAM
+     * energy literals in a tree that already has two: the wrapper's
+     * updateEnergyMetrics() (2.5/3.0) and the IDD-derived intensive path in
+     * pimid_energy.h. Three sets, one of them technology-blind -- an HBM3 run
+     * charged DDR4's numbers here. The wrapper this model owns exposes the
+     * per-64 B array energy for the run's own technology; use it, and use the
+     * architecture object as the second-best source when the wrapper is
+     * absent, which is the only way this branch is reached at all (it runs
+     * only when ramulator_instance_ is null, and the constructor always makes
+     * one). Nothing could observe the difference because access() has no
+     * caller in this tree. */
     if (req.type == MemoryRequestType::READ) {
         total_reads_++;
-        read_energy_ += 2.5;  // nJ per read (typical DDR4)
+        read_energy_ += dramPerAccessNJ(ramulator_instance_.get(),
+                                        dram_arch_.get(), false);
     } else if (req.type == MemoryRequestType::WRITE) {
         total_writes_++;
-        write_energy_ += 3.0;  // nJ per write (typical DDR4)
+        write_energy_ += dramPerAccessNJ(ramulator_instance_.get(),
+                                         dram_arch_.get(), true);
     }
 
     // Update row buffer state
@@ -329,14 +455,28 @@ void DRAMModel::tick() {
         // Update statistics from Ramulator
         total_reads_ = ramulator_instance_->getTotalReads();
         total_writes_ = ramulator_instance_->getTotalWrites();
-        row_hits_ = ramulator_instance_->getRowHits();
-        row_misses_ = ramulator_instance_->getRowMisses();
-        row_conflicts_ = ramulator_instance_->getRowConflicts();
+        /* 1.11.57 (latent D009): the three row counters are no longer copied
+         * from the wrapper, because the wrapper's copies never existed as
+         * measurements -- they were declared, zeroed in the constructor,
+         * zeroed again in resetStats() and incremented nowhere, so these three
+         * lines OVERWROTE this model's own row counters (which calculateLatency
+         * does increment) with three structural zeroes on every tick. The
+         * wrapper's counters and their getters are deleted in 1.11.57; this
+         * model keeps its own, which at least count something. */
 
         // Update energy metrics
         read_energy_ = ramulator_instance_->getReadEnergy();
         write_energy_ = ramulator_instance_->getWriteEnergy();
-        leakage_power_ = ramulator_instance_->getLeakagePower();
+        /* 1.11.57 (latent D021): MILLIWATTS INTO A WATTS FIELD.
+         * RamulatorWrapper::getLeakagePower() returns mW (it is derived from
+         * the IDD background power, which is a mW quantity, and its own
+         * printStats labels it " mW"); leakage_power_ is the MemoryModel
+         * interface's WATTS field -- printStats() below prints it as " W" and
+         * CompositePowerModel::estimatePower reads it with the comment "in W".
+         * Assigning one to the other was a straight 1000x overstatement of
+         * memory leakage, invisible because DRAMModel::tick() is never called
+         * and CompositePowerModel is never constructed. */
+        leakage_power_ = ramulator_instance_->getLeakagePower() / 1000.0;  // mW -> W
         activation_energy_ = ramulator_instance_->getActivationEnergy();
         precharge_energy_ = ramulator_instance_->getPrechargeEnergy();
     } else {
@@ -344,7 +484,25 @@ void DRAMModel::tick() {
         if (!pending_requests_.empty()) {
             pending_requests_.pop();
         }
-        leakage_power_ = 1.5; // W (typical DDR4 idle power)
+        /* 1.11.57 (latent D021): the "leakage_power_ = 1.5; // W (typical DDR4
+         * idle power)" that stood here was a literal for a quantity the
+         * wrapper measures, written into the same field the branch above fills
+         * from a tool -- so one variable meant a sourced number or an asserted
+         * one depending on which way the branch went, and printStats() could
+         * not tell you which. There is no tool on this path at all (the
+         * constructor always builds a wrapper, so this branch is unreachable
+         * today), and the DRAM architecture object carries no leakage field,
+         * so nothing here can source it. Report 0 and say that 0 means
+         * unmodelled rather than negligible. */
+        static bool warned_leak = false;
+        if (!warned_leak) {
+            warned_leak = true;
+            std::cerr << "[DRAMModel] WARNING: no Ramulator wrapper, so DRAM "
+                         "background/leakage power has no source in this model "
+                         "and is reported as 0 W -- unmodelled, not negligible."
+                      << std::endl;
+        }
+        leakage_power_ = 0.0;
     }
 }
 
@@ -364,11 +522,26 @@ Cycle DRAMModel::getLatency(MemoryRequestType type) const {
 }
 
 double DRAMModel::getTotalEnergy() const {
-    // Total energy = dynamic energy + leakage energy
-    // Leakage energy = leakage_power * time
-    double leakage_energy = leakage_power_ * (current_cycle_ / 1e9); // Assuming 1 GHz
+    /* 1.11.57 (latent D022): JOULES ADDED TO NANOJOULES. The old line was
+     *     double leakage_energy = leakage_power_ * (current_cycle_ / 1e9);
+     * with leakage_power_ in WATTS and current_cycle_/1e9 in SECONDS, so the
+     * product is JOULES -- and it was summed with read_energy_, write_energy_,
+     * activation_energy_ and precharge_energy_, every one of which is
+     * NANOJOULES, then returned from a function whose caller prints " nJ".
+     * The leakage term was therefore 1e9 times too small: a 1 W part running
+     * a million cycles contributed 0.001 to a total measured in nJ. Both
+     * halves are fixed here -- the seconds conversion is spelled out against
+     * the model's own clock rather than an unstated "Assuming 1 GHz", and the
+     * result is converted to nJ before it joins the sum. Invisible because
+     * getTotalEnergy() on this model has no reachable caller. */
+    double clock_period_ns = 1.0;   // the model's cycle, 1 GHz unless told
+    if (dram_arch_ && dram_arch_->timing.clock_freq_mhz > 0.0)
+        clock_period_ns = 1000.0 / dram_arch_->timing.clock_freq_mhz;
+    const double elapsed_s =
+        static_cast<double>(current_cycle_) * clock_period_ns * 1e-9;
+    const double leakage_energy_nJ = leakage_power_ * elapsed_s * 1e9;  // J -> nJ
     return read_energy_ + write_energy_ + activation_energy_ +
-           precharge_energy_ + leakage_energy;
+           precharge_energy_ + leakage_energy_nJ;
 }
 
 void DRAMModel::printStats() const {
@@ -380,10 +553,24 @@ void DRAMModel::printStats() const {
     std::cout << "Row Misses: " << row_misses_ << std::endl;
     std::cout << "Row Conflicts: " << row_conflicts_ << std::endl;
 
-    if (total_reads_ + total_writes_ > 0) {
+    /* 1.11.57 (latent D026): GUARD THE DENOMINATOR THAT IS ACTUALLY DIVIDED BY.
+     *
+     * This tested `total_reads_ + total_writes_ > 0` and then divided by
+     * `row_hits_ + row_misses_ + row_conflicts_` -- a different sum entirely.
+     * The three row counters are never incremented anywhere in this model, so
+     * the instant there was any traffic at all the guard passed and the
+     * division was 0/0: a NaN printed as "Row Hit Rate: nan%", or worse, -nan.
+     * Invisible only because printStats() has no caller. A rate whose
+     * denominator is zero is not zero and not 100% -- it is unmeasured, so say
+     * that rather than print a number. */
+    const uint64_t row_events = row_hits_ + row_misses_ + row_conflicts_;
+    if (row_events > 0) {
         double row_hit_rate = static_cast<double>(row_hits_) /
-                             (row_hits_ + row_misses_ + row_conflicts_);
+                              static_cast<double>(row_events);
         std::cout << "Row Hit Rate: " << (row_hit_rate * 100.0) << "%" << std::endl;
+    } else {
+        std::cout << "Row Hit Rate: not measured (no row events recorded)"
+                  << std::endl;
     }
 
     std::cout << "\nEnergy Consumption:" << std::endl;
@@ -429,13 +616,25 @@ Cycle DRAMModel::calculateLatency(const MemoryRequest& req) {
             // Row conflict: precharge + activate + CAS
             latency = dram_config_.tRP + dram_config_.tRCD + dram_config_.tCL;
             row_conflicts_++;
-            activation_energy_ += 5.0;  // nJ for activation
-            precharge_energy_ += 3.0;   // nJ for precharge
+            /* 1.11.57 (latent D023): the "activation_energy_ += 5.0; // nJ for
+             * activation" and "precharge_energy_ += 3.0;" that stood on these
+             * lines were a FOURTH set of invented DRAM energy literals, and
+             * they were also a double charge: access() has already added the
+             * full per-64 B array energy for this request, and that quantity
+             * -- whether it comes from the IDD path or from the architecture
+             * object's bank energy -- already contains the activate and
+             * precharge share (Micron TN-41-01's row energy is exactly
+             * ACT+PRE plus the burst). Charging 8 nJ more per row miss on top
+             * of it roughly quadrupled the energy of a missing access, with
+             * numbers that matched no technology in the tree. The row-miss
+             * COST is where it belongs, in the latency above; the energy split
+             * is reported per line item by the wrapper's own
+             * getActivationEnergy()/getPrechargeEnergy(), which derive it from
+             * the same bank energy instead of asserting it. */
         } else {
             // Row miss: activate + CAS
             latency = dram_config_.tRCD + dram_config_.tCL;
             row_misses_++;
-            activation_energy_ += 5.0;  // nJ for activation
         }
     }
 
@@ -499,7 +698,10 @@ bool DRAMModel::supportsBankPIM() const {
     // Bank-level PIM is supported but limited by bank serialization
     // Check if architecture indicates reasonable bank bandwidth
     if (!dram_arch_) return false;
-    return dram_arch_->bandwidth_limits.bank_effective_bw_GBs > 0.5;  // > 0.5 GB/s
+    // 1.11.57 (audit C003): derived on read from the serialization width and
+    // the core clock, so this test follows a speed-bin change like everything
+    // else on that rung.
+    return dram_arch_->getBankEffectiveBW() > 0.5;  // > 0.5 GB/s
 }
 
 bool DRAMModel::supportsSubarrayPIM() const {
@@ -517,10 +719,32 @@ double DRAMModel::getTierLatencyNs(Tier tier, Op op) const {
         case Tier::SUBARRAY: return getSubarrayAccessLatency();
         case Tier::BANK:     return getBankAccessLatency();
         case Tier::CHIP:     return getChipAccessLatency();
-        default:             return -1.0;   // bankgroup/rank/channel: see below
+        /* 1.11.57 (latent D025): BANKGROUP, RANK and CHANNEL exist in DRAM and
+         * this model cannot price them, which are two different statements --
+         * see hasTier() below, where the contract now says which question each
+         * predicate answers. The wrapper accessors that would supply them
+         * (getBankGroupAccessLatency, and the getChannelAccessLatency that
+         * 1.11.57's D020 deleted) either refuse outright or returned an
+         * unsourced multiple of a neighbouring tier, so refusing here is the
+         * correct answer, not a gap. */
+        default:             return -1.0;
     }
 }
+/* 1.11.57 (latent D025): THE CONTRACT SAID TWO THINGS AT ONCE.
+ *
+ * hasTier() returned true for BANKGROUP, RANK and CHANNEL while
+ * getTierLatencyNs() returned -1 for all three, with only a "// see below"
+ * comment linking them. Read as "this model can answer about that tier" the
+ * pair is a flat contradiction; read as "the technology physically has that
+ * tier" it is consistent, and that IS the documented meaning in
+ * memory_model.h. The one live consumer (main.cpp) already asks both and falls
+ * back when the latency is negative, so nothing was wrong in today's numbers;
+ * a consumer that trusted hasTier() alone would have taken -1.0 ns as a
+ * latency. Answered by making the base-class contract explicit rather than by
+ * dropping tiers DRAM really has. */
 bool DRAMModel::hasTier(Tier tier) const {
+    // PHYSICAL existence, per the MemoryModel contract. DRAM has every tier;
+    // whether this model can SOURCE a number for one is getTierLatencyNs().
     return tier == Tier::SUBARRAY || tier == Tier::BANK ||
            tier == Tier::BANKGROUP || tier == Tier::CHIP ||
            tier == Tier::RANK || tier == Tier::CHANNEL;

@@ -45,6 +45,21 @@ const char* Cache::getName() {
     return name.c_str();
 }
 
+/* 1.11.57 (audit D001/D002/D003): measure and clean in ONE pass, under the
+ * cache's own coherence lock, reporting addresses so the caller can
+ * de-duplicate across levels. See the declaration in cache.h for why each of
+ * those three properties is required. The tag read has to happen INSIDE the
+ * lock: once it is dropped, a concurrent eviction may re-tag the same line id
+ * and the address we recorded would belong to a different line. */
+uint64_t Cache::flushDirtyLines(std::unordered_set<Address>& distinctDirty) {
+    std::vector<uint32_t> ids;
+    cc->flushLock();
+    cc->takeDirtyLineIds(ids);
+    for (uint32_t id : ids) distinctDirty.insert(array->getLineAddr(id));
+    cc->flushUnlock();
+    return (uint64_t)ids.size();
+}
+
 void Cache::setParents(uint32_t childId, const g_vector<MemObject*>& parents, Network* network) {
     cc->setParents(childId, parents, network);
 }
@@ -73,13 +88,33 @@ uint64_t Cache::access(MemReq& req) {
      * 1.11.17 (audit go-through): system-scope caches are named
      * "<node>_l2-0" etc., which the bare prefix test could never match --
      * the 1.9.29 node-prefix parser bug, re-made here. Match the level
-     * token anywhere after an optional node prefix. */
+     * token anywhere after an optional node prefix.
+     *
+     * 1.11.57 (latent F025): TWO DEFECTS IN THAT TEST, both of the same kind
+     * -- the code matched something narrower than the comment claimed.
+     * (a) find('_') takes the FIRST underscore, but node names may contain
+     *     one: the documented "hbm_pim" node yields base = "pim_l2-0", which
+     *     starts with 'p' and can never match, so that node's LLC would never
+     *     mark the tracker. rfind takes the LAST underscore, which is the one
+     *     that separates the node prefix from the level token in every name
+     *     the emitters write ("<node>_l2-0").
+     * (b) the comment advertised an "llc*" pattern the test could not
+     *     express: for a name beginning "llc", base[1] is 'l', which fails
+     *     both digit branches. Either the pattern or the claim had to go;
+     *     the pattern is cheap, so it is implemented.
+     * Nothing reachable moves today: the only consumer of
+     * pgSharedCacheActivePhases is the DEVICE-scope branch of
+     * runPowerAnalysis, and device-scope caches are emitted with no node
+     * prefix at all ("l2", "l3"), where both spellings already matched. The
+     * system path never reads the counter. */
     {
-        size_t p = name.find('_');
+        size_t p = name.rfind('_');
         const char* base = (p != g_string::npos && p + 2 < name.size())
                                ? name.c_str() + p + 1 : name.c_str();
-        if (base[0] == 'l' && (base[1] == '2' || base[1] == '3'))
-            zinfo->pgres.sharedCache.touch(zinfo->numPhases);
+        const bool shared = (base[0] == 'l') &&
+                            (base[1] == '2' || base[1] == '3' ||
+                             (base[1] == 'l' && base[2] == 'c'));
+        if (shared) zinfo->pgres.sharedCache.touch(zinfo->numPhases);
     }
     uint64_t respCycle = req.cycle;
     bool skipAccess = cc->startAccess(req); //may need to skip access due to races (NOTE: may change req.type!)

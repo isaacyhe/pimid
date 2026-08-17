@@ -173,14 +173,19 @@ public:
     double getBitlineCapacitance() const;     // Bitline capacitance (F)
     double getBitlineResistance() const;      // Bitline resistance (Ohm)
 
-    // Subarray energy breakdown (in nJ)
+    /* Subarray energy breakdown (in nJ) and leakage breakdown (in mW).
+     * 1.11.57 (latent D059): these are NVSim's OWN per-component terms, as of
+     * this release. They used to be fixed percentages of mat.readDynamicEnergy
+     * (10/20/40/20/10) and mat.leakage (15/25/30) -- the same defect D031 found
+     * in the six delay accessors and 1.11.56 fixed there, left behind here
+     * because the energy consumers were unread. All are per SUBARRAY, matching
+     * the section heading; guard with hasComponentBreakdown() first. */
     double getDecoderEnergy() const;
     double getWordlineEnergy() const;
     double getBitlineEnergy() const;
     double getSenseAmpEnergy() const;
     double getPrechargerEnergy() const;
 
-    // Subarray leakage breakdown (in mW)
     double getDecoderLeakage() const;
     double getWordlineLeakage() const;
     double getSenseAmpLeakage() const;
@@ -193,6 +198,17 @@ public:
 
     // Validation
     bool isValid() const;
+    /* 1.11.57 (latent C011): IS THERE A RESULT TREE TO BREAK DOWN?
+     *
+     * isValid() is true on a CACHE HIT too, but a cache hit sets only the eight
+     * top-level scalars -- no nvsim_result_ is ever built. Every per-component
+     * accessor below (the six delays, the five energies, the three leakages,
+     * the areas and the organization counts) reads nvsim_result_->bank and so
+     * returns 0 on that path, which is the normal path. Callers that stamp
+     * those components with NVSim provenance were therefore attributing a row
+     * of zeros to a tool. Ask this first: false means the breakdown is
+     * unavailable and must be reported absent, never summed and labelled. */
+    bool hasComponentBreakdown() const;
     std::string getErrorMessage() const;
 
     // Configuration access

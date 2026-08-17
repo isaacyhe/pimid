@@ -797,7 +797,21 @@ static void InitSystem(Config& config) {
             /* 1.11.40 (N7): footprintBytes is retained only so an explicitly
              * configured value can be REFUSED rather than silently ignored --
              * the flush size is measured from the caches' dirty lines at each
-             * flush and is a different number at each one. */
+             * flush and is a different number at each one.
+             *
+             * 1.11.57 (latent F021): the refusal is an ABORT, and the emitter
+             * still advertises the key as a working override. src/main.cpp
+             * parses sys.coherence.footprint_bytes, writes footprintBytes
+             * into the config, and prints an "(OVERRIDE)" branch describing
+             * the value as honoured -- a branch this panic guarantees no run
+             * can ever reach. Nothing moves today because the emitter's
+             * default is 0, so neither the print nor the panic fires; but a
+             * user who follows the documented key gets a crashed simulation
+             * where the printed message promised an override. The honest
+             * shape is for the orchestrator to refuse the key at config time
+             * with an explanation, which is a change on the PIMID side of the
+             * boundary; recorded here so the two halves are not each waiting
+             * for the other. */
             if (zinfo->coherence.footprintBytes > 0) {
                 panic("sys.coherence.footprintBytes=%llu is set, but the flush "
                       "footprint is MEASURED from host dirty lines at each "

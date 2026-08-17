@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include <cctype>       // 1.11.57 (latent D027): cell-file name sanitising
 #include <cstring>
 #include <stdexcept>
 #include <map>
@@ -341,13 +342,42 @@ namespace {
          * caught it: LSTP leakage == HP leakage exactly. */
         int device_corner;
         int temperature_k;
+        /* 1.11.57 (latent D027): THE REST OF THE DESIGN INPUTS.
+         *
+         * createNVSimInput() feeds NVSim five more things that select a
+         * different design point, and none of them were in the key:
+         * designTarget/associativity (from is_cache), optimizationTarget (the
+         * first-true precedence over the six optimize_* flags), pageSize and
+         * flashBlockSize, and fileMemCell (from cell_file). The omission was
+         * safe only by coincidence -- every reachable call site happens to pass
+         * the same value for all five today -- so the key answered a question
+         * it had not been asked the moment any of them was wired to a knob.
+         * That is exactly how the 1.11.49 corner bug worked: the fix compiled,
+         * did nothing, and served the pre-generated entry instead.
+         *
+         * opt_target is the RESOLVED target, not the raw flags, because the
+         * precedence collapses many flag combinations onto one design point;
+         * keying on the resolution avoids splitting the cache for
+         * configurations NVSim would characterize identically. */
+        int design_target;       // 0 = RAM_chip, 1 = cache
+        int associativity;       // as passed to NVSim (forced to 1 for RAM_chip)
+        int opt_target;          // 0 rd-lat 1 wr-lat 2 rd-eng 3 wr-eng 4 leak 5 area
+        uint64_t page_size_bits;
+        uint64_t block_size_bits;
+        std::string cell_file;   // "" = the per-type sample cell
         bool operator<(const NVMCacheKey& o) const {
             if (nvm_type != o.nvm_type) return nvm_type < o.nvm_type;
             if (capacity_bytes != o.capacity_bytes) return capacity_bytes < o.capacity_bytes;
             if (process_node_nm != o.process_node_nm) return process_node_nm < o.process_node_nm;
             if (temperature_k != o.temperature_k) return temperature_k < o.temperature_k;
             if (word_width_bits != o.word_width_bits) return word_width_bits < o.word_width_bits;
-            return device_corner < o.device_corner;
+            if (device_corner != o.device_corner) return device_corner < o.device_corner;
+            if (design_target != o.design_target) return design_target < o.design_target;
+            if (associativity != o.associativity) return associativity < o.associativity;
+            if (opt_target != o.opt_target) return opt_target < o.opt_target;
+            if (page_size_bits != o.page_size_bits) return page_size_bits < o.page_size_bits;
+            if (block_size_bits != o.block_size_bits) return block_size_bits < o.block_size_bits;
+            return cell_file < o.cell_file;
         }
     };
     struct NVMCacheVal {
@@ -376,9 +406,22 @@ namespace {
         // backend subdir is mkdir -p'd for us).
         return pimid::cache::backendDir("nvsim");
     }
-    static std::string nvsimCachePath(const NVMCacheKey& k) {
+    /* 1.11.57 (latent D033): ONE identity string for a characterization, built
+     * from the WHOLE key, used by both the cache filename and the manifest.
+     *
+     * The manifest key used to be assembled by hand from three fields
+     * (type, capacity, node) while the filename already carried more, so two
+     * genuinely different characterizations -- different width, corner,
+     * temperature, optimization target -- landed on one manifest identity, and
+     * a reader that dedups by (backend, key) taking the last line silently
+     * dropped all but one of them. That is the same failure mode the cache key
+     * itself had before 1.11.49/1.11.52/1.11.57: an entry answering a question
+     * it was not asked. Two hand-maintained field lists was the root cause, so
+     * there is now only one; anything added to NVMCacheKey has to be added
+     * here, and the manifest cannot drift behind the cache again. */
+    static std::string nvsimCacheStem(const NVMCacheKey& k) {
         std::ostringstream os;
-        os << nvsimCacheDir() << "/nvm_t" << k.nvm_type
+        os << "nvm_t" << k.nvm_type
            << "_c" << k.capacity_bytes << "_n" << k.process_node_nm
            << "_w" << k.word_width_bits;
         /* 1.11.49: corner joins the FILENAME for non-HP so the pre-generated
@@ -389,8 +432,31 @@ namespace {
          * the pre-existing filenames (no regeneration of the warmed set),
          * any other temperature gets its own entry. */
         if (k.temperature_k != 350) os << "_t" << k.temperature_k;
-        os << ".xml";
+        /* 1.11.57 (latent D027): the five newly-keyed inputs join the FILENAME
+         * under the same rule the corner and the temperature already use --
+         * only a NON-DEFAULT value appends a suffix, so every entry in the
+         * pre-generated set keeps its name and nothing has to be recharacterized
+         * for this fix. The defaults are the values every reachable call site
+         * passes today: RAM_chip, associativity 1, read-energy-optimized, no
+         * page/block size, and the per-type sample cell file. */
+        if (k.design_target != 0) os << "_ca" << k.associativity;
+        if (k.opt_target != 2)    os << "_o" << k.opt_target;
+        if (k.page_size_bits != 0)  os << "_pg" << k.page_size_bits;
+        if (k.block_size_bits != 0) os << "_bl" << k.block_size_bits;
+        if (!k.cell_file.empty()) {
+            // Basename only, and only characters that are safe in a filename.
+            std::string base = k.cell_file.substr(k.cell_file.find_last_of('/') + 1);
+            std::string safe;
+            for (char c : base) {
+                safe += (std::isalnum(static_cast<unsigned char>(c)) || c == '-' ||
+                         c == '_' || c == '.') ? c : '_';
+            }
+            os << "_cell" << safe;
+        }
         return os.str();
+    }
+    static std::string nvsimCachePath(const NVMCacheKey& k) {
+        return nvsimCacheDir() + "/" + nvsimCacheStem(k) + ".xml";
     }
     // Minimal scalar XML reader (looks for <field>value</field>). Returns true on
     // a complete, well-formed hit.
@@ -432,6 +498,70 @@ namespace {
             try { out = std::stod(xml.substr(a, b - a)); } catch (...) { return false; }
             return true;
         };
+        /* 1.11.57 (latent D034): THE STORED RECORD IS CHECKED AGAINST THE KEY
+         * THAT ASKED FOR IT.
+         *
+         * The XML used to carry three of the key's fields (type, capacity,
+         * node) while the FILENAME carried all of them, so a cache file that
+         * had been renamed, hand-copied or restored into the wrong name was
+         * undetectable: the load matched on the name, the body could not
+         * contradict it, and the run priced one configuration with another
+         * one's characterization. cache/README.md states the opposite
+         * discipline in so many words -- "The filename IS the key: every input
+         * that changes the characterization must appear in it" -- which the
+         * filename honoured and the contents did not.
+         *
+         * nvsimDiskStore now writes every key field (see below), and this is
+         * the matching read side: any key field PRESENT in the file must agree
+         * with the key that was asked for, or the entry is refused. Absence is
+         * not a failure -- a pre-1.11.57 file simply carries fewer fields and
+         * is still trusted on its filename, exactly as before -- so no warmed
+         * entry has to be recharacterized for this fix. A file rewritten by
+         * this version onwards is self-describing and a mismatch is loud. */
+        auto agrees = [&](const char* tag, double expected) -> bool {
+            double found = 0.0;
+            if (!get(tag, found)) return true;        // older file: field absent
+            if (found == expected) return true;
+            std::cerr << "[NVSimWrapper] REFUSING cached characterization "
+                      << path << ": its <" << tag << "> is " << found
+                      << " but this query asks for " << expected
+                      << ". The file does not describe the configuration its "
+                         "name claims -- it has been renamed, copied or "
+                         "restored into the wrong entry. Recharacterizing."
+                      << std::endl;
+            return false;
+        };
+        auto getStr = [&](const char* tag, std::string& out) -> bool {
+            std::string open = std::string("<") + tag + ">";
+            std::string close = std::string("</") + tag + ">";
+            size_t a = xml.find(open); if (a == std::string::npos) return false;
+            a += open.size();
+            size_t b = xml.find(close, a); if (b == std::string::npos) return false;
+            out = xml.substr(a, b - a);
+            return true;
+        };
+        if (!agrees("nvm_type", k.nvm_type)) return false;
+        if (!agrees("capacity_bytes", static_cast<double>(k.capacity_bytes))) return false;
+        if (!agrees("process_node_nm", k.process_node_nm)) return false;
+        if (!agrees("word_width_bits", static_cast<double>(k.word_width_bits))) return false;
+        if (!agrees("device_corner", k.device_corner)) return false;
+        if (!agrees("temperature_k", k.temperature_k)) return false;
+        if (!agrees("design_target", k.design_target)) return false;
+        if (!agrees("associativity", k.associativity)) return false;
+        if (!agrees("opt_target", k.opt_target)) return false;
+        if (!agrees("page_size_bits", static_cast<double>(k.page_size_bits))) return false;
+        if (!agrees("block_size_bits", static_cast<double>(k.block_size_bits))) return false;
+        {
+            std::string cf;
+            if (getStr("cell_file", cf) && cf != k.cell_file) {
+                std::cerr << "[NVSimWrapper] REFUSING cached characterization "
+                          << path << ": its <cell_file> is \"" << cf
+                          << "\" but this query asks for \"" << k.cell_file
+                          << "\". Recharacterizing." << std::endl;
+                return false;
+            }
+        }
+
         const bool core = get("read_latency_s", v.read_latency_s)
             && get("write_latency_s", v.write_latency_s)
             && get("read_energy_nj", v.read_energy_nj)
@@ -463,10 +593,27 @@ namespace {
         }
         std::ofstream f(nvsimCachePath(k));
         if (!f.good()) return;
+        /* 1.11.57 (latent D034): EVERY KEY FIELD IS IN THE BODY NOW, not just
+         * the three that happened to be in the key when this writer was
+         * written. The record must let a reader reconstruct exactly which
+         * inputs produced these numbers without decoding the filename -- and
+         * it must let the loader above catch a file that is not what its name
+         * says. Adding fields is backward-compatible in both directions: an
+         * older reader ignores what it does not look for, and the newer reader
+         * treats an absent field as "not stated" rather than as a mismatch. */
         f << "<nvsim_characterization>\n"
           << "  <nvm_type>" << k.nvm_type << "</nvm_type>\n"
           << "  <capacity_bytes>" << k.capacity_bytes << "</capacity_bytes>\n"
           << "  <process_node_nm>" << k.process_node_nm << "</process_node_nm>\n"
+          << "  <word_width_bits>" << k.word_width_bits << "</word_width_bits>\n"
+          << "  <device_corner>" << k.device_corner << "</device_corner>\n"
+          << "  <temperature_k>" << k.temperature_k << "</temperature_k>\n"
+          << "  <design_target>" << k.design_target << "</design_target>\n"
+          << "  <associativity>" << k.associativity << "</associativity>\n"
+          << "  <opt_target>" << k.opt_target << "</opt_target>\n"
+          << "  <page_size_bits>" << k.page_size_bits << "</page_size_bits>\n"
+          << "  <block_size_bits>" << k.block_size_bits << "</block_size_bits>\n"
+          << "  <cell_file>" << k.cell_file << "</cell_file>\n"
           << "  <read_latency_s>" << v.read_latency_s << "</read_latency_s>\n"
           << "  <write_latency_s>" << v.write_latency_s << "</write_latency_s>\n"
           << "  <read_energy_nj>" << v.read_energy_nj << "</read_energy_nj>\n"
@@ -482,10 +629,27 @@ namespace {
 void NVSimWrapper::runNVSim() {
     // Cache short-circuit: if this exact (type, capacity, node) was characterized
     // before, reuse the scalar outputs and skip the expensive design-space search.
+    /* 1.11.57 (latent D027): resolve the optimization target with EXACTLY the
+     * precedence createNVSimInput() uses, so the key records the design point
+     * NVSim will actually search for rather than the flag soup that selects
+     * it. Keep the two in step if that precedence ever changes. */
+    const int opt_target = config_.optimize_read_latency  ? 0
+                         : config_.optimize_write_latency ? 1
+                         : config_.optimize_read_energy   ? 2
+                         : config_.optimize_write_energy  ? 3
+                         : config_.optimize_leakage       ? 4
+                         : config_.optimize_area          ? 5
+                                                          : 2;  // default branch
     NVMCacheKey key{ (int)config_.nvm_type, config_.capacity_bytes,
                      config_.process_node_nm, config_.word_width_bits,
                      config_.device_corner,          // 1.11.49
-                     config_.temperature_k };        // 1.11.52 (D055)
+                     config_.temperature_k,          // 1.11.52 (D055)
+                     config_.is_cache ? 1 : 0,       // 1.11.57 (D027)
+                     config_.is_cache ? config_.associativity : 1,
+                     opt_target,
+                     config_.page_size_bits,
+                     config_.block_size_bits,
+                     config_.cell_file };
     // Reads (both the in-memory map and the on-disk XML) are skipped unless the
     // warehouse mode permits reading -- OFF/WO must truly recompute.
     if (pimid::cache::readEnabled()) {
@@ -692,13 +856,32 @@ void NVSimWrapper::runNVSim() {
             // Record a manifest entry for this fresh characterization. This is a
             // no-op when writes are disabled, so it's safe to call unconditionally.
             {
+                /* 1.11.57 (latent D033): the manifest identity IS the cache
+                 * file stem now -- literally the same string, so the record
+                 * names the exact file on disk it describes and can never
+                 * again be coarser than the key that produced it. The key was
+                 * "t<type>_c<cap>_n<node>", which merged every width, corner,
+                 * temperature, design target and optimization target into one
+                 * provenance row. The stem keeps the tree's suffix rule (a
+                 * suffix appears only for a non-default value), so a
+                 * default-configuration row reads almost as it did before,
+                 * gaining only the "nvm_" prefix and the width that was always
+                 * in the filename. params carries every key field spelled out,
+                 * so a provenance audit does not have to parse the stem. */
                 std::ostringstream keyss, paramss, valss;
-                keyss << "t" << key.nvm_type
-                      << "_c" << key.capacity_bytes
-                      << "_n" << key.process_node_nm;
+                keyss << nvsimCacheStem(key);
                 paramss << "\"nvm_type\":" << key.nvm_type
                         << ",\"capacity_bytes\":" << key.capacity_bytes
-                        << ",\"process_node_nm\":" << key.process_node_nm;
+                        << ",\"process_node_nm\":" << key.process_node_nm
+                        << ",\"word_width_bits\":" << key.word_width_bits
+                        << ",\"device_corner\":" << key.device_corner
+                        << ",\"temperature_k\":" << key.temperature_k
+                        << ",\"design_target\":" << key.design_target
+                        << ",\"associativity\":" << key.associativity
+                        << ",\"opt_target\":" << key.opt_target
+                        << ",\"page_size_bits\":" << key.page_size_bits
+                        << ",\"block_size_bits\":" << key.block_size_bits
+                        << ",\"cell_file\":\"" << key.cell_file << "\"";
                 valss << "\"read_latency_s\":" << v.read_latency_s
                       << ",\"write_latency_s\":" << v.write_latency_s
                       << ",\"read_energy_nj\":" << v.read_energy_nj
@@ -896,6 +1079,15 @@ bool NVSimWrapper::isValid() const {
     return valid_;
 }
 
+/* 1.11.57 (latent C011): see the header. valid_ alone does not mean there is a
+ * result tree -- a cache hit sets valid_ = true and leaves nvsim_result_ null,
+ * and the cache is the normal path. Every per-component accessor in this file
+ * needs the tree, so this is the one predicate a caller must consult before
+ * attributing a component number to NVSim. */
+bool NVSimWrapper::hasComponentBreakdown() const {
+    return valid_ && nvsim_result_ != nullptr && nvsim_result_->bank != nullptr;
+}
+
 std::string NVSimWrapper::getErrorMessage() const {
     return error_message_;
 }
@@ -1023,70 +1215,161 @@ double NVSimWrapper::getBitlineLength() const {
     return nvsim_result_->bank->mat.height;  // meters
 }
 
+/* 1.11.57 (latent D030): THE FALLBACK WIRE CONSTANTS NOW STATE THE UNIT THEY
+ * ARE ACTUALLY IN.
+ *
+ * The audit flagged the wordline capacitance fallback as "1000x its own
+ * comment", and it was -- but the disagreement is the COMMENT's, not the
+ * number's, and the honest fix is therefore the comment. The lengths these
+ * four multiply are METRES (getWordlineLength()/getBitlineLength() return
+ * bank->mat.width/height, NVSim's own SI fields), so the coefficients are
+ * per-metre and must match NVSim's Wire::capWirePerUnit / resWirePerUnit,
+ * documented in external/nvsim/Wire.h:90-91 as ohm/m and F/m.
+ *
+ * WAS: `0.2e-9` annotated "0.2 fF/nm". 0.2 fF/nm is 2e-7 F/m -- a thousand
+ * times the coefficient written beside it, and physically absurd: NVSim's own
+ * CalculateWireCapacitance (external/nvsim/formula.cpp:362) is a sum of two
+ * terms of order 2*PERMITTIVITY*k*(aspect ratio), i.e. some 1e-10 F/m, and
+ * Wire.cpp:788 prints capWirePerUnit/1e6 under the label "F/um" for exactly
+ * that reason.
+ * IS: the same `0.2e-9`, annotated 0.2 fF/um (= 0.2 pF/mm), which is what
+ * 0.2e-9 F/m means and the standard local-interconnect figure. The resistance
+ * pair reads the same way: 10e6 ohm/m is 10 ohm/um, the right order for a
+ * minimum-pitch local wire at these nodes (copper resistivity over a ~30 nm x
+ * ~60 nm cross-section). No value changes; only the annotations that would
+ * have led the next reader to "correct" a correct number by 1000x.
+ *
+ * WHY THE ERROR WAS INVISIBLE: these four fallbacks are doubly unreachable.
+ * On the fresh-characterization path localWire is initialized by NVSim, so the
+ * tool's own per-unit values are used and the fallback branch is dead; on the
+ * normal (cached) path nvsim_result_ is null, so the length is 0.0 and the
+ * product is 0 whatever the coefficient. On top of that the only consumer of
+ * all four is printDetailedResults(), which has no callers. A wrong constant
+ * here could not reach a printed number, let alone a reported one. */
 double NVSimWrapper::getWordlineCapacitance() const {
     // Estimate from wire model
     if (localWire && localWire->initialized)
         return getWordlineLength() * localWire->capWirePerUnit;
-    return getWordlineLength() * 0.2e-9;  // fallback: 0.2 fF/nm
+    // fallback: 0.2e-9 F/m = 0.2 fF/um, local wire (see the D030 note above)
+    return getWordlineLength() * 0.2e-9;
 }
 
 double NVSimWrapper::getWordlineResistance() const {
     if (localWire && localWire->initialized)
         return getWordlineLength() * localWire->resWirePerUnit;
-    return getWordlineLength() * 10e6;  // fallback
+    // fallback: 10e6 ohm/m = 10 ohm/um, local wire
+    return getWordlineLength() * 10e6;
 }
 
 double NVSimWrapper::getBitlineCapacitance() const {
     if (localWire && localWire->initialized)
         return getBitlineLength() * localWire->capWirePerUnit;
-    return getBitlineLength() * 0.3e-9;  // fallback
+    // fallback: 0.3e-9 F/m = 0.3 fF/um (bitlines run denser than wordlines)
+    return getBitlineLength() * 0.3e-9;
 }
 
 double NVSimWrapper::getBitlineResistance() const {
     if (localWire && localWire->initialized)
         return getBitlineLength() * localWire->resWirePerUnit;
-    return getBitlineLength() * 15e6;  // fallback
+    // fallback: 15e6 ohm/m = 15 ohm/um
+    return getBitlineLength() * 15e6;
 }
 
+/* 1.11.57 (latent D059): THE ENERGY BREAKDOWN IS NVSIM'S OWN NOW, TOO.
+ *
+ * These eight accessors returned fixed percentages of one mat-level scalar:
+ * 10/20/40/20/10 of mat.readDynamicEnergy for the five energies and 15/25/30
+ * of mat.leakage for the three leakages. That is precisely the defect D031
+ * found in the six DELAY accessors, which 1.11.56 rebuilt on NVSim's own
+ * terms; the energy half was left behind because its only consumers
+ * (subarray_read_energy_pJ, subarray_leakage_mw) are read by nothing today.
+ * A percentage split is not a breakdown: change the cell, the node or the mux
+ * ratio and all five moved in exact lockstep, because they were one number
+ * scaled five ways -- and they were labelled "NVSim extraction" downstream.
+ *
+ * NVSim resolves every one of them. SubArray::CalculatePower() composes
+ *
+ *   subarray.readDynamicEnergy = <array/bitline charge>
+ *                              + cellReadEnergy + rowDecoder + bitlineMuxDecoder
+ *                              + senseAmpMuxLev1Decoder + senseAmpMuxLev2Decoder
+ *                              + precharger + bitlineMux + senseAmp
+ *                              + senseAmpMuxLev1 + senseAmpMuxLev2
+ *
+ * (SubArray.cpp:854-856) and the leakage the same way (:872-874), each term a
+ * FunctionUnit with its own readDynamicEnergy and leakage. The accessors below
+ * read those terms.
+ *
+ * Two structural notes, same as the delay side:
+ *  - There is no separate WORDLINE term. NVSim charges the wordline inside the
+ *    row decoder and even overwrites rowDecoder.readDynamicEnergy with the
+ *    computed wordline energy for some cell types (SubArray.cpp:789-792), so
+ *    getWordlineEnergy()/getWordlineLeakage() return 0 and the decoder term
+ *    carries it. Splitting a number NVSim never separated is the defect.
+ *  - The BITLINE term is the only one NVSim does not keep as a named member:
+ *    it is the array charge computed before the components are added in. It is
+ *    recovered exactly by subtracting the named terms from the subarray total,
+ *    which is NVSim's own composition run backwards, not an assertion. Clamped
+ *    at 0 so an invalid design point (which sets the total to 1e41) or a NAND
+ *    path cannot produce a negative energy.
+ *
+ * All are per SUBARRAY -- the previous percentages were of a MAT, so the
+ * extractors' divide-by-subarray-count is removed alongside this. Energies in
+ * nJ, leakages in mW, 0.0 when there is no result tree to read (see
+ * hasComponentBreakdown -- notably every cache hit). */
 double NVSimWrapper::getDecoderEnergy() const {
-    // Proportional breakdown from mat read energy
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->mat.readDynamicEnergy * 1e9 * 0.10;  // 10% of mat read energy (nJ)
+    // Row decode + wordline drive: NVSim folds the wordline in here.
+    return nvsim_result_->bank->mat.subarray.rowDecoder.readDynamicEnergy * 1e9;
 }
 
 double NVSimWrapper::getWordlineEnergy() const {
-    if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->mat.readDynamicEnergy * 1e9 * 0.20;
+    /* Folded into the row decoder above; reporting it separately would
+     * double-count the same joules. See the block comment. */
+    return 0.0;
 }
 
 double NVSimWrapper::getBitlineEnergy() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->mat.readDynamicEnergy * 1e9 * 0.40;
+    const auto& sub = nvsim_result_->bank->mat.subarray;
+    // NVSim's own sum, inverted: the array charge is the total less the
+    // named components it accumulated on top (SubArray.cpp:854-856).
+    double components = sub.cellReadEnergy
+                      + sub.rowDecoder.readDynamicEnergy
+                      + sub.bitlineMuxDecoder.readDynamicEnergy
+                      + sub.senseAmpMuxLev1Decoder.readDynamicEnergy
+                      + sub.senseAmpMuxLev2Decoder.readDynamicEnergy
+                      + sub.precharger.readDynamicEnergy
+                      + sub.bitlineMux.readDynamicEnergy
+                      + sub.senseAmp.readDynamicEnergy
+                      + sub.senseAmpMuxLev1.readDynamicEnergy
+                      + sub.senseAmpMuxLev2.readDynamicEnergy;
+    double bitline = sub.readDynamicEnergy - components;
+    return (bitline > 0.0) ? bitline * 1e9 : 0.0;
 }
 
 double NVSimWrapper::getSenseAmpEnergy() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->mat.readDynamicEnergy * 1e9 * 0.20;
+    return nvsim_result_->bank->mat.subarray.senseAmp.readDynamicEnergy * 1e9;
 }
 
 double NVSimWrapper::getPrechargerEnergy() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->mat.readDynamicEnergy * 1e9 * 0.10;
+    return nvsim_result_->bank->mat.subarray.precharger.readDynamicEnergy * 1e9;
 }
 
 double NVSimWrapper::getDecoderLeakage() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->mat.leakage * 1000.0 * 0.15;  // W -> mW, 15%
+    return nvsim_result_->bank->mat.subarray.rowDecoder.leakage * 1000.0;  // W -> mW
 }
 
 double NVSimWrapper::getWordlineLeakage() const {
-    if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->mat.leakage * 1000.0 * 0.25;
+    // Folded into the row decoder, as with the energy and the delay.
+    return 0.0;
 }
 
 double NVSimWrapper::getSenseAmpLeakage() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->mat.leakage * 1000.0 * 0.30;
+    return nvsim_result_->bank->mat.subarray.senseAmp.leakage * 1000.0;  // W -> mW
 }
 
 double NVSimWrapper::getSubarrayArea() const {

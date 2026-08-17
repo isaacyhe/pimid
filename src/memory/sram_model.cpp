@@ -51,7 +51,17 @@ void SRAMModel::initialize() {
 
     // Calculate derived parameters
     capacity_ = sram_config_.capacity;
-    bandwidth_ = capacity_ * 2; // Simplified: 2x capacity per second
+    /* 1.11.57 (latent D053): NO FABRICATED BANDWIDTH. This was
+     * `bandwidth_ = capacity_ * 2;  // Simplified: 2x capacity per second` --
+     * a number with no tool behind it, in bytes/s, derived from a capacity,
+     * sitting behind the same getBandwidth() the DRAM path answers from
+     * Ramulator. Nothing reads it today (main.cpp's getBandwidth() calls are
+     * on RamulatorWrapper, a different class), which is the only reason it has
+     * never been printed as a result. CACTI does report an access time and an
+     * access width, but composing a sustained bandwidth from them is a model
+     * decision this class is not the place to make -- so it reports ABSENT,
+     * and getBandwidth() says so out loud. */
+    bandwidth_ = 0;
 
 #ifdef HAVE_CACTI
     try {
@@ -65,8 +75,20 @@ void SRAMModel::initialize() {
         cacti_config.read_ports = sram_config_.read_ports;
         cacti_config.write_ports = sram_config_.write_ports;
         cacti_config.tech_node_nm = sram_config_.tech_node_nm;
-    cacti_config.temperature = sram_config_.temperature_k;   // 1.11.52 (D055)
+        cacti_config.temperature = sram_config_.temperature_k;   // 1.11.52 (D055)
         cacti_config.is_cache = true;
+        /* 1.11.57 (latent D047): THE ACCESS WIDTH REACHES CACTI NOW.
+         * setAccessWidthBits() stored into access_width_bits_ and nothing in
+         * this file ever read it, so the knob the plugin contract documents as
+         * "the ACCESS GEOMETRY ... selects a DIFFERENT design point" was inert
+         * for SRAM while the three NVM models honoured it. It was invisible
+         * because the one live writer (main.cpp) passes 512, which happens to
+         * be CACTIWrapper::SRAMConfig's own default -- so the inert knob and
+         * the working knob produced identical numbers. Any other value would
+         * have been silently discarded. 0 keeps the wrapper default. */
+        if (access_width_bits_ > 0) {
+            cacti_config.output_width_bits = access_width_bits_;
+        }
 
         // Create and initialize CACTI wrapper
         cacti_wrapper_ = std::make_unique<CACTIWrapper>(cacti_config);
@@ -87,18 +109,29 @@ void SRAMModel::initialize() {
 
             std::cout << "[SRAMModel] Using CACTI-generated parameters" << std::endl;
         } else {
+            /* 1.11.57 (latent D052): NO FALLBACK VALUES. These three sites
+             * called useFallbackValues(), which assigned 0.5 nJ read, 0.8 nJ
+             * write, 0.05 W leakage and 2.5 mm^2 -- the last surviving
+             * counter-example to the 1.11.24 refusal policy this very file
+             * states forty lines below. They could not reach a result only
+             * because the `if (!sram_arch_)` throw further down fires on the
+             * same failure and unwinds first: neutralised by statement order,
+             * not by design, and one reordering away from live. The failure is
+             * announced and the model refuses. */
             std::cerr << "[SRAMModel] CACTI failed: " << cacti_wrapper_->getErrorMessage() << std::endl;
-            std::cerr << "[SRAMModel] Falling back to default values" << std::endl;
-            useFallbackValues();
+            std::cerr << "[SRAMModel] There is no fallback: energy, leakage and "
+                         "area stay at zero and initialization will refuse."
+                      << std::endl;
         }
     } catch (const std::exception& e) {
         std::cerr << "[SRAMModel] CACTI exception: " << e.what() << std::endl;
-        std::cerr << "[SRAMModel] Falling back to default values" << std::endl;
-        useFallbackValues();
+        std::cerr << "[SRAMModel] There is no fallback: energy, leakage and "
+                     "area stay at zero and initialization will refuse."
+                  << std::endl;
     }
 #else
-    std::cout << "[SRAMModel] CACTI not available, using default values" << std::endl;
-    useFallbackValues();
+    std::cerr << "[SRAMModel] CACTI is not compiled in. There is no fallback "
+                 "characterization; initialization will refuse." << std::endl;
 #endif
 
     std::cout << "[SRAMModel] Configuration:" << std::endl;
@@ -300,17 +333,21 @@ bool SRAMModel::canAccept(const MemoryRequest& req) {
 void SRAMModel::tick() {
     current_cycle_++;
 
-#ifdef HAVE_CACTI
-    // Re-query CACTI periodically to update energy models based on temperature
-    // (temperature changes due to activity can affect leakage)
-    if (cacti_wrapper_ && cacti_wrapper_->isValid()) {
-        // Update leakage power based on temperature profile (every 100K cycles)
-        if (current_cycle_ % 100000 == 0) {
-            // CACTI provides activity-based power estimation
-            leakage_power_ = cacti_wrapper_->getLeakagePower() / 1000.0;  // mW to W
-        }
-    }
-#endif
+    /* 1.11.57 (latent D048): THE PERIODIC RE-QUERY IS DELETED.
+     *
+     * It read "Re-query CACTI periodically to update energy models based on
+     * temperature (temperature changes due to activity can affect leakage)"
+     * and then, every 100K cycles, assigned
+     * leakage_power_ = cacti_wrapper_->getLeakagePower() / 1000.0 -- the same
+     * value initialize() already assigned. CACTIWrapper::getLeakagePower()
+     * reads cacti_result_, which is computed once in its initialize() and
+     * never recomputed, and no temperature is passed in on this path anyway.
+     * So the block asserted a thermal feedback loop that does not exist and
+     * performed a no-op to imply it. Invisible twice over: SRAMModel::tick()
+     * has no caller, and the assignment could not change a number even if it
+     * did. A temperature-dependent leakage model means re-characterizing at a
+     * new temperature (setTemperatureK, which feeds SRAMConfig::temperature);
+     * it does not mean re-reading a cached scalar. */
 
     // Process pending requests: latency is accounted for at access() time;
     // tick() just frees capacity by popping one request.
@@ -373,13 +410,9 @@ void SRAMModel::resetStats() {
     current_cycle_ = 0;
 }
 
-void SRAMModel::useFallbackValues() {
-    // Default energy values (typical for 22nm SRAM)
-    read_energy_ = 0.5;    // nJ per access
-    write_energy_ = 0.8;   // nJ per access
-    leakage_power_ = 0.05; // W
-    area_mm2_ = 2.5;       // mm^2
-}
+/* 1.11.57 (latent D052): SRAMModel::useFallbackValues() is DELETED -- see the
+ * call sites in initialize(). It was the last "typical for 22nm SRAM" literal
+ * block on a tool-bound path. */
 
 //=============================================================================
 // Inner-Bank Timing Queries (NEW!)
@@ -465,6 +498,29 @@ void SRAMModel::setTechNodeNm(int nm) {
 
 void SRAMModel::setAccessWidthBits(uint32_t bits) {
     if (bits >= 8 && bits <= 1024) access_width_bits_ = bits;
+}
+
+
+/* 1.11.57 (latent D053): the bandwidth this model can source is NONE.
+ * `bandwidth_ = capacity_ * 2` was an invented bytes/s figure -- no tool, no
+ * measurement, no unit stated -- answering the same MemoryModel::getBandwidth()
+ * that DRAMModel answers from Ramulator's own number. It reached no result
+ * only because nothing calls getBandwidth() on these objects today. 0 is the
+ * absent value; the note fires once per process so a future caller cannot read
+ * the 0 as a measured zero. */
+uint64_t SRAMModel::getBandwidth() const {
+    static bool announced = false;
+    if (!announced) {
+        announced = true;
+        std::cerr << "[SRAMModel] getBandwidth() returns 0 = NOT SOURCED. This model "
+                     "characterizes latency, energy and area through its tool; "
+                     "it has no sustained-bandwidth model, and the literal that "
+                     "used to stand here (capacity_ * 2) was fabricated. Compose a "
+                     "bandwidth from the tier latency and the access width at "
+                     "the call site, or add a sourced model here."
+                  << std::endl;
+    }
+    return 0;
 }
 
 } // namespace pimid
