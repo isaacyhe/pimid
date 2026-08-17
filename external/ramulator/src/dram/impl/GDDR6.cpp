@@ -320,6 +320,39 @@ class GDDR6 : public IDRAM, public Implementation {
           default:    return -1;
         }
       }(m_organization.density);
+      /* PIMID 1.11.59 (audit F037-class): the lambda returns -1 for any
+       * density outside the three tabulated ones, and that -1 then indexed
+       * tRFC_TABLE. An out-of-bounds read one element BEFORE a table of
+       * plausible nanosecond figures does not crash -- it yields whatever
+       * adjacent constant the linker put there, and the run continues with a
+       * refresh time nobody can trace, which is why an unrecognised density
+       * silently produced a plausible-looking timing set instead of an error.
+       *
+       * BEHAVIOUR CHANGE, stated deliberately: unlike the DDR3/DDR4/DDR5/HBM
+       * models, this file's org presets are NOT all covered by the switch,
+       * and the mismatch runs both ways. The six shipped presets are 8/16/32
+       * Gb (GDDR6_8Gb_x8/x16, GDDR6_16Gb_x8/x16, GDDR6_32Gb_x8/x16); the
+       * switch handles 4/8/16 Gb. So the 4 Gb column is dead (no preset
+       * selects it) and the two 32 Gb presets hit the [-1] read on every
+       * instantiation -- those two are what this throw now refuses. The
+       * alternative -- adding a 32 Gb column -- cannot be done from any
+       * source this tree holds: JESD250D (misc/JESD250D.pdf) leaves tRFCab
+       * and tRFCpb as vendor-specific, printing "-" for both minimums in its
+       * AC timing table, so there is no JEDEC per-density GDDR6 refresh row
+       * to copy. (The three columns present here carry DDR4's tRFC1/tRFC2/
+       * tRFC4 figures for 4/8/16 Gb verbatim, which is upstream's own
+       * substitution, not a GDDR6 measurement.) Inventing a 32 Gb entry is
+       * not allowed, so those presets refuse loudly instead of continuing on
+       * a number read off the front of the array. They never produced a
+       * defined timing, so nothing correct is being taken away. */
+      if (density_id < 0) {
+        throw ConfigurationError(
+          "In \"{}\", organization density {} Mb has no tabulated refresh "
+          "timing (tRFC is tabulated for 4/8/16 Gb only; the shipped "
+          "GDDR6_32Gb_x8 / GDDR6_32Gb_x16 org presets are outside that range "
+          "and JESD250D leaves tRFC vendor-specific)!",
+          get_name(), m_organization.density);
+      }
 
       m_timing_vals("nRFC")  = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
       m_timing_vals("nREFI") = JEDEC_rounding(tREFI_BASE, tCK_ps);

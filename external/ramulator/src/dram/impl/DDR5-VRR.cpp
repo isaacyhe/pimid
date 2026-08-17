@@ -488,6 +488,29 @@ class DDR5VRR : public IDRAM, public Implementation {
           default:    return -1;
         }
       }(m_organization.density);
+      /* PIMID 1.11.59 (audit F037-class): the lambda returns -1 for any
+       * density outside the three tabulated ones, and that -1 then indexed
+       * tRFC_TABLE, tRFCsb_TABLE and tRRFsb_TABLE (the last one twice more in
+       * the PRAC block below). An out-of-bounds read one element BEFORE a
+       * table of plausible nanosecond figures does not crash -- it yields
+       * whatever adjacent constant the linker put there, and the run
+       * continues with a refresh time nobody can trace, which is why an
+       * unrecognised density silently produced a plausible-looking timing set
+       * instead of an error. Checked before adding this: the nine ENABLED org
+       * presets cover 8/16/32 Gb only (DDR5_8Gb_*, DDR5_16Gb_*, DDR5_32Gb_*)
+       * and the switch handles exactly those three, so no shipped preset
+       * reaches the throw. The DDR5_64Gb_* presets just above are commented
+       * out and therefore not selectable; whoever re-enables them must add a
+       * 64 Gb column to all three tables first, and this throw is what will
+       * tell them so instead of letting the read run off the front. Refuse at
+       * construction, in the same form as the unrecognized-preset check
+       * above. */
+      if (density_id < 0) {
+        throw ConfigurationError(
+          "In \"{}\", organization density {} Mb has no tabulated refresh "
+          "timing (tRFC/tRFCsb/tRRFsb are tabulated for 8/16/32 Gb only)!",
+          get_name(), m_organization.density);
+      }
 
       m_RH_radius = param<int>("RH_radius").desc("The number of rows to refresh on each side").default_val(2);
 

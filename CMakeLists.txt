@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(PIMID VERSION 1.11.58 LANGUAGES CXX)
+project(PIMID VERSION 1.11.59 LANGUAGES CXX)
 
 # The reported version is taken FROM the project version, so the two cannot
 # drift apart again (see release 1.10.2).
@@ -167,7 +167,34 @@ set(PIMID_SOURCES
     src/memory/pim_controller_plugin.cpp
 
     # DRAM architecture specifications
-    src/memory/dram_architecture.cpp
+    # 1.11.59 (C016-class): src/memory/dram_architecture.{h,cpp} DELETED --
+    # the legacy v1 DRAMArchitecture object. It was compiled into pimid_lib
+    # but had no caller anywhere: a tree-wide search (all files, build/ and
+    # external/ excluded) found the header included only by its own .cpp, and
+    # none of DRAMArchitectureFactory, createDDR4_2400, createDDR5_4800,
+    # createHBM2, createHBM3 or DRAMArchitecture::printSummary referenced
+    # outside those two files. Everything live goes through
+    # src/memory/dram_architecture_v2.h's create*_Verified() creators
+    # (dram_model.cpp, ramulator_wrapper.cpp, pe_placement.h).
+    #
+    # It was deleted rather than repaired because it carried the same drifted
+    # HBM access-time literals that 1.11.57 had just corrected in the v2
+    # object: HBM2 subarray/bank 25.0/37.5 ns and HBM3 20.0/30.0 ns, against
+    # the sums those fields declare themselves to be (subarray = tRCD + tCAS,
+    # bank = tRP + tRCD + tCAS). The numbers were self-consistent when
+    # written -- 25.0 is 12.5+12.5 and 37.5 is 3 x 12.5, HBM2's pre-1.1.1
+    # arithmetic exactly -- and went wrong at release 1.1.1, which raised
+    # HBM2 tRCD/tCAS from 12.5 to the JESD235C spec minimum 16.0 and HBM3
+    # tRCD/tCAS from 10.0 to the JESD238 minimum 16.0 in the v2 object and
+    # left the derived literals here untouched. Against the corrected timing
+    # they read 22% (HBM2 subarray), 16% (HBM2 bank), 37% (HBM3 subarray) and
+    # 29% (HBM3 bank) low. That was invisible because nothing called the
+    # accessors: a wrong number that no code path reads produces no wrong
+    # result and no failing check, so it sat here for 58 releases waiting for
+    # someone to wire the class up and inherit the drift silently. Deleting
+    # it removes the re-entry point; the v2 object derives both sums from
+    # tRCD/tCAS/tRP at construction and cannot drift again. Recoverable from
+    # git history if a v1 consumer is ever really wanted.
 
     # Network - NEW PATHS
     src/network/network_model.cpp

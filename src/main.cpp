@@ -1564,6 +1564,14 @@ struct UnifiedConfig {
     // TEMP (pre-arXiv): parallel DRAM channel count for the M/D/c contention
     // stop-gap (HBM3=16, HBM2=8, others=1). Set in the DRAM H-tree block.
     int hierarchy_dram_channels = 1;
+    /* 1.11.59 (audit round 3, B005): the ADOPTED per-level ladder, carried so
+     * the Garnet topology builder draws the same fabric the latency model
+     * prices. Empty width array = no ladder was adopted for this technology
+     * (it did not reconcile, or it is not DRAM), and the builder keeps its
+     * per-technology table. */
+    std::array<int, 7>    sourced_ladder_w  = {0,0,0,0,0,0,0};
+    std::array<double, 7> sourced_ladder_bw = {0,0,0,0,0,0,0};
+    bool sourced_ladder_valid = false;
     // Real datasheet AGGREGATE sustainable bandwidth (MB/s) of the memory tech,
     // from Ramulator (getBandwidth() = per-channel x channels). Used by the
     // detailed NoC model to cap effective DRAM bandwidth at the channel
@@ -2590,6 +2598,47 @@ static bool dramHTreeBuilder(const std::string& tech,
         return false;  // not a modeled DRAM tech
     }
 
+    /* 1.11.59 (audit round 3, B005): ONE LADDER PER RUN.
+     *
+     * The table above is a SECOND per-tier ladder, and on a detailed DRAM run
+     * both were live: sys.hierarchy's levels came from the sourced ladder
+     * (what the PE is charged), while this table drew the Garnet CUSTOM
+     * topology (what Garnet actually simulates). They disagreed -- DDR4's
+     * chip tier is 192 bits here against the 8 bits an x8 part has and which
+     * the sourced ladder now carries -- so the cycle-accurate network was
+     * measuring a different fabric from the one being priced, in the same
+     * run. 1.11.56 said these tables "survive only as the fallback for a
+     * technology with no architecture object"; this copy was not a fallback,
+     * it was the only authority for the topology.
+     *
+     * The builder's four layers are leaf->root (subarray, bank, bank group,
+     * channel), so they take ladder rungs 0, 1, 2 and 5; the frequency is the
+     * one the rung's own bandwidth and width imply, which is what
+     * applySourcedLadder back-derived. When no ladder was adopted -- the
+     * technology did not reconcile with its preset, so its ladder is not
+     * tool-sourced -- the table stands, and that is a real fallback. */
+    if (config.sourced_ladder_valid) {
+        const int rung[4] = {0, 1, 2, 5};
+        for (int li = 0; li < 4; ++li) {
+            const int    wb = config.sourced_ladder_w[rung[li]];
+            const double bw = config.sourced_ladder_bw[rung[li]];
+            if (wb > 0 && bw > 0.0) {
+                L[li].width_bits = wb;
+                L[li].freq_ghz   = bw * 8.0 / static_cast<double>(wb);
+            }
+        }
+        N = std::max(1, config.hierarchy_dram_channels);
+        std::cout << "  [htree] Garnet topology drawn from the SOURCED ladder"
+                     " (bits/layer " << L[0].width_bits << "/" << L[1].width_bits
+                  << "/" << L[2].width_bits << "/" << L[3].width_bits
+                  << ", " << N << " channel(s)) -- the same fabric the latency"
+                     " model prices\n";
+    } else {
+        std::cout << "  [htree] Garnet topology from the per-technology TABLE:"
+                     " no sourced ladder was adopted for " << tech
+                  << ", so these widths are placeholders, not tool-sourced\n";
+    }
+
     /* 1.10.3: the per-technology table above is the DEFAULT, not a ceiling.
      *
      * Defaults describe the memory as it is built. But the point of this
@@ -3417,6 +3466,12 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
             const int nch = std::max(1, config.hierarchy_dram_channels);
             w[6]  = w[5] * nch;                   bw[6] = bw[5] * nch;
             hierarchy->applySourcedLadder(w, bw);
+            // 1.11.59 (B005): remember it for the Garnet topology builder.
+            for (int li = 0; li < 7; ++li) {
+                config.sourced_ladder_w[li]  = w[li];
+                config.sourced_ladder_bw[li] = bw[li];
+            }
+            config.sourced_ladder_valid = true;
             /* 1.11.57 (audit round 3, C006): the REAL node counts at the rank
              * and channel tiers. InternalDRAMNetwork assumed 2 and 2 for L4
              * and L5 -- the hop-count input for those levels -- in the same
@@ -3568,6 +3623,17 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
         int cyc = static_cast<int>(std::ceil(ns * pe_ghz));
         config.hierarchy_level_latency[i] = cyc > 0 ? cyc : 1;
     }
+    /* 1.11.59: PRINT them. These seven numbers govern every hierarchy
+     * traversal the timing model charges, and until now they existed only
+     * inside the generated ZSim config -- which is written to a temporary
+     * directory and discarded, so no run's own output showed what it charged.
+     * Gate 1169A could not test the B014 fix for exactly this reason: there
+     * was no observable. A quantity this load-bearing should be visible in
+     * the run that used it. */
+    std::cout << "  Hierarchy level latency (PE cycles, 64 B): ";
+    for (int i = 0; i < 7; ++i)
+        std::cout << config.hierarchy_level_latency[i] << (i < 6 ? "/" : "");
+    std::cout << " at " << hier_clk_mhz << " MHz\n";
 
     // Query per-bridge crossing latency (64B)
     // Bridge latency now computed by the bridge model (SIMPLE/MD1/DETAILED/AUTO)
@@ -7358,6 +7424,17 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                           << " nJ  (1.11.58: driver and PHY are charged now;"
                              " before this release the interface was"
                              " termination only)" << std::endl;
+                /* 1.11.59: where the termination rests on an unsourced Rtt,
+                 * report the BAND rather than the point. The doctrine is that
+                 * a quantity the tools cannot produce is stated as an interval
+                 * with its provenance; the pJ/bit link energies already are. */
+                {
+                    double t_lo = 0.0, t_hi = 0.0; std::string t_prov;
+                    if (ram_oracle.getTerminationEnergyBandNJ(t_lo, t_hi, t_prov)) {
+                        std::cout << "    termination BAND " << t_lo << "-" << t_hi
+                                  << " nJ [" << t_prov << "]" << std::endl;
+                    }
+                }
                 if (iface_drv_nj <= 0.0)
                     std::cout << "    NOTE: no driver/PHY figure for this"
                                  " technology -- CACTI-IO has no exact"
@@ -8426,10 +8503,15 @@ static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
                   << (crosses_dq ? "accesses cross the DQ pins at this placement"
                                  : "on-die placement: no DQ crossing, no interface charge")
                   << ")" << std::endl;
-        if (crosses_dq)
+        if (crosses_dq) {
             std::cout << "    termination: " << iface_term_nj
                       << " nJ  driver+PHY: " << iface_drv_nj
                       << " nJ  (1.11.58)" << std::endl;
+            double t_lo = 0.0, t_hi = 0.0; std::string t_prov;   // 1.11.59
+            if (ram_oracle.getTerminationEnergyBandNJ(t_lo, t_hi, t_prov))
+                std::cout << "    termination BAND " << t_lo << "-" << t_hi
+                          << " nJ [" << t_prov << "]" << std::endl;
+        }
         std::cout << "  Array dynamic: " << std::setprecision(3)
                   << (total_rd_mj + total_wr_mj + total_term_mj)
                   << " mJ (rd=" << total_rd_mj
@@ -10238,9 +10320,15 @@ static void emitHostMemBlock(std::ostream& out, const UnifiedConfig& config,
     // per-tech HOST-PATH ADDER (getHostPathAdderNs, ns) so the effective idle
     // host memory latency matches measured real sockets (DDR5 ~110, HBM3 ~235).
     // The adder is HOST-ROLE ONLY -- device (PE) pricing never routes here.
+    /* 1.11.59 (audit round 3, B016): the RUN's temperature, not a literal.
+     * 1.11.56 threaded the line size through here and left the temperature at
+     * a hardcoded 350 K, while getHostMemBandwidth() a few lines below -- in
+     * this same function, for this same array -- passes config.temperature_k.
+     * One array characterized at two different temperatures, for its latency
+     * and for its bandwidth. */
     int phys_latency = getMemoryLatencyCycles(host.memory_tech, host_freq,
                                               host.tech_node_nm, false, 0.0,
-                                              -999, 350,
+                                              -999, config.temperature_k,
                                               config.cache_line_size);  // 1.11.56 (B018)
     phys_latency = std::max(1, phys_latency);
     // Host-path adder (ns): the aggregate override wins outright; otherwise the
@@ -10503,17 +10591,15 @@ static void emitZSimCoherenceBlock(std::ostream& out, const UnifiedConfig& confi
         // Login-node observable: the deterministic flush charge the plugin will
         // apply at roi_begin (unified) or skip (separate).
         double flush_cyc = fixed_cyc;
-        if (unified && wb_bytes_per_cycle > 0.0 && config.coherence_footprint_bytes > 0)
-            flush_cyc += std::ceil((double)config.coherence_footprint_bytes / wb_bytes_per_cycle);
+        // 1.11.59 (F021): the footprint is always measured, so there is no
+        // configured-size term to add here.
+        (void)wb_bytes_per_cycle;
         double flush_ns = flush_cyc * 1000.0 / f;
         /* 1.11.40 (N7): with footprint 0 the flush size is not knowable on the
          * login node -- it is measured at roi_begin from the caches' dirty
          * lines. Say that, rather than printing a 0 that reads as "no flush". */
         std::cerr << "[coherence] mode=" << (unified ? "unified" : "separate")
-                  << " footprint="
-                  << (config.coherence_footprint_bytes > 0
-                        ? std::to_string(config.coherence_footprint_bytes) + "B (OVERRIDE)"
-                        : std::string("MEASURED at roi_begin (host dirty lines)"))
+                  << " footprint=MEASURED at roi_begin (host dirty lines)"   // 1.11.59 (F021)
                   << " writeback_bw=" << writeback_bw_gbs << "GB/s"
                   << " fixed=" << config.coherence_flush_fixed_ns << "ns"
                   << " -> flush=" << (unified ? (uint64_t)flush_cyc : 0)
@@ -12939,8 +13025,31 @@ int main(int argc, char** argv) {
                         co["writeback_bw_gbs"].as<double>(config.coherence_writeback_bw_gbs);
                     config.coherence_flush_fixed_ns =
                         co["flush_fixed_ns"].as<double>(config.coherence_flush_fixed_ns);
-                    config.coherence_footprint_bytes =
-                        co["footprint_bytes"].as<long long>(config.coherence_footprint_bytes);
+                    /* 1.11.59 (audit round 3, F021): REFUSE a non-zero value.
+                     *
+                     * The flush footprint is MEASURED at roi_begin from the
+                     * host's dirty lines (N7), and since then the zsim side
+                     * panics on any configured footprintBytes -- so this key
+                     * can only abort the run it claims to configure. It was
+                     * still parsed, still emitted, and the debug line still
+                     * printed an "(OVERRIDE)" branch describing an override
+                     * that cannot take effect. Refusing here says so at the
+                     * point the user wrote it, instead of at a panic three
+                     * layers down. */
+                    {
+                        long long fp = co["footprint_bytes"].as<long long>(0);
+                        if (fp != 0) {
+                            std::cerr << "[config] FATAL: coherence.footprint_bytes = "
+                                      << fp << " cannot be honoured. The flush "
+                                         "footprint is measured at ROI entry from "
+                                         "the host's dirty cache lines; a configured "
+                                         "value is refused by the timing model, so "
+                                         "this run would abort. Remove the key to "
+                                         "use the measurement." << std::endl;
+                            std::exit(2);
+                        }
+                        config.coherence_footprint_bytes = 0;
+                    }
                 }
 
                 // Kernel LAUNCH cost tree (1.7.3). All fields optional.

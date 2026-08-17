@@ -385,7 +385,7 @@ inline double terminationNJ(const std::string& tech, double term_override_pJ_per
     else if (tech=="DDR4")   {sch=POD;  vddq=1.2;  rtt=48;  rpd=40;}   // POD12  (JESD8-24)
     else if (tech=="DDR5")   {sch=POD;  vddq=1.1;  rtt=48;  rpd=40;}   // POD11  (same family)
     else if (tech=="GDDR6")  {sch=POD;  vddq=1.35; rtt=60;  rpd=40;}   // POD135 (JESD8-21C, Cl.D:
-                                                                       // RTT programmable 48/60 via MR6)
+                                                                       // RTT programmable 48/60 via MR1 (JESD250D p.59))
     /* 1.11.26: was NONE ("LVSTL, unterminated") -- wrong. LPDDR5 does
      * terminate; it terminates to VSS. VDDQ 0.5 V is the ODT-ON rail
      * (0.30 V is the ODT-off rail), RON 40 ohm from the same datasheets.

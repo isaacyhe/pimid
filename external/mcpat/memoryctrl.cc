@@ -594,17 +594,25 @@ MemoryController::MemoryController(ParseXML *XML_interface,InputParameter* inter
    * driver is now the only thing that varies.
    *
    * PIMID 1.11.57 (latent E010): what that costs the SHIPPED REFERENCE XMLs.
-   * Niagara1/Niagara2/Penryn/Xeon/Alpha21364 all declare type=0 withPHY=0,
+   * Niagara1/Niagara2/Penryn/Xeon/Alpha21364 all declared type=0 withPHY=0,
    * and before D3 a type=0 MC built its PHY regardless -- so under this gate
-   * those inputs now report an MC with no PHY area, no PHY dynamic and no
-   * PHY leakage, and no longer reproduce McPAT's published validation
-   * numbers. Nothing in this tree notices: CMakeLists excludes main.cc, the
-   * fork builds as libmcpat.a only, the sole entry point is McPATWrapper and
-   * nothing under src/ names ProcessorDescriptionFiles. The gate is correct
-   * for PIMID (an on-die element controller must be able to drop its
-   * off-chip driver without switching backend cost models); the reference
-   * XMLs are stale inputs for a binary this fork does not build, and are
-   * recorded as such here rather than quietly re-tuned. */
+   * those inputs reported an MC with no PHY area, no PHY dynamic and no PHY
+   * leakage, and no longer reproduced McPAT's published validation numbers.
+   * Nothing in this tree notices: CMakeLists excludes main.cc, the fork
+   * builds as libmcpat.a only, the sole entry point is McPATWrapper and
+   * nothing under src/ names ProcessorDescriptionFiles.
+   *
+   * PIMID 1.11.59 (audit E010): that was STATED here and left standing, which
+   * left a reader two readings of the same 0 -- "upstream ignored this field
+   * for type=0" and "this part has no PHY" -- with no way to tell which was
+   * meant. The eight type=0 reference files now declare withPHY=1, each with
+   * the reason at the line, because every one of those parts drives off-chip
+   * DIMMs and its published number includes the PHY. The gate stays as D3
+   * wrote it (an on-die element controller must be able to drop its off-chip
+   * driver without switching backend cost models); what changes is that the
+   * inputs now say what they mean under the gate. No PIMID number moves --
+   * nothing builds main.cc -- and MCPHY's type=0 branch reads withPHY
+   * nowhere else, so setting it restores exactly the pre-D3 result. */
   if (mcp.withPHY)
   {
 	  PHY = new MCPHY(&interface_ip, mcp, mc_type);

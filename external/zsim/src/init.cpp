@@ -85,6 +85,46 @@ extern void EndOfPhaseActions(); //in qemu_zsim_plugin.cpp
  * follow the layout of zinfo, top-down.
  */
 
+/* 1.11.59 (audit F018): who owns a cache group, so the flush registry can be
+ * role-aware instead of asserting in a comment that it does not need to be.
+ *
+ * The system-scope emitter names every cache group "<node.name>_l1d" /
+ * "_l1i" / "_l2" / "_l3" and gates emission on CORE TYPE (alu_core and
+ * null_core get none), never on ROLE -- so a node declared `role: DEVICE`
+ * with an in_order/simple/ooo core is given a full L1I/L1D/L2 hierarchy.
+ * Those caches landed in the same global registry as the host's, and the
+ * host's coherence flush then charged their dirty lines to a HOST core in
+ * cycles and to HOST DRAM in writeback bytes. Nothing warned: the registry
+ * was a flat vector and the only stated guard was the sentence below.
+ *
+ * The node map is parsed earlier in InitSystem than the cache groups are
+ * built, so the role is available here. Longest-name-first, because one node
+ * name may be a prefix of another ("dev" and "dev0"). Returns -1 when there
+ * is no node map at all (device-scope runs, where sys.coherence is never
+ * emitted and the registry is never walked) or when no node claims the
+ * group, and the caller then keeps the old register-everything behaviour. */
+static int cacheGroupOwnerNode(const string& groupName) {
+    if (!zinfo || zinfo->nodeMap.numNodes == 0) return -1;
+    int best = -1;
+    size_t bestLen = 0;
+    for (uint32_t n = 0; n < zinfo->nodeMap.numNodes && n < 16; n++) {
+        const string nodeName(zinfo->nodeMap.nodes[n].name);
+        if (nodeName.empty()) continue;
+        const string pfx = nodeName + "_";
+        if (groupName.compare(0, pfx.size(), pfx) == 0 && pfx.size() > bestLen) {
+            best = (int)n;
+            bestLen = pfx.size();
+        }
+    }
+    return best;
+}
+
+/* 1.11.59 (audit F018): banks excluded from the flush registry because their
+ * owning node is a DEVICE, reported once the groups are built so the decision
+ * is visible in the log rather than inferred from a count that silently got
+ * smaller. */
+static uint32_t g_flushRegistryDeviceBanks = 0;
+
 BaseCache* BuildCacheBank(Config& config, const string& prefix, g_string& name, uint32_t bankSize, bool isTerminal, uint32_t domain) {
     string type = config.get<const char*>(prefix + "type", "Simple");
     // Shortcut for TraceDriven type
@@ -300,10 +340,33 @@ BaseCache* BuildCacheBank(Config& config, const string& prefix, g_string& name, 
      * Device PEs of type alu_core have no cache at all (see pe_memory_interface.h,
      * "The ALU has no cache"), so in a co-sim run every entry here is a host
      * cache -- which is what makes summing the whole registry the right answer
-     * for a HOST flush. If a cache-bearing PE type is ever added this must
-     * become role-aware, and the flush reports the count so the assumption is
-     * visible rather than buried. */
-    zsimAllCaches().push_back(cache);
+     * for a HOST flush.
+     *
+     * 1.11.59 (audit F018): that held only because the shipped co-sim gives
+     * its device node an alu_core. The condition was never CHECKED -- the
+     * push_back was unconditional and the sentence that followed it said a
+     * cache-bearing PE type "must" make this role-aware, which is a comment,
+     * not a guard. A device node with core_type in_order/simple/ooo gets a
+     * full L1I/L1D/L2 from the same emitter (it gates on core type, not on
+     * role), and every dirty line in it was then written back on a HOST core
+     * and billed to HOST DRAM by the roi_begin flush -- silently, in exactly
+     * the placement sweeps the flush charge exists to keep honest. The
+     * registry is the HOST flush domain now, and a device-owned bank is
+     * excluded and counted rather than summed. */
+    {
+        string groupName(prefix);
+        const string kPfx = "sys.caches.";
+        if (groupName.compare(0, kPfx.size(), kPfx) == 0) groupName.erase(0, kPfx.size());
+        if (!groupName.empty() && groupName.back() == '.') groupName.pop_back();
+        const int ownerNode = cacheGroupOwnerNode(groupName);
+        const bool deviceOwned = (ownerNode >= 0) &&
+                                 (zinfo->nodeMap.nodes[ownerNode].role != 0);
+        if (deviceOwned) {
+            g_flushRegistryDeviceBanks++;
+        } else {
+            zsimAllCaches().push_back(cache);
+        }
+    }
 
 #if 0
     info("Built L%d bank, %d bytes, %d lines, %d ways (%d candidates if array is Z), %s array, %s hash, %s replacement, accLat %d, invLat %d name %s",
@@ -793,8 +856,8 @@ static void InitSystem(Config& config) {
         // the string form the emitter writes.
         {
             const char* fb = config.get<const char*>("sys.coherence.footprintBytes", "0");
-            zinfo->coherence.footprintBytes = strtoull(fb, nullptr, 10);
-            /* 1.11.40 (N7): footprintBytes is retained only so an explicitly
+            const uint64_t configuredFootprint = strtoull(fb, nullptr, 10);
+            /* 1.11.40 (N7): footprintBytes is read only so an explicitly
              * configured value can be REFUSED rather than silently ignored --
              * the flush size is measured from the caches' dirty lines at each
              * flush and is a different number at each one.
@@ -804,28 +867,39 @@ static void InitSystem(Config& config) {
              * parses sys.coherence.footprint_bytes, writes footprintBytes
              * into the config, and prints an "(OVERRIDE)" branch describing
              * the value as honoured -- a branch this panic guarantees no run
-             * can ever reach. Nothing moves today because the emitter's
-             * default is 0, so neither the print nor the panic fires; but a
-             * user who follows the documented key gets a crashed simulation
-             * where the printed message promised an override. The honest
-             * shape is for the orchestrator to refuse the key at config time
-             * with an explanation, which is a change on the PIMID side of the
-             * boundary; recorded here so the two halves are not each waiting
-             * for the other. */
-            if (zinfo->coherence.footprintBytes > 0) {
+             * can ever reach.
+             *
+             * 1.11.59 (audit F021, fork half): the value is now a LOCAL. It
+             * used to be stored in zinfo->coherence.footprintBytes, where it
+             * was read by nothing except this panic and the startup line
+             * below, which printed it as "footprint=%llu B" -- always 0, and
+             * indistinguishable from a genuine report of the quantity the
+             * flush actually uses. Keeping a config field alive next to the
+             * measurement it was replaced by is how a reader (or a later
+             * edit) comes to believe the flush still has a configured size.
+             * The refusal is unchanged and deliberately loud. The other half
+             * is NOT fixable here: src/main.cpp still emits the key and still
+             * prints an "(OVERRIDE)" branch for a value that only ever aborts
+             * the run it claims to configure. That belongs to whoever owns
+             * src/, and is reported rather than reached across the boundary. */
+            if (configuredFootprint > 0) {
                 panic("sys.coherence.footprintBytes=%llu is set, but the flush "
                       "footprint is MEASURED from host dirty lines at each "
                       "flush -- it is not one number. Remove the key.",
-                      (unsigned long long)zinfo->coherence.footprintBytes);
+                      (unsigned long long)configuredFootprint);
             }
         }
         zinfo->coherence.flushFixedCycles = config.get<uint32_t>("sys.coherence.flushFixedCycles", 0);
         const char* wbpc = config.get<const char*>("sys.coherence.writebackBytesPerCycle", "0.0");
         zinfo->coherence.writebackBytesPerCycle = atof(wbpc);
-        info("[ZSim] Case-1 coherence flush %s (mode=%s, footprint=%llu B, %.4f B/cyc writeback, fixed=%u cyc)",
+        /* 1.11.59 (audit F021): this line used to print "footprint=%llu B"
+         * from the refused config field, which could only ever be 0 and read
+         * as a report of the flush size. The flush size is measured per
+         * flush and printed there; what belongs here is that fact. */
+        info("[ZSim] Case-1 coherence flush %s (mode=%s, footprint=measured per "
+             "flush from host dirty lines, %.4f B/cyc writeback, fixed=%u cyc)",
              zinfo->coherence.enabled ? "enabled" : "present-disabled",
              zinfo->coherence.mode == 0 ? "unified" : "separate",
-             (unsigned long long)zinfo->coherence.footprintBytes,
              zinfo->coherence.writebackBytesPerCycle, zinfo->coherence.flushFixedCycles);
     }
 
@@ -975,6 +1049,15 @@ static void InitSystem(Config& config) {
     /* Since we have checked for no loops, parent is mandatory, and all parents are checked valid,
      * it follows that we have a fully connected tree finishing at the LLC.
      */
+    /* 1.11.59 (audit F018): say what the flush domain ended up containing.
+     * The flush log already prints the registry size; without this line a
+     * reader could not tell a smaller registry from a config that simply has
+     * fewer caches, which is how the un-checked assumption stayed invisible
+     * in the first place. */
+    info("[ZSim] Coherence-flush cache registry: %zu host-owned bank(s), "
+         "%u device-owned bank(s) excluded (a HOST flush writes back HOST "
+         "dirty lines; a device cache is not in the host's flush domain)",
+         zsimAllCaches().size(), g_flushRegistryDeviceBanks);
     } // hasCaches
 
     //Build the memory controllers

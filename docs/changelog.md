@@ -7,6 +7,167 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.59 -- the eight that were left, and one ladder per run
+
+The items still open after 1.11.58, closed. Three came out of round 3 and were
+never fixed (I reported round 3 as fully closed at 1.11.57; it was not -- B005,
+B014 and C018 had no fix, and my verification scan read the absence of a
+citation tag as "covered elsewhere" without checking each one).
+
+### One ladder per run (B005)
+
+A detailed DRAM run had TWO live per-tier ladders. `sys.hierarchy`'s levels
+came from the sourced ladder -- what the element is charged -- while the Garnet
+CUSTOM topology was drawn from a per-technology table inside the H-tree
+builder. They disagreed: DDR4's chip tier is 192 bits in that table against the
+8 bits an x8 part has and which the sourced ladder carries. So the
+cycle-accurate network was SIMULATING a different fabric from the one being
+PRICED, in the same run. 1.11.56 said those tables "survive only as the
+fallback for a technology with no architecture object"; this copy was not a
+fallback, it was the only authority for the topology.
+
+The builder now takes its four layers from ladder rungs 0, 1, 2 and 5, and the
+channel count from the technology. Where no ladder was adopted -- the object
+did not reconcile with its preset -- the table stands and the run says the
+widths are placeholders, not tool-sourced. That is a real fallback.
+
+### A tier with no routing hops still has to be crossed (B014)
+
+`avgHops()` returns 0.0 for "bus" and "crossbar" and for a single node, and the
+fixed per-level latency was multiplied by it. For a DDR part that is L0, L1,
+L2, L4, L5 and L6 -- six of the seven levels -- so the sense-amp and
+column-decode time at L0, the mux arbitration at L1/L2, the rank-switching tRR
+at L4 and the PCB trace at L5 contributed NOTHING to any traversal that crossed
+them, at every technology. Six of the seven emitted levelLatency values were
+pure width serialisation. Zero hops means no ROUTING, not no crossing: a bus
+still has to be driven and sensed. The fixed cost is charged once plus one per
+additional hop; genuine multi-hop topologies are unchanged.
+
+The second half of the same finding is stated rather than changed: adopting the
+sourced ladder RE-TIMES every per-level fixed latency, because those constants
+are cycle counts at a clock the ladder is free to change. DDR5's L3 "I/O driver
++ package delay" of 5 cycles was authored at 1.2 GHz (4.17 ns) and becomes 2.08
+ns at 2.4 GHz. A package delay is a TIME; expressing it in cycles is the
+underlying defect, and correcting the constants would move the corpus.
+
+### The per-level latencies are printed (new)
+
+These seven numbers govern every hierarchy traversal the timing model charges,
+and they existed only inside the generated ZSim config -- written to a
+temporary directory and discarded. No run's own output showed what it charged.
+Gate 1169A's B014 arm could not test the fix for exactly this reason: it
+grepped for a string that is not in any log and failed EMPTY, testing nothing.
+A quantity this load-bearing should be visible in the run that used it.
+
+### Access times that had been wrong since 1.1.1 (C016)
+
+HBM2 and HBM3 carried `subarray_access_ns` and `bank_access_ns` literals
+contradicting their own cited timings -- HBM3's subarray said 20.0 ns against a
+tRCD+tCAS of 32.0. The history, checked rather than guessed: release 1.1.1
+raised HBM tRCD/tCAS to the JESD235C/JESD238 spec minima and did not move the
+derived literals, which are exactly the pre-1.1.1 sums (25.0 = 12.5+12.5,
+20.0 = 10+10). They were consistent when written and wrong in every release
+since. NOT caused by 1.11.56's speed-bin work, which moved only the rate, the
+core clock and the burst. Both fields are computed from the timings now and
+cannot drift again. Latent today (the extractor overwrites them), so no corpus
+number moves.
+
+### A device width that changed nothing (C018)
+
+`setDeviceWidth()` wrote a string that three array-energy sites read. Every
+ladder accessor -- chip I/O, rank bus, chips per rank, the bandwidths -- read
+per-factory literals with chip DQ fixed at 8, so the width changed none of
+them, while the extractor stamped the result "extracted from Ramulator device
+configuration (x4/x8/x16)". A false provenance claim. The object honours the
+width now: chip DQ is the configured width, chips per rank is rank bus / width,
+the prefetch datapath follows, and DDR4/DDR5 bank groups halve at x16. At x8
+every value reproduces the factory exactly, so nothing in the corpus moves;
+x4 and x16 move, and they were wrong.
+
+### The rest
+
+- **F021**: `coherence.footprint_bytes` is refused at config time. The footprint
+  is measured at ROI entry, and the timing model panics on any configured
+  value, so the key could only abort the run it claimed to configure -- while
+  the debug line printed an "(OVERRIDE)" branch describing an override that
+  cannot take effect.
+- **F034**: HBM2's `nREFISB` read the refresh-TIME table instead of the
+  same-bank refresh-INTERVAL table -- 260 ns where the interval is 4875 ns,
+  18.75x too frequent. HBM3 got this in 1.11.51 and its twin did not.
+- **F037-class**: an unguarded `density_id == -1` indexed three constexpr
+  tables at [-1] -- a non-crashing out-of-bounds read yielding an adjacent
+  constant -- in nine more DRAM implementations. All now refuse at
+  construction. Two presets change behaviour: `LPDDR5_32Gb_x16` and
+  `GDDR6_32Gb_x8/_x16` passed the density check, did the [-1] read on every
+  instantiation, and never produced a defined timing; no sourced 32 Gb refresh
+  row exists to extend the tables with (JESD250D leaves GDDR6 tRFC
+  vendor-specific; Micron's LPDDR5 tables stop at 16 Gb because 32 Gb parts are
+  multi-die packages), so they refuse loudly instead. PIMID selects only the
+  8 Gb presets, so no configuration here is affected.
+- **E010, F018, F035, F036**: the McPAT reference XMLs declare withPHY=1 again
+  (D3 made the flag authoritative and thereby deleted the PHY from parts that
+  drive off-chip DIMMs); cache registration is role-aware, so a DEVICE node's
+  dirty lines are no longer written back on a HOST core and billed to HOST
+  DRAM; two dead preset columns and an unsatisfiable guard removed.
+- **B013**: the 1.11.56 flattening guard was structurally unsatisfiable. The
+  behaviour was right; the condition read as though the other case existed.
+- **B016**: the host array's latency was characterized at a literal 350 K while
+  its bandwidth, in the same function for the same array, used the configured
+  temperature.
+- Dead code with wrong numbers deleted: the legacy v1 `DRAMArchitecture`
+  carried the same drifted HBM literals and had no callers.
+
+### LPDDR5 termination: a band, not a point
+
+The DQ-interface correction landed in 1.11.58 for every technology with an
+exact CACTI-IO map -- DDR3, DDR4, DDR5 and GDDR6. (The 1.11.58 entry said
+GDDR6 was excluded. That was wrong and is corrected there.) LPDDR5 is the one
+technology whose Rtt this tree cannot source.
+
+A search of everything freely available found the encoding MR11 OP[6:4] = 000B
+for "ODT disabled" (YM5XCBQ3B2-T16 64 Gb LPDDR5, IDD note 2, p.10) and
+corroborated RON = 40 ohm, and found NO ohm ladder and NO stated default: full
+datasheets are either image-only or defer to a Micron General AC/DC
+specification not held here, JESD209-5 is paywalled, and the only sources
+quoting the ladder are secondary. Every PDF fetched this session -- 51
+documents, about 1500 pages -- was machine-scanned for MR11 and DQ ODT; one
+page matched, the ODT-disabled note above.
+
+So the termination is now reported as a BAND, which is what the project's own
+rule requires of a quantity the tools cannot produce: RODT(DQ) = 30-240 ohm
+(Intel 743844-015 Table 89 p.211, typical column EMPTY) against RON = 40 ohm
+gives a loop-resistance ratio of 4.0. The applied value stays the 240 ohm end
+-- the weakest termination and therefore the LOWEST energy the range permits --
+and the run prints the interval and its provenance beside it. An unsourced
+point becomes a sourced interval with a stated direction.
+
+Closing it to a point needs the MR11 ODT ladder AND a stated default or a
+vendor-stated operating point; the ladder alone would not do it, because which
+rung applies is a controller choice.
+
+### Data impact
+
+B005 changes the simulated Garnet topology on every detailed DRAM run, and
+B014 changes the fixed-latency term at every bus and crossbar tier. On the HBM3
+reference cell the NET is -8.3% device cycles (14.32M -> 13.13M): the two pull
+opposite ways and B005 dominates, because the sourced rungs carry the higher
+per-rung clocks C003 derived. C018 moves x4 and x16 configurations only. C016
+and the fork items move nothing today.
+
+Gates 1169A then 1169B. 1169A's B014 arm grepped for a string that exists only
+in a discarded temp file and failed empty; the fix for that is the per-level
+latency print above, not a looser assertion.
+
+One honest limit on 1169B's P4 arm: it confirms the seven latencies are now
+printed and well-formed (HBM3: 1/2/2/1/2/2/2 PE cycles at the device clock),
+but it CANNOT A/B them against 1.11.58, because the comparison binary does not
+print them at all -- the observable is what this release added. So P4 verifies
+visibility and sanity, not the direction of the B014 change. B014 itself rests
+on code inspection and on the argument in the source: with the old formula a
+zero-hop tier's latency was serialisation alone, since the fixed term was
+multiplied by avgHops() == 0. The first release that can A/B this is the next
+one.
+
 ## 1.11.58 -- the interface correction reaches a number, and the units are one
 
 Three items that 1.11.57 left explicitly open, each flagged at the time as
@@ -32,8 +193,12 @@ result showed.
 
 WHAT THIS DOES NOT FIX, stated plainly because it is the case the original
 correction existed for: the accessors return zero unless CACTI-IO has an EXACT
-parameter map, which exists for DDR3, DDR4 and DDR5 and not for LPDDR5, GDDR6
-or HBM. LPDDR5 -- the technology the 1.11.40 note says was understated by
+parameter map. CORRECTION (1.11.59): this entry originally said such a map
+exists for "DDR3, DDR4 and DDR5 and not for LPDDR5, GDDR6 or HBM". GDDR6 was
+wrong -- its electrical row is sourced (POD135, JESD8-21C Cl.D) and its
+exact_map is true, so GDDR6 DOES receive the driver+PHY term. The map exists
+for DDR3, DDR4, DDR5 and GDDR6; it does not for LPDDR5 (RTT unsourced) or for
+HBM2/HBM3 (no electrical row at all). LPDDR5 -- the technology the 1.11.40 note says was understated by
 roughly 71x -- receives NOTHING from this change: measured, driver+PHY 0.000
 nJ, interface unchanged at 0.036 nJ. What changed for it is that the run now
 SAYS the interface is still termination-only and why, instead of reporting

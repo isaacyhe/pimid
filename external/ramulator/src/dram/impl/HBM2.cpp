@@ -32,10 +32,20 @@ class HBM2 : public IDRAM, public Implementation {
       //   name       rate   nBL  nCL  nRCDRD  nRCDWR  nRP  nRAS  nRC  nWR  nRTPS  nRTPL  nCWL  nCCDS  nCCDL  nRRDS  nRRDL  nWTRS  nWTRL  nRTW  nFAW  nRFC  nRFCSB  nREFI  nREFISB  nRREFD  tCK_ps
       // HBM2 @ 2.4 Gb/s with JEDEC JESD235C spec-minimum physical timings
       // (tRCD=tRP=16ns, tRAS=33ns, tRC=49ns, tCL=16ns, tWR=16ns, tFAW=16ns,
-      // tRFC=220ns @4Gb, tREFI=3.9us). Cycle counts derived at tCK=833ps.
+      // tREFI=3.9us). Cycle counts derived at tCK=833ps.
       // Replaces the earlier placeholder "HBM2_2Gbps" preset, which encoded
       // physically-impossible ~7ns row timings (~2x faster than any real HBM2).
-      {"HBM2_2.4Gbps", {2400, 4, 20, 20, 20, 20, 40, 59, 20, 5, 10, 10, 3, 5, 4, 5, 5, 10, 10, 20, 265, -1, 4682, -1, 8, 833}},
+      /* PIMID 1.11.59 (audit F036): the nRFC/nRFCSB/nREFISB columns are -1,
+       * because get_timing_vals() overwrites all three from the per-density
+       * tables further down before anything reads them. This line used to
+       * carry nRFC=265 with a comment claiming "tRFC=220ns @4Gb" -- a value
+       * and a source that no run ever used: the table supplies 260 ns at the
+       * emitted HBM2_4Gb org, so the refresh occupancy this model simulates
+       * is 18% longer than the preset's own comment stated. The number was
+       * dead and the comment beside it read as the authority, which is the
+       * worse half. -1 is this file's idiom for "supplied elsewhere" and the
+       * completeness check below still catches a column nothing fills. */
+      {"HBM2_2.4Gbps", {2400, 4, 20, 20, 20, 20, 40, 59, 20, 5, 10, 10, 3, 5, 4, 5, 5, 10, 10, 20, -1, -1, 4682, -1, 8, 833}},
     };
 
 
@@ -267,13 +277,16 @@ class HBM2 : public IDRAM, public Implementation {
         { 160,  260,  350,  450},
       };
 
-      // tRFC table (unit is nanosecond!)
+      /* PIMID 1.11.59 (audit F034): this header said "tRFC table" over the
+       * same-bank refresh INTERVAL table -- the copy-paste that hid the wrong
+       * read below for as long as it stood. */
+      // tREFIsb table (same-bank refresh INTERVAL, unit is nanosecond!)
       constexpr int tREFISB_TABLE[1][4] = {
       //  2Gb    4Gb    8Gb    16Gb
         { 4875,  4875,  2438,  2438},
       };
 
-      int density_id = [](int density_Mb) -> int { 
+      int density_id = [](int density_Mb) -> int {
         switch (density_Mb) {
           case 2048:  return 0;
           case 4096:  return 1;
@@ -282,16 +295,47 @@ class HBM2 : public IDRAM, public Implementation {
           default:    return -1;
         }
       }(m_organization.density);
+      /* PIMID 1.11.59 (audit F037): the lambda returns -1 for any density
+       * outside the four tabulated ones, and that -1 then indexed three
+       * constexpr arrays. An out-of-bounds read one element BEFORE a table of
+       * plausible nanosecond figures does not crash -- it yields whatever
+       * adjacent constant the linker put there, and the run continues with a
+       * refresh time nobody can trace. Every org preset this tree emits is
+       * tabulated, so the read never happened; a hand-written org of 1 Gb or
+       * 32 Gb would have reached it silently. Refuse at construction instead,
+       * in the same form as the unrecognized-preset check above. */
+      if (density_id < 0) {
+        throw ConfigurationError(
+          "In \"{}\", organization density {} Mb has no tabulated refresh "
+          "timing (tRFC/tREFIsb are tabulated for 2/4/8/16 Gb only)!",
+          get_name(), m_organization.density);
+      }
 
       m_timing_vals("nRFC")  = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
-      m_timing_vals("nREFISB")  = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
+      /* PIMID 1.11.59 (audit F034): nREFISB read tRFC_TABLE -- the refresh
+       * TIME table -- while tREFISB_TABLE, the same-bank refresh INTERVAL
+       * defined just above, sat unread. HBM3.cpp was corrected in 1.11.51 and
+       * this twin was not, so the same upstream copy-paste survived here: at
+       * the emitted HBM2_4Gb org the interval came out as 260 ns instead of
+       * 4875 ns, 18.75x too frequent. Invisible because nREFISB enters no
+       * timing constraint in populate_timingcons and the emitted refresh
+       * manager is always AllBank, which never consumes it -- so a value that
+       * was wrong by 18.75x sat in a completeness-checked table that reads as
+       * though every entry had been derived. */
+      m_timing_vals("nREFISB")  = JEDEC_rounding(tREFISB_TABLE[0][density_id], tCK_ps);
       /* PIMID 1.11.51 (N9): nRFCSB was never filled, so every instantiation
        * of this model died in the -1 completeness check. Filled with tRFC as
        * a stated UPPER BOUND (same reasoning as HBM3.cpp; AllBank refresh
-       * never consumes it). */
-      if (m_timing_vals("nRFCSB") == -1) {
-        m_timing_vals("nRFCSB") = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
-      }
+       * never consumes it).
+       *
+       * PIMID 1.11.59 (audit F035): the `if (nRFCSB == -1)` this replaces was
+       * unconditionally true -- the one shipped preset sets that column to -1
+       * -- while nRFC and nREFISB beside it were overwritten with no guard at
+       * all. The guard therefore documented a preset-wins precedence rule
+       * that the other two columns did not follow and that nothing exercised.
+       * All three are unconditional now, and the preset carries -1 in all
+       * three columns to say so (F036). */
+      m_timing_vals("nRFCSB") = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
 
       // Overwrite timing parameters with any user-provided value
       // Rate and tCK should not be overwritten

@@ -457,6 +457,25 @@ class DDR4RVRR : public IDRAM, public Implementation {
           default:    return -1;
         }
       }(m_organization.density);
+      /* PIMID 1.11.59 (audit F037-class): the lambda returns -1 for any
+       * density outside the four tabulated ones, and that -1 then indexed
+       * tRFC_TABLE. An out-of-bounds read one element BEFORE a table of
+       * plausible nanosecond figures does not crash -- it yields whatever
+       * adjacent constant the linker put there, and the run continues with a
+       * refresh time nobody can trace, which is why an unrecognised density
+       * silently produced a plausible-looking timing set instead of an error.
+       * Checked before adding this: the twelve shipped org presets cover
+       * 2/4/8/16 Gb only (DDR4_2Gb_*, DDR4_4Gb_*, DDR4_8Gb_*, DDR4_16Gb_*)
+       * and the switch handles exactly those four, so no shipped preset
+       * reaches the throw -- only a hand-written org/density override does.
+       * Refuse at construction, in the same form as the unrecognized-preset
+       * check above. */
+      if (density_id < 0) {
+        throw ConfigurationError(
+          "In \"{}\", organization density {} Mb has no tabulated refresh "
+          "timing (tRFC is tabulated for 2/4/8/16 Gb only)!",
+          get_name(), m_organization.density);
+      }
 
       m_timing_vals("nRFC")  = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
       m_timing_vals("nREFI") = JEDEC_rounding(tREFI_BASE, tCK_ps);

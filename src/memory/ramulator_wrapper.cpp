@@ -75,6 +75,9 @@ void RamulatorWrapper::initialize() {
      * Fabricating architecture objects for the three missing technologies
      * would be the dishonest repair; saying which part is being read is not. */
     if (!dram_arch_) {
+        // 1.11.59 (audit C018): a fresh object carries its factory
+        // organization, so no device width is stamped on it yet.
+        arch_device_width_bits_ = 0;
         std::string dt = dram_type_;
         std::transform(dt.begin(), dt.end(), dt.begin(), ::toupper);
         if (dt == "DDR5") {
@@ -101,6 +104,11 @@ void RamulatorWrapper::initialize() {
             }
         }
     }
+
+    /* 1.11.59 (audit C018): stamp the configured JEDEC device width onto the
+     * object BEFORE anything reads a width, a bandwidth or the reconciliation
+     * check below off it. No-op when no width is configured. */
+    applyDeviceWidthToArchitecture();
 
     /* 1.11.57 (audit round 3, C002): this check RUNS now.
      *
@@ -163,6 +171,168 @@ void RamulatorWrapper::initialize() {
 
     current_cycle_ = 0;
     resetStats();
+}
+
+/* 1.11.59 (audit C018): THE DEVICE WIDTH REACHES THE WIDTHS, not only the
+ * energy.
+ *
+ * What the audit found: setDeviceWidth() wrote device_width_ and nothing else.
+ * That string was read at exactly two places, both array-energy calls, where it
+ * sets how many devices a rank access lights up (4/8/16). Every WIDTH the
+ * wrapper reports came from the architecture object instead, and the DDR
+ * objects hold a fixed 8-bit chip DQ -- so with memory.dram.device_width: x16
+ * set, one run priced the rank as 4 devices for energy and modelled it as 8
+ * devices of 8 pins for bandwidth, and the hierarchy link ladder's L3 rung (the
+ * level literally named "chip DQ pins") was 8 bits for an x4 part and an x16
+ * part alike. Worse than the number: architecture_extractor.h stamped that 8
+ * VERIFIED with the source "Extracted from Ramulator device configuration
+ * (x4/x8/x16)" -- a provenance claim on a value that ignored the width.
+ *
+ * The repair is the one the finding asks for first: make the object honour the
+ * width. Four coupled quantities move together, and each is JEDEC organization
+ * rather than a new constant:
+ *
+ *   chip_io_bits          = the configured width. That IS the x4/x8/x16 datum.
+ *   chips_per_rank        = rank_databus_bits / width. A DDR-class rank
+ *                           presents 64 data bits, so it takes 64/width devices
+ *                           to build one -- the same arithmetic, from the same
+ *                           reasoning, as chipsPerRankForDeviceWidth() in
+ *                           main.cpp (1.11.57, latent A013) and the die-count
+ *                           helper beside it. It also makes the extractor's
+ *                           "chips_per_rank x chip_io_bits" description of the
+ *                           rank bus TRUE for DDR-class parts.
+ *   prefetch_datapath_bits = prefetch length x width. The field's own factory
+ *                           comment defines it that way ("8n prefetch x 8-bit
+ *                           I/O" for DDR4, "16n prefetch x 8-bit I/O" for
+ *                           DDR5); the prefetch LENGTH is what JEDEC fixes, and
+ *                           it is recovered from the object rather than
+ *                           re-tabulated here.
+ *   bank_groups_per_chip  = halved at x16 on DDR4 (4 -> 2) and DDR5 (8 -> 4),
+ *                           which is the JEDEC coupling main.cpp already
+ *                           applies to the hierarchy at the same site that
+ *                           calls setDeviceWidth(). Leaving it would have the
+ *                           object and the hierarchy describe two different
+ *                           parts of the same run.
+ *
+ * WHAT DOES NOT MOVE: rank_databus_bits and channel_databus_bits. A rank is 64
+ * bits wide whatever devices build it, which is the whole point of the width
+ * knob, so the rank rung of the ladder and the speed-bin reconciliation check
+ * are untouched. And at x8 -- the default, and what every corpus cell ran --
+ * all four assignments above reproduce the factory values exactly, so no
+ * existing result moves. Only x4 and x16 move, and they were wrong.
+ *
+ * HBM is excluded and says so: a stack has no x4/x8/x16 device width. main.cpp
+ * already refuses the key for HBM; this is the wrapper refusing it on its own
+ * authority, since the wrapper is reachable without main.cpp.
+ *
+ * RESIDUAL, stated rather than papered over: the DEFAULT Ramulator2 config
+ * this wrapper generates in parseConfiguration() still names a fixed org
+ * preset per technology ("DDR4_8Gb_x8", "DDR5_8Gb_x8", ...), so on that path
+ * the timing model's device organization does not follow this key -- only the
+ * YAML main.cpp writes for the zsim path does (writeRamulatorConfigYaml takes
+ * the width). This function fixes the widths the wrapper REPORTS; it does not
+ * claim to have re-bound the preset the timing model would parse. */
+void RamulatorWrapper::setDeviceWidth(const std::string& w) {
+    device_width_ = w;
+    applyDeviceWidthToArchitecture();  // no-op until dram_arch_ exists
+}
+
+void RamulatorWrapper::applyDeviceWidthToArchitecture() {
+    if (!dram_arch_ || device_width_.empty()) return;
+
+    int w_bits = 0;
+    if (device_width_ == "x4")       w_bits = 4;
+    else if (device_width_ == "x8")  w_bits = 8;
+    else if (device_width_ == "x16") w_bits = 16;
+    if (w_bits == 0) {
+        static bool warned_bad_width = false;
+        if (!warned_bad_width) {
+            warned_bad_width = true;
+            std::cerr << "[mem] WARNING: device width \"" << device_width_
+                      << "\" is not one of x4/x8/x16. The architecture object "
+                         "keeps its factory organization, so the chip DQ width, "
+                         "the devices per rank and every figure derived from "
+                         "them describe an x"
+                      << dram_arch_->datapath.chip_io_bits.value_bits
+                      << " part, not the configured one." << std::endl;
+        }
+        return;
+    }
+
+    std::string dt = dram_type_;
+    std::transform(dt.begin(), dt.end(), dt.begin(), ::toupper);
+    if (dt.rfind("HBM", 0) == 0) {
+        static bool warned_hbm_width = false;
+        if (!warned_hbm_width) {
+            warned_hbm_width = true;
+            std::cerr << "[mem] NOTE: a device width (" << device_width_
+                      << ") was set for " << dt
+                      << ", which has no x4/x8/x16 device organization -- an "
+                         "HBM stack's interface is fixed 128-bit channels. The "
+                         "width is IGNORED for the architecture object and the "
+                         "widths derived from it." << std::endl;
+        }
+        return;
+    }
+
+    if (arch_device_width_bits_ == w_bits) return;  // already stamped
+
+    // The width currently described by this object: the stamp if one was
+    // applied, otherwise the factory's own chip DQ width.
+    const int base_w = arch_device_width_bits_ > 0
+                           ? arch_device_width_bits_
+                           : dram_arch_->datapath.chip_io_bits.value_bits;
+    if (base_w <= 0) return;
+
+    // Prefetch LENGTH (8n, 16n, ...) recovered from the object it was written
+    // on, so the JEDEC number is not re-tabulated in a second place.
+    const int prefetch_length =
+        dram_arch_->datapath.prefetch_datapath_bits.value_bits / base_w;
+
+    dram_arch_->datapath.chip_io_bits.value_bits = w_bits;
+    dram_arch_->datapath.chip_io_bits.status =
+        pimid::memory::VerificationStatus::VERIFIED;
+    dram_arch_->datapath.chip_io_bits.source =
+        "JEDEC device organization " + device_width_ +
+        ", from the configured memory.dram.device_width -- the same key that "
+        "sets the array-energy device count. NOT read from a Ramulator device "
+        "object; this wrapper's default config still names a fixed x8 org "
+        "preset.";
+    dram_arch_->datapath.chip_io_bits.notes =
+        "External package DQ pins of one device";
+
+    const int rank_bits = dram_arch_->datapath.rank_databus_bits.value_bits;
+    if (rank_bits > 0) {
+        dram_arch_->organization.chips_per_rank = rank_bits / w_bits;
+    }
+
+    if (prefetch_length > 0) {
+        dram_arch_->datapath.prefetch_datapath_bits.value_bits =
+            prefetch_length * w_bits;
+        dram_arch_->datapath.prefetch_datapath_bits.notes =
+            std::to_string(prefetch_length) + "n prefetch x " +
+            std::to_string(w_bits) + "-bit device I/O";
+    }
+
+    // JEDEC couples the bank-group count to the width on DDR4 and DDR5; the
+    // same table main.cpp applies to the hierarchy at the calling site.
+    if (dt == "DDR4")      dram_arch_->organization.bank_groups_per_chip = (w_bits == 16) ? 2 : 4;
+    else if (dt == "DDR5") dram_arch_->organization.bank_groups_per_chip = (w_bits == 16) ? 4 : 8;
+
+    arch_device_width_bits_ = w_bits;
+
+    if (w_bits != 8) {
+        static bool announced_width = false;
+        if (!announced_width) {
+            announced_width = true;
+            std::cerr << "[mem] NOTE: " << dt << " architecture object stamped "
+                      << device_width_ << ": chip DQ " << w_bits << " bits, "
+                      << dram_arch_->organization.chips_per_rank
+                      << " devices per " << rank_bits << "-bit rank. The rank "
+                         "and channel buses are unchanged -- a rank is 64 bits "
+                         "wide whatever devices build it." << std::endl;
+        }
+    }
 }
 
 void RamulatorWrapper::loadConfig(const std::string& config_path) {
@@ -756,18 +926,92 @@ double RamulatorWrapper::getTerminationEnergyNJ() const {
          * ~1.75x for a 2x error in it. Disclosing this only in a comment in
          * another file is not disclosure. */
         if (dram_type_ == "LPDDR5") {
+            /* 1.11.59 (LPDDR5 IO sourcing): the note now says WHICH END of the
+             * only citable range the assumption sits at, because that fixes
+             * the sign of the error rather than leaving it open. */
             std::cerr << "[power] NOTE: the LPDDR5 termination number rests on "
                          "an UNSOURCED Rtt = 240 ohm (of a 280-ohm loop); "
-                         "Micron's datasheets give VDDQ and RON but not Rtt. "
-                         "Treat LPDDR5 termination as an assumption, not a "
-                         "sourced value." << std::endl;
+                         "Micron's datasheets give VDDQ (0.50 V) and RON "
+                         "(40 ohm) but defer the ODT ohm table to a General "
+                         "LPDDR5 AC/DC specification this tree does not hold, "
+                         "and no LVSTL document exists in the JESD8-* set here. "
+                         "The only citable bound is host-side: Intel 743844-015 "
+                         "Table 89 gives RODT(DQ) = 30-240 ohm with no typical, "
+                         "so 240 is the MAXIMUM of that range -- the weakest "
+                         "termination, hence the LOWEST termination energy it "
+                         "allows; the 30 ohm end would raise this term about "
+                         "4x. Treat LPDDR5 termination as an optimistic "
+                         "assumption, not a sourced value." << std::endl;
         }
     }
     return Ramulator::pimid_energy::terminationNJ(
         dram_type_, energy_term_override_pJ_per_bit_, rate);   // 1.11.57 (D017)
 }
 
-/* 1.11.57 (latent D011): THESE TWO ARE COMPUTED AND NOBODY READS THEM.
+bool RamulatorWrapper::getTerminationEnergyBandNJ(double& lo_nj, double& hi_nj,
+                                                  std::string& provenance) const {
+    /* 1.11.59: report a BAND where the termination rests on an unsourced Rtt.
+     *
+     * The project rule is that a quantity the tools cannot produce is stated
+     * as a band with its provenance, never as a constant -- the pJ/bit link
+     * energies already work this way. LPDDR5 is the one technology whose Rtt
+     * this tree cannot source: Micron gives VDDQ and RON and defers the ODT
+     * ohm table to a General LPDDR5 AC/DC specification not held here, and
+     * there is no LVSTL document in the JESD8-* set. A web search of every
+     * freely available datasheet found the encoding MR11 OP[6:4] = 000B for
+     * "ODT disabled" (YM5XCBQ3B2-T16 64 Gb LPDDR5, IDD table note 2, p.10)
+     * and no ohm ladder and no stated default anywhere.
+     *
+     * The only citable range is host-side: Intel 743844-015 Table 89 gives
+     * RODT(DQ) = 30..240 ohm with an EMPTY typical column. Termination
+     * current is V/(RON + Rtt), so the two ends of that range bracket the
+     * term by the ratio of their loop resistances -- with RON = 40 ohm
+     * (Micron, IDD note 4), (40+240)/(40+30) = 4.0. The applied value stays
+     * the 240 ohm end, which is the weakest termination and therefore the
+     * LOWEST energy the range permits; this returns the interval so a reader
+     * sees the assumption's width and its direction rather than a bare point.
+     *
+     * Returns false for technologies whose electricals ARE sourced (DDR3,
+     * DDR4, DDR5, GDDR6) -- there is no band to report, only a value. */
+    lo_nj = hi_nj = 0.0;
+    provenance.clear();
+    std::string dt = dram_type_;
+    std::transform(dt.begin(), dt.end(), dt.begin(), ::toupper);
+    if (dt != "LPDDR5") return false;
+
+    const double applied = getTerminationEnergyNJ();
+    if (!(applied > 0.0)) return false;
+
+    const double ron    = 40.0;    // Micron LPDDR5X IDD table note 4
+    const double rtt_hi = 240.0;   // Intel 743844-015 Tbl 89 max -- the value applied
+    const double rtt_lo = 30.0;    // same table, min
+    const double ratio  = (ron + rtt_hi) / (ron + rtt_lo);   // 4.0
+
+    lo_nj = applied;               // weakest termination = lowest energy
+    hi_nj = applied * ratio;       // strongest termination in the citable range
+    provenance = "Rtt UNSOURCED; band = RODT(DQ) 30-240 ohm "
+                 "(Intel 743844-015 Tbl 89 p.211, typical column empty) "
+                 "with RON 40 ohm (Micron LPDDR5X IDD note 4); "
+                 "applied value is the 240 ohm end, the lowest-energy bound";
+    return true;
+}
+
+/* 1.11.57 (latent D011), SUPERSEDED BY 1.11.58: both are wired in now.
+ *
+ * The block below described a real defect -- these two had no caller, so the
+ * 1.11.40 interface correction reached no reported number and the DQ
+ * interface was termination-only in every result. 1.11.58 consumed both at
+ * device and system scope, so that is no longer true: driver+PHY and the IO
+ * area now enter the reported energy and the reported area, and the split is
+ * printed. The one thing the original note said that STILL holds is the
+ * reach: these return zero unless CACTI-IO has an exact parameter map, which
+ * exists for DDR3, DDR4, DDR5 and GDDR6 -- and not for LPDDR5 (Rtt
+ * unsourced; see the band accessor above) or HBM2/HBM3 (no electrical row at
+ * all; HBM specifies driver strength in mA, not ohms, and its interface is
+ * unterminated by design). The historical note is kept below for the record.
+ *
+ * ---- as written at 1.11.57 ----
+ * THESE TWO ARE COMPUTED AND NOBODY READS THEM.
  *
  * getInterfaceDynamicEnergyNJ() and getInterfaceAreaMM2() have no caller
  * anywhere in src/ or include/ -- grep finds only these definitions and their
@@ -991,6 +1235,9 @@ void RamulatorWrapper::enablePIMSupport(const std::string& dram_type) {
     std::cout << "Enabling PIM support for " << dram_type_ << "...\n";
 
     // Create DRAM architecture based on type
+    // 1.11.59 (audit C018): a fresh object carries its factory organization,
+    // so nothing is stamped on it yet; the width is re-applied below.
+    arch_device_width_bits_ = 0;
     if (dram_type_ == "DDR4") {
         dram_arch_ = pimid::memory::createDDR4_2400_Verified();
         std::cout << "Using DDR4-2400 architecture specs\n";
@@ -1009,6 +1256,10 @@ void RamulatorWrapper::enablePIMSupport(const std::string& dram_type) {
         std::cerr << "Unknown DRAM type: " << dram_type_ << ", using DDR4\n";
         dram_arch_ = pimid::memory::createDDR4_2400_Verified();
     }
+
+    // 1.11.59 (audit C018): this path builds a NEW architecture object, so the
+    // configured device width has to be stamped onto it again.
+    applyDeviceWidthToArchitecture();
 
     // Initialize PIM components
     initializePIMComponents();

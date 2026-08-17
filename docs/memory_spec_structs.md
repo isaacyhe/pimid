@@ -31,14 +31,19 @@ HBM but not on commodity DDR.
 
 | File | Purpose |
 |------|---------|
-| `dram_architecture.h` | DRAM specs: `createDDR4_2400()`, `createDDR5_4800()`, `createHBM2()`, `createHBM3()` |
-| `dram_architecture_v2.h` | Same techs with inner-bank timing breakdown (`*_Verified()` creators) |
+| `dram_architecture_v2.h` | DRAM specs: `createDDR4_2400_Verified()`, `createDDR5_4800_Verified()`, `createHBM2_Verified()`, `createHBM3_Verified()` |
 | `sram_architecture.h` | SRAM (cache) specs with inner-bank timing |
 | `sttmram_architecture.h` | STT-MRAM specs with read/write asymmetry |
 | `pcm_architecture.h` | PCM (phase-change memory) specs |
 | `reram_architecture.h` | ReRAM/memristor specs with analog-compute support |
-| `dram_architecture.cpp` | Implementation (`printSummary()` etc.) |
 | `dram_config_example.json` | Example config for hypothetical-architecture studies |
+
+1.11.59 (C016-class): `dram_architecture.h` / `.cpp` -- the legacy v1
+`DRAMArchitecture` object listed here until now -- were DELETED. They were
+compiled but had no caller anywhere in the tree, and they carried HBM
+access-time literals that had drifted 16-37% from their own declared sums
+since release 1.1.1 raised HBM tRCD/tCAS to the JEDEC spec minima. Use the v2
+object below; it derives those sums from tRCD/tCAS/tRP at construction.
 
 The structs cover four explicit DRAM creators; the other simulator
 technologies (DDR3, LPDDR5, GDDR6 -- see [memory.md](memory.md)) take their
@@ -48,42 +53,51 @@ architecture extractor.
 ## Quick start
 
 ```cpp
-#include "memory/dram_architecture.h"
+#include "memory/dram_architecture_v2.h"
 using namespace pimid::memory;
 
-auto ddr4 = createDDR4_2400();
-ddr4->printSummary();
+auto ddr4 = createDDR4_2400_Verified();
+ddr4->printVerificationReport();
 
-std::cout << "Bank port: " << ddr4->ports.bank_port_bits << " bits\n";
-std::cout << "Bank BW:   " << ddr4->getBankBandwidth() << " GB/s\n";
+std::cout << "Bank serialization: "
+          << ddr4->datapath.bank_serialization_bits.value_bits << " bits\n";
+std::cout << "Bank BW:            " << ddr4->getBankEffectiveBW() << " GB/s\n";
 
-auto hbm2 = createHBM2();
-std::cout << "HBM2 bank port: " << hbm2->ports.bank_port_bits << " bits\n";  // 64
+auto hbm2 = createHBM2_Verified();
+std::cout << "HBM2 bank serialization: "
+          << hbm2->datapath.bank_serialization_bits.value_bits << " bits\n";
 ```
 
 ## Structure
 
-**Ports (`DRAMPortBitwidths`)** -- bitwidth at every hierarchy level:
-`subarray_port_bits`, `bank_port_bits`, `bank_group_port_bits`,
-`chip_internal_bits`, `chip_io_bits`, `rank_data_bits`,
-`channel_data_bits`, plus a `port_width_scale` factor for hypothetical
-studies. Methods: `getBankBandwidth()`, `getRankBandwidth()`,
-`applyScaling()`.
+**Datapath (`DRAMDatapathStages`)** -- width of each stage between the cell
+array and the package pins, every one carrying its own verification status
+and citation (`VerifiedValue`): `row_buffer_bits`, `gsa_datapath_bits`,
+`prefetch_datapath_bits`, `bank_serialization_bits` (the bank-level PIM
+bottleneck, and the one stage nobody publishes), `chip_io_bits`,
+`rank_databus_bits`, `channel_databus_bits`. Bank and bank-group bandwidth
+are derived, not stored: `getBankEffectiveBW()`,
+`getBankGroupEffectiveBW()`.
 
-**Organization (`DRAMOrganization`)** -- physical hierarchy and capacity at
-each level (subarrays per bank, banks per bank group, bank groups per chip,
-chips per rank, per-level capacities).
+**Organization (`DRAMArchitectureV2::organization`)** -- physical hierarchy
+and capacity at each level (subarrays per bank, banks per bank group, bank
+groups per chip, chips per rank, per-level capacities).
 
-**Timing (`DRAMTiming`)** -- standard DRAM timing (tRCD, tCAS, ...) plus
-hierarchical access latencies (subarray / bank / chip / rank access). The v2
-header additionally breaks down the inner-bank datapath hidden inside tCAS
-(column decoder, mux, output driver, H-tree segments, global I/O) -- e.g.
-~6.65 ns total for DDR4 vs ~3.05 ns for HBM2, because TSVs shorten internal
-paths.
+**Timing (`DRAMArchitectureV2::timing`)** -- standard DRAM timing (tRCD,
+tCAS, ...) plus hierarchical access latencies. `subarray_access_ns` and
+`bank_access_ns` are DERIVED from tRCD/tCAS/tRP by
+`deriveHierarchicalAccessTimes()` rather than written as literals, which is
+what the deleted v1 object got wrong. The header also breaks down the
+inner-bank datapath hidden inside tCAS (column decoder, mux, output driver,
+H-tree segments, global I/O) -- e.g. ~6.65 ns total for DDR4 vs ~3.05 ns for
+HBM2, because TSVs shorten internal paths.
 
-**Energy (`DRAMEnergy`)** -- data-movement energy per byte at each hierarchy
-level (e.g. DDR4: ~1 pJ/B subarray, ~2 pJ/B bank, ~10 pJ/B rank,
-~15 pJ/B channel).
+**PE bus constraints (`pe_bus_constraints`)** -- the data bus a PE actually
+sees at each placement level (subarray / bank / chip / rank / logic die):
+`data_bus_width_bits`, `max_bandwidth_gbps`, `has_dedicated_bus`.
+
+**Energy (`DRAMArchitectureV2::energy`)** -- data-movement energy per byte at
+subarray / bank / chip / rank, with an `energy_source` citation string.
 
 ## Hypothetical scalability studies
 
@@ -91,11 +105,8 @@ The `port_width_scale` knob answers questions like "at what internal port
 width does bank-level PIM become viable on DDR?":
 
 ```cpp
-auto arch = createDDR4_2400();
-arch->ports.port_width_scale = 4.0;   // 4x wider internal ports
-arch->energy.energy_scale = 1.0 + 3.0 * 0.3;  // energy grows sub-linearly
-arch->applyScaling();
-// bank port: 8 -> 32 bits; bank BW scales accordingly
+auto arch = createDDR4_2400_Verified(4.0);   // 4x wider internal ports
+arch->energy_scale = 1.0 + 3.0 * 0.3;        // energy grows sub-linearly
 ```
 
 Observed in our studies: DDR needs roughly 8x wider bank ports before

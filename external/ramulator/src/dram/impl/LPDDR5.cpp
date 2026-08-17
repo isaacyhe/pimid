@@ -318,6 +318,38 @@ class LPDDR5 : public IDRAM, public Implementation {
           default:    return -1;
         }
       }(m_organization.density);
+      /* PIMID 1.11.59 (audit F037-class): the lambda returns -1 for any
+       * density outside the four tabulated ones, and that -1 then indexed
+       * tRFCab_TABLE, tRFCpb_TABLE, tPBR2PBR_TABLE and tPBR2ACT_TABLE. An
+       * out-of-bounds read one element BEFORE a table of plausible nanosecond
+       * figures does not crash -- it yields whatever adjacent constant the
+       * linker put there, and the run continues with a refresh time nobody
+       * can trace, which is why an unrecognised density silently produced a
+       * plausible-looking timing set instead of an error.
+       *
+       * BEHAVIOUR CHANGE, stated deliberately: unlike the DDR3/DDR4/DDR5/HBM
+       * models, this file's org presets are NOT all covered by the switch.
+       * The five shipped presets are 2/4/8/16/32 Gb (LPDDR5_2Gb_x16 ...
+       * LPDDR5_32Gb_x16); the switch and all four tables stop at 16 Gb. So
+       * LPDDR5_32Gb_x16 hit the [-1] read on every instantiation and is the
+       * one preset this throw now refuses. The alternative -- adding a 32 Gb
+       * column -- would require a tRFCab/tRFCpb/tPBR2PBR figure for a 32 Gb
+       * LPDDR5 die, and no such figure exists in any source this tree holds:
+       * the Micron LPDDR5/LPDDR5X datasheets in misc/ tabulate 8 Gb
+       * (210/120/90), 12 Gb (280/140/90) and 16 Gb (280/140/90) dies and stop
+       * there, because 32 Gb LPDDR5 parts are multi-die packages rather than
+       * a 32 Gb die with its own refresh row. Inventing that column is not
+       * allowed, so this preset refuses loudly instead of continuing on a
+       * number read off the front of the array. It never produced a defined
+       * timing, so nothing correct is being taken away. */
+      if (density_id < 0) {
+        throw ConfigurationError(
+          "In \"{}\", organization density {} Mb has no tabulated refresh "
+          "timing (tRFCab/tRFCpb/tPBR2PBR/tPBR2ACT are tabulated for "
+          "2/4/8/16 Gb only; the shipped LPDDR5_32Gb_x16 org preset is "
+          "outside that range and has no sourced refresh figures)!",
+          get_name(), m_organization.density);
+      }
 
       m_timing_vals("nRFCab")    = JEDEC_rounding(tRFCab_TABLE[density_id], tCK_ps);
       m_timing_vals("nRFCpb")    = JEDEC_rounding(tRFCpb_TABLE[density_id], tCK_ps);

@@ -1112,14 +1112,28 @@ inline std::unique_ptr<DRAMArchitectureV2> extractDRAMArchitecture(
         "Column I/O width"
     };
 
-    // Prefetch datapath
+    /* Prefetch datapath.
+     *
+     * 1.11.59 (C018-class): the provenance string was false. This value is
+     * getSubarrayPortBits(), which returns the architecture object's GSA
+     * datapath width -- the global sense-amplifier bus -- not a prefetch
+     * configuration, and nothing on this path consults a Ramulator prefetch
+     * setting at all. Same category as the chip_io_bits and rank_databus_bits
+     * mis-stamps corrected beside it: a value presented as extracted from a
+     * tool that was never asked. The VALUE is unchanged; only the claim is. */
     int prefetch_bits = ramulator_wrapper.getSubarrayPortBits();
-    if (prefetch_bits <= 0) prefetch_bits = 64;
+    bool prefetch_sourced = (prefetch_bits > 0);
+    if (!prefetch_sourced) prefetch_bits = 64;
     arch->datapath.prefetch_datapath_bits = {
         prefetch_bits,
         VerificationStatus::INFERRED,
-        "Extracted from Ramulator prefetch configuration",
-        "Prefetch buffer width"
+        prefetch_sourced
+            ? "The architecture object's GSA datapath width (getSubarrayPortBits); "
+              "NOT a Ramulator prefetch setting -- no prefetch configuration is "
+              "consulted on this path"
+            : "ASSERTED 64 bits: the architecture object reported no GSA datapath "
+              "width and no prefetch configuration is consulted here",
+        "Prefetch buffer width (GSA-derived)"
     };
 
     // Bank serialization (critical for PIM!)
@@ -1132,14 +1146,33 @@ inline std::unique_ptr<DRAMArchitectureV2> extractDRAMArchitecture(
         "Bank-to-peripheral serialization - CRITICAL for PIM bandwidth!"
     };
 
+    /* 1.11.59 (audit C018): SAY WHERE THESE TWO ACTUALLY COME FROM.
+     *
+     * Both are read off the wrapper's DRAM architecture object. Neither is
+     * "extracted from Ramulator": no Ramulator device object is consulted
+     * anywhere on this path. The chip DQ width stamp used to read "Extracted
+     * from Ramulator device configuration (x4/x8/x16)" while the value ignored
+     * the configured device width entirely -- a claim of x4/x8/x16 sourcing on
+     * a fixed 8. The width IS honoured now (RamulatorWrapper::setDeviceWidth ->
+     * applyDeviceWidthToArchitecture), so the parenthetical has become true;
+     * the "extracted from Ramulator" half has not, and is corrected here.
+     *
+     * The rank stamp said "Calculated from chips_per_rank x chip_io_bits",
+     * which was false for HBM by two orders of magnitude: HBM2 holds 8 x 1024
+     * in those two fields against the 128 this value carries, because an HBM
+     * "rank" is one 128-bit channel and not a set of devices on a shared bus.
+     * The relation does hold for DDR-class parts, and holds at every device
+     * width since C018 -- so it is stated as what it is, family-dependent. */
     // Chip I/O
     int chip_io = ramulator_wrapper.getChipIOBits();
     if (chip_io <= 0) chip_io = 8;
     arch->datapath.chip_io_bits = {
         chip_io,
         VerificationStatus::VERIFIED,
-        "Extracted from Ramulator device configuration (x4/x8/x16)",
-        "External package pins"
+        "DRAM architecture object's chip DQ width, set by the configured JEDEC "
+        "device width (memory.dram.device_width x4/x8/x16) where one is given, "
+        "otherwise the object's factory organization",
+        "External package DQ pins of one device (HBM: the stack interface)"
     };
 
     // Rank databus
@@ -1148,7 +1181,10 @@ inline std::unique_ptr<DRAMArchitectureV2> extractDRAMArchitecture(
     arch->datapath.rank_databus_bits = {
         rank_bits,
         VerificationStatus::VERIFIED,
-        "Calculated from chips_per_rank x chip_io_bits",
+        "DRAM architecture object's rank data bus: the JEDEC 64-bit rank for "
+        "DDR-class parts (= chips_per_rank x chip_io_bits at every device "
+        "width), and one 128-bit channel for HBM, where a rank is not built "
+        "from devices on a shared bus",
         "First wide interface in DDR hierarchy"
     };
 

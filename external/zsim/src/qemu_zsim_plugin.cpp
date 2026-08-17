@@ -2123,7 +2123,12 @@ static uint32_t boundaryTransferCycles(uint32_t transfer_bytes = 0) {
  * invalidates OUTPUT lines before the device reads DRAM. Analytic upper bound
  * (HANDOFF ISSUE 3 F1): the whole input+output footprint is treated as dirty
  * writeback traffic (conservative-against-PIM), so
- *   cycles = flushFixedCycles + ceil(footprintBytes / writebackBytesPerCycle).
+ *   cycles = flushFixedCycles + ceil(sliceBytes / writebackBytesPerCycle),
+ * where sliceBytes is this rank's share of the MEASURED distinct-dirty epoch
+ * footprint. (1.11.59, audit F021: this line still named `footprintBytes`,
+ * the configured override that 1.11.40 stopped using and init.cpp now
+ * refuses outright -- a formula naming a config key as its input, five
+ * releases after the input became a measurement.)
  * Separate address space (mode==1): cache bypass (Case 2) -> NO flush; the
  * 1.7.1 bridge bulk-DMA path already prices the crossing, so return 0.
  * Deterministic (no phase M/D/1) so the boundary cost reproduces exactly.

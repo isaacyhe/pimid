@@ -238,8 +238,12 @@ public:
         } inner_bank;
 
         // Hierarchical (INFERRED from measurements)
-        double subarray_access_ns;    // tRCD + tCAS
-        double bank_access_ns;        // tRP + tRCD + tCAS
+        /* 1.11.59 (audit C016): the first two are DERIVED from the JEDEC
+         * timings above -- set them with deriveHierarchicalAccessTimes(), not
+         * by hand. Written as literals they had drifted 22-37% from their own
+         * declared sums on HBM2 and HBM3. */
+        double subarray_access_ns;    // DERIVED: tRCD + tCAS
+        double bank_access_ns;        // DERIVED: tRP + tRCD + tCAS
         double chip_access_ns;        // ESTIMATED
         double rank_access_ns;        // ESTIMATED
     } timing;
@@ -304,6 +308,52 @@ public:
 
     // Print verification status
     void printVerificationReport() const;
+
+    /* 1.11.59 (audit C016): the two HIERARCHICAL access times are DERIVED from
+     * the JEDEC timings above, not written down a second time beside them.
+     *
+     * The fields declare their own composition (subarray_access_ns = tRCD +
+     * tCAS, bank_access_ns = tRP + tRCD + tCAS) and every factory used to state
+     * them as literals as well, so a change to tRCD/tCAS/tRP left the derived
+     * pair describing the old part. Measured on the tree before this release:
+     *
+     *   DDR4  tRCD+tCAS 26.64  literal 26.64      consistent
+     *   DDR5  tRCD+tCAS 33.34  literal 33.34      consistent
+     *   HBM2  tRCD+tCAS 32.00  literal 25.00      22% low
+     *   HBM3  tRCD+tCAS 32.00  literal 20.00      37% low
+     *   HBM2  tRP+tRCD+tCAS 44.50  literal 37.50  16% low
+     *   HBM3  tRP+tRCD+tCAS 42.00  literal 30.00  29% low
+     *
+     * WHERE THE DRIFT CAME FROM, since the obvious suspect is not the culprit:
+     * it is NOT the 1.11.56 speed-bin correction. That release moved
+     * clock_freq_mhz, data_rate_mtps and tBurst_ns only, and said in each
+     * factory that "the ns timings are absolute and stay" -- tRCD/tCAS/tRP for
+     * HBM2 and HBM3 are byte-identical before and after it. The drift dates to
+     * release 1.1.1, which raised HBM2 tRCD/tCAS from 12.5 to the JESD235C
+     * spec minimum 16.0 and HBM3 tRCD/tCAS from 10.0 to the JESD238 spec
+     * minimum 16.0, and did not move the two derived literals with them: 25.0
+     * is 12.5+12.5 and 37.5 is 3 x 12.5, HBM2's pre-1.1.1 arithmetic exactly,
+     * and 20.0/30.0 is HBM3's. They were consistent when written and have been
+     * inconsistent for every release since.
+     *
+     * Fix (a) of the two the audit offered -- computed, not corrected-plus-
+     * checked -- because nothing needs these two settable independently of the
+     * timings. The one path that writes them from outside a factory
+     * (extractDRAMArchitecture / updateDRAMArchitectureFromRamulator in
+     * architecture_extractor.h) writes them from the wrapper's
+     * getSubarrayAccessLatency() / getBankAccessLatency(), which compose the
+     * SAME sums from getTRCD()/getTCAS()/getTRP(). So the derivation is the
+     * only definition either path ever used; the literals were a second
+     * authority that agreed by accident.
+     *
+     * chip_access_ns and rank_access_ns stay literals: they are marked
+     * ESTIMATED and no relation in this file states what they are composed of,
+     * so there is nothing to derive them from and inventing one would be worse
+     * than leaving them declared as estimates. */
+    void deriveHierarchicalAccessTimes() {
+        timing.subarray_access_ns = timing.tRCD_ns + timing.tCAS_ns;
+        timing.bank_access_ns = timing.tRP_ns + timing.tRCD_ns + timing.tCAS_ns;
+    }
 
     // Calculate effective bandwidths
     /* 1.11.57 (audit C003): DERIVED, like every other rung of the ladder.
@@ -455,8 +505,12 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR4_2400_Verified() {
     // Remaining for sense amp + row decoder: 13.32 - 6.65 = 6.67ns OK
     // This breakdown is consistent with tCAS = 13.32ns
 
-    arch->timing.subarray_access_ns = 26.64;  // tRCD + tCAS
-    arch->timing.bank_access_ns = 39.96;  // tRP + tRCD + tCAS
+    /* 1.11.59 (audit C016): DERIVED -- see deriveHierarchicalAccessTimes().
+     * These were the literals 26.64 and 39.96, and DDR4 is one of the two
+     * technologies whose literals still reproduced their own declared sums
+     * (13.32 + 13.32, 3 x 13.32). Nothing moves here; the derivation is what
+     * keeps it that way after the next timing edit. */
+    arch->deriveHierarchicalAccessTimes();
     arch->timing.chip_access_ns = 60.0;  // ESTIMATED
     arch->timing.rank_access_ns = 80.0;  // ESTIMATED
 
@@ -652,8 +706,14 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified() {
     // Remaining for sense amp + row decoder: 12.5 - 3.05 = 9.45ns OK
     // TSVs enable much shorter H-tree paths and wider datapaths
 
-    arch->timing.subarray_access_ns = 25.0;
-    arch->timing.bank_access_ns = 37.5;
+    /* 1.11.59 (audit C016): DERIVED -- see deriveHierarchicalAccessTimes().
+     * WAS 25.0 and 37.5; IS 32.0 (16.0 + 16.0) and 44.5 (12.5 + 16.0 + 16.0),
+     * 22% and 16% higher. WHY they drifted: 25.0 = 12.5 + 12.5 and 37.5 = 3 x
+     * 12.5 -- this object's arithmetic before release 1.1.1 raised tRCD and
+     * tCAS from 12.5 to the JESD235C spec minimum 16.0 without moving the two
+     * derived literals. NOT a 1.11.56 casualty: that release changed the rate,
+     * the core clock and tBurst and left every ns timing alone. */
+    arch->deriveHierarchicalAccessTimes();
     arch->timing.chip_access_ns = 45.0;  // Lower due to TSV
     arch->timing.rank_access_ns = 50.0;
 
@@ -811,7 +871,12 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR5_4800_Verified() {
      * RATE and the burst follow the preset. */
     arch->timing.clock_freq_mhz = 1600;  // 3200 MT/s DDR -> 1.6 GHz core
     arch->timing.data_rate_mtps = 3200;  // preset DDR5_3200AN
-    arch->timing.tRCD_ns = 16.67;  // VERIFIED: CL40 at 4800 MT/s
+    /* 1.11.59: the bin label was stale. 1.11.56 re-binned this object to the
+     * DDR5_3200AN preset this tree simulates; the ns timings are absolute and
+     * stayed, but this comment still named the 4800 MT/s bin they were
+     * originally quoted at. The VALUE is unchanged and within JEDEC's range
+     * across bins -- only the label was wrong. */
+    arch->timing.tRCD_ns = 16.67;  // VERIFIED: JESD79-5 tRCD, absolute ns
     arch->timing.tCAS_ns = 16.67;  // VERIFIED
     arch->timing.tRP_ns = 16.67;  // VERIFIED
     arch->timing.tRAS_ns = 32.0;  // VERIFIED
@@ -830,8 +895,11 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR5_4800_Verified() {
     arch->timing.inner_bank.source =
         "INFERRED from DDR4 CACTI model with process scaling for DDR5 (7nm-10nm node)";
 
-    arch->timing.subarray_access_ns = 33.34;  // tRCD + tCAS
-    arch->timing.bank_access_ns = 50.01;  // tRP + tRCD + tCAS
+    /* 1.11.59 (audit C016): DERIVED -- see deriveHierarchicalAccessTimes().
+     * These were the literals 33.34 and 50.01, and DDR5 is the other
+     * technology whose literals still reproduced their own declared sums
+     * (16.67 + 16.67, 3 x 16.67). Nothing moves here. */
+    arch->deriveHierarchicalAccessTimes();
     arch->timing.chip_access_ns = 70.0;  // ESTIMATED
     arch->timing.rank_access_ns = 90.0;  // ESTIMATED
 
@@ -1006,8 +1074,15 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM3_Verified() {
     arch->timing.inner_bank.source =
         "INFERRED from HBM2 with advanced process scaling (5nm logic die)";
 
-    arch->timing.subarray_access_ns = 20.0;
-    arch->timing.bank_access_ns = 30.0;
+    /* 1.11.59 (audit C016): DERIVED -- see deriveHierarchicalAccessTimes().
+     * WAS 20.0 and 30.0; IS 32.0 (16.0 + 16.0) and 42.0 (10.0 + 16.0 + 16.0),
+     * 37% and 29% higher -- the largest of the four gaps. WHY they drifted:
+     * 20.0 = 10.0 + 10.0 and 30.0 = 3 x 10.0 -- this object's arithmetic
+     * before release 1.1.1 raised tRCD and tCAS from 10.0 to the JESD238 spec
+     * minimum 16.0 without moving the two derived literals. NOT a 1.11.56
+     * casualty: that release changed the rate, the core clock and tBurst and
+     * left every ns timing alone. */
+    arch->deriveHierarchicalAccessTimes();
     arch->timing.chip_access_ns = 35.0;
     arch->timing.rank_access_ns = 40.0;
 

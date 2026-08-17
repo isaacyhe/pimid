@@ -370,7 +370,23 @@
 			<!-- current McPAT only supports homogeneous memory controllers -->
 			<param name="memory_channels_per_mc" value="1"/>
 			<param name="number_ranks" value="2"/>
-			<param name="withPHY" value="0"/>
+			<!-- PIMID 1.11.59 (audit E010): withPHY 0 becomes 1. Upstream McPAT
+			     built the MC PHY for every type=0 (high performance) controller and
+			     read this flag only for type=1, so these reference inputs left it at
+			     0 meaning "ignored here", not "this part has no PHY". All five parts
+			     (eight input files) drive off chip DIMMs and their published
+			     validation numbers include the PHY. PIMID 1.11.19 (decision D3) made
+			     the flag authoritative for type=0 as well, so that an on die element
+			     controller could drop its off package driver without also switching
+			     the BACKEND cost model; the same edit silently deleted the PHY area,
+			     dynamic and leakage from these inputs, which is invisible because
+			     nothing in this tree consumes them (CMakeLists excludes main.cc, the
+			     sole entry point is McPATWrapper, and no PIMID source names
+			     ProcessorDescriptionFiles). The flag is re stated with its new
+			     meaning rather than left to read as a deliberate no PHY declaration:
+			     no PIMID number moves, and anyone building the standalone binary
+			     reproduces McPAT validation again. -->
+			<param name="withPHY" value="1"/>
 			<!-- # of ranks of each channel-->
 			<param name="req_window_size_per_channel" value="32"/>
 			<param name="IO_buffer_size_per_channel" value="32"/>

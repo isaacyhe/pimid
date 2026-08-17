@@ -403,15 +403,16 @@ struct GlobSimInfo {
     // start) the host must write back dirty INPUT lines (so the device sees
     // current data) and invalidate OUTPUT lines (so the host re-reads device
     // results). Analytic upper-bound charge on the HOST core before the device
-    // clock starts: cycles = footprintBytes/writebackBytesPerCycle + flushFixed.
+    // clock starts: cycles = measuredSliceBytes/writebackBytesPerCycle +
+    // flushFixed (1.11.59, audit F021: this said footprintBytes, the config
+    // override 1.11.40 replaced with a measurement and init.cpp now refuses).
     // mode: 0 = unified (Case 1, flush) ; 1 = separate (Case 2, cache bypass, no
     // flush). NO_OFFLOAD baselines never enter the co-sim ROI block, so they are
     // never charged (self-zeroing).
     struct {
         bool enabled = false;
         uint32_t mode = 0;                    // 0=unified(flush), 1=separate(bypass)
-        /* 1.11.40 (audit N7): footprintBytes is now an explicit OVERRIDE, not
-         * the source of truth. The flush footprint is MEASURED at roi_begin by
+        /* 1.11.40 (audit N7): the flush footprint is MEASURED at roi_begin by
          * walking the host caches' MESI state for lines in M -- the bytes a
          * writeback would actually move.
          *
@@ -421,8 +422,16 @@ struct GlobSimInfo {
          * timeline -- for a kernel of 4096 elements. It is also 56.9x the whole
          * host cache hierarchy (32 KB L1D + 256 KB L2), so it was not merely
          * unmeasured but physically impossible: a flush writes back dirty lines
-         * FROM cache and cannot exceed what the cache holds. */
-        uint64_t footprintBytes = 0;          // refused if set; see init.cpp
+         * FROM cache and cannot exceed what the cache holds.
+         *
+         * 1.11.59 (audit F021): the `footprintBytes` field that carried the
+         * old override is GONE. It was written once from the config and read
+         * only by the panic that refuses a non-zero value, but it sat in the
+         * global state beside the real measurement, was printed at startup as
+         * "footprint=0 B" as though a configured footprint governed the
+         * flush, and gave a reader a second, always-zero candidate for the
+         * quantity in the formula above. The key is still consumed and still
+         * refused (init.cpp); nothing keeps its value afterwards. */
         /* 1.11.40: what the caches held. 1.11.57 (audit D015): DIAGNOSTIC
          * ONLY -- no stat exports it and no consumer reads it, and it used to
          * be written TWICE per flush from two independent measurements, so

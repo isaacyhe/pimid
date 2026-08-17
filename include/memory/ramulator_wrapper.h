@@ -81,7 +81,17 @@ public:
     // bank energy (array) + a per-tech JEDEC IDD/VDD table (interface, background).
     // Override the IDD-derived array energy with a fixed pJ/byte (0 = use IDD default).
     void setBankEnergyOverridePJPerByte(double v) { energy_bank_override_pJ_per_byte_ = v; }
-    void setDeviceWidth(const std::string& w) { device_width_ = w; }  // 1.11.46
+    /* 1.11.59 (audit C018): this used to store the width and stop there, so
+     * the JEDEC device width priced the ARRAY ENERGY (4/8/16 devices per
+     * access) and changed nothing on the WIDTH side -- chip_io_bits stayed at
+     * the architecture object's fixed 8 for every DDR-class part, and the
+     * extractor stamped that 8 "Extracted from Ramulator device configuration
+     * (x4/x8/x16)". One run then priced a rank as 4 devices for energy and 8
+     * for bandwidth. It now applies the width to the architecture object as
+     * well; defined out of line for that reason. Order-independent: callers
+     * that set the width before initialize() and callers that set it after are
+     * both correct. */
+    void setDeviceWidth(const std::string& w);  // 1.11.46; 1.11.59 (C018)
     /* 1.11.52 (audit D003): the MEASURED row-buffer miss fraction from the
      * run (PE-MI rowHits/rowMisses). <0 = not measured, and the array energy
      * then uses the stated 0.5 fallback while the caller says so. */
@@ -102,6 +112,10 @@ public:
      * still comes from getTerminationEnergyNJ() alone, so the interface is
      * termination-only in results even though this correction exists in code.
      * Do not cite the 1.11.40 fix as landed until a caller consumes these. */
+    /* 1.11.59: the termination band, where Rtt is unsourced. Returns false
+     * when the technology's electricals ARE sourced (nothing to band). */
+    bool getTerminationEnergyBandNJ(double& lo_nj, double& hi_nj,
+                                    std::string& provenance) const;
     double getInterfaceDynamicEnergyNJ() const;
     double getInterfaceAreaMM2() const;
     // Override termination energy (pJ/bit; <0 = model default, 0 = force no termination).
@@ -272,6 +286,11 @@ private:
     /* 1.11.46 (L181): device width for the whole-rank array-energy basis.
      * Empty = x8 default (the same convention backgroundUnits uses). */
     std::string device_width_;
+    /* 1.11.59 (audit C018): which device width is currently STAMPED on
+     * dram_arch_, in bits. 0 = the factory object's own organization. It is
+     * reset to 0 wherever a fresh architecture object is built, so applying a
+     * width twice is a no-op and applying it to a rebuilt object is not. */
+    int arch_device_width_bits_ = 0;
     std::shared_ptr<pimid::memory::DRAMArchitectureV2> dram_arch_;
     std::shared_ptr<PIMBandwidthTracker> bandwidth_tracker_;
     std::shared_ptr<InternalDRAMNetwork> internal_network_;
@@ -286,6 +305,10 @@ private:
     void handleRequestCompletion(Ramulator::Request& req);
     void updateEnergyMetrics() const;
     void initializePIMComponents();
+    // 1.11.59 (audit C018): stamp the configured JEDEC device width onto the
+    // architecture object (chip DQ pins, devices per rank, and the JEDEC
+    // organization coupled to them). No-op when no width is configured.
+    void applyDeviceWidthToArchitecture();
 };
 
 } // namespace pimid

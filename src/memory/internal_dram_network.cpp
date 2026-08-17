@@ -1367,10 +1367,27 @@ double InternalDRAMNetwork::getTransferLatencyNs(NetworkLevel level,
     if (hops <= 1.0 && link.router_bypass && per_hop_router > 1)
         per_hop_router = std::max(1, per_hop_router - 1);
 
+    /* 1.11.59 (audit round 3, B014): a traversal costs its fixed latency ONCE
+     * even when the routing hop count is zero.
+     *
+     * avgHops() returns 0.0 for "bus" and "crossbar" and for num_nodes <= 1,
+     * which for a DDR part covers L0, L1, L2, L4, L5 and L6 -- six of the
+     * seven levels. Multiplying the fixed term by that zero deleted it: the
+     * sense-amp and column-decode time at L0, the mux arbitration at L1/L2,
+     * the rank-switching tRR at L4 and the PCB trace at L5 contributed
+     * NOTHING to any traversal that crossed them, at every technology. Six of
+     * the seven emitted levelLatency values were pure width serialisation.
+     *
+     * Zero hops means no ROUTING, not no crossing: a bus still has to be
+     * driven and sensed. The fixed cost is therefore charged for one crossing
+     * plus one per additional hop. A genuine multi-hop topology (mesh, torus,
+     * ring, fat tree) is unchanged where avgHops >= 1. */
+    double hops_charged = std::max(1.0, hops);
+
     double per_hop = static_cast<double>(per_hop_router + link.latency_cycles);
     double width = link.link_width_bits > 0 ? link.link_width_bits : 1;
     double serialization = std::ceil(static_cast<double>(data_bytes) * 8.0 / width);
-    return (hops * per_hop + serialization) / f_ghz;
+    return (hops_charged * per_hop + serialization) / f_ghz;
 }
 
 double InternalDRAMNetwork::getBridgeLatencyNs(int boundary, uint64_t data_bytes,
@@ -1415,6 +1432,16 @@ double InternalDRAMNetwork::getBridgeLatencyNs(int boundary, uint64_t data_bytes
 
 void InternalDRAMNetwork::applySourcedLadder(const int width_bits[7],
                                              const double bandwidth_GBs[7]) {
+    /* 1.11.59 (audit round 3, B014, second half): adopting the ladder RE-TIMES
+     * every per-level fixed latency, because those constants are counts of
+     * cycles at the level's own clock and this function changes that clock.
+     * DDR5's L3 "I/O driver + package delay" of 5 cycles was authored against
+     * 1.2 GHz (4.17 ns) and becomes 2.08 ns at the 2.4 GHz the sourced ladder
+     * back-derives -- with no edit to the constant and, until now, no word to
+     * the reader. A package delay is a TIME, not a cycle count, so expressing
+     * it in cycles at a clock the ladder is free to change is the underlying
+     * defect; the constants are left alone (changing them moves the corpus)
+     * and the re-timing is stated instead. */
     for (int i = 0; i < NUM_HIERARCHY_LEVELS && i < 7; ++i) {
         if (width_bits[i] <= 0 || bandwidth_GBs[i] <= 0.0) continue;
         auto& cfg = network_configs_[i];

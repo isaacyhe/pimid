@@ -165,7 +165,7 @@ struct DramIOMap {
  * SSTL-135, RZQ=240 so RTT=RZQ/6, RON=RZQ/7 -- 1.11.57 audit C008: this line
  * said SSTL-15, naming the 1.5 V part while pimid_energy.h prices the 1.35 V
  * one), JESD8-24 POD12 (DDR4), POD11 (DDR5),
- * JESD8-21C POD135 (GDDR6, RTT programmable via MR6), and the Micron LPDDR5
+ * JESD8-21C POD135 (GDDR6, RTT programmable via MR1), and the Micron LPDDR5
  * datasheets (LVSTL, VDDQ 0.5 V ODT-on, RON 40).
  *
  * Injecting them and re-deriving the swings is strictly better than borrowing:
@@ -180,7 +180,52 @@ struct DramIOMap {
  *
  * RTT for LPDDR5 is the one UNSOURCED input, flagged the same way pimid_energy.h
  * flags it: Micron defers the ohm table to a separate AC/DC document we do not
- * have, so 240 (RZQ, the LPDDR4/5 ODT reference) stands in. */
+ * have, so 240 (RZQ, the LPDDR4/5 ODT reference) stands in.
+ *
+ * 1.11.59 (LPDDR5 IO sourcing): THE SEARCH FOR THAT OHM TABLE WAS RUN OVER THE
+ * WHOLE misc/ ARCHIVE AND IT IS NOT THERE. Recorded so the next worker does
+ * not repeat it. What IS in hand, and what is not:
+ *
+ *   VDDQ = 0.50 V   SOURCED. "VDDQ = 0.50V or 0.45V TYP; 0.30V TYP (ODT off
+ *                   only)" -- misc/315b-441b-561b-563b-y52p-*-lpddr5x.pdf p.1
+ *                   Features, "Ultra-low-voltage core and I/O power supplies";
+ *                   same line as "VDDQ = 0.5V NOM or 0.3V NOM (ODT off)" in
+ *                   misc/Micron_LPDDR5_MT62F_datasheet.pdf p.1. The IDD table
+ *                   header states the operating range VDDQ = 0.47-0.57 V
+ *                   (same file, Table 7, p.14).
+ *   RON  = 40 ohm   SOURCED. IDD-table Note 4, verbatim: "IDD4RQ value is
+ *                   reference only. Typical value. Output load = 5pF; RON = 40
+ *                   ohms; TC = 25 C" -- misc/Micron_LPDDR5_MT62F_datasheet.pdf
+ *                   p.15; the identical note appears in y52p p.43, y52q p.33,
+ *                   MICT-S-A0025741931-1 p.30 and y4bm p.25.
+ *   RTT             NOT FOUND, still. Every Micron part sheet states only
+ *                   "Programmable VSS on-die termination (ODT)" (Features,
+ *                   p.1) and defers the ohm table to "General LPDDR5/LPDDR5X
+ *                   Specification 2", which misc/ does not hold; JESD209-5 is
+ *                   not in misc/ either; and there is no LVSTL document in the
+ *                   JESD8-* set we have (JESD8-19 POD18, -20A POD15, -21C
+ *                   POD135, -23 wide-range CMOS, -24 POD12, -25 POD10).
+ *                   The 240 ohm on the ZQ pin is NOT this number: it is the
+ *                   external calibration reference ("The ZQ pin should be
+ *                   connected to VDDQ through a 240 ohm +-1% resistor",
+ *                   y52p Table 11, p.22).
+ *
+ * THE ONE SOURCED THING WE NOW HAVE ABOUT RTT IS A BOUND, NOT A VALUE.
+ * misc/743844-015.pdf (Intel doc 743844 rev 015, cl.13.2.2.4 Table 89,
+ * "LPDDR5/x Signal Group DC Specifications", p.211) gives the HOST-side
+ * buffer: RODT(DQ) "On-die termination equivalent resistance for data
+ * signals" Minimum 30, Maximum 240 ohm, TYPICAL COLUMN EMPTY; and RON_UP(DQ)
+ * / RON_DN(DQ) Minimum 30, Maximum 50 ohm (which brackets Micron's 40).
+ * Two reasons that does not close this: it is the CONTROLLER's termination,
+ * not the DRAM's, and 30-240 is a range with no centre. What it does buy is
+ * a direction: the 240 in use is the MAXIMUM of the documented range, i.e.
+ * the weakest termination and so the LOWEST termination energy the range
+ * allows -- the 30 ohm end would raise it about 4x (a 280 ohm loop against
+ * 70). So the standing assumption is not merely unsourced, it sits at the
+ * optimistic end of the only bound we can cite. It is left in place and left
+ * sourced = false: an endpoint of a host-side range is not a device value,
+ * and flipping the gate on it would let an assumption replace the reported
+ * termination energy, which is exactly what C020 stopped. */
 /* 1.11.57 (latent C009): the `mts` FIELD IS GONE.
  *
  * It was a fourth transfer-rate table in a tree that has three too many
@@ -216,8 +261,11 @@ bool pimidElectricalFor(const std::string& t, PimidElectrical& e) {
     if (t == "DDR3")   { e = {1.35, 40,  34, true,  "SSTL-135, JESD79-3-1 + T38/T41 (RZQ=240); DDR3L, the part the IDD row describes"}; return true; }
     if (t == "DDR4")   { e = {1.2,  48,  40, true,  "POD12, JESD8-24"};                            return true; }
     if (t == "DDR5")   { e = {1.1,  48,  40, true,  "POD11, same family as JESD8-24"};             return true; }
-    if (t == "GDDR6")  { e = {1.35, 60,  40, true,  "POD135, JESD8-21C Cl.D (RTT via MR6)"};       return true; }
-    if (t == "LPDDR5") { e = {0.5,  240, 40, false, "LVSTL, Micron LPDDR5 datasheets; RTT=240 (RZQ) UNSOURCED"}; return true; }
+    if (t == "GDDR6")  { e = {1.35, 60,  40, true,  "POD135, JESD8-21C Cl.D (RTT via MR1; JESD250D p.59)"};       return true; }
+    /* 1.11.59 (LPDDR5 IO sourcing): the note now carries the page-level
+     * citations for the two values that ARE sourced and the bound that is all
+     * misc/ yields for the third. sourced stays false -- see the block above. */
+    if (t == "LPDDR5") { e = {0.5,  240, 40, false, "LVSTL; VDDQ 0.50 V TYP (Micron LPDDR5X y52p p.1 Features) and RON 40 ohm (same sheet, IDD Note 4, p.43); RTT=240 UNSOURCED -- Micron defers the ODT ohm table to General LPDDR5 Spec 2, absent here, and 240 is only the MAX of host-side RODT(DQ) 30-240 ohm (Intel 743844-015 Tbl 89 p.211), i.e. the lowest-energy end of that range"}; return true; }
     /* HBM rides an interposer: JESD238B cl.9.1, unterminated, so there is no
      * termination network to inject. It keeps WideIO's low-swing electricals,
      * which is the physically right family for a wide unterminated bus. */
