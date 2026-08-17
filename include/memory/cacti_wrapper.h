@@ -133,13 +133,18 @@ public:
      * INSIDE the tool that owns the array model instead of by the caller.
      *
      * HARD SCOPE (the reason this is a method and not a transform applied to
-     * getArea()): McPAT links this same cacti7 library and issues thousands
-     * of cache, register-file and TLB queries through it. A DRAM VENDOR
-     * DENSITY factor must never touch those. The calibration therefore
-     * applies only when the query says it is a commodity-DRAM MAIN MEMORY
-     * array AND names its technology; every other query returns raw CACTI,
-     * byte-identical to before. k is reported alongside so a calibrated
-     * number can never pass as a raw tool output. */
+     * getArea()). 1.11.51 (L88/L247) corrects the stated threat: McPAT does
+     * link libcacti7, but it drives it through its OWN mem_array machinery
+     * and never constructs a pimid::CACTIWrapper -- so McPAT's cache/RF/TLB
+     * queries could never reach this method, and the old comment guarded a
+     * path that does not exist. The gate is still real, for PIMID's OWN
+     * other CACTIWrapper queries (cache-latency probes, SRAM-as-memory
+     * arrays): a DRAM vendor-density factor must never touch those. The
+     * calibration therefore applies only when the query says it is a
+     * commodity-DRAM MAIN MEMORY array AND names its technology; every
+     * other query returns raw CACTI, byte-identical to before. k is
+     * reported alongside so a calibrated number can never pass as a raw
+     * tool output. */
     struct CalibratedArea {
         double area_mm2 = 0.0;   // calibrated (or raw, when not applicable)
         double raw_mm2  = 0.0;
@@ -160,6 +165,14 @@ public:
     static double vendorArrayFraction(const std::string& tech);
     static int    generationTableNm(const std::string& tech);
     static const char* generationClass(const std::string& tech);
+    /* 1.11.51 (L87): the vendor JEDEC anchor as a METHOD, so no caller
+     * re-implements the arithmetic. Returns (chip_bytes -> MB) / density
+     * (MB/mm^2) = mm^2/die, or 0 when the technology has no density row.
+     * The 1.11.14 migration left this arithmetic duplicated in main.cpp,
+     * where one copy divided MBIT by a MB/mm^2 density (an 8x error) and
+     * still carried the phantom x1.12 that E29 removed from the tool. */
+    static double vendorAnchorAreaMM2(const std::string& tech,
+                                      uint64_t chip_bytes);
     double getDynamicReadEnergy() const;   // Read energy in nJ
     double getDynamicWriteEnergy() const;  // Write energy in nJ
     double getLeakagePower() const;    // Leakage power in mW

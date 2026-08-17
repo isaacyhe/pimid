@@ -7,6 +7,128 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.51 -- the FIX-PRE-FLEET queue closes; the N-notes and E-residues with it
+
+The final FIX-PRE-FLEET batch (16 items), the open N-notes that were
+mechanical, and the two E-residues. The ledger's fix queue is now EMPTY;
+what remains open is N2/N3 (pending a user ruling), N6 (root cause), and
+the N8 sourcing residue.
+
+**Batch I -- the last 16 ledger items.**
+- L70: SRAM/NVM access latency was characterized at a HARDCODED 22 nm while
+  energy/area used the configured node -- one array, two processes. Both
+  legs fixed: the flat helper takes a required, validated node from every
+  caller, and the plugin tier models (which carried their own divergent
+  compiled-in defaults: SRAM/STT 22, ReRAM 32, PCM 90 nm, with dead config
+  knobs nothing ever set) take it via setTechNodeNm().
+- L75: the tech-node positive-list ran only inside power analysis, so
+  --no-power accepted an invalid node. Validated unconditionally at config
+  load, for the global node, the host node, and every system node.
+- L76: generic "DRAM" is now an ALIAS resolved at the single
+  canonicalization point (-> DDR4, the preset that times it). It used to
+  hit three different truths: Ramulator priced it DDR4, one host table
+  classed it DDR5, and a device-scope validator rejected it outright.
+- L87: the JEDEC die-area anchor arithmetic moved INTO the tool
+  (vendorAnchorAreaMM2). One caller copy divided MBIT by a MB/mm^2 density
+  -- an 8x error -- and still carried the phantom x1.12 E29 removed.
+- L88/L247 reconciled: the 1.11.14 scope-gate rationale claimed to guard
+  McPAT's cache queries; McPAT never constructs the wrapper. The gate is
+  real -- for PIMID's own non-DRAM queries -- and now says so.
+- L105 (with L68): ONE factor authority. The wrapper's XML emission derived
+  the family factors at (table,table,hp,350K) while main printed them at
+  the configured node/corner/temperature -- the APPLIED factor disagreed
+  with the printed one whenever any input was non-default. Every call now
+  names all four inputs. L68's "free logic-node knob" is thereby consistent
+  end-to-end -- and the N2 MEASUREMENT below shows it is still live.
+- L142: the NVM retention-free gating floor (2%, invented) is replaced by
+  CACTI's own sleep-transistor state (Vcc_min/Vdd = 0.35), the same
+  authority the SRAM path cites, stated as the tool-backed bound.
+- L207: OOO retire-site attribution -- the measured mix, the PG activity
+  mark and the FP-emulation charge read the NEXT basic block while the
+  cycle cost came from the RETIRED one. All three now read the retired
+  block.
+- L208/L209 reconciled: both already fixed (1.11.48 measured-mix wiring;
+  1.11.16 base-class syntheticInstrs).
+- L214: floating_point=false now removes the FPU from the POWER model on
+  every profile (OOO priced 2 FPUs it did not have); explicit overrides
+  still win.
+- L215/L223: the FP-emulation ENERGY fold -- on an FPU-less element each FP
+  op becomes fp_emul_cycles integer-op equivalents through the integer-ALU
+  stat, so soft-float work rides the same datapath factors real integer
+  work rides instead of costing nothing.
+- L243: 1.11.9's claim that device scope already counted the memory die was
+  FALSE; device scope now prints the same populated "With memory:" total,
+  making the two scopes comparable.
+- L255 reconciled: the cCycles ROI rebase is correct; its 1.11.9 note
+  understated the blast radius (every core, every scope). Recorded.
+- L262: the coupled/decoupled regression arm now asserts the quantities the
+  diff can move (the decoupled banner + per-technology memory pricing),
+  not node McPAT power.
+
+**N-notes closed.**
+- N1 (user-raised at E7): PITCH IS GEOMETRY, NOT FAMILY. The SUBARRAY pitch
+  penalty applies beside SRAM/NVM arrays too -- gating hoisted out of the
+  DRAM-periphery branch; family-0 dies take it on the same measured
+  on-pitch logic share (L116 boundary).
+- N2 (measured, then RULED 2026-08-17): the logic-node cancellation the
+  1.11.21 design intended is PARTIAL ONLY -- same HBM3/BANK cell at 22 vs
+  45 nm: core area 2.0x apart, total power 8.8x. User ruling: settings must
+  be MEANINGFUL -- a PE on the DRAM die takes the DIE's generation (class
+  ladder -> its CACTI table, announced when it overrides the knob); a PE
+  off the die (buffer chip, MC die, HBM base die, host) keeps
+  technology.node_nm as the real logic-process choice. Implemented at both
+  family-1 power sites AND at config load for device scope, so TIMING
+  queries (cache-latency probes, array latency) see the same node as the
+  power model -- one node per die, everywhere. Corpus cells sit at 22 on 22-table techs: no numbers move
+  there; 32-table classes (DDR3-era) now price at their own generation.
+- N3 (RULED: "go with the banded form"): the SUBARRAY pitch factor gains a
+  DERIVED, BANDED default from published silicon when the user sets no
+  hypothesis: [1.25 .. ~4] -- low end the FIMDRAM measurement (ISSCC 2021
+  25.4, lean SIMD, our default), upper end UPMEM-implied (HC31 ~10x density
+  claim / family factor; general-purpose CPU incl. 3-metal routing loss) --
+  printed with the generation's own array pitch 2F from cell area = 6F^2
+  (1x 38 / 1y 35 / 1z 31 / 1a 28 / 1b 25 nm). power.subarray_pitch_factor
+  remains the explicit override; non-DRAM arrays get no invented default.
+- N6 ROOT-CAUSED (probe gate N6, one job): the detailed cell's job-scoped
+  three-valued divergence is GUEST ENVIRONMENT LAYOUT, not a simulator
+  race -- two identical runs in one job are bit-identical; padding the
+  environment by 256 B produced a third value (270245 -> 269540 cycles,
+  25467 -> 25380 packets) and 1 KiB a fourth: each slurm job's env block
+  (SLURM_JOB_ID at minimum) shifts guest stack addresses and a handful of
+  cache-set mappings. The within-job A/B gate method stays mandatory;
+  cross-job equality constants stay invalid.
+- N5: ComponentType::FULL_SYSTEM deleted -- declared, never populated, zero
+  consumers, an invitation to read zeros.
+- N7 was closed earlier (measured flush footprint); marked.
+- N9: HBM2/HBM3 nRFCSB was never filled, so EVERY instantiation of the
+  Ramulator HBM models died in the completeness check (the HOST_MC
+  SIGABRT). Filled with tRFC as a stated upper bound (no public per-density
+  tRFCsb; unused under AllBank refresh); HBM3's nREFISB also read the wrong
+  table (upstream copy-paste -- its own tREFISB_TABLE sat unused).
+- N10: a declared link can no longer be silently ignored: src/dst-less
+  entries apply by inference in a system with a device; every other skip
+  warns and names what was kept.
+
+**E-residues closed.**
+- E17: the measured devMC gap histogram leaves the log and enters the model.
+  The plugin exports the raw log2 buckets as stats; the orchestrator applies
+  the SOURCED per-generation tXP (DDR3/4 6 ns, DDR5/LPDDR5 7.5 ns, JESD79/
+  209; settable via memory.power_down_threshold_ns; GDDR6/HBM refuse -- no
+  sourced tXP) with each qualifying gap paying the threshold once. The
+  10k-cycle phase residency -- which measured r_idle=0 while ~90% of ROI
+  cycles sat in usable gaps -- is superseded where the histogram exists.
+  NoC gating stays measurement-only: no sourced wake penalty, none invented.
+- E31 residue: the System Total memory term prints its wall clock, so the
+  term is reconstructable from the report alone.
+
+The one 1161I2 red arm (J1, tier latency at 22 vs 45 nm printing equal)
+was an extractor-precision artifact: the tool's own cached
+characterizations differ (read latency 3.298e-9 s @22 vs 3.786e-9 s @45,
+~/.cache/pimid/nvsim/nvm_t0_c65536_n{22,45}_w512.xml) -- the node is live
+end-to-end; the 1-decimal log print and cycle quantization hid it.
+
+Gate 1161I + 1161I2 + N6 probe; predictions in the gate headers.
+
 ## 1.11.50 -- the family transform stops at the die edge
 
 FIX-PRE-FLEET Batch H: the DRAM-periphery family transform's scope inside the

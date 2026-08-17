@@ -414,6 +414,12 @@ void SRAMModel::setArrayCapacityBytes(uint64_t bytes) {
 
 /* 1.11.25: characterize the access the RUN performs. Must precede
  * initialize(). 0 keeps the model default. */
+/* 1.11.51 (L70): the run's node, replacing the compiled-in default.
+ * Must precede initialize(). */
+void SRAMModel::setTechNodeNm(int nm) {
+    if (nm > 0) sram_config_.tech_node_nm = nm;
+}
+
 void SRAMModel::setAccessWidthBits(uint32_t bits) {
     if (bits >= 8 && bits <= 1024) access_width_bits_ = bits;
 }

@@ -101,7 +101,14 @@ void OOOCore::initStats(AggregateStat* parentStat) {
 
     auto y = [this]() -> uint64_t {
         uint64_t c = cRec.getContentionCycles();
-        return (c > roiBaseCCycles) ? (c - roiBaseCCycles) : 0;  // 1.11.9: ROI-windowed
+        /* 1.11.9: ROI-windowed. 1.11.51 (L255), correcting the record: the
+         * 1.11.9 note motivated this as a host_wall_cycles consistency fix,
+         * but the rebase applies to EVERY core's cCycles in EVERY scope --
+         * device PEs included -- so it moved contention-derived numbers for
+         * every node in system scope, not just the host sum. The windowing
+         * itself is correct (all activity stats share the ROI window); what
+         * was wrong was the stated blast radius. */
+        return (c > roiBaseCCycles) ? (c - roiBaseCCycles) : 0;
     };
     LambdaStat<decltype(y)>* cCyclesStat = new LambdaStat<decltype(y)>(y);
     cCyclesStat->init("cCycles", "Cycles due to contention stalls");
@@ -243,6 +250,15 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
 
     uint32_t bblInstrs = prevBbl->instrs;
     DynBbl* bbl = &(prevBbl->oooBbl[0]);
+    /* 1.11.51 (L207): keep the pointer to the BBL being RETIRED. Everything
+     * charged "at retire" below -- the measured mix, the PG-residency
+     * activity mark, the FP soft-float penalty -- used to read bblInfo, the
+     * NEXT block that just arrived, while the cycle cost came from this
+     * one: a one-block attribution shift on every accumulator, and a wrong
+     * window class whenever a real block retired as a synthetic one arrived
+     * (or vice versa). Run totals barely moved; per-window attribution and
+     * the synth/real split did. */
+    BblInfo* retiredBbl = prevBbl;
     prevBbl = bblInfo;
 
     uint64_t lastCommitCycle = 0;  // used to find misprediction penalty
@@ -470,18 +486,19 @@ inline void OOOCore::bbl(Address bblAddr, BblInfo* bblInfo) {
         { /* 1.11.8 PG residency. 1.11.18: an INJECTED timing charge is a
            * WAIT (barrier/flush/launch), not retirement -- marking it
            * active credited the very windows power gating exists for as
-           * busy, so a co-sim PE could never show idle residency. */
-          if (!bblInfo->synth) { uint64_t _ph = zinfo->numPhases;
+           * busy, so a co-sim PE could never show idle residency.
+           * 1.11.51 (L207): classify by the block being RETIRED. */
+          if (!retiredBbl->synth) { uint64_t _ph = zinfo->numPhases;
               pgAct.touch(_ph); zinfo->pgres.anyCore.touch(_ph); } }
-    mixAdd(bblInfo);  // 1.11.10 measured instruction mix
+    mixAdd(retiredBbl);  // 1.11.10 measured mix; 1.11.51 (L207): the RETIRED block
     /* 1.11.47 (L203): soft-float on an FPU-less OOO element -- the same
      * charge simple/in-order/alu cores have carried since 1.11.11. Applied at
      * retire alongside the mix, as a serialising penalty: emulated FP is a
      * library call chain the OOO window cannot hide. (L207's known off-by-one
      * BBL attribution applies to this the same way it applies to the mix --
      * one finding, not two.) */
-    if (!coreHasFpu_ && coreFpEmulCycles_ && bblInfo->nFp) {
-        curCycle += (uint64_t)bblInfo->nFp * coreFpEmulCycles_;
+    if (!coreHasFpu_ && coreFpEmulCycles_ && retiredBbl->nFp) {
+        curCycle += (uint64_t)retiredBbl->nFp * coreFpEmulCycles_;
     }
     uops += bbl->uops;
     bbls++;

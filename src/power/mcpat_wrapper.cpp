@@ -362,13 +362,22 @@ bool McPATWrapper::periphFactorsFor(int dram_table_nm, int logic_node_nm,
                                temp_k, fa, fd, fl);
 }
 
-/* In-tree callers price at hp and at the configured temperature. A table that
- * cannot be read is a hard stop, not a silent fallback to the old literals:
- * the literals are exactly what this release removed. */
-static void periphFamilyFactors(int table_nm, double& fa, double& fd, double& fl) {
-    if (!periphFamilyFactors(table_nm, table_nm, 0, 350, fa, fd, fl)) {
-        std::cerr << "[power] FATAL: cannot read the " << table_nm
-                  << " nm CACTI table for the DRAM-periphery factors.\n";
+/* 1.11.51 (L105/L68): the legacy 3-arg wrapper is GONE. It priced the
+ * baseline at the DRAM table's own node with device hp and 350 K, while
+ * main.cpp derived the same factors at the CONFIGURED logic node, corner
+ * baseline and temperature -- two factor computations in one run, and the
+ * XML (the applied one) was the wrong one. Every caller now names all four
+ * inputs; a table that cannot be read is a hard stop, not a fallback. */
+static void periphFamilyFactorsCfg(int table_nm, int logic_node_nm,
+                                   int baseline_device, int temp_k,
+                                   double& fa, double& fd, double& fl) {
+    if (!periphFamilyFactors(table_nm, logic_node_nm, baseline_device,
+                             temp_k, fa, fd, fl)) {
+        std::cerr << "[power] FATAL: cannot derive the DRAM-periphery factors"
+                  << " (comm-dram from " << table_nm << "nm.dat / baseline"
+                  << " device " << baseline_device << " from "
+                  << logic_node_nm << "nm.dat at " << (temp_k - 273)
+                  << "C).\n";
         std::exit(2);
     }
 }
@@ -833,7 +842,11 @@ void McPATWrapper::computePower() {
                 double fdW = 1.0, flW = 1.0;
                 if (config_.process_family == 1) {
                     double faW = 1.0;   // 1.11.16: same authority as the XML emission
-                    periphFamilyFactors(config_.dram_periph_table_nm, faW, fdW, flW);
+                    periphFamilyFactorsCfg(config_.dram_periph_table_nm,
+                                           config_.tech_node_nm,
+                                           config_.device_type,
+                                           config_.temperature_k,
+                                           faW, fdW, flW);
                     (void)faW;
                 }
                 auto wf = [&](const Component* p) -> double {
@@ -1606,6 +1619,13 @@ std::string McPATWrapper::generateXMLConfig() const {
      * carries clocking and control overhead; 0 would zero it, which is a
      * cheaper answer than the truth. */
     xml << "    <param name=\"opt_clockrate\" value=\"1\"/>\n";
+    /* 1.11.51 (N1): the SUBARRAY pitch penalty, emitted for EVERY family --
+     * geometry does not care which process the transistors came from. The
+     * family block below still emits dram_periph_pitch for the family-1
+     * transform; family-0 (SRAM/NVM placements) reads this one. */
+    xml << "    <param name=\"core_pitch_factor\" value=\""
+        << ((config_.subarray_pitch_factor > 0.0)
+                ? config_.subarray_pitch_factor : 1.0) << "\"/>\n";
     /* 1.11.12 (borders rule): the DRAM-periphery family is DESCRIBED to
      * McPAT, which owns the components and applies it internally; the
      * wrapper no longer post-scales results. Scope says which components sit
@@ -1614,7 +1634,14 @@ std::string McPATWrapper::generateXMLConfig() const {
      * base-die designs keep their logic on a buffer die and stay family 0. */
     if (config_.process_family == 1) {
         double fa, fd, fl;
-        periphFamilyFactors(config_.dram_periph_table_nm, fa, fd, fl);   // 1.11.16: single authority
+        /* 1.11.51 (L105): the APPLIED factors now come from the same four
+         * inputs main.cpp prints -- logic node, corner baseline device and
+         * temperature included -- instead of a table_nm/hp/350K shortcut
+         * that silently disagreed with the printed derivation whenever the
+         * logic node, corner or temperature was not the default. */
+        periphFamilyFactorsCfg(config_.dram_periph_table_nm,
+                               config_.tech_node_nm, config_.device_type,
+                               config_.temperature_k, fa, fd, fl);
         double pitch = (config_.subarray_pitch_factor > 0.0)
                            ? config_.subarray_pitch_factor : 1.0;
         xml << "    <param name=\"dram_periph_family\" value=\"1\"/>\n";
@@ -1977,6 +2004,27 @@ std::string McPATWrapper::generateXMLConfig() const {
             uint64_t ia_pc = mm_ ? meas_int_ / nc_ : inst_per_core * 70 / 100;
             uint64_t fp_pc = mm_ ? meas_fp_  / nc_ : inst_per_core * 10 / 100;
             uint64_t mu_pc = mm_ ? meas_mul_ / nc_ : inst_per_core * 5 / 100;
+            /* 1.11.51 (L215/L223): on an FPU-less element the FP class does
+             * not vanish -- it EXECUTES as a soft-float integer sequence the
+             * timing side already charges at fp_emul_cycles per op. Pricing
+             * it at a zero-FPU cost while adding only cycles made the
+             * FPU-less element look MORE power-efficient (same energy over
+             * more time), and on the ALU profile the emulation bypassed
+             * every datapath scaling the element applies to its integer
+             * work. The fold below routes the emulation through the integer
+             * ALU stat -- one integer-op-equivalent per charged cycle, the
+             * same 1-CPI equivalence the timing charge uses -- so it now
+             * rides exactly the datapath factors real integer work rides. */
+            if (config_.num_fpus == 0 && config_.fp_emul_cycles > 0 && fp_pc > 0) {
+                uint64_t emul_ops = fp_pc * (uint64_t)config_.fp_emul_cycles;
+                std::cout << "  [Activity] FPU-less element: " << fp_pc
+                          << " FP ops/core priced as soft-float integer work ("
+                          << emul_ops << " int-op equivalents at "
+                          << config_.fp_emul_cycles << " cycles/op)."
+                          << std::endl;
+                ia_pc += emul_ops;
+                fp_pc = 0;
+            }
             xml << "      <stat name=\"ialu_accesses\" value=\"" << ia_pc << "\"/>\n";
             xml << "      <stat name=\"fpu_accesses\" value=\"" << fp_pc << "\"/>\n";
             xml << "      <stat name=\"mul_accesses\" value=\"" << mu_pc << "\"/>\n";
@@ -1985,10 +2033,12 @@ std::string McPATWrapper::generateXMLConfig() const {
         {
             const uint64_t nc_ = std::max(1, config_.num_cores);
             const bool mm_ = (meas_int_ + meas_fp_ + meas_mul_) > 0;
+            uint64_t cdb_fp = mm_ ? meas_fp_ / nc_ : inst_per_core * 10 / 100;
+            if (config_.num_fpus == 0 && config_.fp_emul_cycles > 0)
+                cdb_fp = 0;   // 1.11.51 (L215): no FPU result bus exists
             xml << "      <stat name=\"cdb_mul_accesses\" value=\""
                 << (mm_ ? meas_mul_ / nc_ : inst_per_core * 5 / 100) << "\"/>\n";
-            xml << "      <stat name=\"cdb_fpu_accesses\" value=\""
-                << (mm_ ? meas_fp_ / nc_ : inst_per_core * 10 / 100) << "\"/>\n";
+            xml << "      <stat name=\"cdb_fpu_accesses\" value=\"" << cdb_fp << "\"/>\n";
         }
 
         if (alu_only) {

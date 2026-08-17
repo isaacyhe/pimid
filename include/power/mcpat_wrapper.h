@@ -31,8 +31,13 @@ public:
         L3_CACHE,          // L3 cache (shared)
         NOC,               // Network-on-Chip (aggregate of all levels)
         MEMORY_CONTROLLER, // Memory controller
-        PCIE,              // PCIe controller
-        FULL_SYSTEM        // Entire processor system
+        PCIE               // PCIe controller
+        /* 1.11.51 (N5): FULL_SYSTEM is GONE. It was declared and never
+         * populated -- the E8-completed rollup lives inside the McPAT fork
+         * (processor.cc, correct if anything reads the Processor object
+         * directly), but no PIMID-side extraction ever filled this slot, and
+         * a declared-but-empty system total invites someone to read zeros.
+         * Consumers want getSystemPower()/getTotalArea(), which are real. */
     };
 
     struct PowerMetrics {
@@ -277,6 +282,9 @@ public:
         int num_alus;
         int num_muls;
         int num_fpus;
+        /* 1.11.51 (L215/L223): soft-float emulation cycles per FP op, for
+         * the FPU-less energy fold (see the FU-stat emission). 0 = none. */
+        int fp_emul_cycles = 0;
 
         /* 1.9.32: reference class. McPAT prices a die against one of two
          * measured populations. The default one is server processors -- the

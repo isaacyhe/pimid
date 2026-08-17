@@ -286,7 +286,25 @@ class HBM3 : public IDRAM, public Implementation {
       }(m_organization.density);
 
       m_timing_vals("nRFC")  = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
-      m_timing_vals("nREFISB")  = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
+      /* PIMID 1.11.51 (N9): two fixes to the refresh fill.
+       * (1) nREFISB was assigned from tRFC_TABLE -- the refresh TIME table --
+       *     while the tREFISB_TABLE (the same-bank refresh INTERVAL, defined
+       *     just above and never used) sat unread: an upstream copy-paste
+       *     that made same-bank refresh ~7x too frequent had anything
+       *     consumed it. It now reads its own table.
+       * (2) nRFCSB was never filled at all, so EVERY instantiation of this
+       *     model died in the -1 completeness check below ("timing nRFCSB is
+       *     not specified!") -- the HOST_MC SIGABRT of audit finding N9. No
+       *     public per-density tRFCsb is available to us (JESD238 tables are
+       *     paywalled), so it is filled with tRFC as a stated UPPER BOUND:
+       *     refreshing one bank cannot take longer than refreshing them all.
+       *     Our emitted configs use the AllBank refresh manager, which never
+       *     consumes nRFCSB; a SameBank manager would over-price refresh
+       *     time by the bound's slack -- conservative, and stated here. */
+      m_timing_vals("nREFISB") = JEDEC_rounding(tREFISB_TABLE[0][density_id], tCK_ps);
+      if (m_timing_vals("nRFCSB") == -1) {
+        m_timing_vals("nRFCSB") = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
+      }
 
       // Overwrite timing parameters with any user-provided value
       // Rate and tCK should not be overwritten

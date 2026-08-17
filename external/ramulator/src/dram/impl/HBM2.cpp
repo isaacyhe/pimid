@@ -285,6 +285,13 @@ class HBM2 : public IDRAM, public Implementation {
 
       m_timing_vals("nRFC")  = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
       m_timing_vals("nREFISB")  = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
+      /* PIMID 1.11.51 (N9): nRFCSB was never filled, so every instantiation
+       * of this model died in the -1 completeness check. Filled with tRFC as
+       * a stated UPPER BOUND (same reasoning as HBM3.cpp; AllBank refresh
+       * never consumes it). */
+      if (m_timing_vals("nRFCSB") == -1) {
+        m_timing_vals("nRFCSB") = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
+      }
 
       // Overwrite timing parameters with any user-provided value
       // Rate and tCK should not be overwritten

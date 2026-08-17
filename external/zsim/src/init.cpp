@@ -1774,6 +1774,36 @@ static void InitGlobalStats() {
         stw->init("pgPhaseWindow", "Phases in the priced (ROI) window");
         zinfo->rootStat->append(stw);
     }
+    /* 1.11.51 (E17, closing the measure-first ruling): the devMC gap
+     * histogram leaves the log and enters the stats stream, so the power
+     * model can read it back. The 10,000-cycle phase residency above is
+     * three orders of magnitude coarser than tXP-scale power-down windows
+     * -- it measured r_idle = 0 on cells whose own histogram shows ~90% of
+     * ROI cycles sitting in gaps a JEDEC power-down could use. The
+     * THRESHOLD is not chosen here: the plugin exports the raw log2
+     * buckets; the orchestrator applies the per-generation sourced tXP (and
+     * the user's override), which is where that knowledge lives. NoC gaps
+     * stay measurement-only: a logic clock-gating wake penalty has no
+     * source, and one is not invented (the E17 ruling). */
+    {
+        static char nmC[GapHist::kBuckets][32], nmY[GapHist::kBuckets][32];
+        for (int b = 0; b < GapHist::kBuckets; b++) {
+            snprintf(nmC[b], sizeof(nmC[b]), "pgDevMCGapCnt_%d", b);
+            snprintf(nmY[b], sizeof(nmY[b]), "pgDevMCGapCyc_%d", b);
+            auto fc = [b]() -> uint64_t { return zinfo->pgres.devMCGaps.count[b]; };
+            auto* sc = new LambdaStat<decltype(fc)>(fc);
+            sc->init(nmC[b], "devMC gap-histogram count, log2 bucket");
+            zinfo->rootStat->append(sc);
+            auto fy = [b]() -> uint64_t { return zinfo->pgres.devMCGaps.cycles[b]; };
+            auto* sy = new LambdaStat<decltype(fy)>(fy);
+            sy->init(nmY[b], "devMC gap-histogram cycles, log2 bucket");
+            zinfo->rootStat->append(sy);
+        }
+        auto fs = []() -> uint64_t { return zinfo->pgres.devMCGaps.spanCycles(); };
+        auto* ss = new LambdaStat<decltype(fs)>(fs);
+        ss->init("pgDevMCGapSpan", "devMC gap-histogram ROI span, cycles");
+        zinfo->rootStat->append(ss);
+    }
 }
 
 

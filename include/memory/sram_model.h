@@ -104,6 +104,7 @@ private:
     std::string tierLatencySource(Tier tier, Op op) const override;
     void setArrayCapacityBytes(uint64_t bytes) override;
     void setAccessWidthBits(uint32_t bits) override;
+    void setTechNodeNm(int nm) override;   // 1.11.51 (L70)
     uint32_t access_width_bits_ = 0;   // 0 = model default
 };
 

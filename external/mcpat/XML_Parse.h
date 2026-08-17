@@ -621,6 +621,10 @@ typedef struct{
 	 * the components -- rather than by post-scaling the results outside
 	 * (model-borders rule). 0 = logic = untouched. */
 	int    dram_periph_family;      // 0 = logic (default), 1 = DRAM periphery
+	/* PIMID 1.11.51 (N1): SUBARRAY pitch penalty independent of family --
+	 * consumed by the family-0 core-area path; the family-1 transform keeps
+	 * its dram_periph_pitch. Default 1.0. */
+	double core_pitch_factor;
 	double dram_periph_area;
 	double dram_periph_pitch;   /* PIMID 1.11.34 (E11): core-only pitch penalty */        // area factor
 	double dram_periph_dyn;         // dynamic factor

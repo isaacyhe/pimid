@@ -85,6 +85,13 @@ public:
      * ladder describes a device nobody is simulating. 0 = keep the default. */
     virtual void setAccessWidthBits(uint32_t /*bits*/) {}
 
+    /* 1.11.51 (L70, plugin leg): characterize at the RUN's technology node.
+     * Each model shipped its own compiled-in default (SRAM/STT 22, ReRAM 32,
+     * PCM 90 nm) that nothing ever set -- the per-model config-map knobs had
+     * no writer -- so tier timing was priced at a node the energy path did
+     * not use. Must precede initialize(). <=0 keeps the model default. */
+    virtual void setTechNodeNm(int /*nm*/) {}
+
     enum class Tier { SUBARRAY, BANK, BANKGROUP, CHIP, RANK, CHANNEL };
     enum class Op   { READ, WRITE, SET, RESET };
 

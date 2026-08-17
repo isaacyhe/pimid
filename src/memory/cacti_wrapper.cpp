@@ -344,11 +344,13 @@ double CACTIWrapper::getArea() const {
  * with the density and generation tables living there too -- model logic in
  * the orchestrator, which the borders rule forbids.
  *
- * The scope gate is the whole point. McPAT links this same library; a DRAM
- * vendor-density factor applied to its cache and register-file queries would
- * be nonsense. So calibration requires BOTH a commodity-DRAM main-memory
- * query AND a named technology, and anything else returns raw CACTI
- * unchanged. */
+ * The scope gate is the whole point -- with the threat stated correctly
+ * (1.11.51, L88/L247): McPAT drives libcacti7 through its own machinery and
+ * never constructs this wrapper, so the parties the gate actually protects
+ * are PIMID's OWN non-DRAM CACTIWrapper queries (cache-latency probes,
+ * SRAM-as-memory arrays), to which a DRAM vendor-density factor would be
+ * nonsense. Calibration requires BOTH a commodity-DRAM main-memory query
+ * AND a named technology; anything else returns raw CACTI unchanged. */
 /* 1.11.19 (user decision D11): FULL-DIE density, one published measurement
  * per row. "mm^2/die" now means what a reviewer assumes and can check
  * against a die photo.
@@ -447,6 +449,14 @@ const char* CACTIWrapper::generationClass(const std::string& tech) {
     if (tech == "HBM2")   return "1y";
     if (tech == "HBM3")   return "1a/1b";
     return "1x";
+}
+
+double CACTIWrapper::vendorAnchorAreaMM2(const std::string& tech,
+                                         uint64_t chip_bytes) {
+    /* 1.11.51 (L87): ONE home for the anchor arithmetic. MB / (MB/mm^2). */
+    double dens = vendorDieDensity(tech);
+    if (dens <= 0.0) return 0.0;
+    return (static_cast<double>(chip_bytes) / (1024.0 * 1024.0)) / dens;
 }
 
 CACTIWrapper::CalibratedArea CACTIWrapper::getCalibratedDieArea() const {

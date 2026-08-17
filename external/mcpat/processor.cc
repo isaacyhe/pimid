@@ -433,6 +433,29 @@ Processor::Processor(ParseXML *XML_interface)
    * Leakage rebases on PLAIN leakage: the comm-dram ratio already encodes a
    * long-channel device, so stacking McPAT's longer-channel discount on top
    * would double-count it. */
+  /* PIMID 1.11.51 (N1): the on-pitch logic share of the core, one
+   * computation for both pitch consumers (the family-1 areaMul and the
+   * family-0 SUBARRAY-pitch path below). See the L116 boundary statement. */
+  auto onPitchLogicShare = [&]() -> double {
+      double a_tot = 0.0, a_logic = 0.0;
+      for (int ci = 0; ci < numCore; ci++) {
+          Core* c = cores[ci];
+          double lg = 0.0;
+          if (c->exu) {
+              lg += c->exu->area.get_area();
+              if (c->exu->rfu)   lg -= c->exu->rfu->area.get_area();
+              if (c->exu->scheu) lg -= c->exu->scheu->area.get_area();
+          }
+          if (c->corepipe)   lg += c->corepipe->area.get_area();
+          if (c->undiffCore) lg += c->undiffCore->area.get_area();
+          double t = c->area.get_area();
+          if (lg < 0.0) lg = 0.0;
+          if (lg > t)   lg = t;
+          a_tot += t; a_logic += lg;
+      }
+      return (a_tot > 0.0) ? a_logic / a_tot : 1.0;
+  };
+
   if (XML->sys.dram_periph_family == 1) {
       const double fa = XML->sys.dram_periph_area;
       /* PIMID 1.11.34 (E11): the PITCH penalty applies to the CORE ONLY. It
@@ -558,23 +581,7 @@ Processor::Processor(ParseXML *XML_interface)
        * a stated approximation, the units are not separable there.) */
       double pitch_core_mul = fpitch;
       if (fpitch != 1.0 && numCore > 0) {
-          double a_tot = 0.0, a_logic = 0.0;
-          for (int ci = 0; ci < numCore; ci++) {
-              Core* c = cores[ci];
-              double lg = 0.0;
-              if (c->exu) {
-                  lg += c->exu->area.get_area();
-                  if (c->exu->rfu)   lg -= c->exu->rfu->area.get_area();
-                  if (c->exu->scheu) lg -= c->exu->scheu->area.get_area();
-              }
-              if (c->corepipe)   lg += c->corepipe->area.get_area();
-              if (c->undiffCore) lg += c->undiffCore->area.get_area();
-              double t = c->area.get_area();
-              if (lg < 0.0) lg = 0.0;
-              if (lg > t)   lg = t;
-              a_tot += t; a_logic += lg;
-          }
-          double logic_frac = (a_tot > 0.0) ? a_logic / a_tot : 1.0;
+          double logic_frac = onPitchLogicShare();
           pitch_core_mul = 1.0 + (fpitch - 1.0) * logic_frac;
           /* stderr: the fork's stdout is /dev/null (see wrapper). */
           std::cerr << "  [fam] pitch penalty " << fpitch
@@ -734,6 +741,25 @@ Processor::Processor(ParseXML *XML_interface)
           rt_power = rt_power + pcies.rt_power;
           area.set_area(area.get_area() + pcies.area.get_area());
       }
+  } else if (XML->sys.core_pitch_factor > 1.0 && numCore > 0) {
+      /* PIMID 1.11.51 (N1, user-raised at E7): PITCH IS GEOMETRY, NOT
+       * FAMILY. A SUBARRAY-placed PE beside an SRAM/NVM array is pressed
+       * against that array's pitch exactly as a DRAM-placed one is, but the
+       * penalty used to live inside the DRAM-periphery transform and could
+       * never fire here. Same on-pitch boundary as L116: the penalty lands
+       * on the measured logic share; SRAM macro blocks keep their cell-
+       * table area. Area only -- the device factors are family physics and
+       * correctly stay off a logic die. */
+      double lf = onPitchLogicShare();
+      double p = XML->sys.core_pitch_factor;
+      double mul = 1.0 + (p - 1.0) * lf;
+      double before = core.area.get_area();
+      core.area.set_area(before * mul);
+      area.set_area(area.get_area() + core.area.get_area() - before);
+      std::cerr << "  [fam] SUBARRAY pitch x" << p
+                << " on a logic-family die: applied to the on-pitch logic "
+                << "share (" << lf << " of core area) -> core area x"
+                << mul << "." << std::endl;
   }
 
 //  //clock power

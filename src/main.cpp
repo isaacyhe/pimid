@@ -142,7 +142,16 @@ static pimid::MemoryModel::Tier tierForPlacement(int pe_hierarchy_level) {
     }
 }
 
+static int validateTechNodeNm(int node_nm, const char* what);  // 1.11.51 (L70): node authority, declared early for the latency helper
+
+/* 1.11.51 (L70): array_tech_node_nm is REQUIRED. The SRAM/NVM latency
+ * queries below characterized at a hardcoded 22 nm while the energy/area
+ * queries for the same array used the configured node -- timing and energy
+ * of one array priced at two different processes. Every caller now passes
+ * the node that governs its array, and the same positive-list authority
+ * validates it (DRAM branches ignore it: JEDEC timing has no free node). */
 static int getMemoryLatencyCycles(const std::string& memory_tech, double frequency_mhz,
+                                   int array_tech_node_nm,
                                    bool use_yaml_override = false, double yaml_latency_ns = -1.0,
                                    uint64_t array_capacity_bytes = 0,
                                    int pe_hierarchy_level = -999) {
@@ -189,6 +198,11 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
                  * latency on our own cached characterization. */
                 model->setArrayCapacityBytes(PER_BANK_BYTES);
                 model->setAccessWidthBits(512);   // one 64 B line, as the flat path
+                /* 1.11.51 (L70): tier timing at the RUN's validated node --
+                 * the plugin models carried their own divergent compiled-in
+                 * defaults (22/22/32/90 nm) that no caller ever set. */
+                model->setTechNodeNm(validateTechNodeNm(array_tech_node_nm,
+                                                        "tier latency query"));
                 model->initialize();
                 const auto tier = tierForPlacement(pe_hierarchy_level);
                 if (model->hasTier(tier)) {
@@ -214,6 +228,7 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
             latency_ns = tier_ns;
         } else {
             latency_ns = getMemoryLatencyCycles(memory_tech, frequency_mhz,
+                                                array_tech_node_nm,
                                                 false, -1.0, array_capacity_bytes)
                          * 1000.0 / frequency_mhz;
         }
@@ -226,7 +241,7 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
             // Query CACTI for SRAM timing (RAM mode, not cache)
             pimid::CACTIWrapper::SRAMConfig cfg;
             cfg.capacity_bytes = sram_cap;
-            cfg.tech_node_nm = 22;
+            cfg.tech_node_nm = validateTechNodeNm(array_tech_node_nm, "SRAM latency query");
             cfg.is_cache = false;  // SRAM as memory, not cache
             pimid::CACTIWrapper wrapper(cfg);
             wrapper.initialize();
@@ -237,7 +252,7 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
             pimid::NVSimWrapper::NVMConfig cfg;
             cfg.nvm_type = pimid::NVSimWrapper::NVMType::STTRAM;
             cfg.capacity_bytes = nvm_cap;
-            cfg.process_node_nm = 22;
+            cfg.process_node_nm = validateTechNodeNm(array_tech_node_nm, "NVM latency query");
             cfg.word_width_bits = 512;  // one full 64 B line per access, matching the CACTI/SRAM path
             pimid::NVSimWrapper wrapper(cfg);
             wrapper.initialize();
@@ -247,7 +262,7 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
             pimid::NVSimWrapper::NVMConfig cfg;
             cfg.nvm_type = pimid::NVSimWrapper::NVMType::PCRAM;
             cfg.capacity_bytes = nvm_cap;
-            cfg.process_node_nm = 22;
+            cfg.process_node_nm = validateTechNodeNm(array_tech_node_nm, "NVM latency query");
             cfg.word_width_bits = 512;  // one full 64 B line per access, matching the CACTI/SRAM path
             pimid::NVSimWrapper wrapper(cfg);
             wrapper.initialize();
@@ -257,7 +272,7 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
             pimid::NVSimWrapper::NVMConfig cfg;
             cfg.nvm_type = pimid::NVSimWrapper::NVMType::RERAM;
             cfg.capacity_bytes = nvm_cap;
-            cfg.process_node_nm = 22;
+            cfg.process_node_nm = validateTechNodeNm(array_tech_node_nm, "NVM latency query");
             cfg.word_width_bits = 512;  // one full 64 B line per access, matching the CACTI/SRAM path
             pimid::NVSimWrapper wrapper(cfg);
             wrapper.initialize();
@@ -475,6 +490,16 @@ struct ZSimParsedOutput {
     uint64_t pg_hostmc_active = 0;
     uint64_t pg_devmc_active = 0;
     uint64_t pg_phase_window = 0;   // 1.11.18: ROI-relative denominator (0 = use phases)
+    /* 1.11.51 (E17): the devMC inter-access gap histogram, read back from
+     * the stats stream (log2-cycle buckets, counts + cycles, ROI span).
+     * The power-down residency derives from THIS at the sourced tXP
+     * threshold; the 10k-cycle phase residency above cannot see tXP-scale
+     * windows (it measured r_idle = 0 while ~90% of ROI cycles sat in
+     * usable gaps). */
+    static const int kGapBuckets = 40;
+    uint64_t devmc_gap_cnt[kGapBuckets] = {0};
+    uint64_t devmc_gap_cyc[kGapBuckets] = {0};
+    uint64_t devmc_gap_span = 0;
     /* 1.11.18: the window every PG residency divides by. Pre-1.11.18 dumps
      * carry no pgPhaseWindow, so the whole-run phase count is used and the
      * old numbers reproduce exactly. */
@@ -955,6 +980,17 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
                  * since roi_begin), matching the now-ROI-relative numerators.
                  * Absent on pre-1.11.18 dumps -> falls back to `phase`. */
                 else if (key == "pgPhaseWindow") { out.pg_phase_window = val; }
+                else if (key == "pgDevMCGapSpan") { out.devmc_gap_span = val; }
+                else if (key.rfind("pgDevMCGapCnt_", 0) == 0) {
+                    int b = std::atoi(key.c_str() + 14);
+                    if (b >= 0 && b < ZSimParsedOutput::kGapBuckets)
+                        out.devmc_gap_cnt[b] = val;
+                }
+                else if (key.rfind("pgDevMCGapCyc_", 0) == 0) {
+                    int b = std::atoi(key.c_str() + 14);
+                    if (b >= 0 && b < ZSimParsedOutput::kGapBuckets)
+                        out.devmc_gap_cyc[b] = val;
+                }
                 else if (key == "syntheticInstrs") {
                     out.syntheticInstrs += val; if (grp) grp->syntheticInstrs += val;
                 }
@@ -1518,6 +1554,10 @@ struct UnifiedConfig {
      * they meant, and the reported saving mixed them. */
     bool pg_mc = false;         // pim.mc.pg          controller LOGIC gating
     bool mem_power_down = false; // memory.power_down  DRAM JEDEC power-down (IDD2P)
+    /* 1.11.51 (E17): power-down entry threshold override, ns. <=0 = use the
+     * per-generation sourced tXP default; techs with no sourced tXP refuse
+     * the gap-based descent rather than inventing a threshold. */
+    double power_down_threshold_ns = -1.0;
     bool mem_array_pg = false;   // memory.array_pg    NVM retention-free periphery gating
     std::string pcie_model = "simple";    // "simple" or "md1" for PCIe timing model
     // Host<->device link technology. Selects preset latency/BW/overhead unless
@@ -1866,16 +1906,31 @@ static std::string canonicalMemTech(std::string t) {
      * smaller and safer change: every one of them is correct for canonical
      * input, and this is the single point every technology string passes
      * through. Nothing that is currently valid changes classification. */
+    /* 1.11.51 (L76, second half): "DRAM" is an ALIAS, resolved HERE. It sat
+     * in the supported set as its own name, but downstream the string hit
+     * two different truths -- Ramulator prices it with the DDR4 preset while
+     * a device-scope validator rejected it outright (gate 1161I found the
+     * dr cell failing rc=1 on "unknown memory technology 'DRAM'"), and two
+     * host-path tables classed it with DDR5 and DDR4 respectively. One
+     * resolution point ends that: the generic name becomes the generation
+     * that actually times it, and every consumer sees only canonical names. */
+    if (t == "DRAM") {
+        std::cout << "[config] memory technology 'DRAM' is the generic alias; "
+                     "priced as DDR4 (the Ramulator preset that times it)."
+                  << std::endl;
+        t = "DDR4";
+    }
     static const std::set<std::string> kSupported = {
         // DRAM, priced by Ramulator2
-        "DDR3", "DDR4", "DDR5", "LPDDR5", "GDDR6", "HBM2", "HBM3", "DRAM",
+        "DDR3", "DDR4", "DDR5", "LPDDR5", "GDDR6", "HBM2", "HBM3",
         // non-DRAM, priced by NVSim/CACTI
         "SRAM", "STT_MRAM", "PCM", "RERAM"
     };
     if (!kSupported.count(t)) {
         std::cerr << "[config] FATAL: unsupported memory technology '" << t
-                  << "'. Supported: DDR3 DDR4 DDR5 LPDDR5 GDDR6 HBM2 HBM3 DRAM "
-                     "SRAM STT_MRAM PCM RERAM (aliases: MRAM/STTMRAM -> STT_MRAM, "
+                  << "'. Supported: DDR3 DDR4 DDR5 LPDDR5 GDDR6 HBM2 HBM3 "
+                     "SRAM STT_MRAM PCM RERAM (aliases: DRAM -> DDR4, "
+                     "MRAM/STTMRAM -> STT_MRAM, "
                      "PCRAM/3DXPOINT -> PCM, MEMRISTOR/RESISTIVE -> RERAM). "
                      "An unknown value would otherwise be classified as DRAM by "
                      "exclusion and priced with JEDEC DRAM tables." << std::endl;
@@ -4351,6 +4406,25 @@ static GarnetParsedStats parseGarnetStatsFile(const std::string& path) {
  * table used to shape the structure response -- the absolute scale is the
  * JEDEC k-calibration's job (1.11.1), which divides the table choice out. */
 struct DRAMGenClass { const char* cls; int cacti_table_nm; };
+/* 1.11.51 (N3, user ruling 2026-08-17 "go with the banded form"): the DRAM
+ * generation's feature size F, nm -- cell area = 6F^2 (buried-wordline
+ * architectural fact), so the array's bitline pitch is 2F. Mid-values for
+ * compound classes. Used to REPORT the generation's own pitch beside the
+ * derived pitch-factor band; the band's endpoints are published silicon
+ * (FIMDRAM ISSCC 2021 25.4 lean-SIMD bound; UPMEM HC31-implied
+ * general-purpose end incl. its 3-metal-layer routing loss). */
+static double dramGenFeatureNm(const std::string& cls) {
+    if (cls == "3x/2x") return 25.0;
+    if (cls == "1x")    return 19.0;
+    if (cls == "1y")    return 17.5;
+    if (cls == "1y/1z") return 16.5;
+    if (cls == "1z")    return 15.5;
+    if (cls == "1a")    return 14.0;
+    if (cls == "1a/1b") return 13.25;
+    if (cls == "1b")    return 12.5;
+    return 0.0;
+}
+
 static DRAMGenClass getDRAMGenClass(const std::string& tech) {
     /* 1.11.14 (borders rule): the generation map moved into the CACTI fork
      * with the calibration it serves; this is a thin read of the tool's
@@ -4437,7 +4511,13 @@ static pimid::McPATWrapper::MCTechParams getMCTechParamsForMcPAT(
 
     if (tech == "DDR3") {
         p.peak_transfer_rate = 1600; p.databus_width = 64; p.number_ranks = 2;
-    } else if (tech == "DDR4") {
+    } else if (tech == "DDR4" || tech == "DRAM") {
+        /* 1.11.51 (L76): "DRAM" is an accepted canonical technology (the
+         * generic alias) and Ramulator prices it with the DDR4 preset --
+         * but this table dropped it into the SRAM/NVM else-branch below,
+         * giving the generic-DRAM MC a single-rank 1600 simple-controller
+         * description while its timing ran as dual-rank DDR4. It now takes
+         * the same row as the generation that actually prices it. */
         p.peak_transfer_rate = 3200; p.databus_width = 64; p.number_ranks = 2;
     } else if (tech == "DDR5") {
         p.peak_transfer_rate = 4800; p.databus_width = 64; p.number_ranks = 2;
@@ -4677,6 +4757,52 @@ static void reportFpWithoutFpu(const UnifiedConfig& config,
     }
 }
 
+static int memorySystemDieCount(const std::string& tech,
+                                const std::string& device_width,
+                                int ranks_per_channel, int channels);  // 1.11.51 (L243)
+
+/* 1.11.51 (E17): DRAM power-down residency from the MEASURED devMC gap
+ * histogram, at a SOURCED per-generation threshold (settable via
+ * memory.power_down_threshold_ns). Bucket b holds gaps in [2^b, 2^(b+1));
+ * only buckets whose FLOOR clears the threshold count (the boundary bucket
+ * is excluded -- conservative), and each qualifying gap pays the threshold
+ * once as its entry/exit cost. Returns r in [0,1], or <0 when refused:
+ * no histogram in the dump, or a technology with no sourced tXP (GDDR6 and
+ * HBM power-down exit timings are not publicly tabulated to us -- the E17
+ * ruling forbids inventing one). */
+static double gapPowerDownResidency(const UnifiedConfig& config,
+                                    const ZSimParsedOutput& z,
+                                    double clock_mhz, std::string* prov) {
+    if (z.devmc_gap_span == 0 || clock_mhz <= 0.0) return -1.0;
+    double th_ns = config.power_down_threshold_ns;
+    const char* src = "memory.power_down_threshold_ns (user override)";
+    if (th_ns <= 0.0) {
+        const std::string& t = config.memory_tech;
+        if      (t == "DDR3")   { th_ns = 6.0; src = "tXP max(3nCK,6ns), JESD79-3D"; }
+        else if (t == "DDR4")   { th_ns = 6.0; src = "tXP max(4nCK,6ns), JESD79-4"; }
+        else if (t == "DDR5")   { th_ns = 7.5; src = "tXP 7.5ns, JESD79-5"; }
+        else if (t == "LPDDR5") { th_ns = 7.5; src = "tXP 7.5ns, JESD209-5"; }
+        else return -1.0;
+    }
+    uint64_t th_cyc = static_cast<uint64_t>(th_ns * clock_mhz / 1000.0);
+    if (th_cyc < 1) th_cyc = 1;
+    uint64_t usable = 0;
+    for (int b = 0; b < ZSimParsedOutput::kGapBuckets; b++) {
+        if ((1ull << b) < th_cyc) continue;
+        uint64_t cyc = z.devmc_gap_cyc[b], cnt = z.devmc_gap_cnt[b];
+        uint64_t cost = cnt * th_cyc;
+        usable += (cyc > cost) ? (cyc - cost) : 0;
+    }
+    if (prov) {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "threshold %.1f ns = %llu cyc @%.0f MHz, %s",
+                 th_ns, (unsigned long long)th_cyc, clock_mhz, src);
+        *prov = buf;
+    }
+    double r = static_cast<double>(usable) / static_cast<double>(z.devmc_gap_span);
+    return (r > 1.0) ? 1.0 : r;
+}
+
 /**
  * Run McPAT power analysis using simulation stats.
  * Called after successful simulation in exec/trace/MPI modes.
@@ -4782,6 +4908,21 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     McPAT::SystemConfig mcfg;
     mcfg.num_cores = config.num_pes;
     mcfg.core_clock_mhz = config.frequency_mhz;
+    /* 1.11.51 (L68, closing the audit finding): on a DRAM-periphery
+     * placement this node is NOT a free knob anymore -- it is the LOGIC-
+     * EQUIVALENT baseline that McPAT prices at, and since 1.11.21 the family
+     * factors are ratios AGAINST THIS SAME NODE's table (comm-dram @
+     * generation table / baseline @ this node), which was DESIGNED to make
+     * the baseline choice cancel. 1.11.51 extended that to the wrapper's XML
+     * emission, which had still derived its factors at the table's own node
+     * (L105). MEASURED 1.11.51 (the N2 check the audit demanded): the
+     * cancellation is PARTIAL ONLY -- the same HBM3/BANK cell at 22 vs 45 nm
+     * gives core area 11.67 vs 23.55 mm^2 (2.0x) and total power 0.195 vs
+     * 1.726 W (8.8x), because McPAT's own node scaling is not the .dat l/C/V
+     * ratios the factor divides by. So for a family-1 PE this knob remains a
+     * LIVE, physically meaningless degree of freedom; pinning it to the
+     * generation table (the N2 proposal) is a pending user ruling. For LOGIC
+     * placements the knob is the real process choice, as it should be. */
     mcfg.tech_node_nm = validateTechNodeNm(config.tech_node_nm, "device PE node");
     mcfg.temperature_k = 350;
 
@@ -4846,30 +4987,80 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                       << "; backend priced on the full-MC fit at every "
                          "placement (iso-model ladder)" << std::endl;
         }
-        if (on_dram_silicon) {
-            mcfg.process_family = 1;  // DRAM_PERIPHERY (per-class factors)
-            /* 1.11.31 (E7): SAY when it is dropped. A user who sets this at
-             * BANK placement previously got silence and assumed it applied.
-             * The pitch penalty belongs to circuits laid out on the array
-             * pitch -- subarray-adjacent -- which is why it is placement-
-             * gated; per Vogelsang the on-pitch circuits are the sense-amp
-             * stripes and local wordline drivers, not the row/column logic
-             * further out. */
-            if (config.pe_hierarchy_level == 0) {
-                mcfg.subarray_pitch_factor = config.subarray_pitch_factor;
-            } else {
-                mcfg.subarray_pitch_factor = 1.0;
-                if (config.subarray_pitch_factor != 1.0) {
-                    std::cout << "  [tech] power.subarray_pitch_factor="
-                              << config.subarray_pitch_factor
-                              << " IGNORED at " << config.placement_level
-                              << " placement: the pitch penalty applies only "
-                                 "where the PE sits in the array pitch "
-                                 "(SUBARRAY). Priced at 1.0." << std::endl;
+        /* 1.11.51 (N1, raised by the user at E7): PITCH IS GEOMETRY, NOT
+         * FAMILY. The pitch gating used to live inside the DRAM-periphery
+         * branch, so a PE pressed against an SRAM/STT-MRAM/PCM/ReRAM
+         * subarray could never be charged for on-pitch layout -- but the
+         * array's pitch constrains the neighbouring logic whatever process
+         * the transistors came from. The gate is now PLACEMENT only
+         * (SUBARRAY); the family decides which process prices the result,
+         * not whether geometry applies. 1.11.31's announce-the-drop rule
+         * kept. */
+        if (config.pe_hierarchy_level == 0) {
+            mcfg.subarray_pitch_factor = config.subarray_pitch_factor;
+            /* 1.11.51 (N3): DERIVED, BANDED default when the user set no
+             * hypothesis. Low end = the only direct silicon measurement
+             * (FIMDRAM, HBM2/1y, <=1.25 given our family area factor);
+             * upper end ~4 = UPMEM's stated ~10x density penalty divided by
+             * the family factor -- a general-purpose CPU with the 3-metal
+             * routing loss included. Our PEs are lean elements, so the low
+             * end is the default and the band is printed with it. Non-DRAM
+             * arrays have no published PIM pitch datum: no default is
+             * invented there. */
+            if (config.subarray_pitch_factor == 1.0) {
+                if (on_dram_silicon) {
+                    DRAMGenClass g3 = getDRAMGenClass(config.memory_tech);
+                    double F3 = dramGenFeatureNm(g3.cls);
+                    mcfg.subarray_pitch_factor = 1.25;
+                    std::cout << "  [tech] SUBARRAY pitch: derived default "
+                                 "1.25 = the FIMDRAM silicon bound (ISSCC "
+                                 "2021 25.4, lean SIMD end) of the published "
+                                 "band [1.25, ~4] (upper end UPMEM-implied, "
+                                 "HC31: general-purpose CPU, 3 metal layers); "
+                                 "generation " << g3.cls
+                              << " array pitch 2F ~= " << (2.0 * F3)
+                              << " nm (6F^2). Settable: "
+                                 "power.subarray_pitch_factor." << std::endl;
+                } else {
+                    std::cout << "  [tech] SUBARRAY pitch: no derived default "
+                                 "for a non-DRAM array (no published PIM "
+                                 "pitch datum); priced at 1.0 unless "
+                                 "power.subarray_pitch_factor is set."
+                              << std::endl;
                 }
             }
+        } else {
+            mcfg.subarray_pitch_factor = 1.0;
+            if (config.subarray_pitch_factor != 1.0) {
+                std::cout << "  [tech] power.subarray_pitch_factor="
+                          << config.subarray_pitch_factor
+                          << " IGNORED at " << config.placement_level
+                          << " placement: the pitch penalty applies only "
+                             "where the PE sits in the array pitch "
+                             "(SUBARRAY). Priced at 1.0." << std::endl;
+            }
+        }
+        if (on_dram_silicon) {
+            mcfg.process_family = 1;  // DRAM_PERIPHERY (per-class factors)
             DRAMGenClass gc = getDRAMGenClass(config.memory_tech);
             mcfg.dram_periph_table_nm = gc.cacti_table_nm;
+            /* 1.11.51 (N2, user ruling 2026-08-17): an on-DRAM-die PE's
+             * process is the DIE's OWN GENERATION -- a DRAM die has no logic
+             * node to choose. MEASURED before ruling: the logic-node knob
+             * moved the same cell by 2.0x area / 8.8x power between 22 and
+             * 45 nm because the factor design only partially cancels it.
+             * The knob remains the real process choice for OFF-die PEs
+             * (buffer chip, MC die, HBM base die, host). */
+            if (mcfg.tech_node_nm != gc.cacti_table_nm) {
+                std::cout << "  [tech] on-DRAM-die PE: process pinned to the "
+                             "die's generation (class " << gc.cls
+                          << " -> CACTI " << gc.cacti_table_nm
+                          << "nm table); technology.node_nm="
+                          << mcfg.tech_node_nm
+                          << " is a logic-die knob and is IGNORED at this "
+                             "placement." << std::endl;
+                mcfg.tech_node_nm = gc.cacti_table_nm;
+            }
             std::cout << "  [tech] PE process family: DRAM-periphery (placement "
                       << config.placement_level << " on " << config.memory_tech
                       << ", class " << gc.cls << "); factors from CACTI "
@@ -4978,6 +5169,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     mcfg.pe_lanes       = config.pe_lanes;
     mcfg.pe_element_bits= config.alu_operand_width;   // ONE width, shared
     mcfg.pe_has_fp      = config.pe_has_fp;
+    mcfg.fp_emul_cycles = (int)config.pe_fp_emul_cycles;   // 1.11.51 (L215/L223)
     mcfg.pe_imem_bytes  = config.pe_imem_bytes;
 
     // Derive McPAT architecture from pe_type
@@ -5000,6 +5192,18 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         mcfg.num_alus = 3;
         mcfg.num_muls = 1;
         mcfg.num_fpus = 1;
+    }
+    /* 1.11.51 (L214): pim.pe.floating_point=false must remove the FPU from
+     * the POWER model on every profile, not just on ALU (whose default
+     * happens to be zero). Before this, an FPU-less OOO or in-order element
+     * still priced 2 or 1 FPUs in McPAT while its timing charged soft-float
+     * emulation -- power for hardware the element declares it does not
+     * have. An explicit power.mcpat_overrides.num_fpus below still wins. */
+    if (!config.pe_has_fp && mcfg.num_fpus > 0) {
+        std::cout << "  [power] pim.pe.floating_point=false: FPU removed from "
+                     "the power model (profile default num_fpus="
+                  << mcfg.num_fpus << " -> 0)." << std::endl;
+        mcfg.num_fpus = 0;
     }
 
     // Apply mcpat_overrides as escape hatch for architecture-level knobs
@@ -5570,6 +5774,22 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                              "standby (IDD3N); no idle descent claimed."
                           << std::endl;
             }
+            /* 1.11.51 (E17): the measured gap histogram supersedes the
+             * phase-granular residency when present and sourced -- the
+             * 10k-cycle phase window cannot see tXP-scale gaps. */
+            {
+                std::string gprov;
+                double r_gap = gapPowerDownResidency(config, zsim_stats,
+                                                     config.frequency_mhz, &gprov);
+                if (r_gap >= 0.0) {
+                    std::cout << "  [pg] power-down residency from the MEASURED "
+                                 "gap histogram: " << r_gap << " (" << gprov
+                              << "); phase-granular residency was " << mc_r_idle
+                              << " (10k-cycle window, granularity-limited)."
+                              << std::endl;
+                    mc_r_idle = r_gap;
+                }
+            }
             /* 1.11.20 (D13): population-scaled. One DDR chip / one HBM
              * channel is the unit the JEDEC IDD table is written against. */
             const int bg_units =
@@ -5697,9 +5917,11 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                 pimid::CACTIWrapper cacti_eff(eff_cfg);
                 cacti_eff.initialize();
                 auto ca_ref = cacti_ref.getCalibratedDieArea();
+                double die_area_reported = 0.0;   // 1.11.51 (L243)
                 if (ca_ref.calibrated && cacti_eff.isValid() &&
                     cacti_eff.getArea() > 0.0) {
                     double die_area = cacti_eff.getArea() * ca_ref.k;
+                    die_area_reported = die_area;
                     std::cout << "  Area:            " << std::fixed << std::setprecision(2)
                               << die_area << " mm^2/die (CACTI x k, k="
                               << std::setprecision(3) << ca_ref.k
@@ -5710,12 +5932,37 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                               << std::setprecision(2) << cacti_eff.getArea()
                               << ")" << std::endl;
                 } else {
-                    double chip_mbit = (double)chip_bytes * 8.0 / (1024.0*1024.0);
-                    double die_area = (chip_mbit /
-                        pimid::CACTIWrapper::vendorDieDensity(config.memory_tech)) * 1.12;
+                    /* 1.11.51 (L87): this fallback used to divide MBIT by a
+                     * MB/mm^2 density (8x high) and then multiply by the
+                     * phantom 1.12 E29 removed from the tool -- a ~9x error
+                     * whenever it fired. The tool now owns the arithmetic. */
+                    double die_area = pimid::CACTIWrapper::vendorAnchorAreaMM2(
+                        config.memory_tech, chip_bytes);
+                    die_area_reported = die_area;
                     std::cout << "  Area:            " << std::fixed << std::setprecision(2)
                               << die_area << " mm^2/die (JEDEC density fallback)"
                               << std::endl;
+                }
+                /* 1.11.51 (L243): the SYSTEM-COMPARABLE total, printed in
+                 * device scope too. 1.11.9 justified adding the memory die
+                 * to the system-scope total by claiming device scope already
+                 * counted it -- it never did (its "Total Area" is McPAT
+                 * silicon only; the die printed per-die above), so the two
+                 * scopes reported non-comparable totals for one machine.
+                 * Same populated basis as the system total (L237). ADDS a
+                 * line; existing lines unchanged. */
+                if (die_area_reported > 0.0) {
+                    int dies = memorySystemDieCount(config.memory_tech,
+                                                    config.dram_device_width,
+                                                    config.hierarchy_ranks_per_channel,
+                                                    config.hierarchy_dram_channels);
+                    std::cout << "  With memory:     " << std::fixed
+                              << std::setprecision(2)
+                              << (mcpat.getTotalArea() + die_area_reported * dies)
+                              << " mm^2 (device silicon + " << dies
+                              << " dies x " << die_area_reported
+                              << " -- the system-scope comparable total)"
+                              << std::defaultfloat << std::endl;
                 }
             } catch (const std::exception& e) {
                 std::cerr << "  [DRAM area] CACTI query failed: " << e.what() << std::endl;
@@ -5909,21 +6156,36 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             double wr_energy = nvsim.getWriteDynamicEnergy();
             double leakage = nvsim.getLeakagePower() * config.num_banks;  // device = num_banks banks
             /* 1.11.8: NVM periphery gates RETENTION-FREE -- non-volatile
-             * cells hold state unpowered, so with pim.mc.pg the array
-             * periphery leakage collapses toward the sleep-transistor floor
-             * (~2% of active, the CACTI-class sleep-tx residual) during
-             * measured no-traffic residency. The one place PG is free. */
+             * cells hold state unpowered, so with memory.array_pg the array
+             * periphery leakage descends during measured no-traffic
+             * residency.
+             *
+             * 1.11.51 (L142): the gated residual is CACTI's OWN sleep-
+             * transistor state, the same authority the SRAM path cites --
+             * peri_global.Vcc_min/Vdd = 0.35 (decoder.cc detalV model) --
+             * not the invented 2% floor this block used to carry. NVSim's
+             * reported leakage is ALL CMOS periphery (the cells are non-
+             * volatile and do not leak), so the old floor claimed a 50x
+             * leakage cut for which no linked tool provides a model, 17x
+             * deeper than the sleep-tx state the comment cited. Retention-
+             * free means the periphery COULD be cut harder than a retention
+             * design -- but neither CACTI nor NVSim models a deeper off
+             * state, so 0.35 is reported as the tool-backed BOUND rather
+             * than closing the gap with a made-up number. */
             if (config.mem_array_pg && zsim_stats.pg_window() > 0) {   // 1.11.41: memory-side flag
                 double r_idle = 1.0 - std::min(1.0,
                     static_cast<double>(zsim_stats.pg_devmc_active)
                         / static_cast<double>(zsim_stats.pg_window()));
                 if (r_idle > 0.0) {
-                    const double kSleepTxFloor = 0.02;
+                    const double kPeriphResidual = 0.35;  // CACTI peri_global.Vcc_min/Vdd
                     double before = leakage;
-                    leakage = leakage * (1.0 - r_idle) + leakage * kSleepTxFloor * r_idle;
-                    std::cout << "  [pg] NVM retention-free gating: idle residency "
-                              << r_idle << " -> periphery leakage " << before
-                              << " -> " << leakage << " mW" << std::endl;
+                    leakage = leakage * (1.0 - r_idle) + leakage * kPeriphResidual * r_idle;
+                    std::cout << "  [pg] NVM periphery gating (sleep-tx state, "
+                                 "CACTI Vcc_min/Vdd=" << kPeriphResidual
+                              << ", tool-backed bound; retention-free could cut "
+                                 "deeper but no linked tool models it): idle "
+                                 "residency " << r_idle << " -> periphery leakage "
+                              << before << " -> " << leakage << " mW" << std::endl;
                 }
             }
             double area = nvsim.getArea() * config.num_banks;
@@ -6209,9 +6471,10 @@ static double computeDramDieAreaMM2(const std::string& memory_tech, bool print,
          * memory from the system total. The vendor anchor (capacity/density)
          * needs no CACTI; fall back to it and say so. */
         auto jedecFallback = [&](const char* why) -> double {
-            double dens = pimid::CACTIWrapper::vendorDieDensity(memory_tech);
-            if (dens <= 0.0) return 0.0;
-            double mm2 = (static_cast<double>(chip_bytes) / (1024.0 * 1024.0)) / dens;
+            /* 1.11.51 (L87): arithmetic owned by the tool. */
+            double mm2 = pimid::CACTIWrapper::vendorAnchorAreaMM2(memory_tech,
+                                                                  chip_bytes);
+            if (mm2 <= 0.0) return 0.0;
             std::cerr << "[area] NOTE: CACTI could not price the " << memory_tech
                       << " die (" << why << "); using the vendor density anchor "
                       << mm2 << " mm^2/die directly." << std::endl;
@@ -6481,26 +6744,48 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 else if (interposer_tier)  mcfg.mc_phy_tier = Tier::INTERPOSER;
                 else                       mcfg.mc_phy_tier = Tier::OFFCHIP;
             }
+            /* 1.11.51 (N1): pitch gating hoisted out of the family branch
+             * here too -- geometry, not family; mirrors the device path. */
+            if (config.pe_hierarchy_level == 0) {
+                mcfg.subarray_pitch_factor = config.subarray_pitch_factor;
+                /* 1.11.51 (N3): same banded derived default as the device
+                 * path; see there for the sources. */
+                if (config.subarray_pitch_factor == 1.0 && dram_family_tech) {
+                    DRAMGenClass g3 = getDRAMGenClass(node.memory_tech);
+                    mcfg.subarray_pitch_factor = 1.25;
+                    std::cout << "  [tech] " << node.name
+                              << ": SUBARRAY pitch derived default 1.25 "
+                                 "(band [1.25, ~4]; FIMDRAM low end), gen "
+                              << g3.cls << " 2F ~= "
+                              << (2.0 * dramGenFeatureNm(g3.cls)) << " nm."
+                              << std::endl;
+                }
+            } else {
+                mcfg.subarray_pitch_factor = 1.0;
+                if (config.subarray_pitch_factor != 1.0)
+                    std::cout << "  [tech] node: power.subarray_pitch_factor="
+                              << config.subarray_pitch_factor
+                              << " IGNORED at " << config.placement_level
+                              << " placement (pitch penalty is SUBARRAY-only)."
+                              << std::endl;
+            }
             if (dram_family_tech &&
                 ((config.pe_hierarchy_level >= 0 && config.pe_hierarchy_level <= 3) ||
                  (config.pe_hierarchy_level == 5 && channel_centric))) {
                 mcfg.process_family = 1;
-                /* 1.11.31 (E7): same rule as the device path -- announce the
-                 * drop rather than discarding silently. Two copies of a
-                 * placement rule is how they drift; this mirrors it exactly. */
-                if (config.pe_hierarchy_level == 0) {
-                    mcfg.subarray_pitch_factor = config.subarray_pitch_factor;
-                } else {
-                    mcfg.subarray_pitch_factor = 1.0;
-                    if (config.subarray_pitch_factor != 1.0)
-                        std::cout << "  [tech] node: power.subarray_pitch_factor="
-                                  << config.subarray_pitch_factor
-                                  << " IGNORED at " << config.placement_level
-                                  << " placement (pitch penalty is SUBARRAY-only)."
-                                  << std::endl;
-                }
                 DRAMGenClass ngc = getDRAMGenClass(node.memory_tech);
                 mcfg.dram_periph_table_nm = ngc.cacti_table_nm;
+                /* 1.11.51 (N2): same pinning as the device path -- an on-die
+                 * node prices at its die's generation; the logic node is for
+                 * off-die parts. */
+                if (mcfg.tech_node_nm != ngc.cacti_table_nm) {
+                    std::cout << "  [tech] " << node.name
+                              << ": on-DRAM-die PE process pinned to generation "
+                              << ngc.cls << " (CACTI " << ngc.cacti_table_nm
+                              << "nm table); node tech_node_nm IGNORED here."
+                              << std::endl;
+                    mcfg.tech_node_nm = ngc.cacti_table_nm;
+                }
                 std::cout << "  [tech] " << node.name
                           << ": PE process family DRAM-periphery (placement "
                           << config.placement_level << " on " << node.memory_tech
@@ -6597,6 +6882,16 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
             profile = McPAT::DeviceProfile::DEVICE_INORDER;
             result.core_desc = (effective_type == "in_order_core") ? "InOrder" : "Simple";
         }
+        /* 1.11.51 (L214): same rule per node -- an element that declares no
+         * FPU prices none, on every profile. Node-scoped flag (E23/E24);
+         * an explicit num_fpus override below still wins. */
+        if (!node.pe_has_fpu && mcfg.num_fpus > 0) {
+            std::cout << "  [power] " << node.name
+                      << ": floating_point=false -- FPU removed from the power "
+                         "model (profile default num_fpus=" << mcfg.num_fpus
+                      << " -> 0)." << std::endl;
+            mcfg.num_fpus = 0;
+        }
 
         /* 1.9.32: reference class follows the node's role -- a device node
          * sits on the memory die, a host node is a server part. */
@@ -6604,6 +6899,8 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
         mcfg.pe_lanes       = config.pe_lanes;
         mcfg.pe_element_bits= config.alu_operand_width;   // ONE width, shared
         mcfg.pe_has_fp      = config.pe_has_fp;
+        /* 1.11.51 (L215/L223): node-scoped emulation cost for the energy fold. */
+        mcfg.fp_emul_cycles = (int)node.pe_fp_emul_cycles;
         mcfg.pe_imem_bytes  = config.pe_imem_bytes;
 
         // Apply overrides
@@ -7386,6 +7683,19 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 static_cast<double>(zsim_stats.pg_devmc_active)
                     / static_cast<double>(zsim_stats.pg_window()));
         }
+        /* 1.11.51 (E17): same supersession as device scope (D6: one
+         * derivation, two scopes). */
+        if (config.pg_mc) {
+            std::string gprov;
+            double r_gap = gapPowerDownResidency(config, zsim_stats,
+                                                 config.frequency_mhz, &gprov);
+            if (r_gap >= 0.0) {
+                std::cout << "  [pg] power-down residency from the MEASURED "
+                             "gap histogram: " << r_gap << " (" << gprov
+                          << ")." << std::endl;
+                sys_r_idle = r_gap;
+            }
+        }
         const bool sys_crosses_dq = (config.pe_hierarchy_level >= 4 ||
                                      config.pe_hierarchy_level == -1);
 
@@ -7520,13 +7830,23 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
     sys_power += mem_power_total;
     std::cout << "  Power: " << std::fixed << std::setprecision(2)
               << sys_power << " W (" << sys_dyn << " dyn + " << sys_leak << " leak";
-    if (mem_power_total > 0.0)
+    if (mem_power_total > 0.0) {
         std::cout << " + " << mem_power_total << " memory";
+        /* 1.11.51 (E31 residue): the wall clock the memory watts are priced
+         * over, printed so an external reader can reconstruct the term
+         * (energy / wall + background rate) from the report alone. */
+        std::cout << " over " << std::setprecision(6) << wall_seconds
+                  << " s" << std::setprecision(2);
+    }
     std::cout << ")" << std::endl;
-    /* 1.11.9 (#86, audit): the memory die is silicon too -- omitting it made
-     * a co-simulated PIM system's area smaller than the same configuration
-     * reported in device scope. Shared memory is counted ONCE (a device that
-     * IS the host's memory names one technology and is priced once). */
+    /* 1.11.9 (#86, audit): the memory die is silicon too. (1.11.51, L243:
+     * the original justification here -- that device scope already counted
+     * the die in ITS total -- was FALSE; device scope's "Total Area" was
+     * McPAT silicon only, so 1.11.9 CREATED a cross-scope mismatch rather
+     * than fixing one. Device scope now prints the same populated
+     * "with memory" total, so the two scopes are comparable again.)
+     * Shared memory is counted ONCE (a device that IS the host's memory
+     * names one technology and is priced once). */
     sys_area += mem_area_total;
     std::cout << "  Area:  " << sys_area << " mm^2";
     /* 1.11: the aggregate alone hides the number that matters for a PIM
@@ -7593,6 +7913,7 @@ public:
              * sits at config_.pe_hierarchy_level, so the array access it sees
              * is that tier's, not a flat per-bank number for every tier. */
             mem_latency = getMemoryLatencyCycles(config_.memory_tech, config_.frequency_mhz,
+                                                  config_.tech_node_nm,
                                                   config_.use_yaml_memory_params,
                                                   config_.memory_params.read_latency_ns,
                                                   array_cap,
@@ -7933,7 +8254,8 @@ static void emitHostMemBlock(std::ostream& out, const UnifiedConfig& config,
     // per-tech HOST-PATH ADDER (getHostPathAdderNs, ns) so the effective idle
     // host memory latency matches measured real sockets (DDR5 ~110, HBM3 ~235).
     // The adder is HOST-ROLE ONLY -- device (PE) pricing never routes here.
-    int phys_latency = getMemoryLatencyCycles(host.memory_tech, host_freq, false, 0.0);
+    int phys_latency = getMemoryLatencyCycles(host.memory_tech, host_freq,
+                                              host.tech_node_nm, false, 0.0);
     phys_latency = std::max(1, phys_latency);
     // Host-path adder (ns): the aggregate override wins outright; otherwise the
     // per-tech DECOMPOSED default split (getHostPathSplit) with any per-component
@@ -8457,7 +8779,8 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
             // host clock into the DEVICE cycle count. Device scope uses the device's
             // own frequency here (see config.frequency_mhz path), so match it.
             double dev_freq = (node.frequency_mhz > 0.0) ? node.frequency_mhz : ref_freq;
-            int mem_latency = getMemoryLatencyCycles(node.memory_tech, dev_freq, false, 0.0);
+            int mem_latency = getMemoryLatencyCycles(node.memory_tech, dev_freq,
+                                                     node.tech_node_nm, false, 0.0);
             mem_latency = std::max(1, mem_latency);
 
             std::string tech_upper = node.memory_tech;
@@ -8526,7 +8849,8 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
                 // CLOCK-INVARIANT device memory latency: convert to cycles at the
                 // DEVICE's own clock, not the reference/max (host) clock.
                 double dev_freq = (node.frequency_mhz > 0.0) ? node.frequency_mhz : ref_freq;
-                int mem_latency = getMemoryLatencyCycles(node.memory_tech, dev_freq, false, 0.0);
+                int mem_latency = getMemoryLatencyCycles(node.memory_tech, dev_freq,
+                                                     node.tech_node_nm, false, 0.0);
                 mem_latency = std::max(1, mem_latency);
                 emitZSimMemBlock(cfg, config, mem_latency);
                 cfg << "\n";
@@ -8551,8 +8875,49 @@ static std::string generateSystemConfig(UnifiedConfig& config) {
                 if ((n.name == lnk.src_name || n.name == lnk.dst_name) &&
                     n.role == UnifiedConfig::SystemNode::DEVICE) host_dev = true;
             }
-            if (!host_dev) continue;
-            if (lnk.base_latency_ns <= 0.0 || lnk.bandwidth_GBs <= 0.0) continue;
+            /* 1.11.51 (N10): a declared link must never be IGNORED IN
+             * SILENCE. The reference cosim.yaml declares only type+width --
+             * no src/dst -- so the host_dev test failed and the entry was
+             * skipped without a word; config.pcie_link_type stayed at its
+             * default, which HAPPENED to match the reference's declared
+             * type, hiding the skip for the whole corpus until a gate
+             * edited the type and nothing changed (1157c). Two closures:
+             * a src/dst-less entry in a system with a device is applied by
+             * INFERENCE (one host-device link is what it can mean), and
+             * every other skip states itself and what was kept. */
+            if (!host_dev && lnk.src_name.empty() && lnk.dst_name.empty()) {
+                for (const auto& n : config.system_nodes)
+                    if (n.role == UnifiedConfig::SystemNode::DEVICE)
+                        { host_dev = true; break; }
+                if (host_dev)
+                    std::cout << "  [xing] links entry '" << lnk.link_type
+                              << "' has no src/dst; applied to the host-device "
+                                 "link by inference." << std::endl;
+            }
+            if (!host_dev) {
+                std::cerr << "  [xing] WARNING: links entry '" << lnk.link_type
+                          << "' (src='" << lnk.src_name << "' dst='"
+                          << lnk.dst_name << "') names no DEVICE node -- NOT "
+                             "applied; link type stays '"
+                          << config.pcie_link_type << "'." << std::endl;
+                continue;
+            }
+            if (lnk.base_latency_ns <= 0.0 || lnk.bandwidth_GBs <= 0.0) {
+                std::cerr << "  [xing] WARNING: links entry '" << lnk.link_type
+                          << "' carries no timing (base_latency_ns="
+                          << lnk.base_latency_ns << ", bandwidth_GBs="
+                          << lnk.bandwidth_GBs << ") -- the TYPE is applied "
+                             "for energy pricing but the offload timing keeps "
+                             "its current source." << std::endl;
+                /* the type is still authoritative (D8): apply it before
+                 * skipping the timing fields. */
+                if (config.pcie_timing_configured &&
+                    config.pcie_link_type != lnk.link_type)
+                    std::cout << "  [xing] link type from the declared "
+                                 "topology: " << lnk.link_type << std::endl;
+                config.pcie_link_type = lnk.link_type;
+                continue;
+            }
             /* 1.11.19 (user decision D8): the TIMING link type is
              * AUTHORITATIVE for energy. This sync used to be skipped whenever
              * a power.pcie block existed, so a config could time an
@@ -9547,7 +9912,8 @@ int main(int argc, char** argv) {
             if (mfreq <= 0.0) mfreq = 2000.0; else ++i;
             std::string mtech_up = mtech;
             std::transform(mtech_up.begin(), mtech_up.end(), mtech_up.begin(), ::toupper);
-            int lat_cy = std::max(1, getMemoryLatencyCycles(mtech, mfreq, false, 0.0));
+            int lat_cy = std::max(1, getMemoryLatencyCycles(mtech, mfreq,
+                                                            config.tech_node_nm, false, 0.0));
             double bw_gbs = 12.8;
             if (pimid::isDRAM(pimid::parseMemoryTechnology(mtech))) {
                 try {
@@ -10083,6 +10449,9 @@ int main(int argc, char** argv) {
     if (yaml_cfg["memory"]) {
         if (yaml_cfg["memory"]["power_down"])
             config.mem_power_down = yaml_cfg["memory"]["power_down"].as<bool>(config.mem_power_down);
+        if (yaml_cfg["memory"]["power_down_threshold_ns"])   // 1.11.51 (E17)
+            config.power_down_threshold_ns =
+                yaml_cfg["memory"]["power_down_threshold_ns"].as<double>(-1.0);
         if (yaml_cfg["memory"]["array_pg"])
             config.mem_array_pg = yaml_cfg["memory"]["array_pg"].as<bool>(config.mem_array_pg);
     }
@@ -11006,6 +11375,37 @@ int main(int argc, char** argv) {
     // IS the device: system scope adopts the first compute device node's
     // parameters and runs the SAME derivation device scope runs, so init
     // builds the same PE memory interfaces / device NoC / memory model.
+    /* 1.11.51 (N2, user ruling): in DEVICE scope, an on-DRAM-die PE's node
+     * is the die's generation for EVERYTHING -- pinned BEFORE the hierarchy
+     * derivation so timing (hierarchy latencies, cache probes, array
+     * queries) and power see one node. Gate 1161I3 K1 caught the late pin:
+     * areas equalized but cycles still differed 1.5% because the hierarchy
+     * had already been derived at the logic knob's value. The predicate
+     * uses the placement STRING (the level integer is derived inside the
+     * call this must precede). System scope pins per device node instead. */
+    if (config.scope != "system") {
+        const std::string& mt = config.memory_tech;
+        const std::string& pl = config.placement_level;
+        bool dft = !(mt == "SRAM" || mt == "STT_MRAM" || mt == "PCM" ||
+                     mt == "RERAM");
+        bool cc = mt.rfind("LPDDR", 0) == 0 || mt.rfind("GDDR", 0) == 0 ||
+                  mt.rfind("HBM", 0) == 0;
+        bool on_die = dft &&
+            (pl == "SUBARRAY" || pl == "BANK" || pl == "BANK_GROUP" ||
+             pl == "CHIP" || (pl == "CHANNEL" && cc));
+        if (on_die) {
+            DRAMGenClass gpin = getDRAMGenClass(mt);
+            if (config.tech_node_nm != gpin.cacti_table_nm) {
+                std::cout << "[tech] on-DRAM-die PE: technology.node_nm="
+                          << config.tech_node_nm
+                          << " is a logic-die knob; the die's generation (class "
+                          << gpin.cls << " -> CACTI " << gpin.cacti_table_nm
+                          << "nm table) governs this placement -- pinned for "
+                             "timing and power alike." << std::endl;
+                config.tech_node_nm = gpin.cacti_table_nm;
+            }
+        }
+    }
     if (config.scope != "system") {
         computeHierarchyLatencies(config);
     } else {
@@ -11070,6 +11470,22 @@ int main(int argc, char** argv) {
                             yaml_cache_mode, yaml_cache_dir);
     std::cout << "[pimid] cache mode: "
               << pimid::cache::modeName(pimid::cache::mode()) << std::endl;
+
+    /* 1.11.51 (L75): validate the technology node UNCONDITIONALLY at config
+     * load. The 1.11.2 positive-list ran only inside the power-analysis
+     * paths, so --no-power / power.enabled:false silently accepted an
+     * invalid node (e.g. 28 nm) that still shaped the run wherever timing
+     * consumed it -- a swept study with power off plateaued instead of
+     * failing at the invalid point. One authority, called once for every
+     * node surface the config carries; power paths keep their own calls
+     * (idempotent) so no path can regress to unvalidated. */
+    validateTechNodeNm(config.tech_node_nm, "config load: technology.node_nm");
+    if (config.host_tech_node_nm >= 0)
+        validateTechNodeNm(config.host_tech_node_nm,
+                           "config load: power.host_tech_node_nm");
+    for (const auto& vn : config.system_nodes)
+        validateTechNodeNm(vn.tech_node_nm,
+                           (std::string("config load: node ") + vn.name).c_str());
 
     // Validate L2/L3 cache configuration
     if (config.l2_count < 1) config.l2_count = 1;
@@ -11651,6 +12067,7 @@ int main(int argc, char** argv) {
                 disp_latency = (config.memory_latency_override >= 0) ?
                     config.memory_latency_override :
                     getMemoryLatencyCycles(config.memory_tech, config.frequency_mhz,
+                                           config.tech_node_nm,
                                            config.use_yaml_memory_params,
                                            config.memory_params.read_latency_ns);
             }
@@ -12235,6 +12652,7 @@ int main(int argc, char** argv) {
                 disp_latency = (config.memory_latency_override >= 0) ?
                     config.memory_latency_override :
                     getMemoryLatencyCycles(config.memory_tech, config.frequency_mhz,
+                                           config.tech_node_nm,
                                            config.use_yaml_memory_params,
                                            config.memory_params.read_latency_ns);
             }
