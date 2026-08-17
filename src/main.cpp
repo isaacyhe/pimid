@@ -7325,7 +7325,15 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
         mcfg.device_scope   = (node.role == UnifiedConfig::SystemNode::DEVICE);
         mcfg.pe_lanes       = config.pe_lanes;
         mcfg.pe_element_bits= config.alu_operand_width;   // ONE width, shared
-        mcfg.pe_has_fp      = config.pe_has_fp;
+        /* 1.11.52 (audit C031): the NODE's flag, not the global one. The FPU
+         * REMOVAL above keys on node.pe_has_fpu while this fed the ALU
+         * profile's FPU emission (num_fpus = pe_has_fp ? lanes : 0, and
+         * phy_regs_frf) from the GLOBAL pim.pe.floating_point -- so on the
+         * ALU profile a node declared FPU-less could still emit `lanes`
+         * FPUs, and because the soft-float fold gates on config_.num_fpus
+         * (which IS 0), the same FP ops were then ALSO charged as integer
+         * work. One flag, node-scoped, for both. */
+        mcfg.pe_has_fp      = node.pe_has_fpu;
         /* 1.11.51 (L215/L223): node-scoped emulation cost for the energy fold. */
         mcfg.fp_emul_cycles = (int)node.pe_fp_emul_cycles;
         mcfg.pe_imem_bytes  = config.pe_imem_bytes;
@@ -7894,6 +7902,19 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                               << mc_lvl.chip_coverage
                               << " by node count (leakage-only entries; no host"
                                  " fabric is measured)" << std::endl;
+                }
+                /* 1.11.52 (audit C011): these placeholder levels describe a
+                 * HOST's on-die fabric (or a device's when no Garnet
+                 * measurement exists). on_dram_die defaults to 1, which would
+                 * hand a host's crossbar the DRAM-periphery transform. The
+                 * host is logic; a device without measured levels takes the
+                 * same matrix answer the measured path computes. */
+                {
+                    const bool on_die = (node.role == UnifiedConfig::SystemNode::DEVICE)
+                        && (mcfg.process_family == 1);
+                    pe_lvl.on_dram_die = on_die ? 1 : 0;
+                    mc_lvl.on_dram_die = on_die ? 1 : 0;
+                    two_levels[0].on_dram_die = pe_lvl.on_dram_die;
                 }
                 two_levels.push_back(mc_lvl);
                 mcpat.setNoCLevels(two_levels);
@@ -12362,6 +12383,11 @@ int main(int argc, char** argv) {
                 nc.duty_cycle = (result.totalCycles > 0 && result.numNodes > 0)
                     ? (double)result.totalPackets / (result.totalCycles * result.numNodes)
                     : 0.0;
+                /* 1.11.52 (audit C011): the in-memory NoC probe describes the
+                 * fabric at the PE's placement, so its die membership is the
+                 * family answer applyProcessFamily just computed -- not the
+                 * struct default of 1. */
+                nc.on_dram_die = (mcfg.process_family == 1) ? 1 : 0;
                 mcpat.setNoCLevels({nc});
 
                 try {

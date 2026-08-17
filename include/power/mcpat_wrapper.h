@@ -527,6 +527,14 @@ private:
      * latches the one-time warning when they are not, so a sweep does not emit
      * the same line for every node of every cell. */
     mutable bool warned_mix_ = false;
+    /* 1.11.52 (audit C016/C007): latch + emitter for the unsourced-fraction
+     * warning. Three blocks substitute invented activity when nothing was
+     * measured, and all three were silent. */
+    mutable bool warned_unsourced_mix_ = false;
+    void warnUnsourcedMix(const char* which, const char* frac) const;
+    /* 1.11.52 (audit C016/C007): latch for the unsourced-fraction warning --
+     * three blocks substitute invented activity when nothing was measured,
+     * and all three were silent. */
     mutable bool warned_narrow_datapath_ = false;  // 1.9.40
     /* 1.9.36: per-core intra-core power split, transported from the forked child
      * (which alone holds the model object). Diagnostic only -- nothing consumes

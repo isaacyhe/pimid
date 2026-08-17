@@ -986,9 +986,29 @@ void McPATWrapper::computePower() {
              * generation are genuinely needed and sit inside it. */
             double core_tot = component_power_.count(ComponentType::CORE)
                 ? component_power_[ComponentType::CORE].total_power : 0.0;
-            std::cout << "  [CoreBreakdown] blocks sum=" << tot << "W";
-            if (core_tot > 0.0) std::cout << "  core total=" << core_tot << "W"
-                                          << " (undiffCore is in the core total, not in any block)";
+            /* 1.11.52 (audit C013): SAY WHY THE TWO DIFFER, correctly. The
+             * parenthetical blamed undiffCore, which is false -- undiffCore
+             * IS in the block sum (core_undiff_w). The gap is two basis
+             * differences the reader cannot see:
+             *   (1) POPULATION: the blocks are ONE core (cores[0]); the core
+             *       total is all num_cores of them.
+             *   (2) LEAKAGE BASIS: the blocks read rt_power (runtime), the
+             *       total reads power (peak). 1.11.33 measured those ~6x
+             *       apart, because McPAT scales the execution unit's runtime
+             *       leakage with utilisation while the peak basis counts
+             *       every powered device -- which is why PIMID reports peak.
+             * On a 16-PE device that is ~16x times ~6x, i.e. the printed
+             * blocks sum sits about two orders below the printed core total.
+             * The blocks are a SHAPE (what fraction of a core each unit is),
+             * not an addend of the total. */
+            std::cout << "  [CoreBreakdown] blocks sum=" << tot << "W (ONE core, "
+                         "runtime-leakage basis)";
+            if (core_tot > 0.0) std::cout << "  core total=" << core_tot << "W ("
+                                          << config_.num_cores
+                                          << " core(s), peak-leakage basis) --"
+                                             " different population AND different"
+                                             " leakage basis; the blocks are a"
+                                             " shape, not an addend";
             std::cout << std::endl;
             std::cout << "  [CoreBreakdown] ifu+lsu+mmu = " << absent << "W = "
                       << (100.0 * absent / tot) << "% of the block sum -- an UPPER BOUND on what an "
@@ -1404,6 +1424,22 @@ void McPATWrapper::printDetailedResults() const {
     std::cout << "=====================================\n" << std::endl;
 }
 
+/* 1.11.52 (audit C016/C007): the "warned fallback" that never warned. Three
+ * blocks substitute unsourced fractions of the retired instruction count when
+ * a run carried no measurement -- mispredicts 1%, loads/stores 20%/10%, and
+ * the int/fp/mul mix 70/10/5% -- and all three were silent, so a run priced
+ * on invented activity looked exactly like a measured one in the log.
+ * Latched: say it once, naming what was missing and what stood in. */
+void McPATWrapper::warnUnsourcedMix(const char* which, const char* frac) const {
+    if (warned_unsourced_mix_) return;
+    warned_unsourced_mix_ = true;
+    std::cout << "  [Activity] WARNING: no measured " << which
+              << " in this run; McPAT is driven by UNSOURCED fractions of the "
+                 "retired instruction count (" << frac
+              << "). These are stand-ins, not measurements -- the core dynamic "
+                 "power below rests on them." << std::endl;
+}
+
 void McPATWrapper::printSummaryLine() const {
     if (!power_computed_) return;
     std::cout << "Power: " << std::fixed << std::setprecision(2)
@@ -1543,9 +1579,10 @@ std::string McPATWrapper::generateXMLConfig() const {
          * result bus dominate, which is why real parts share one compute unit
          * between banks rather than widening indefinitely. */
         phy_regs_irf   = 8 * lanes;
-        phy_regs_frf   = config_.pe_has_fp ? (8 * lanes) : 1;  // 0 aborts CACTI
+        const bool has_fpu_here = config_.pe_has_fp && (config_.num_fpus != 0);
+        phy_regs_frf   = has_fpu_here ? (8 * lanes) : 1;  // 0 aborts CACTI
         issue_width    = lanes;
-        fp_issue_width = config_.pe_has_fp ? lanes : 0;
+        fp_issue_width = has_fpu_here ? lanes : 0;
         store_buffer   = 1;      // request issue only; no queueing, no cache
         load_buffer    = 1;
         lsu_order      = "inorder";
@@ -1568,7 +1605,18 @@ std::string McPATWrapper::generateXMLConfig() const {
          * choice, not a default. */
         num_alus = lanes;
         num_muls = lanes;
-        num_fpus = config_.pe_has_fp ? lanes : 0;
+        /* 1.11.53 (audit C031, completing it): the ALU branch OVERWRITES the
+         * FPU count, so a zero the caller already resolved was discarded and
+         * re-derived from pe_has_fp. Those two flags are set from different
+         * places -- main.cpp zeroes num_fpus from the NODE's floating_point
+         * while pe_has_fp arrives from the pim.pe block -- so an FPU-less
+         * element could emit `lanes` FPUs here while the soft-float fold
+         * (which gates on config_.num_fpus == 0) ALSO charged its FP ops as
+         * integer work: energy for hardware the element does not have, twice.
+         * An explicit zero from the caller now wins; pe_has_fp only decides
+         * the count when the caller left it unresolved. */
+        const bool caller_removed_fpu = (config_.num_fpus == 0);
+        num_fpus = (config_.pe_has_fp && !caller_removed_fpu) ? lanes : 0;
     }
 
     xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
@@ -1972,6 +2020,8 @@ std::string McPATWrapper::generateXMLConfig() const {
          * warned fallback for cores that never decode. */
         {
             const uint64_t nc_ = std::max(1, config_.num_cores);
+            if ((meas_ld_ + meas_st_) == 0)
+                warnUnsourcedMix("load/store mix", "20% loads, 10% stores");
             uint64_t ld_pc = (meas_ld_ + meas_st_) > 0 ? meas_ld_ / nc_
                                                        : inst_per_core * 20 / 100;
             uint64_t st_pc = (meas_ld_ + meas_st_) > 0 ? meas_st_ / nc_
@@ -2012,6 +2062,8 @@ std::string McPATWrapper::generateXMLConfig() const {
         {
             const uint64_t nc_ = std::max(1, config_.num_cores);
             const bool mm_ = (meas_int_ + meas_fp_ + meas_mul_) > 0;
+            if (!mm_) warnUnsourcedMix("instruction mix",
+                                       "70% int, 10% fp, 5% mul");
             uint64_t ia_pc = mm_ ? meas_int_ / nc_ : inst_per_core * 70 / 100;
             uint64_t fp_pc = mm_ ? meas_fp_  / nc_ : inst_per_core * 10 / 100;
             uint64_t mu_pc = mm_ ? meas_mul_ / nc_ : inst_per_core * 5 / 100;

@@ -7,6 +7,57 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.53 -- the interconnect stops substituting what it only cross-checks
+
+The C block of audit round 2 (power wrappers): seven verified-REAL findings,
+all of them cases where a number was allowed to stand for more than it was.
+
+- C020: the CACTI-IO substitution gate had widened from "exact map" to
+  "exact OR injected", and the paragraph justifying it says "its electrical
+  layer is sourced" -- which is FALSE for LPDDR5 by our own record (its
+  RTT = 240 ohm is flagged UNSOURCED in the same table; Micron gives VDDQ
+  and RON, not Rtt). An assumption was silently REPLACING the DQ termination
+  energy, the interface dynamic energy and the IO area. Substitution now
+  requires a fully sourced injection; an unsourced one is still computed and
+  reported as a cross-check, and says so.
+- C021: two false claims in the code -- "its 14 Gb/s rate will be refused"
+  and "GDDR6 refused above; no parameter set to give a structure to". The
+  fit-range check is on the BUS CLOCK (7000 MHz against an 8000 MHz
+  ceiling), so GDDR6 passes and is fully modelled; with no GDDR6 branch it
+  fell into the DDR default of a 25-pin command bus amortised over 32 data
+  lanes -- the same fixed-CA-over-few-lanes shape the LPDDR5 note records as
+  producing ~71 pJ/bit against a real 3-6. GDDR6 now carries its own
+  structure (32 DQ, WCK/EDC per byte, ~12-pin JESD250 CA bus): 0.632
+  nJ/access at RANK placement.
+- C022: the injection was partial while the source string announced
+  "ELECTRICALS INJECTED". rtt2 is the far-end termination of the same DQ net
+  and is now injected with rtt1; rs1/rs2, rtt_ca and z0 stay borrowed, and
+  the string says which is which.
+- C031: an FPU-less element could be charged twice. main.cpp zeroes
+  num_fpus from the NODE's floating_point flag, but the wrapper's ALU branch
+  OVERWROTE it from pe_has_fp (a different flag, set elsewhere), so the XML
+  could carry `lanes` FPUs while the soft-float fold -- which gates on
+  config_.num_fpus == 0 -- ALSO charged the FP ops as integer work. The
+  caller's explicit zero now wins, and the FP register file and issue width
+  follow the same decision. Gate: device ALU emits FPU_per_core 0; in co-sim
+  the device is 0 and the host keeps its FPU.
+- C016/C007: the "warned fallback" that never warned. Three blocks
+  substitute unsourced fractions of the retired instruction count when a run
+  carried no measurement (mispredicts 1%, loads/stores 20/10%, int/fp/mul
+  70/10/5%) and all three were silent, so a run priced on invented activity
+  looked exactly like a measured one. One latched warning names what was
+  missing and what stood in.
+- C011: on_dram_die defaults to 1 and two of the four setNoCLevels call
+  sites left it there -- handing a HOST's fabric the DRAM-periphery
+  transform. Both now take the family answer.
+- C013: the CoreBreakdown blamed its own gap on undiffCore, which is IN the
+  block sum. The real gap is population (one core vs all) times leakage
+  basis (runtime vs peak, ~6x apart per 1.11.33) -- about two orders on a
+  16-PE device. Both lines now state their population and basis.
+
+Gate 1163A/B + G5. HBM3 device cell bit-identical vs 1.11.52 (0.383167 W),
+as expected: HBM has no injection set, so none of these apply to it.
+
 ## 1.11.52 -- the second audit round: the model stops assuming what it can measure
 
 Audit round 2 (six parallel auditors, 254 findings) was VERIFIED finding by

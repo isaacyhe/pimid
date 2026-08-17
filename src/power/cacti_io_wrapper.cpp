@@ -313,8 +313,14 @@ bool dramIOMapFor(const std::string& t, DramIOMap& m) {
                        { m = {WideIO, false, "HBM -> WideIO (wide low-swing parallel on interposer; per-channel stack structure unmodelled)"}; return true; }
     /* GDDR6: POD135, same signalling family as DDR4/DDR5, so DDR4's structural
      * and PHY coefficients apply once PIMID's POD135 electricals are injected.
-     * Its 14 Gb/s rate is still checked against the fit range below and will be
-     * refused there -- the map exists, the RATE is what disqualifies it. */
+     *
+     * 1.11.52 (audit C021): the previous note claimed the 14 Gb/s rate "will
+     * be refused" by the fit-range check. It is not: the check is on the BUS
+     * CLOCK (rate/2 = 7000 MHz) against a 8000 MHz ceiling, so GDDR6 passes
+     * and is fully modelled. The claim was written when the ceiling was
+     * compared against the transfer rate. It is modelled, not refused -- and
+     * its command-bus structure is given explicitly below rather than
+     * falling into the DDR default. */
     if (t == "GDDR6")  { m = {DDR4, false, "GDDR6 -> DDR4 structure + PIMID POD135 electricals"}; return true; }
     return false;
 }
@@ -387,11 +393,21 @@ LinkIOResult CactiIOWrapper::computeDramIO(const std::string& tech,
      *   HBM2/3    128 DQ per channel, strobe per byte, split row/column
      *             command buses (~14 pins), one differential clock. Wide and
      *             slow, which is why its per-bit energy is the lowest here.
-     *   GDDR6     refused above; no parameter set to give a structure to. */
+     *   GDDR6     32 DQ per channel (2x16 pseudo-channels), WCK/EDC per
+     *             byte, and a ~12-pin single-ended CA bus (JESD250: CA0-9
+     *             plus CABI/CKE-class pins) -- NOT the 25-pin DDR-class
+     *             command bus. 1.11.52 (audit C021): GDDR6 used to fall into
+     *             the DDR default below, so a 25-pin CA bus was amortised
+     *             over 32 data lanes -- the same fixed-CA-over-few-lanes
+     *             shape the LPDDR5 note above records as producing ~71
+     *             pJ/bit against a real 3-6. */
     int n_dqs, n_ca;
     if (tech == "LPDDR5") {
         n_dqs = (num_dq / 8) * 2;   // WCK/RDQS pair per byte
         n_ca  = 7;                  // LPDDR5 CA bus
+    } else if (tech == "GDDR6") {
+        n_dqs = (num_dq / 8) * 2;   // WCK + EDC per byte
+        n_ca  = 12;                 // JESD250 single-ended CA bus
     } else if (tech == "HBM2" || tech == "HBM3") {
         n_dqs = (num_dq / 8) * 2;
         n_ca  = 14;                 // row + column command buses
@@ -445,6 +461,19 @@ LinkIOResult CactiIOWrapper::computeDramIO(const std::string& tech,
             iop.rtt1_dq_read  = el.rtt;
             iop.rtt1_dq_write = el.rtt;
             iop.r_on          = el.ron;
+            /* 1.11.52 (audit C022): the injection is PARTIAL, and the
+             * uninjected legs are load-bearing -- extio.cc's read/write
+             * termination sums 1/rtt1 + 1/rtt2 and its command-bus term uses
+             * r_on_ca + rtt_ca. rtt2 is the FAR-END termination of the same
+             * DQ net, so for the point-to-point topologies we model it is
+             * the same device parameter as rtt1 and is injected with it;
+             * rs1/rs2 (series resistors), rtt_ca and z0 stay at the borrowed
+             * family's values because our tables carry no per-technology
+             * source for them. The `source` string below names the split so
+             * a reader is not told "ELECTRICALS INJECTED" about a result
+             * that is partly the neighbour's. */
+            iop.rtt2_dq_read  = el.rtt;
+            iop.rtt2_dq_write = el.rtt;
             iop.recomputeSwing();
         }
         Extio io(&iop);
@@ -481,16 +510,38 @@ LinkIOResult CactiIOWrapper::computeDramIO(const std::string& tech,
             r.energy_pj_per_bit_term = r.io_power_term_mw / payload_gbps;
         }
         r.valid  = true;
-        /* An INJECTED technology is no longer merely borrowed: its electrical
-         * layer is sourced, only the capacitance/PHY/area coefficients come
-         * from the neighbouring family. That is good enough to substitute, and
-         * it is what extends coverage past DDR3/DDR4. A map with neither an
-         * exact set nor an injection stays cross-check-only. */
-        r.exact_map = m.exact || injected;
+        /* SUBSTITUTION GATE. An injected technology is no longer merely
+         * borrowed -- its electrical layer comes from JEDEC and the vendor
+         * datasheets, and only the capacitance/PHY/area coefficients come
+         * from the neighbouring family -- so it may REPLACE the scheme-table
+         * number. A map with neither an exact set nor an injection stays
+         * cross-check-only.
+         *
+         * 1.11.52 (audit C020): the injection must be FULLY SOURCED to
+         * substitute. The premise of the paragraph above is "its electrical
+         * layer is sourced", and for LPDDR5 that is false by our own record:
+         * its RTT = 240 ohm is flagged UNSOURCED in the same table (Micron
+         * gives VDDQ and RON, not Rtt). Letting it substitute meant an
+         * assumption silently replaced the termination energy, the interface
+         * dynamic energy and the IO area -- exactly the substitution the
+         * consumer's own comment says these technologies do not get. An
+         * unsourced injection is still computed and REPORTED, as a
+         * cross-check; it just does not replace. */
+        r.exact_map = m.exact || (injected && el.sourced);
+        if (injected && !el.sourced) {
+            std::cerr << "[power] NOTE: " << tech
+                      << " CACTI-IO result is CROSS-CHECK ONLY: its injected "
+                         "electricals contain an unsourced value (" << el.note
+                      << "), so it does not replace the scheme-table "
+                         "termination." << std::endl;
+        }
         r.source = std::string("CACTI-IO ")
                  + (m.exact ? "" : "structure from " + std::string(m.note) + "; ")
                  + (injected
-                      ? std::string("ELECTRICALS INJECTED from PIMID: ") + el.note
+                      ? std::string("ELECTRICALS PARTIALLY INJECTED from PIMID "
+                                    "(vddq, rtt1/rtt2 DQ, r_on; rs1/rs2, "
+                                    "rtt_ca and z0 remain the borrowed "
+                                    "family's): ") + el.note
                         + (el.sourced ? "" : " [contains an UNSOURCED value]")
                       : std::string("family electricals"));
         r.not_modelled = std::string(
