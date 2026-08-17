@@ -836,7 +836,11 @@ static void dumpGapHistograms() {
      * reported percentages above 100%. See GapHist's comment. */
     info("[E17 gap histogram] clock %.0f MHz, whole run %lu cyc "
          "(%lu phases); percentages below are against each component's own "
-         "ROI span. MEASUREMENT ONLY, no model reads this",
+         "ROI span. Since 1.11.51 the devMC buckets ARE read back: they "
+         "weight the DRAM power-down residency (audit F006 -- the previous "
+         "'no model reads this' is stale). NoC buckets remain "
+         "measurement-only: no sourced wake penalty exists for a logic "
+         "fabric and none is invented.",
          mhz, (unsigned long)zinfo->globPhaseCycles,
          (unsigned long)zinfo->numPhases);
     for (Item& it : items) {
@@ -866,7 +870,7 @@ static void dumpGapHistograms() {
             uint64_t th = (uint64_t)(ns_thresh[i] * mhz / 1000.0);
             if (th < 1) th = 1;
             uint64_t u = h->cyclesInGapsOver(th);
-            info("[E17 %s] usable idle above %-9s (%4lu cyc): %-12lu = %.2f%% of run",
+            info("[E17 %s] usable idle above %-9s (%4lu cyc): %-12lu = %.2f%% of span",
                  it.name, ns_name[i], (unsigned long)th, (unsigned long)u,
                  total ? 100.0 * u / total : 0.0);
         }
@@ -2127,8 +2131,56 @@ static uint32_t boundaryTransferCycles(uint32_t transfer_bytes = 0) {
  * visible; a cache-bearing PE type would require making this role-aware. */
 static uint64_t measuredFlushFootprintBytes() {
     if (!zinfo) return 0;
+    /* 1.11.55 (audit F015): COUNT EACH DIRTY LINE ONCE. Summing dirtyBytes
+     * over every registered cache double-counts an inclusive hierarchy: when
+     * a child writes back, MESIBottomCC::processWritebackOnAccess drives the
+     * PARENT's own state E->M (coherence_ctrls.cpp:153-160), so one dirty
+     * 64 B line is M in both L1D and L2 and was counted as 128 B. With an L3
+     * it is 3x. The footprint drives BOTH the host flush cycles and the
+     * bytes priced as DRAM writebacks, so the error propagated into time and
+     * energy alike.
+     *
+     * The last level holds every dirty line exactly once in an inclusive
+     * hierarchy, so that is the level counted. Levels are read from the
+     * cache names the config emits (<node>_l1d/_l1i/_l2/_l3); the deepest
+     * level present wins. A non-inclusive hierarchy would make this an
+     * under-count -- zsim's nonInclusiveHack exists -- so the assumption is
+     * printed once with the level it chose, rather than left implicit. */
+    const g_vector<Cache*>& all = zsimAllCaches();
+    int deepest = 1;
+    for (Cache* c : all) {
+        if (!c) continue;
+        const char* n = c->getName();
+        if (!n) continue;
+        std::string nm(n);
+        if (nm.find("_l3") != std::string::npos)      deepest = std::max(deepest, 3);
+        else if (nm.find("_l2") != std::string::npos) deepest = std::max(deepest, 2);
+    }
+    const char* tag = (deepest == 3) ? "_l3" : (deepest == 2) ? "_l2" : "_l1";
     uint64_t bytes = 0;
-    for (Cache* c : zsimAllCaches()) if (c) bytes += c->dirtyBytes(zinfo->lineSize);
+    int counted = 0;
+    for (Cache* c : all) {
+        if (!c) continue;
+        const char* n = c->getName();
+        if (!n) continue;
+        std::string nm(n);
+        /* At L1 there is no shared level: count the data caches only (an
+         * instruction cache holds no dirty lines, but naming it out keeps
+         * the intent explicit). */
+        bool take = (deepest == 1) ? (nm.find("_l1d") != std::string::npos)
+                                   : (nm.find(tag) != std::string::npos);
+        if (!take) continue;
+        bytes += c->dirtyBytes(zinfo->lineSize);
+        counted++;
+    }
+    static bool said = false;
+    if (!said) {
+        said = true;
+        info("[flush] dirty footprint counted at the LAST level (%s, %d cache(s) "
+             "of %d registered): an inclusive hierarchy holds each dirty line "
+             "once there. A non-inclusive hierarchy would make this an "
+             "under-count.", tag, counted, (int)all.size());
+    }
     return bytes;
 }
 
@@ -2147,7 +2199,15 @@ static uint64_t coherenceFlushCycles() {
     if (!zinfo || !zinfo->coherence.enabled) return 0;
     if (zinfo->coherence.mode != 0) return 0;   // separate = cache bypass, no flush
     uint64_t cyc = zinfo->coherence.flushFixedCycles;
-    uint64_t fp = effectiveFlushFootprintBytes();
+    /* 1.11.55 (audit F016): THE SAME SLICE THE BYTES USE. The footprint is
+     * measured over the GLOBAL cache registry while this charge runs ONCE
+     * PER RANK, so the flush TIME was booked as N x footprint while the
+     * flush BYTES were priced (D4) as 1 x footprint / N per rank. The
+     * timing half therefore carried exactly the slope in N that D4 removed
+     * from the energy half -- aimed straight at the pecount sweep, which is
+     * what D4 existed to protect. One working set, one division. */
+    uint64_t fp = effectiveFlushFootprintBytes() /
+                  ((g_mpi_rank_count > 0) ? g_mpi_rank_count : 1u);
     if (zinfo->coherence.writebackBytesPerCycle > 0.0 && fp > 0) {
         cyc += (uint64_t)std::ceil(
             (double)fp / zinfo->coherence.writebackBytesPerCycle);
@@ -2185,10 +2245,26 @@ static void chargeCoherenceFlush(uint32_t tid) {
     __sync_fetch_and_add(&zinfo->xing.count, 1);
     __sync_fetch_and_add(&zinfo->coherence.flushCount, 1);
     __sync_fetch_and_add(&zinfo->coherence.flushCyclesCharged, flushCyc);
-    info("Thread %d: Case-1 coherence flush (measured %llu dirty B across %zu "
-         "caches -> %llu cycles)",
-         tid, (unsigned long long)flushFootprint,
-         zsimAllCaches().size(), (unsigned long long)flushCyc);
+    /* 1.11.55 (audit F017): THE FLUSH ACTUALLY CLEANS. Until now it measured
+     * the dirty set, charged for it, and left every line in M -- so offload
+     * #2 re-measured and re-charged the same working set, and both host
+     * cycles and flushBytes grew linearly in the number of offloads for data
+     * a real flush had written back once. The comment above this function
+     * even argued the dirty set "is a different number at each one", which
+     * is exactly what the code prevented from being true. Lines go M -> E:
+     * memory is current, the line is still valid. */
+    uint64_t cleaned = 0;
+    for (Cache* c : zsimAllCaches())
+        if (c) cleaned += c->cleanDirtyBytes(zinfo->lineSize);
+    /* The two byte figures are DIFFERENT QUANTITIES and are labelled as such:
+     * the charge is UNIQUE dirty data (last level, F015), while cleaning has
+     * to touch every level that holds a copy -- so the cleaned figure is the
+     * per-level sum and is legitimately larger. */
+    info("Thread %d: Case-1 coherence flush (charged %llu B of unique dirty "
+         "data -> %llu cycles; cleaned %llu B of cache lines across %zu caches "
+         "at all levels, so the next flush sees only what is re-dirtied)",
+         tid, (unsigned long long)flushFootprint, (unsigned long long)flushCyc,
+         (unsigned long long)cleaned, zsimAllCaches().size());
 }
 
 /**

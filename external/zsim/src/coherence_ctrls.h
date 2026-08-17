@@ -65,6 +65,9 @@ class CC : public GlobAlloc {
          * it was a 16 MiB constant, which is 56.9x the whole host cache
          * hierarchy and therefore not merely unmeasured but impossible. */
         virtual uint64_t countDirtyLines() const = 0;
+        /* 1.11.55 (audit F017): a WRITEBACK flush leaves the lines clean.
+         * Returns the number of lines it transitioned M -> E. */
+        virtual uint64_t cleanDirtyLines() = 0;
 };
 
 
@@ -110,6 +113,21 @@ class MESIBottomCC : public GlobAlloc {
         /* 1.11.40 (N7): count lines in M. Only M is dirty -- E is exclusive
          * but CLEAN and needs no writeback, which is the distinction a
          * capacity-based estimate cannot make. */
+        uint64_t cleanDirtyLines() {
+            /* 1.11.55 (audit F017): M -> E, the state a writeback flush
+             * leaves behind: the data is now current in memory and the line
+             * is still valid and exclusively held. Without this the flush
+             * MEASURED the dirty set and never cleaned it, so every later
+             * offload re-charged the same working set -- host cycles and
+             * flush bytes both grew linearly in the number of offloads for
+             * data a real flush had already written back once. (Not M -> I:
+             * our flush is "make memory current", the transfer/prep cost,
+             * not a wbinvd that also throws the lines away.) */
+            uint64_t n = 0;
+            for (uint32_t i = 0; i < numLines; i++)
+                if (array[i] == M) { array[i] = E; n++; }
+            return n;
+        }
         uint64_t countDirtyLines() const {
             uint64_t n = 0;
             for (uint32_t i = 0; i < numLines; i++) if (array[i] == M) n++;
@@ -417,6 +435,7 @@ class MESICC : public CC {
         uint32_t numSharers(uint32_t lineId) {return tcc->numSharers(lineId);}
         bool isValid(uint32_t lineId) {return bcc->isValid(lineId);}
         uint64_t countDirtyLines() const {return bcc->countDirtyLines();}  // 1.11.40 (N7)
+        uint64_t cleanDirtyLines() {return bcc->cleanDirtyLines();}        // 1.11.55 (F017)
 };
 
 // Terminal CC, i.e., without children --- accepts GETS/X, but not PUTS/X
@@ -506,6 +525,7 @@ class MESITerminalCC : public CC {
         uint32_t numSharers(uint32_t lineId) {return 0;} //no sharers
         bool isValid(uint32_t lineId) {return bcc->isValid(lineId);}
         uint64_t countDirtyLines() const {return bcc->countDirtyLines();}  // 1.11.40 (N7)
+        uint64_t cleanDirtyLines() {return bcc->cleanDirtyLines();}        // 1.11.55 (F017)
 };
 
 #endif  // COHERENCE_CTRLS_H_

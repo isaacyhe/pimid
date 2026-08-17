@@ -1721,7 +1721,19 @@ static void InitGlobalStats() {
     phaseStat->init("phase", "Simulated phases", &zinfo->numPhases);
     zinfo->rootStat->append(phaseStat);
 
-    // 1.11.7 (#85): crossing counters -> zsim.out root scalars
+    /* 1.11.7 (#85): crossing counters -> zsim.out root scalars.
+     *
+     * 1.11.54 (audit F009): these are plain ProxyStats over the raw
+     * accumulators -- NO ROI base, unlike the pg counters below -- and they
+     * ARE priced (link framing + byte energy, and the flush writebacks).
+     * That is correct today only because of an INVARIANT: every crossing
+     * site in the plugin sits at or inside the offload region (the flush is
+     * charged at roi_begin; launch runs inside cosimRoiBeginOffload, which
+     * the handler calls AFTER markRoi; WORK_BEGIN/WORK_END are by
+     * definition inside). A crossing recorded BEFORE zsim_roi_begin would be
+     * priced against an ROI-windowed wall clock and silently inflate link
+     * energy. If you add a crossing site, either keep it inside the ROI or
+     * give these counters an ROI base like addPgStat does. */
     ProxyStat* xH2D = new ProxyStat();
     xH2D->init("xingH2DBytes", "Host->device crossing payload bytes",
                (uint64_t*)&zinfo->xing.h2dBytes);

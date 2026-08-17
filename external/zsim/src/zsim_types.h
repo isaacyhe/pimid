@@ -94,13 +94,26 @@ struct PhaseActivity {
  * in them. The second is the one that matters -- a gating scheme can only
  * recover time, and only from gaps longer than its wake penalty.
  *
- * This is instrumentation ONLY. Nothing reads it back into the model; it is
- * dumped at end of run and the numbers decide what the model should be.
+ * 1.11.51 made this LOAD-BEARING: gapPowerDownResidency() reads it back to
+ * weight DRAM background power, so it is no longer instrumentation only and
+ * the two notes below were corrected accordingly (audit F006).
  *
  * Concurrency follows the E14 lesson: lastCycle never rewinds, and a thread
- * that loses the CAS drops its sample rather than retrying. Dropping samples
- * biases the histogram toward FEWER recorded gaps, never toward larger ones,
- * so it cannot manufacture gating opportunity that is not there. */
+ * that loses the CAS drops its sample rather than retrying.
+ *
+ * 1.11.54 (audit F001): THE DIRECTION OF THAT BIAS WAS STATED BACKWARDS. The
+ * old note claimed dropping "biases toward FEWER recorded gaps, never toward
+ * larger ones, so it cannot manufacture gating opportunity". It does exactly
+ * that. A lost CAS does not shrink a gap -- it MERGES two: for arrivals
+ * t1 < t2 < t3 delivered out of order, the code records one gap of (t3-t1)
+ * where the truth is (t2-t1) and (t3-t2). Under cyclesInGapsOver(thresh) one
+ * gap G yields G-thresh while two gaps summing to G yield G-2*thresh, or 0
+ * when each falls below the threshold. Merging therefore OVER-states usable
+ * idle, inflating the power-down residency and LOWERING reported DRAM
+ * background power. The run prints events/samples/dropped so the exposure is
+ * bounded and visible; the fix for the bias itself would be a retry loop,
+ * which is deliberately not taken here (E14: a retry under contention is how
+ * the phase counters became irreproducible). */
 struct GapHist {
     static const int kBuckets = 40;          // log2(cycles), 0 .. 2^39
     volatile uint64_t lastCycle = 0;
@@ -124,6 +137,16 @@ struct GapHist {
      * start -- event() replaces it with the first actual event, which is
      * where the recorded gaps really begin. */
     inline void arm(uint64_t c) {
+        /* 1.11.54 (audit F002): CLEAR THE BUCKETS TOO. arm() reset the span
+         * but left count[]/cycles[]/events/samples standing, and it fires at
+         * EVERY ROI_BEGIN -- so a workload with several ROIs accumulated gap
+         * cycles across all of them while spanCycles() described only the
+         * last. The consumer divides one by the other, so the residency ran
+         * past 1.0 and was silently clamped (main.cpp), hiding the mismatch
+         * as a plausible-looking 100% idle. */
+        for (int i = 0; i < kBuckets; i++) { count[i] = 0; cycles[i] = 0; }
+        events     = 0;
+        samples    = 0;
         lastCycle  = 0;      // discard any pre-ROI history
         firstCycle = c;
         armed      = 1;

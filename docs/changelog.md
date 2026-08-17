@@ -7,6 +7,72 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.55 -- the coherence flush stops charging for work it never did
+
+The F block of audit round 2 (zsim fork). The flush trio are one story: the
+same footprint was inflated three independent ways, and it drives BOTH host
+cycles and the bytes priced as DRAM writebacks.
+
+- F015: summing dirtyBytes over every registered cache DOUBLE-COUNTS an
+  inclusive hierarchy. When a child writes back,
+  MESIBottomCC::processWritebackOnAccess drives the PARENT's state E->M, so
+  one dirty 64 B line is M in both L1D and L2 and was counted as 128 B (3x
+  with an L3). Counted at the last level now, which holds each dirty line
+  exactly once; the run prints which level it chose and states the
+  inclusion assumption (a non-inclusive hierarchy would make it an
+  under-count). Measured: 54912 -> 33920 B.
+- F016: the flush TIME used the whole global footprint while the flush BYTES
+  used the per-rank slice -- and the charge runs once per rank. So the
+  timing half carried exactly the slope in N that D4 removed from the energy
+  half, aimed at the pecount sweep D4 exists to protect. One working set,
+  one division. Measured with F015: 6120 -> 3934 flush cycles.
+- F017: the flush measured the dirty set, charged for it, and left every
+  line in M -- so offload #2 re-charged the same working set, and both host
+  cycles and flushBytes grew linearly in the number of offloads for data a
+  real flush had already written back. The function's own comment argued
+  the dirty set "is a different number at each one", which is precisely what
+  the code prevented. Lines now go M -> E: memory is current, the line stays
+  valid (a writeback flush, not a wbinvd). The charge is unique dirty data;
+  cleaning touches every level holding a copy, and the two figures are
+  labelled as the different quantities they are.
+- F002: GapHist::arm() reset the span but not the buckets, and it fires at
+  EVERY ROI_BEGIN -- so a multi-ROI workload accumulated gap cycles across
+  all of them while the span described only the last. The residency ran past
+  1.0 and was silently clamped, presenting as a plausible 100% idle.
+- F004: firstCycle held the ARM cycle while the recorded gaps telescope from
+  the FIRST EVENT, so the span was longer than the samples cover and the
+  derived residency was biased low by the head of the ROI.
+- F008: under thread-MPI, ROI_BEGIN returns before the legacy path's
+  pgres.markRoi(), so the PG counters and the devMC gap histogram were armed
+  at a later event -- or never, when roi_begin precedes any barrier or
+  send/recv, leaving every bucket empty and silently falling back to the
+  phase-granular residency.
+- F001/F003/F006/F007 (truth-in-comment on a LOAD-BEARING path, since 1.11.51
+  reads this histogram back into DRAM background power): dropped samples
+  MERGE gaps rather than shrinking them, so they inflate residency and lower
+  background power -- the opposite of what the note claimed; a bucket
+  straddling the threshold is skipped entirely, an UNDER-estimate where the
+  comment said over; "nothing reads this back into the model" is false; and
+  two lines reported "% of run" against an ROI-span divisor.
+- F005/F009 recorded as TRAPS with the exact conditions that would make them
+  live (a device topology terminating at a grand MC; a crossing site before
+  roi_begin), rather than "fixed" where nothing reachable differs today.
+
+Also: PIMID_QEMU pins the guest emulator. Each tree otherwise prefers its own
+external/qemu build, so an A/B gate silently compared two emulators -- worth
+a few accesses of guest-stream difference, which moves NoC duty.
+
+N6b (recorded in the audit queue, binding on gate design): this engine's
+local/remote split is sensitive to guest ADDRESSES, and env padding, object
+size, in-run host work and path length each perturb them. On the ooo_dev cell
+that is ~19 packets in 25396 (0.075%) and power in the 5th significant digit
+-- two orders MORE sensitive than N6 recorded, because this cell's packet
+count is 54x smaller. Cycles were identical in every run. A cross-BINARY gate
+arm therefore cannot use bit-equality: cycles exact, power within 1e-4
+relative.
+
+Gate 1165A/B/C.
+
 ## 1.11.54 -- the fork stops charging one thing twice
 
 The E block of audit round 2 (the McPAT fork) plus two zsim ROI-window

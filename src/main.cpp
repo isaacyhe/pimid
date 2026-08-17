@@ -376,6 +376,20 @@ static int getCacheLatencyCycles(int size_kb, int ways, int line_size,
  * Returns empty string if not found.
  */
 static std::string findQemuBinary() {
+    /* 1.11.55: an explicit override, first. Without it an A/B comparison
+     * between two trees silently uses TWO DIFFERENT GUEST EMULATORS -- each
+     * tree prefers its own external/qemu build -- and the guest instruction
+     * stream then differs by a handful of accesses (measured: 25406 vs 25394
+     * packets on one cell), which moves NoC duty and every number derived
+     * from it. That is the N6 layout-sensitivity class, and it is a gate
+     * hazard rather than a model defect, so the fix is to make the emulator
+     * selectable and state which one ran. */
+    if (const char* q = getenv("PIMID_QEMU")) {
+        if (q[0] && access(q, X_OK) == 0) return std::string(q);
+        std::cerr << "[qemu] PIMID_QEMU=" << (q ? q : "")
+                  << " is not executable; falling back to the search path."
+                  << std::endl;
+    }
     std::string pimid_root = getPimidRoot();
     std::vector<std::string> qemu_paths = {
         // Prefer project-local QEMU build (built with --enable-plugins)

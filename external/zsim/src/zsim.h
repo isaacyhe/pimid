@@ -463,11 +463,25 @@ struct GlobSimInfo {
          * roi_begin, with the phase index) make the numerator and its
          * denominator the same window. All zero without an ROI, which
          * reproduces the whole-run behavior exactly. */
-        /* 1.11.40 (audit E17): measurement-only companions to the two
-         * device-side trackers above. Instrumented at the SAME sites, with the
-         * event CYCLE instead of the phase index, so the two views come from
-         * one event stream and can be compared directly. Nothing reads these
-         * back into the model -- they exist to decide whether a cycle-resolved
+        /* 1.11.40 (audit E17): cycle-resolved companions to the two
+         * device-side trackers above, carrying the event CYCLE instead of the
+         * phase index.
+         *
+         * 1.11.54 (audit F005/F006) corrects two claims that were made here:
+         * (1) "Instrumented at the SAME sites ... one event stream". Not
+         *     quite: the PE memory interface records both views on the same
+         *     line, but RamulatorMemory::access touches devMC/hostMC WITHOUT
+         *     a matching gap event (ramulator_mem_ctrl.cpp). Today nothing
+         *     diverges, because a device path reaches the PE-MI rather than a
+         *     RamulatorMemory with setPGDevice(true) -- so this is a trap
+         *     rather than a live error, and it becomes live the moment a
+         *     device topology terminates at the grand MC.
+         * (2) "Nothing reads these back into the model". FALSE since 1.11.51:
+         *     gapPowerDownResidency() reads the devMC histogram to weight
+         *     DRAM background power. These are load-bearing now, which is
+         *     exactly why (1) matters.
+         *
+         * They were introduced to decide whether a cycle-resolved
          * residency model can report anything, before one is written.
          * Scope is deliberate: noc and devMC are the components the device-side
          * gating model targets. anyCore is a different gating domain (core

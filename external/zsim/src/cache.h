@@ -80,6 +80,15 @@ class Cache : public BaseCache {
             return cc->countDirtyLines() * (uint64_t)lineSize;
         }
 
+        /* 1.11.55 (audit F017): mark this cache's dirty lines written back
+         * (M -> E). Called once per flush, right after the bytes are
+         * measured and charged, so the NEXT flush sees only what has been
+         * re-dirtied since. Same O(numLines) walk, same off-the-access-path
+         * discipline as dirtyBytes(). */
+        uint64_t cleanDirtyBytes(uint32_t lineSize) {
+            return cc->cleanDirtyLines() * (uint64_t)lineSize;
+        }
+
         //NOTE: reqWriteback is pulled up to true, but not pulled down to false.
         virtual uint64_t invalidate(const InvReq& req) {
             startInvalidate();
