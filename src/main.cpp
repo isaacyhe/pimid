@@ -5095,9 +5095,25 @@ static void applyCornerAndPeripheryPricing(
                       << mcfg.tech_node_nm << "nm.dat at "
                       << (mcfg.temperature_k - 273) << "C: area " << fa
                       << "x, dynamic " << fd_c << "x, leakage " << fl_c << "x";
-            if (pitch != 1.0)
-                std::cout << " x pitch " << pitch << " = " << (fa * pitch)
-                          << "x applied";
+            if (pitch != 1.0) {
+                /* 1.11.54 (audit E001, adjacent): PRINT WHAT IS APPLIED.
+                 * Since 1.11.50/1.11.51 the pitch penalty lands on the
+                 * measured on-pitch LOGIC SHARE of the core, not on the whole
+                 * core: the transform applies fa * (1 + (pitch-1)*share). This
+                 * line kept printing fa * pitch -- on the SUBARRAY/HBM3 cell
+                 * it claimed 3.05556x while the transform applied 2.5574x, a
+                 * 19.5% gap between the reported factor and the real one,
+                 * under a comment promising "the factor actually APPLIED".
+                 * The share is measured inside the fork (it needs McPAT's own
+                 * area breakdown), so it is named here rather than restated:
+                 * the fork prints the share and the effective multiplier on
+                 * the [fam] line. */
+                std::cout << " x pitch " << pitch
+                          << " on the on-pitch logic share only (the fork's"
+                             " [fam] line prints the share and the effective"
+                             " multiplier; the flat product " << (fa * pitch)
+                          << "x is NOT what is applied)";
+            }
             /* 1.11.27: the band is no longer open at the top. Samsung's
              * FIMDRAM (Kwon, ISSCC 2021 25.4) replaced half the cell array in
              * each bank with a 16-wide SIMD PCU on a 20nm DRAM process, at

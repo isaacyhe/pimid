@@ -321,7 +321,8 @@ static bool cactiRow(int table_nm, const char* tag, double col[5], int temp = -1
  *   denominator baseline column  @ logic_node_nm   (what McPAT priced) */
 static bool periphFamilyFactors(int dram_table_nm, int logic_node_nm,
                                 int baseline_device, int temp_k,
-                                double& fa, double& fd, double& fl) {
+                                double& fa, double& fd, double& fl,
+                                double& fg) {   // 1.11.54 (E004): gate-leakage ratio
     double lp_d[5], cg_d[5], cf_d[5], vd_d[5], io_d[5];   // DRAM table
     double lp_l[5], cg_l[5], cf_l[5], vd_l[5], io_l[5];   // logic table
     if (!cactiRow(dram_table_nm, "-l_phy", lp_d) ||
@@ -363,14 +364,46 @@ static bool periphFamilyFactors(int dram_table_nm, int logic_node_nm,
     if (!cactiRow(logic_node_nm, "-I_off_n", io_l, t_row)) return false;
     if (!(io_l[B] > 0.0)) return false;
     fl = (io_d[CD] / io_l[B]) * vr;
+    /* 1.11.54 (audit E004): GATE leakage gets its OWN ratio. The transform
+     * scaled gate leakage by fl -- a SUBTHRESHOLD ratio derived from the
+     * I_off_n rows -- but gate leakage is oxide tunnelling, which McPAT
+     * computes with cmos_Ig_leakage and CACTI tabulates separately as
+     * I_g_on_n. The two do not track each other: at 22 nm the comm-dram
+     * device's off-current is ~10x the hp device's while its gate current is
+     * a different ratio entirely, so applying one to the other mis-scales a
+     * term PIMID reports (gate_leakage is read, not merely displayed).
+     * Falls back to fl when a table lacks the rows, so an older .dat cannot
+     * turn this into a hard failure. */
+    double ig_d[5], ig_l[5];
+    if (cactiRow(dram_table_nm, "-I_g_on_n", ig_d, t_row) &&
+        cactiRow(logic_node_nm, "-I_g_on_n", ig_l, t_row) &&
+        ig_l[B] > 0.0 && ig_d[CD] > 0.0) {
+        fg = (ig_d[CD] / ig_l[B]) * vr;
+    } else {
+        /* MEASURED 1.11.54: CACTI tabulates NO gate-leakage current for the
+         * DRAM device columns -- I_g_on_n is 0 for both lp-dram and comm-dram
+         * at 22, 32 and 45 nm, while the logic columns carry real values. So
+         * this branch is the one that runs today, at every node, and the
+         * gate-leakage ratio is UNSOURCED.
+         *
+         * The subthreshold ratio stands in for it, which is directionally
+         * defensible rather than arbitrary: both mechanisms move the same way
+         * between these devices. A periphery transistor is high-Vt (hence
+         * fl ~ 1e-5, a huge subthreshold reduction) AND thick-oxide, because
+         * it must withstand the boosted wordline rail -- and gate leakage is
+         * exponential in oxide thickness, so it too collapses. The magnitude
+         * is not sourced and is stated as such wherever it is reported. */
+        fg = fl;
+    }
     return true;
 }
 
 bool McPATWrapper::periphFactorsFor(int dram_table_nm, int logic_node_nm,
                                     int baseline_device, int temp_k,
                                     double& fa, double& fd, double& fl) {
+    double fg_unused = 0.0;   // 1.11.54: reporting callers do not need it
     return periphFamilyFactors(dram_table_nm, logic_node_nm, baseline_device,
-                               temp_k, fa, fd, fl);
+                               temp_k, fa, fd, fl, fg_unused);
 }
 
 /* 1.11.51 (L105/L68): the legacy 3-arg wrapper is GONE. It priced the
@@ -381,9 +414,10 @@ bool McPATWrapper::periphFactorsFor(int dram_table_nm, int logic_node_nm,
  * inputs; a table that cannot be read is a hard stop, not a fallback. */
 static void periphFamilyFactorsCfg(int table_nm, int logic_node_nm,
                                    int baseline_device, int temp_k,
-                                   double& fa, double& fd, double& fl) {
+                                   double& fa, double& fd, double& fl,
+                                   double& fg) {   // 1.11.54 (E004)
     if (!periphFamilyFactors(table_nm, logic_node_nm, baseline_device,
-                             temp_k, fa, fd, fl)) {
+                             temp_k, fa, fd, fl, fg)) {
         std::cerr << "[power] FATAL: cannot derive the DRAM-periphery factors"
                   << " (comm-dram from " << table_nm << "nm.dat / baseline"
                   << " device " << baseline_device << " from "
@@ -853,12 +887,13 @@ void McPATWrapper::computePower() {
                 double fdW = 1.0, flW = 1.0;
                 if (config_.process_family == 1) {
                     double faW = 1.0;   // 1.11.16: same authority as the XML emission
+                    double fgW = 1.0;   // 1.11.54 (E004)
                     periphFamilyFactorsCfg(config_.dram_periph_table_nm,
                                            config_.tech_node_nm,
                                            config_.device_type,
                                            config_.temperature_k,
-                                           faW, fdW, flW);
-                    (void)faW;
+                                           faW, fdW, flW, fgW);
+                    (void)faW; (void)fgW;
                 }
                 auto wf = [&](const Component* p) -> double {
                     if (!p) return 0.0;
@@ -1698,9 +1733,10 @@ std::string McPATWrapper::generateXMLConfig() const {
          * temperature included -- instead of a table_nm/hp/350K shortcut
          * that silently disagreed with the printed derivation whenever the
          * logic node, corner or temperature was not the default. */
+        double fg = 1.0;   // 1.11.54 (E004): gate-leakage ratio, emitted below
         periphFamilyFactorsCfg(config_.dram_periph_table_nm,
                                config_.tech_node_nm, config_.device_type,
-                               config_.temperature_k, fa, fd, fl);
+                               config_.temperature_k, fa, fd, fl, fg);
         double pitch = (config_.subarray_pitch_factor > 0.0)
                            ? config_.subarray_pitch_factor : 1.0;
         xml << "    <param name=\"dram_periph_family\" value=\"1\"/>\n";
@@ -1715,6 +1751,17 @@ std::string McPATWrapper::generateXMLConfig() const {
         xml << "    <param name=\"dram_periph_pitch\" value=\"" << pitch << "\"/>\n";
         xml << "    <param name=\"dram_periph_dyn\" value=\"" << fd << "\"/>\n";
         xml << "    <param name=\"dram_periph_leak\" value=\"" << fl << "\"/>\n";
+        /* 1.11.54 (audit E004): gate leakage is oxide tunnelling and gets its
+         * OWN ratio from the I_g_on_n rows, instead of borrowing the
+         * subthreshold ratio above. */
+        xml << "    <param name=\"dram_periph_gate_leak\" value=\"" << fg << "\"/>\n";
+        if (fg == fl)
+            std::cout << "  [tech] gate-leakage ratio UNSOURCED: CACTI has no "
+                         "I_g_on_n data for the DRAM device columns (0 at 22, "
+                         "32 and 45 nm), so the subthreshold ratio " << fl
+                      << " stands in -- same direction (high-Vt AND thick-oxide"
+                         " both collapse leakage), unsourced magnitude."
+                      << std::endl;
         /* 1.11.34 (E10): the scope mask is GONE. It was emitted as the
          * literal 15 -- every bit, always -- with no configuration surface, so
          * it had one reachable value and its bit structure implied a

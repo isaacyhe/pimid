@@ -7,6 +7,73 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.54 -- the fork stops charging one thing twice
+
+The E block of audit round 2 (the McPAT fork) plus two zsim ROI-window
+findings. Three of these are double-counts; one is a ruling that CONFIRMS
+the current behaviour and rewrites its false justification.
+
+- E008: the SerDes was charged twice. McPAT's PCIe dynamic contains
+  SerDer_dyn whenever withPHY is set -- and PIMID sets withPHY for every
+  link class except interposer -- while 1.11.41 also ADDS the measured
+  bytes x pJ/bit for the same silicon. The 1.11.41 rationale ("different
+  silicon from the SerDes") holds only at withPHY=0. Our band is the
+  better-sourced of the two (it names its process and whether clocking is
+  included), so it stands and McPAT's SerDes DYNAMIC leaves the RUNTIME
+  basis; AREA and LEAKAGE keep it, because the SerDes is real silicon that
+  really leaks. The peak/TDP basis also keeps it: there we add no pJ/bit
+  term, so nothing is duplicated. The correction announces the watts it
+  removes and the duty they were computed at -- it scales with link
+  utilisation, so it is invisible on the reference cell (duty 0.002) and
+  dominant on a busy link (34.7 mW/channel at gen5, 217 mW at UALink,
+  against a controller term of a few mW).
+- E004: gate leakage was scaled by the SUBTHRESHOLD ratio. Gate leakage is
+  oxide tunnelling (McPAT: cmos_Ig_leakage; CACTI: I_g_on_n rows), not
+  subthreshold conduction, and PIMID reports it. It now takes its own ratio
+  -- and the MEASUREMENT that came with the fix is recorded: CACTI carries
+  NO gate-leakage data for the DRAM device columns (I_g_on_n is 0 for
+  lp-dram and comm-dram at 22, 32 and 45 nm), so the ratio is unsourced
+  today and the run says so. The subthreshold ratio stands in for it, which
+  is directionally defensible -- a periphery device is high-Vt AND
+  thick-oxide, and both mechanisms collapse together -- with the magnitude
+  stated as unsourced.
+- E001: onPitchLogicShare() added corepipe again after McPAT had already
+  DISTRIBUTED it into ifu/lsu/exu/mmu (core.cc adds
+  corepipe*num_pipelines/4 to each; the direct add is disabled). At the
+  emitted num_pipelines=1 that over-counted the pipeline by 0.25*corepipe;
+  measured logic share 0.184867 -> 0.183517. Its adjacent finding too: the
+  [tech] line printed the pitch as a flat fa x pitch (3.05556x on the
+  SUBARRAY/HBM3 cell) while the transform applies
+  fa x (1 + (pitch-1)*share) = 2.5574x -- a 19.5% gap between the printed
+  claim and the real factor, under a comment promising "the factor actually
+  APPLIED".
+- E002 RULED (user), behaviour CONFIRMED, justification REWRITTEN: the
+  earlier comment exempted the core's SRAM arrays from the pitch penalty on
+  the grounds that "CACTI's tables declare cell area device-independent".
+  That misreads the tables -- area_cell is 146 (292 for the 2-port cell) in
+  EVERY device column at EVERY node because it is expressed in F^2, the
+  ITRS convention, not because a periphery device leaves an SRAM cell
+  unchanged; CACTI simply has no data for SRAM-in-DRAM-periphery.
+  Physically an SRAM cell there DOES suffer: six ordinary transistors on
+  thick-oxide, long-channel, relaxed-rule devices, whose larger F is
+  precisely what the l_phy ratio measures -- so area_cell = 146*F^2 at the
+  periphery F IS the fa scaling. fa therefore stays on the whole core,
+  arrays included (no numbers move). The PITCH exemption survives as the
+  narrower claim it always should have been: must the circuit be DRAWN ON
+  the array's bitline pitch, which is layout geometry, not device size.
+- F008: under thread-MPI, ROI_BEGIN returns before the legacy path's
+  pgres.markRoi(), so the power-gating counters and the devMC gap histogram
+  were armed at a later event -- or never, when roi_begin precedes any
+  barrier or send/recv, leaving every bucket empty and silently falling back
+  to the phase-granular residency. Both handlers now open the window where
+  they open the ROI.
+- F004: GapHist::firstCycle held the ARM cycle while the recorded gaps
+  telescope from the FIRST EVENT, so spanCycles() returned a denominator
+  longer than the samples cover and the derived residency was biased low by
+  the head of the ROI. The first event now defines the span's start.
+
+Gate 1164A/B/C. BANK/HBM3 device cell bit-identical vs 1.11.53.
+
 ## 1.11.53 -- the interconnect stops substituting what it only cross-checks
 
 The C block of audit round 2 (power wrappers): seven verified-REAL findings,

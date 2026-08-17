@@ -63,6 +63,11 @@ class PCIeController : public Component {
     PCIeParam  pciep;
     powerDef power_t;
     uca_org_t local_result;
+    /* PIMID 1.11.54 (audit E008): the SerDes DYNAMIC term McPAT computed, kept
+     * so the runtime basis can remove it when PIMID supplies the measured
+     * SerDes energy (bytes x pJ/bit) for the same silicon. Area and leakage
+     * keep their SerDes share; only switching would be double-counted. */
+    double SerDer_dyn_saved = 0.0;
     PCIeController(ParseXML *XML_interface,InputParameter* interface_ip_);
     void set_pcie_param();
     void computeEnergy(bool is_tdp=true);

@@ -308,6 +308,7 @@ PCIeController::PCIeController(ParseXML *XML_interface,InputParameter* interface
 		  PMOS_sizing	  = g_tp.min_w_nmos_*pmos_to_nmos_sizing_r;
 
 	  }
+	  SerDer_dyn_saved = SerDer_dyn;   // PIMID 1.11.54 (E008)
 	  area.set_area(((ctrl_area + (pciep.withPHY? SerDer_area:0))/8*pciep.num_channels)*1e6);
 	  power_t.readOp.dynamic = (ctrl_dyn + (pciep.withPHY? SerDer_dyn:0))*pciep.num_channels;
 	  power_t.readOp.leakage = (ctrl_gates + (pciep.withPHY? SerDer_gates:0))*cmos_Isub_leakage(NMOS_sizing, PMOS_sizing, 2, nand)*g_tp.peri_global.Vdd;//unit W
@@ -368,6 +369,47 @@ void PCIeController::computeEnergy(bool is_tdp)
     		 * array in E18. Assigning deleted the controller's dynamic power on
     		 * every co-sim run while leaving its area and leakage in place, so
     		 * the reported controller had area, leaked, and did no work. */
+    		/* PIMID 1.11.54 (audit E008): DO NOT PAY FOR THE SerDes TWICE.
+    		 *
+    		 * The 1.11.41 note above is right that McPAT's ctrl term is the
+    		 * digital protocol engine and our pJ/bit figures are PHY-side --
+    		 * but power_t.readOp.dynamic above ALSO contains SerDer_dyn
+    		 * whenever withPHY is set, and PIMID sets withPHY for every link
+    		 * class except interposer. So for pcie gen3/4/5, CXL, NVLink and
+    		 * UALink the run was charging McPAT's SerDes model AND the
+    		 * measured SerDes energy for the same transistors. Measured at
+    		 * 22 nm: 0.01 * lane_gbps * (F_sz/0.09) * (Vdd/1.2)^2 is ~34.7
+    		 * mW/channel/unit at gen5 and ~217 mW at UALink -- comparable to
+    		 * the whole reported link-controller figure.
+    		 *
+    		 * The measured band is the better-sourced of the two (it names
+    		 * its process and whether clocking is included), so it stands and
+    		 * McPAT's SerDes DYNAMIC is removed from the runtime basis. AREA
+    		 * and LEAKAGE keep it: the SerDes is real silicon that really
+    		 * leaks, and our pJ/bit figure prices switching only. */
+    		if (pciep.withPHY) {
+    			double serdes_rt = SerDer_dyn_saved * pciep.num_channels
+    			                 * pciep.perc_load;
+    			rt_power.readOp.dynamic -= serdes_rt;
+    			if (rt_power.readOp.dynamic < 0.0) rt_power.readOp.dynamic = 0.0;
+    			/* Report the correction so it is auditable. Its size scales
+    			 * with the MEASURED duty: on a nearly idle link (duty 0.002 on
+    			 * the reference co-sim cell) it is invisible at the printed
+    			 * precision, while on a link-heavy run it is the dominant term
+    			 * -- 34.7 mW/channel at gen5 and 217 mW at UALink, against a
+    			 * controller term of a few mW. Stderr: the parent's stdout is
+    			 * /dev/null in the forked child. */
+    			static bool said = false;
+    			if (!said) {
+    				said = true;
+    				std::cerr << "[link] E008: removed McPAT's SerDes dynamic ("
+    				          << serdes_rt << " W at measured duty "
+    				          << pciep.perc_load << ") from the runtime basis;"
+    				             " the measured pJ/bit term prices that same"
+    				             " silicon. Area and leakage keep it."
+    				          << std::endl;
+    			}
+    		}
     		rt_power.readOp.dynamic += joules / execTimeSec / denom;
     	}
     }

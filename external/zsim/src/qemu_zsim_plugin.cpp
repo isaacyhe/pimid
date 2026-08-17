@@ -2352,6 +2352,19 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
                 in_roi.store(true);
                 mpi_roi_baselined = true;
                 snapshotRoiBaseCyc();
+                /* 1.11.54 (audit F008): OPEN THE PG/GAP WINDOW HERE TOO. This
+                 * branch returns before the legacy path's
+                 * pgres.markRoi(), so under thread-MPI the power-gating
+                 * residency counters and the devMC gap histogram were either
+                 * armed at a LATER event (the first barrier or send/recv,
+                 * which carry their own !mpi_roi_baselined guard -- and this
+                 * line has just set that flag) or, when roi_begin precedes
+                 * any of them, never armed at all: GapHist::armed stayed 0,
+                 * every bucket stayed empty, and gapPowerDownResidency
+                 * silently fell back to the phase-granular residency. Two
+                 * counters that get divided against each other must come
+                 * from one window. */
+                zinfo->pgres.markRoi(zinfo->numPhases, zinfo->globPhaseCycles);
             }
             // 1.8.4: the opener must open the co-sim device window HERE too
             // -- this branch returns before the legacy block below.
@@ -2609,6 +2622,19 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
                 in_roi.store(true);
                 mpi_roi_baselined = true;
                 snapshotRoiBaseCyc();
+                /* 1.11.54 (audit F008): OPEN THE PG/GAP WINDOW HERE TOO. This
+                 * branch returns before the legacy path's
+                 * pgres.markRoi(), so under thread-MPI the power-gating
+                 * residency counters and the devMC gap histogram were either
+                 * armed at a LATER event (the first barrier or send/recv,
+                 * which carry their own !mpi_roi_baselined guard -- and this
+                 * line has just set that flag) or, when roi_begin precedes
+                 * any of them, never armed at all: GapHist::armed stayed 0,
+                 * every bucket stayed empty, and gapPowerDownResidency
+                 * silently fell back to the phase-granular residency. Two
+                 * counters that get divided against each other must come
+                 * from one window. */
+                zinfo->pgres.markRoi(zinfo->numPhases, zinfo->globPhaseCycles);
             }
             // 1.8.4: the opener must open the co-sim device window HERE too
             // -- this branch returns before the legacy block below.

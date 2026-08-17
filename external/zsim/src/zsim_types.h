@@ -120,6 +120,9 @@ struct GapHist {
      * ever prices, and was not usable for choosing a gating threshold.
      * Recording is armed at roi_begin and the denominator is the span the
      * samples actually cover. */
+    /* 1.11.54 (F004): `c` here is the ROI-begin cycle. It is a PROVISIONAL
+     * start -- event() replaces it with the first actual event, which is
+     * where the recorded gaps really begin. */
     inline void arm(uint64_t c) {
         lastCycle  = 0;      // discard any pre-ROI history
         firstCycle = c;
@@ -141,7 +144,19 @@ struct GapHist {
         uint64_t last = lastCycle;
         if (c <= last) return;                  // out of order or repeat: no gap
         if (!__sync_bool_compare_and_swap(&lastCycle, last, c)) return;  // lost: drop
-        if (last == 0) return;                  // first event only seeds the clock
+        if (last == 0) {
+            /* 1.11.54 (audit F004): the FIRST EVENT defines the span's start.
+             * arm() stored the roi_begin cycle in firstCycle, but the gaps
+             * recorded here telescope to (lastEvent - firstEvent), not
+             * (lastEvent - armCycle) -- so spanCycles() returned a
+             * denominator longer than the samples cover, by however long the
+             * ROI ran before the first access. The consumer divides usable
+             * idle by that span, so the residency it derived was biased low
+             * by exactly that head. Re-seed firstCycle to the first event
+             * and the two agree again. */
+            firstCycle = c;
+            return;                             // first event only seeds the clock
+        }
         uint64_t gap = c - last;
         int b = 63 - __builtin_clzll(gap);      // gap >= 1 here, so clzll is defined
         if (b >= kBuckets) b = kBuckets - 1;

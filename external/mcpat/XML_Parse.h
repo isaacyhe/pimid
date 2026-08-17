@@ -625,6 +625,9 @@ typedef struct{
 	 * consumed by the family-0 core-area path; the family-1 transform keeps
 	 * its dram_periph_pitch. Default 1.0. */
 	double core_pitch_factor;
+	/* PIMID 1.11.54 (E004): gate-leakage ratio, separate from the
+	 * subthreshold one. Default 1.0 leaves gate leakage untouched. */
+	double dram_periph_gate_leak;
 	double dram_periph_area;
 	double dram_periph_pitch;   /* PIMID 1.11.34 (E11): core-only pitch penalty */        // area factor
 	double dram_periph_dyn;         // dynamic factor

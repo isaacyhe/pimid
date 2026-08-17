@@ -446,7 +446,17 @@ Processor::Processor(ParseXML *XML_interface)
               if (c->exu->rfu)   lg -= c->exu->rfu->area.get_area();
               if (c->exu->scheu) lg -= c->exu->scheu->area.get_area();
           }
-          if (c->corepipe)   lg += c->corepipe->area.get_area();
+          /* PIMID 1.11.54 (audit E001): DO NOT ADD THE PIPELINE TWICE.
+           * core.cc does not add corepipe to the core area directly (that
+           * line is disabled at core.cc:1881); it DISTRIBUTES it, adding
+           * pipeline_area_per_unit = corepipe*num_pipelines/4 into each of
+           * ifu/lsu/exu/mmu (/5 plus rnu on OOO). So exu->area above already
+           * carries its share, and adding corepipe again counted the
+           * pipeline as (share + whole) against a denominator that holds
+           * exactly corepipe*num_pipelines. At the emitted num_pipelines=1
+           * that is +0.25*corepipe of pure over-count; at N>=2 it flips to an
+           * under-count. The exu share is already in `lg` -- nothing further
+           * to add. */
           if (c->undiffCore) lg += c->undiffCore->area.get_area();
           double t = c->area.get_area();
           if (lg < 0.0) lg = 0.0;
@@ -466,6 +476,13 @@ Processor::Processor(ParseXML *XML_interface)
                           ? XML->sys.dram_periph_pitch : 1.0;
       const double fd = XML->sys.dram_periph_dyn;
       const double fl = XML->sys.dram_periph_leak;
+      /* PIMID 1.11.54 (audit E004): gate leakage is oxide tunnelling, not
+       * subthreshold conduction. It used to be scaled by fl -- a ratio of
+       * I_off_n rows -- while CACTI tabulates I_g_on_n separately and McPAT
+       * computes it with cmos_Ig_leakage. Defaults to fl when the emitter
+       * did not supply one (older XMLs), so nothing changes silently. */
+      const double fg = (XML->sys.dram_periph_gate_leak > 0.0)
+                        ? XML->sys.dram_periph_gate_leak : fl;
       auto applyFam = [&](Component& c, bool scaleArea, const char* who = "?",
                           double areaMul = 1.0) {
           /* PIMID 1.11.32 (user ruling E9): read each basis from ITSELF.
@@ -526,10 +543,10 @@ Processor::Processor(ParseXML *XML_interface)
           c.rt_power.readOp.dynamic *= fd;
           c.power.readOp.leakage                        = plainLeak * fl;
           c.power.readOp.longer_channel_leakage         = plainLeak * fl;
-          c.power.readOp.gate_leakage                  *= fl;
+          c.power.readOp.gate_leakage                  *= fg;   // 1.11.54 (E004)
           c.rt_power.readOp.leakage                     = plainLeakRt * fl;
           c.rt_power.readOp.longer_channel_leakage      = plainLeakRt * fl;
-          c.rt_power.readOp.gate_leakage               *= fl;
+          c.rt_power.readOp.gate_leakage               *= fg;   // 1.11.54 (E004)
           /* 1.11.15 (audit): the GATED endpoints must ride the same family
            * transform, or power gating on a periphery component compares a
            * family-priced active value against a logic-priced gated one and
@@ -572,9 +589,29 @@ Processor::Processor(ParseXML *XML_interface)
        * layout constrained to the array's bitline pitch (Vogelsang MICRO
        * 2010: sense-amp stripes and local wordline drivers); the core's own
        * SRAM arrays -- caches, TLBs, register files, scheduler CAMs -- are
-       * placed as macro blocks whose CELL area CACTI's tables declare
-       * device-independent, so multiplying them by a transistor-pitch ratio
-       * priced silicon that does not exist. The on-pitch share is measured
+       * placed as macro blocks that need not follow the array's pitch.
+       *
+       * 1.11.54 (audit E002, user-ruled): the earlier wording justified this
+       * with "CELL area CACTI's tables declare device-independent". That
+       * MISREADS the tables. area_cell is 146 (292 for the 2-port cell) in
+       * EVERY device column at EVERY node -- because it is expressed in F^2,
+       * the ITRS convention -- not because a periphery device leaves an SRAM
+       * cell unchanged. CACTI simply carries no data for "SRAM built in a
+       * DRAM periphery process".
+       *
+       * Physically an SRAM cell in DRAM periphery DOES suffer: it is six
+       * ordinary transistors, and on a periphery process those are the
+       * thick-oxide, long-channel, relaxed-rule devices whose larger F the
+       * l_phy ratio measures. area_cell = 146*F^2 evaluated at the periphery
+       * F IS the fa scaling -- so applying fa to the core's arrays is not an
+       * over-reach; it is the same statement CACTI's own cell model makes.
+       * fa therefore stays on the WHOLE core, arrays included.
+       *
+       * The PITCH penalty survives as a separate, narrower claim: it asks
+       * whether a circuit must be DRAWN ON the array's bitline pitch, which
+       * is layout geometry rather than device size, and a macro block placed
+       * away from the array is free of that constraint whatever transistors
+       * it is made of. The on-pitch share is measured
        * from McPAT's own breakdown: execution unit MINUS its register-file
        * and scheduler arrays, plus pipeline and the undifferentiated core.
        * (Decode logic inside the IFU stays classed with the IFU's arrays --
