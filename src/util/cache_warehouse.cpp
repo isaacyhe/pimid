@@ -10,6 +10,7 @@
 #include <fstream>
 #include <mutex>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <sys/types.h>
 
 namespace pimid {
@@ -47,10 +48,57 @@ const char* env(const char* name) {
     return (v && v[0]) ? v : nullptr;
 }
 
+/* 1.11.52 (user ruling): the cache SHIPS WITH PIMID and starts EMPTY.
+ *
+ * It used to default to ~/.cache/pimid, which put the tool's generated
+ * memory designs in a per-user location outside the tree -- invisible to
+ * anyone inspecting the checkout, not shipped, and silently different
+ * between two trees on one machine. The store belongs beside the simulator
+ * that fills it: `<pimid>/cache/<backend>/`. The directory is committed
+ * empty (.gitkeep + README) and populated at runtime.
+ *
+ * Located from the RUNNING BINARY, not the working directory: readlink
+ * /proc/self/exe, take its directory, and drop a trailing /build so both
+ * `pimid/build/pimid` and an installed `pimid/bin/pimid` resolve to
+ * `pimid/cache`. --cache-dir / PIMID_CACHE_DIR still override, and HOME is
+ * the last resort when /proc is unavailable. */
+std::string exeDir() {
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return std::string();
+    buf[n] = '\0';
+    std::string p(buf);
+    size_t slash = p.find_last_of('/');
+    if (slash == std::string::npos) return std::string();
+    return p.substr(0, slash);
+}
+
 std::string defaultRoot() {
+    std::string d = exeDir();
+    if (!d.empty()) {
+        const std::string build = "/build";
+        if (d.size() > build.size() &&
+            d.compare(d.size() - build.size(), build.size(), build) == 0)
+            d = d.substr(0, d.size() - build.size());
+        else {
+            size_t slash = d.find_last_of('/');
+            std::string last = (slash == std::string::npos) ? d : d.substr(slash + 1);
+            if (last == "bin" && slash != std::string::npos) d = d.substr(0, slash);
+        }
+        return d + "/cache";
+    }
     const char* home = env("HOME");
     if (home) return std::string(home) + "/.cache/pimid";
     return std::string("/tmp/pimid-cache");
+}
+
+/* The pre-1.11.52 location, kept as a READ-ONLY fallback so the expensive
+ * characterizations already on disk are not thrown away: a miss in the tree
+ * cache looks here, and a hit is copied forward. Writes always go to the
+ * tree. */
+std::string legacyRoot() {
+    const char* home = env("HOME");
+    return home ? (std::string(home) + "/.cache/pimid") : std::string();
 }
 
 // mkdir -p
@@ -150,6 +198,12 @@ std::string backendDir(const std::string& backend) {
     std::string d = warehouseRoot() + "/" + backend;
     ensureDir(d);
     return d;
+}
+
+std::string legacyBackendDir(const std::string& backend) {
+    const std::string lr = legacyRoot();
+    if (lr.empty() || lr == warehouseRoot()) return std::string();
+    return lr + "/" + backend;   // read-only: never created here
 }
 
 std::string toolVersion() {

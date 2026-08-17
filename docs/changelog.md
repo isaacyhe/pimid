@@ -7,6 +7,107 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.52 -- the second audit round: the model stops assuming what it can measure
+
+Audit round 2 (six parallel auditors, 254 findings) was VERIFIED finding by
+finding against the tree before anything was changed: 103 REAL, 110 LATENT
+(true as written, but no reachable configuration makes them differ today), 3
+WRONG, 18 already fixed. This release lands the first 30 REAL ones, chosen
+by how far they move a number. Verification records: `_1162audit/V_*.md`
+(LOCAL).
+
+**The three that move device numbers most.**
+- D024: `DRAMModel` hardcoded `MemoryTechnology::DDR4` and handed its
+  Ramulator wrapper a default "DDR4", while the factory routed all seven
+  DRAM generations into it. Every non-DDR4 PE at SUBARRAY/BANK/CHIP
+  placement was therefore timed on the DDR4-2400 ladder -- subarray 26.6 ns,
+  bank 39.9 ns -- and the log printed that as the technology's own number.
+  The technology now reaches the model and the wrapper.
+- D003: the array energy weighted its activate/precharge term (the dominant
+  one: ~1.42 nJ against ~0.39 nJ of burst on DDR4) by a hardcoded
+  ROW_MISS_FRAC = 0.5. The PE memory interface already sees every access and
+  the unit it lands in, so the open row is observable there: one last-row
+  register per unit, exported as rowHits/rowMisses, and the array model uses
+  the run's own miss fraction. Unmeasured runs say so and the 0.5 becomes a
+  stated fallback rather than a hidden default.
+- B001: the PE-MI's local access latency was a per-technology table in
+  CYCLES -- not a property of an array. The same silicon was charged 10
+  cycles at any PE clock: 20 ns at 500 MHz, 2.5 ns at 4 GHz, an 8x swing
+  across a frequency sweep, on the base term of every PE-MI access. It now
+  comes from the array model at the PE's own tier and node, in ns, converted
+  at the PE clock.
+
+**One part, one rate (D002/D016).** DDR4 had its array half priced at 2400
+MT/s and its DQ-termination half at 3200 (termination 1.33x understated);
+the rate table now names the part this tree actually simulates (DDR4-2400 --
+the Ramulator preset, the architecture object and the wrapper's own 19.2
+GB/s all agree), and POD12 is an interface standard so the electricals are
+untouched. DRAM bandwidth is derived (rate x channel width x channels)
+instead of a literal that had drifted from it: DDR5 was 20% low, GDDR6 1.75x
+low. Where upstream Ramulator2 ships no timing bin at the modelled rate
+(DDR5 above 3200), the run says so once instead of hiding two numbers that
+disagree.
+
+**Temperature (user ask) reaches the whole machine (D055, C001).** The new
+`power.temperature_k` / `temperature_c` knob was priced into cores and
+caches while every memory array stayed pinned at 350 K. It now reaches all
+four plugin models, the SRAM/NVM latency queries, the array power/area
+queries and the DRAM die-area query -- after temperature joined the NVSim
+cache key, since otherwise a 400 K query would be served the cached 350 K
+design (the LSTP-served-HP failure of 1.11.49). The accepted range follows
+the LINKED TOOLS, each read from its own source: CACTI checks 300..400 K in
+steps of 10 (io.cc:2259) and NVSim indexes a 300..400 K table with no bounds
+check at all (Technology.h:81-84), so the intersection is enforced and the
+refusal cites both. And C001: the DRAM-periphery leakage factor read the
+I_off row as Celsius (T-273) where CACTI indexes it as an offset from 300 K
+(parameter.cc:175) -- at the default 350 K it took the 380 K row, understating
+the leakage ratio by ~34% on every on-DRAM-die run.
+
+**Cross-scope divergence closed structurally (A001-A009).** 1.11.17 tried to
+end it by COPYING device-scope logic into the per-node path; the copy had
+drifted on all three of its claims (corner refused instead of mapped to
+lp-dram; area factor from literals 2.44/2.46 instead of the tables; a
+literal 700 MHz clock guard instead of the calculated ceiling) while its
+comment said "Same behavior as the device-scope site". The copy is deleted
+and both scopes call one owner. Also unified: MC count per placement-tree
+region, memory.power_down no longer dead unless pim.mc.pg is set, the
+unarmed-counter refusal, the die organisation (printed die == die added to
+the total), and the SRAM/NVM tool inputs.
+
+**Reports that described two different machines.**
+- A015: background power counted ONE rank while die area counted the whole
+  populated system, so the Power and Area lines differed by ranks x
+  channels. Background is now population-scaled on the same basis as area.
+- A020: a memory with no accesses returned silently, deleting its background
+  from System Total -- but standby and refresh do not stop. On the reference
+  co-sim cell the memory term is 1.12 W of 2.34 W.
+- A018/A019: two predicates answered "does this access drive off-package DQ
+  pins?" and disagreed at the interposer tiers; and the DEVICE's placement
+  decided whether the HOST's own DIMM paid termination. One predicate now,
+  asked per memory.
+- D036: the system-scope die area printed as "CACTI x k" is, at the stock
+  organisation, algebraically capacity/density with zero CACTI content. The
+  number is right (the vendor anchor is the sourced one); it now says what
+  it is.
+
+**Silent substitution (B019/B025/B026/B027, A021, A016/A032, A010/A011,
+B038/B039/B043).** A YAML error thrown midway through applying a config
+printed "Warning" and ran on with a half-applied machine -- now fatal. An
+unrecognised network-model name silently became SIMPLE -- now refused. The
+NoC duty cycle divided measured traversals by cycles of a different clock,
+and skipped levels dropped their share of the measured hop count while
+leaving chip coverage below 1. The flat NoC branch still carried the
+pre-1.9.22 shape (hardcoded flit width, PE clock for the network's, packets
+where McPAT counts router traversals -- a measured 2.04x undercount). Host
+NoC coverage fractions and the host MC clock were unsourced literals. And
+three "two authorities for one quantity" cases: the on_dram_die predicate
+missing the family owner's guard, PCIe protocol overhead emitted from
+different sources depending on an unrelated toggle, and topology helpers
+using ceil-sqrt in one place and truncating sqrt in two others.
+
+DATA IMPACT: device timing and array energy both move (D024, B001, D003,
+D002), so the corpus must be re-simulated on >= 1.11.52. Gate 1162F.
+
 ## 1.11.51 -- the FIX-PRE-FLEET queue closes; the N-notes and E-residues with it
 
 The final FIX-PRE-FLEET batch (16 items), the open N-notes that were

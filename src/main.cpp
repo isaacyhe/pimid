@@ -154,7 +154,8 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
                                    int array_tech_node_nm,
                                    bool use_yaml_override = false, double yaml_latency_ns = -1.0,
                                    uint64_t array_capacity_bytes = 0,
-                                   int pe_hierarchy_level = -999) {
+                                   int pe_hierarchy_level = -999,
+                                   int array_temperature_k = 350) {  // 1.11.52 (D055)
     double latency_ns = 0.0;
 
     // Normalize technology name for comparison
@@ -203,6 +204,7 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
                  * defaults (22/22/32/90 nm) that no caller ever set. */
                 model->setTechNodeNm(validateTechNodeNm(array_tech_node_nm,
                                                         "tier latency query"));
+                model->setTemperatureK(array_temperature_k);   // 1.11.52 (D055)
                 model->initialize();
                 const auto tier = tierForPlacement(pe_hierarchy_level);
                 if (model->hasTier(tier)) {
@@ -242,6 +244,7 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
             pimid::CACTIWrapper::SRAMConfig cfg;
             cfg.capacity_bytes = sram_cap;
             cfg.tech_node_nm = validateTechNodeNm(array_tech_node_nm, "SRAM latency query");
+            cfg.temperature = static_cast<uint32_t>(array_temperature_k);   // 1.11.52 (D055)
             cfg.is_cache = false;  // SRAM as memory, not cache
             pimid::CACTIWrapper wrapper(cfg);
             wrapper.initialize();
@@ -253,6 +256,7 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
             cfg.nvm_type = pimid::NVSimWrapper::NVMType::STTRAM;
             cfg.capacity_bytes = nvm_cap;
             cfg.process_node_nm = validateTechNodeNm(array_tech_node_nm, "NVM latency query");
+            cfg.temperature_k = array_temperature_k;   // 1.11.52 (D055)
             cfg.word_width_bits = 512;  // one full 64 B line per access, matching the CACTI/SRAM path
             pimid::NVSimWrapper wrapper(cfg);
             wrapper.initialize();
@@ -263,6 +267,7 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
             cfg.nvm_type = pimid::NVSimWrapper::NVMType::PCRAM;
             cfg.capacity_bytes = nvm_cap;
             cfg.process_node_nm = validateTechNodeNm(array_tech_node_nm, "NVM latency query");
+            cfg.temperature_k = array_temperature_k;   // 1.11.52 (D055)
             cfg.word_width_bits = 512;  // one full 64 B line per access, matching the CACTI/SRAM path
             pimid::NVSimWrapper wrapper(cfg);
             wrapper.initialize();
@@ -273,6 +278,7 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
             cfg.nvm_type = pimid::NVSimWrapper::NVMType::RERAM;
             cfg.capacity_bytes = nvm_cap;
             cfg.process_node_nm = validateTechNodeNm(array_tech_node_nm, "NVM latency query");
+            cfg.temperature_k = array_temperature_k;   // 1.11.52 (D055)
             cfg.word_width_bits = 512;  // one full 64 B line per access, matching the CACTI/SRAM path
             pimid::NVSimWrapper wrapper(cfg);
             wrapper.initialize();
@@ -289,7 +295,20 @@ static int getMemoryLatencyCycles(const std::string& memory_tech, double frequen
             latency_ns = wrapper.getTRCD() + wrapper.getTCAS();
         }
         else {
-            // Unknown tech: default to DDR4 timing via Ramulator wrapper
+            /* 1.11.52 (audit B025): reaching here means a technology string
+             * got past canonicalMemTech(), which validates against the
+             * supported set and is the single point every technology passes
+             * through. Silently timing it as DDR4 would hand back a number
+             * for a part nobody described -- the exact failure canonical-
+             * isation exists to prevent -- so say so. The DDR4 answer is
+             * still produced (a refusal here would abort mid-report), but it
+             * is announced as a substitution, not presented as the
+             * technology's own. */
+            std::cerr << "[mem] WARNING: no timing model for memory technology '"
+                      << tech << "' in the latency helper; substituting DDR4 "
+                         "timing. This string bypassed canonicalisation -- the "
+                         "number below is DDR4's, not " << tech << "'s."
+                      << std::endl;
             pimid::RamulatorWrapper wrapper("", "DDR4");
             wrapper.initialize();
             latency_ns = wrapper.getTRCD() + wrapper.getTCAS();
@@ -510,6 +529,13 @@ struct ZSimParsedOutput {
     /* 1.11.9 (#86, audit): the PE-MI locality split has been EMITTED since
      * 1.5.3 and parsed by nobody -- the one measurement that says whether a
      * placement actually kept its accesses local. */
+    /* 1.11.52 (audit D003): MEASURED row-buffer behaviour from the PE-MI. */
+    uint64_t row_hits = 0, row_misses = 0;
+    double rowMissFraction() const {
+        uint64_t n = row_hits + row_misses;
+        return (n > 0) ? static_cast<double>(row_misses) / static_cast<double>(n)
+                       : -1.0;   // <0 = the run carried no row measurement
+    }
     uint64_t pemi_local_acc = 0;
     uint64_t pemi_remote_acc = 0;
     /* 1.11.10 (#112): MEASURED instruction mix, summed over cores like every
@@ -1077,7 +1103,9 @@ static ZSimParsedOutput parseZSimOutputFile(const std::string& path) {
                  * scope left them zero forever and the locality report never
                  * printed. They are a locality SPLIT, not memory accesses:
                  * do not add them to mem_rd/mem_wr. */
-                if (key == "localAcc")  { out.pemi_local_acc += val; }
+                if (key == "rowHits")   { out.row_hits += val; }
+                else if (key == "rowMisses") { out.row_misses += val; }
+                else if (key == "localAcc")  { out.pemi_local_acc += val; }
                 else if (key == "remoteAcc") { out.pemi_remote_acc += val; }
                 if (key == "rd") { out.mem_rd += val; if (cgrp) cgrp->mem_rd += val; }
                 else if (key == "wr") { out.mem_wr += val; if (cgrp) cgrp->mem_wr += val; }
@@ -1554,6 +1582,13 @@ struct UnifiedConfig {
      * they meant, and the reported saving mixed them. */
     bool pg_mc = false;         // pim.mc.pg          controller LOGIC gating
     bool mem_power_down = false; // memory.power_down  DRAM JEDEC power-down (IDD2P)
+    /* 1.11.52 (user ask "the n and temp of mcpat need fixed"): the McPAT /
+     * factor-derivation temperature, previously a hardcoded 350 at three
+     * sites with no config surface. 350 K = 77 C is the value every corpus
+     * number so far was priced at, so it stays the default; the CACTI
+     * I_off tables carry 0..100 C rows, so anything outside 273..373 K is
+     * refused rather than extrapolated. */
+    int temperature_k = 350;     // power.temperature_k (or power.temperature_c)
     /* 1.11.51 (E17): power-down entry threshold override, ns. <=0 = use the
      * per-generation sourced tXP default; techs with no sourced tXP refuse
      * the gap-based descent rather than inventing a threshold. */
@@ -2682,11 +2717,22 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
     // Apply per-level model overrides
     for (int i = 0; i < 7; ++i) {
         const auto& m = config.network_level_model[i];
+        /* 1.11.52 (audit B026): VALIDATE the per-level model name. Anything
+         * that was not "detailed" became SIMPLE, so a typo ("detaild",
+         * "Detailed") silently downgraded that level's network model and the
+         * run reported results for a model the user did not ask for. The
+         * accepted spellings are listed; anything else is a config error. */
         if (m == "detailed") {
             hierarchy->setLevelModel(i, pimid::NetworkModelType::DETAILED);
-        } else {
-            // "simple", "md1", "analytical" (backward compat) → SIMPLE
+        } else if (m.empty() || m == "simple" || m == "md1" || m == "analytical") {
+            // "simple", "md1", "analytical" (backward compat) -> SIMPLE
             hierarchy->setLevelModel(i, pimid::NetworkModelType::SIMPLE);
+        } else {
+            std::cerr << "[config] FATAL: noc.levels[" << i << "].model = '" << m
+                      << "' is not a network model. Valid: detailed, simple "
+                         "(aliases md1, analytical). An unrecognised name used "
+                         "to become SIMPLE silently." << std::endl;
+            std::exit(2);
         }
     }
 
@@ -2927,9 +2973,15 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
                 /* 1.10.6: the shared channel DQ bus pays a penalty to reverse
                  * direction, and a bandwidth-limited link does not know that.
                  * tWTR (write-to-read) is the dominant JEDEC turnaround; the
-                 * value is each technology's OWN, read from the Ramulator2
-                 * preset this run selects (nWTR_L x tCK -- see dram/impl/*.cpp),
-                 * not invented. Read-to-write is approximated by the same
+                 * value is each technology's OWN, TRANSCRIBED from the
+                 * Ramulator2 preset this run selects -- every line below
+                 * carries its preset name and the nWTR_L x tCK arithmetic
+                 * that produced it. 1.11.52 (audit B003) corrects the
+                 * previous wording, which said the values were READ from
+                 * the preset: no tWTR accessor exists on the wrapper or in
+                 * DRAMTiming, so nothing reads them at run time and a
+                 * preset change would not move them. Sourced constants
+                 * with their derivation shown, not model output. Read-to-write is approximated by the same
                  * figure; stated approximation, conservative in direction.
                  * Off with memory.dq_turnaround: false -- a design with a
                  * dedicated PIM interconnect has no shared bus to turn. */
@@ -3459,6 +3511,20 @@ static void emitZSimHierarchyBlock(std::ostream& out, const UnifiedConfig& confi
     out << "        mcStandalone = " << (config.mc_standalone ? 1 : 0) << ";\n";
     out << "        totalMemOrgs = " << config.total_mem_orgs << ";\n";
     out << "        pagesPerUnit = " << config.pages_per_unit << ";\n";
+    /* 1.11.52 (audit D003): the DRAM ROW size, so the memory interface can
+     * MEASURE the row-buffer hit rate the array-energy model used to assume
+     * (ROW_MISS_FRAC = 0.5). JEDEC page size is a spec fact per generation;
+     * 1 KB is the DDR3/DDR4 x8 page and 2 KB the wide-interface HBM/GDDR
+     * page. Non-DRAM technologies have no row buffer -> 0, and the consumer
+     * then claims no measurement. */
+    {
+        const std::string& mt = config.memory_tech;
+        uint32_t row_bytes = 0;
+        if (mt == "DDR3" || mt == "DDR4" || mt == "DDR5") row_bytes = 1024;
+        else if (mt == "LPDDR5")                          row_bytes = 2048;
+        else if (mt == "GDDR6" || mt == "HBM2" || mt == "HBM3") row_bytes = 2048;
+        out << "        dramRowBytes = " << row_bytes << ";\n";
+    }
     out << "        assumeLocal = 1;\n";  // perfect data prep: device computes local (both scopes)
     out << "        chargePrep = " << ((config.scope == "system") ? 1 : 0) << ";\n";  // co-sim: first-touch reorg+transfer
     // Host->device link transfer (perfect-prep): charged once per first-touch line
@@ -3556,10 +3622,23 @@ static void emitZSimHierarchyBlock(std::ostream& out, const UnifiedConfig& confi
         out << "        pcieBytesPerCycle = \"" << std::fixed << std::setprecision(4)
             << bytes_per_cycle << "\";\n" << std::defaultfloat;
 
-        // Protocol overhead and coherence — derived from system link config
-        int header_bytes = 20;  // default PCIe TLP overhead
-        double coherence_extra_ns = 0.0;
-        if (!config.system_network.links.empty()) {
+        /* Protocol overhead and coherence.
+         *
+         * 1.11.52 (audit B039): ONE source, whichever block emits it. This
+         * path read the system-network link entry while the sibling
+         * emitZSimPcieBlock reads config.pcie_header_bytes /
+         * pcie_coherence_extra_ns -- and the caller picks between the two
+         * blocks purely on whether a DRAM hierarchy exists. So the same
+         * machine emitted different protocol overheads depending on an
+         * unrelated toggle, and power.link.header_bytes was silently
+         * inert whenever the hierarchy was on. The resolved config fields
+         * are the single source (the link-sync already folds the declared
+         * topology into them); the link entry is consulted only if those
+         * were never resolved. */
+        int header_bytes = (config.pcie_header_bytes > 0)
+                           ? config.pcie_header_bytes : 20;
+        double coherence_extra_ns = config.pcie_coherence_extra_ns;
+        if (config.pcie_header_bytes <= 0 && !config.system_network.links.empty()) {
             header_bytes = config.system_network.links[0].header_bytes;
             coherence_extra_ns = config.system_network.links[0].coherence_extra_ns;
         }
@@ -3583,27 +3662,78 @@ static void emitZSimHierarchyBlock(std::ostream& out, const UnifiedConfig& confi
             : (config.placement_level == "SUBARRAY"
                ? config.num_banks * config.subarrays_per_bank : config.num_banks);
 
-        // Auto-derive local latency from technology if not overridden
+        /* 1.11.52 (audit B001): the PE-MI's local access latency is the
+         * ARRAY's access time, and the array models already answer that.
+         *
+         * This was a per-technology table in CYCLES, which is not a property
+         * of an array at all: the same silicon was charged 10 cycles at any
+         * PE clock, i.e. 20 ns at 500 MHz and 2.5 ns at 4 GHz -- an 8x swing
+         * in modelled array time across the frequency sweep, and it is the
+         * base term of EVERY PE-MI access (pe_memory_interface.h). The tool
+         * answer is the placement-tier latency in NANOSECONDS
+         * (getMemoryLatencyCycles, which queries Ramulator/CACTI/NVSim at the
+         * PE's own tier and node), converted at the PE clock here. The old
+         * table survives only as the stated fallback when no tool answer is
+         * available, and says so. */
         int local_latency = config.pe_mc_local_latency;
         if (local_latency < 0) {
-            std::string tech = config.memory_tech;
-            if (tech == "SRAM")             local_latency = 3;
-            else if (tech == "STT_MRAM")    local_latency = 20;
-            else if (tech == "PCM")         local_latency = 50;
-            else if (tech == "RERAM")       local_latency = 30;
-            else if (tech == "HBM2" || tech == "HBM3") local_latency = 8;
-            else                            local_latency = 10;  // DDR default
+            const double pe_clk_mhz = (device_bw_freq_mhz > 0.0)
+                                      ? device_bw_freq_mhz : config.frequency_mhz;
+            int tool_cycles = getMemoryLatencyCycles(
+                config.memory_tech, pe_clk_mhz, config.tech_node_nm,
+                config.use_yaml_memory_params,
+                config.memory_params.read_latency_ns,
+                static_cast<uint64_t>(std::max(1, config.num_banks)) * 64ULL * 1024ULL,
+                config.pe_hierarchy_level, config.temperature_k);
+            if (tool_cycles > 0) {
+                local_latency = tool_cycles;
+                std::cout << "  [pe-mi] local access latency " << local_latency
+                          << " cycles at " << pe_clk_mhz
+                          << " MHz, from the array model at this placement "
+                             "(scales with the PE clock, as an array time must)"
+                          << std::endl;
+            } else {
+                std::string tech = config.memory_tech;
+                if (tech == "SRAM")             local_latency = 3;
+                else if (tech == "STT_MRAM")    local_latency = 20;
+                else if (tech == "PCM")         local_latency = 50;
+                else if (tech == "RERAM")       local_latency = 30;
+                else if (tech == "HBM2" || tech == "HBM3") local_latency = 8;
+                else                            local_latency = 10;  // DDR default
+                std::cerr << "  [pe-mi] WARNING: no array-model latency for "
+                          << tech << " at this placement; falling back to the "
+                             "fixed per-technology cycle table (" << local_latency
+                          << " cycles), which does NOT scale with the PE clock."
+                          << std::endl;
+            }
         }
 
-        // Auto-derive bandwidth from technology if not overridden
+        /* 1.11.52 (audit B002): the PE-MI's bandwidth is the memory's own
+         * aggregate, which this run already derived from Ramulator into
+         * config.hierarchy_agg_bandwidth_mbs. The table below contradicted
+         * it (e.g. HBM3 51200 against the derived rate) while both were
+         * emitted into ONE sys.hierarchy block, and this one sets the M/D/1
+         * service rate. Prefer the derived value; keep the table as the
+         * stated fallback. */
         int bw_mbs = config.pe_mc_bandwidth_mbs;
         if (bw_mbs < 0) {
-            std::string tech = config.memory_tech;
-            if (tech == "HBM2")             bw_mbs = 25600;
-            else if (tech == "HBM3")        bw_mbs = 51200;
-            else if (tech == "GDDR6")       bw_mbs = 19200;
-            else if (tech == "SRAM")        bw_mbs = 51200;
-            else                            bw_mbs = 12800;  // DDR default
+            if (config.hierarchy_agg_bandwidth_mbs > 0) {
+                bw_mbs = static_cast<int>(config.hierarchy_agg_bandwidth_mbs);
+                std::cout << "  [pe-mi] bandwidth " << bw_mbs
+                          << " MB/s, from the memory model's own aggregate"
+                          << std::endl;
+            } else {
+                std::string tech = config.memory_tech;
+                if (tech == "HBM2")             bw_mbs = 25600;
+                else if (tech == "HBM3")        bw_mbs = 51200;
+                else if (tech == "GDDR6")       bw_mbs = 19200;
+                else if (tech == "SRAM")        bw_mbs = 51200;
+                else                            bw_mbs = 12800;  // DDR default
+                std::cerr << "  [pe-mi] WARNING: no derived aggregate bandwidth"
+                             " for " << tech << "; falling back to the fixed "
+                             "per-technology table (" << bw_mbs << " MB/s)."
+                          << std::endl;
+            }
         }
 
         out << "        totalUnits = " << total_units << ";\n";
@@ -3864,7 +3994,23 @@ static int resolveMemoryTopology(UnifiedConfig& config) {
                       << "ignoring host.mem (the device technology drives host "
                       << "main memory by construction).\n";
         }
-        if (dev) host->memory_tech = dev->memory_tech;
+        /* 1.11.52 (audit B027): announce the OVERWRITE, not just the ignored
+         * block. The warning above fires only when a host.mem block is
+         * present; a host memory technology that arrived by any other route
+         * was replaced here without a word. Under is_default_mem the device
+         * IS the host's memory, so the overwrite is correct -- but a user who
+         * set a different host technology must be told which one runs. */
+        if (dev) {
+            if (!host->memory_tech.empty() &&
+                host->memory_tech != dev->memory_tech) {
+                std::cerr << "Warning: host '" << host->name << "' memory technology "
+                          << host->memory_tech << " is replaced by the device's "
+                          << dev->memory_tech
+                          << " (device.is_default_mem=true: the device IS the "
+                             "host's main memory)." << std::endl;
+            }
+            host->memory_tech = dev->memory_tech;
+        }
     } else {
         // Separate memory: the host must declare its own main memory tech.
         if (!host->host_mem_present || host->host_mem_tech.empty()) {
@@ -4022,13 +4168,18 @@ static int bisectionLinksForTopology(const std::string& topology, int num_nodes,
 
     if (topo == "CROSSBAR") return num_nodes / 2;
     if (topo == "FAT_TREE") return num_nodes / 2;  // full bisection BW
+    /* 1.11.52 (audit B043): ONE grid derivation. avgHops uses
+     * ceil(sqrt(N)) -- the grid that actually holds N nodes -- while these
+     * two used a TRUNCATING sqrt, so for any non-square N the bisection
+     * width and the hop count described different meshes (N=12: hops on a
+     * 4x4, bisection on a 3x3). The mesh a router count is built for is the
+     * one that fits the nodes. */
+    const int grid_side = (int)std::ceil(std::sqrt((double)num_nodes));
     if (topo == "TORUS_2D" || topo == "TORUS") {
-        int side = (int)std::sqrt((double)num_nodes);
-        return 2 * side;  // cut wraps around both dimensions
+        return 2 * grid_side;  // cut wraps around both dimensions
     }
     if (topo == "MESH_2D" || topo == "MESH") {
-        int side = (int)std::sqrt((double)num_nodes);
-        return side;  // cut along one dimension
+        return grid_side;      // cut along one dimension
     }
     if (topo == "RING") return ring_unidir ? 1 : 2;  // uni: 1 CW link; bi: 2 links
     if (topo == "BUS") return 1;      // single shared medium
@@ -4048,7 +4199,7 @@ static int totalChannelsForTopology(const std::string& topology, int num_nodes,
     for (auto& c : topo) c = std::toupper(c);
 
     int N = num_nodes;
-    int k = (int)std::sqrt((double)N);
+    int k = (int)std::ceil(std::sqrt((double)N));   // 1.11.52 (B043): same grid as avgHops
 
     if (topo == "BUS") return 1;           // shared bus: 1 flit/cycle total
     if (topo == "CROSSBAR") return N;      // N output ports
@@ -4462,6 +4613,18 @@ static bool applyProcessFamily(pimid::McPATWrapper::SystemConfig& mcfg,
         mcfg.process_family = 1;
         DRAMGenClass gc = getDRAMGenClass(config.memory_tech);
         mcfg.dram_periph_table_nm = gc.cacti_table_nm;
+        /* 1.11.52 (N2 completion; audit 1162-A): the helper now carries the
+         * generation pin too, so its caller -- the in-memory NoC probe --
+         * prices the fabric at the same node as the PEs beside it. Without
+         * this the probe kept config.tech_node_nm: one die, two processes,
+         * the exact defect the probe's own E3 comment says was fixed. */
+        if (mcfg.tech_node_nm != gc.cacti_table_nm) {
+            if (!quiet)
+                std::cout << "  [tech] on-die fabric: process pinned to "
+                             "generation " << gc.cls << " (CACTI "
+                          << gc.cacti_table_nm << "nm table)." << std::endl;
+            mcfg.tech_node_nm = gc.cacti_table_nm;
+        }
         if (!quiet)
             std::cout << "  [tech] process family: DRAM-periphery (placement "
                       << pe_hierarchy_level << " on " << config.memory_tech
@@ -4594,11 +4757,43 @@ static std::vector<pimid::McPATWrapper::NoCLevelConfig> buildNoCLevelsForMcPAT(
             config.memory_tech.rfind("GDDR", 0) == 0 ||
             config.memory_tech.rfind("HBM", 0) == 0;
 
+        /* 1.11.52 (A021): which levels will actually be priced? A level with
+         * neither a branch router nor an endpoint is wire and is skipped
+         * below; the weight and coverage denominators must match that set. */
+        double surviving_weight = 0.0;
+        int surviving_levels = 0;
+        for (int l = pe_level; l < 7; l++) {
+            if (config.htree_level_branch[0] >= 0 &&
+                (config.htree_level_branch[l] + config.htree_level_endpoints[l]) <= 0)
+                continue;
+            surviving_weight += 1.0 / (1 + l - pe_level);
+            surviving_levels++;
+        }
+        if (surviving_levels == 0) { surviving_levels = 1; surviving_weight = 1.0; }
+        if (surviving_levels != num_active)
+            std::cout << "  [NoC] " << (num_active - surviving_levels)
+                      << " hierarchy level(s) are pure pass-through wire and are"
+                         " not priced; traversal weights and chip coverage are"
+                         " normalised over the " << surviving_levels
+                      << " level(s) that are" << std::endl;
+
         for (int lvl = pe_level; lvl < 7; lvl++) {
             NoCLevel nc;
             nc.name = level_names[lvl];
-            nc.on_dram_die = ((lvl <= 3) ||
-                              (lvl == 5 && noc_channel_centric)) ? 1 : 0;
+            /* 1.11.52 (audit B038): the family owner's guard was dropped
+             * here. applyProcessFamily requires dram_family_tech BEFORE the
+             * placement test, so an SRAM or NVM device is family 0 at every
+             * level -- but this predicate omitted it and declared the fabric
+             * of an SRAM/NVM device to be ON THE DRAM DIE at levels 0-3,
+             * which is what decides whether processor.cc applies the
+             * DRAM-periphery transform to that fabric. Same matrix, same
+             * guard, one reader. */
+            const bool noc_dram_family_tech =
+                !(config.memory_tech == "SRAM" || config.memory_tech == "STT_MRAM" ||
+                  config.memory_tech == "PCM"  || config.memory_tech == "RERAM");
+            nc.on_dram_die = (noc_dram_family_tech &&
+                              ((lvl <= 3) ||
+                               (lvl == 5 && noc_channel_centric))) ? 1 : 0;
 
             // Lower levels (subarray/bank) → bus; upper levels → router NoC
             nc.type = (lvl <= 1) ? 0 : topologyToMcPATType(config.noc_topology);
@@ -4663,20 +4858,35 @@ static std::vector<pimid::McPATWrapper::NoCLevelConfig> buildNoCLevelsForMcPAT(
             nc.clock_mhz = (garnet.clock_mhz > 0.0)
                          ? garnet.clock_mhz : config.frequency_mhz;
 
-            // Distribute Garnet accesses: lower levels see more traffic
-            // Simple model: level i gets fraction proportional to 1/(i+1 - pe_level)
+            /* Distribute Garnet traversals: lower levels see more traffic;
+             * level i gets a share proportional to 1/(i+1-pe_level).
+             *
+             * 1.11.52 (audit A021): NORMALISE OVER THE LEVELS THAT SURVIVE.
+             * Levels with no chargeable node are skipped by the `continue`
+             * above (pure pass-through wire), but the weight sum and the
+             * coverage denominator still counted them -- so a skipped level's
+             * share of the MEASURED hop count was dropped on the floor and
+             * the emitted chip_coverage no longer tiled the die, silently.
+             * Both denominators now use the surviving set, computed once. */
             double level_weight = 1.0 / (1 + lvl - pe_level);
-            double total_weight = 0;
-            for (int l = pe_level; l < 7; l++) total_weight += 1.0 / (1 + l - pe_level);
-            uint64_t level_accesses = static_cast<uint64_t>(garnet_packets * level_weight / total_weight);
+            uint64_t level_accesses = static_cast<uint64_t>(
+                garnet_packets * level_weight / surviving_weight);
+            double chip_cov = 1.0 / static_cast<double>(surviving_levels);
 
-            // chip_coverage
-            double chip_cov = 1.0 / num_active;
-
-            // duty_cycle: fraction of peak bandwidth [0,1]
-            // Peak = nodes × 1 access/cycle, so duty = accesses / (cycles × nodes)
-            double duty = (total_cycles > 0 && nodes > 0)
-                ? static_cast<double>(level_accesses) / (total_cycles * nodes) : 0.0;
+            /* duty_cycle: fraction of peak bandwidth [0,1].
+             * Peak = nodes x 1 access/cycle, so duty = accesses / (cycles x nodes).
+             *
+             * 1.11.52 (audit A016): the CYCLES MUST BE THE NETWORK'S OWN. The
+             * caller passes the PE/zsim-domain cycle count, while nc.clock_mhz
+             * two lines below is the MEASURED Garnet clock -- so when the
+             * fabric runs at a different frequency than the elements, the duty
+             * was off by exactly their ratio. Convert the window into network
+             * cycles before dividing. */
+            double net_cycles = static_cast<double>(total_cycles);
+            if (nc.clock_mhz > 0.0 && config.frequency_mhz > 0.0)
+                net_cycles *= (nc.clock_mhz / config.frequency_mhz);
+            double duty = (net_cycles > 0.0 && nodes > 0)
+                ? static_cast<double>(level_accesses) / (net_cycles * nodes) : 0.0;
 
             // Apply overrides
             std::string prefix = "noc." + std::to_string(lvl - pe_level);
@@ -4705,14 +4915,27 @@ static std::vector<pimid::McPATWrapper::NoCLevelConfig> buildNoCLevelsForMcPAT(
         nc.vertical_nodes = grid;
         nc.input_ports = 5;
         nc.output_ports = 5;
-        nc.flit_bits = 128;
-        nc.clock_mhz = config.frequency_mhz;
+        /* 1.11.52 (audit A032): the flat branch takes the same MEASURED
+         * inputs 1.9.22 gave the hierarchical one. A hardcoded 128-bit flit
+         * ignored a reconfigured width; the PE clock is not the network's;
+         * and McPAT's total_accesses counts ROUTER TRAVERSALS, so packets
+         * undercount by the average hop count (measured 2.04x on a co-sim
+         * HBM3 cell). This branch runs whenever hierarchy is disabled or the
+         * placement level is out of range. */
+        nc.flit_bits = (garnet.flit_size_bits > 0)
+                     ? static_cast<int>(garnet.flit_size_bits) : 128;
+        nc.clock_mhz = (garnet.clock_mhz > 0.0) ? garnet.clock_mhz
+                                                : config.frequency_mhz;
         nc.chip_coverage = 1.0;
 
-        uint64_t accesses = garnet.total_packets;
-        // duty_cycle: fraction of peak bandwidth [0,1]
-        double duty = (total_cycles > 0 && flat_nodes > 0)
-            ? static_cast<double>(accesses) / (total_cycles * flat_nodes) : 0.0;
+        uint64_t accesses = (garnet.total_hops > 0) ? garnet.total_hops
+                                                    : garnet.total_packets;
+        // duty_cycle: fraction of peak bandwidth [0,1], in NETWORK cycles (A016)
+        double flat_net_cycles = static_cast<double>(total_cycles);
+        if (nc.clock_mhz > 0.0 && config.frequency_mhz > 0.0)
+            flat_net_cycles *= (nc.clock_mhz / config.frequency_mhz);
+        double duty = (flat_net_cycles > 0.0 && flat_nodes > 0)
+            ? static_cast<double>(accesses) / (flat_net_cycles * flat_nodes) : 0.0;
 
         auto it_dc = overrides.find("noc.0.duty_cycle");
         if (it_dc != overrides.end()) duty = it_dc->second;
@@ -4761,6 +4984,246 @@ static int memorySystemDieCount(const std::string& tech,
                                 const std::string& device_width,
                                 int ranks_per_channel, int channels);  // 1.11.51 (L243)
 
+/* 1.11.52 (audit A018/A019): ONE predicate for "does an access at this
+ * placement drive OFF-PACKAGE DQ pins, and therefore pay termination?"
+ *
+ * There were two, and they disagreed. The MC-interface tier says levels 5
+ * (on channel-centric parts) and 6 are INTERPOSER -- TSVs and microbumps,
+ * priced at no ODT "by physics" -- while the termination predicate charged
+ * everything at level >= 4. The reachable non-zero disagreements were
+ * CHANNEL placement on GDDR6 (0.333 nJ/access, ~5% of the memory's
+ * per-access dynamic) and on LPDDR5 (0.036 nJ), plus any DDR technology
+ * configured at LOGIC_DIE. HBM was inert only because its termination model
+ * already returns 0 by physics -- an accident, not agreement.
+ *
+ * The tiers, stated once: on-die (subarray..chip) drives no pins; interposer
+ * (LOGIC_DIE, or the channel tier of a channel-centric part) crosses TSVs
+ * and microbumps, which our termination model prices at zero ODT; rank and
+ * above, and HOST_MC, cross the package boundary and pay full termination. */
+static bool crossesOffPackageDQ(int pe_hierarchy_level,
+                                const std::string& memory_tech) {
+    const bool channel_centric =
+        memory_tech.rfind("LPDDR", 0) == 0 ||
+        memory_tech.rfind("GDDR", 0) == 0 ||
+        memory_tech.rfind("HBM", 0) == 0;
+    if (pe_hierarchy_level == -1) return true;             // HOST_MC: host DIMM pins
+    if (pe_hierarchy_level >= 0 && pe_hierarchy_level <= 3) return false;  // on-die
+    if (pe_hierarchy_level == 6) return false;             // LOGIC_DIE: interposer
+    if (pe_hierarchy_level == 5) return !channel_centric;  // channel tier
+    return true;                                           // RANK and anything above
+}
+
+/* 1.11.52 (audit 1162 A001/A002/A003/A025): ONE OWNER for the device
+ * corner, the DRAM-periphery factors and the periphery clock ceiling.
+ *
+ * The per-node (system/co-sim) path carried a DIVERGENT COPY of this
+ * decision, and the copy was wrong in three ways at once: it REFUSED the
+ * corner outright where this logic maps it to CACTI's lp-dram column (E2);
+ * it priced the area factor from two hardcoded literals (2.44 / 2.46)
+ * instead of reading the columns, so the corner, the baseline device and
+ * the temperature never entered the number; and it guarded the clock with
+ * a literal 700 MHz instead of the calculated ceiling. Its own comment
+ * claimed "Same behavior as the device-scope site, per node" -- it was not.
+ * Both paths now call this, so they cannot drift again.
+ *
+ * `label` prefixes every message ("" in device scope, "<node>: " per node);
+ * `freq_mhz` and `gc` belong to the element being priced. */
+static void applyCornerAndPeripheryPricing(
+        pimid::McPATWrapper::SystemConfig& mcfg,
+        const UnifiedConfig& config,
+        const std::map<std::string, double>& overrides,
+        const DRAMGenClass& gc,
+        double freq_mhz,
+        const std::string& label) {
+    auto ovInt = [&overrides](const std::string& key, int fallback) -> int {
+        auto it = overrides.find(key);
+        return (it != overrides.end()) ? static_cast<int>(it->second) : fallback;
+    };
+        int corner = (config.device_corner == "lstp") ? 1
+                   : (config.device_corner == "lop")  ? 2 : 0;
+        /* 1.11.21 (user ruling E1+E2): the BASELINE McPAT will actually price
+         * at -- override included. The refusal below tests THIS, not the
+         * corner alone, because power.mcpat_overrides.device_type used to be
+         * applied AFTER the refusal and silently reinstated what was refused. */
+        int baseline = ovInt("device_type", corner);
+        /* 1.11.21 (E2): on a DRAM-periphery placement the low-power device is
+         * lp-dram (CACTI column 3), not logic lstp/lop. The corner names an
+         * intent; the family decides which column carries it. */
+        if (mcfg.process_family == 1 && !overrides.count("device_type") &&
+            (baseline == 1 || baseline == 2)) {
+            std::cout << "  [tech] " << label << "power.device_corner=" << config.device_corner
+                      << " on a DRAM-periphery placement maps to the lp-dram "
+                         "column: the low-power variant of a DRAM periphery "
+                         "device is lp-dram, not logic lstp/lop." << std::endl;
+            baseline = 3;
+        }
+        if (mcfg.process_family == 1) {
+            double fa_c = 0, fd_c = 0, fl_c = 0;
+            const bool coherent = pimid::McPATWrapper::periphFactorsFor(
+                mcfg.dram_periph_table_nm, mcfg.tech_node_nm, baseline,
+                mcfg.temperature_k, fa_c, fd_c, fl_c);
+            if (!coherent) {
+                std::cerr << "[config] FATAL: " << label << "DRAM-periphery components cannot be "
+                             "priced at device column " << baseline
+                          << " (power.device_corner=" << config.device_corner
+                          << (overrides.count("device_type")
+                                  ? ", overridden by power.mcpat_overrides.device_type"
+                                  : "")
+                          << ").\n"
+                             "  All three family factors are ratios against "
+                             "that column in the "
+                          << mcfg.dram_periph_table_nm << " nm table, and the "
+                             "column is not populated there (lp-dram is all-zero "
+                             "at 22 nm; it is real data at 32 and 45 nm). "
+                             "Deriving a factor from an empty column would "
+                             "produce a number with no referent.\n"
+                             "  Either run this placement at 32/45 nm, drop the "
+                             "corner, or move the PE to a LOGIC placement.\n";
+                std::exit(2);
+            }
+            corner = baseline;
+            /* 1.11.17 (audit go-through): report the factor actually APPLIED
+             * -- the emitted XML carries fa x subarray_pitch_factor, and the
+             * old print showed fa alone, so at SUBARRAY placement the
+             * reported factor was not the one in use. */
+            /* 1.11.21: the value in USE, read from the table, not a literal. */
+            double fa = fa_c;
+            double pitch = (mcfg.subarray_pitch_factor > 0.0)
+                               ? mcfg.subarray_pitch_factor : 1.0;
+            std::cout << "  [tech] " << label << "periphery factors READ: comm-dram from "
+                      << mcfg.dram_periph_table_nm << "nm.dat / baseline from "
+                      << mcfg.tech_node_nm << "nm.dat at "
+                      << (mcfg.temperature_k - 273) << "C: area " << fa
+                      << "x, dynamic " << fd_c << "x, leakage " << fl_c << "x";
+            if (pitch != 1.0)
+                std::cout << " x pitch " << pitch << " = " << (fa * pitch)
+                          << "x applied";
+            /* 1.11.27: the band is no longer open at the top. Samsung's
+             * FIMDRAM (Kwon, ISSCC 2021 25.4) replaced half the cell array in
+             * each bank with a 16-wide SIMD PCU on a 20nm DRAM process, at
+             * unchanged HBM2 dimensions: 8 GB -> 6 GB, so 2 GB of array bought
+             * the compute. At our measured HBM2 density (Sohn, ISSCC 2016
+             * 18.2: 8 Gb / 96 mm^2) that is ~24 mm^2 per die over 16 PCUs, so
+             * ~1.5 mm^2 per PCU -- an UPPER bound, since some of the reclaimed
+             * area is control and routing.
+             * Our comparable PE prices at 0.4925 mm^2 in logic. The linear end
+             * puts it at 1.204 mm^2, UNDER that bound; the squared end puts it
+             * at 2.943 mm^2, 1.96x ABOVE it. Silicon therefore contradicts the
+             * pessimistic end and is consistent with the linear one, which is
+             * the value we apply. The UPMEM die is NOT a quantitative anchor:
+             * its Hot Chips 31 deck carries no die area at all. */
+            std::cout << " -- uncertainty band ["
+                      << (fa * pitch) << ", " << (fa * fa * pitch)
+                      << "]: the linear ratio is applied. Samsung FIMDRAM "
+                         "(ISSCC 2021 25.4, ~1.5 mm^2/PCU upper bound) is "
+                         "consistent with the linear end and rules out the "
+                         "squared one, which would exceed it by 1.96x."
+                      << std::endl;
+            /* 1.11.52: the CALCULATED periphery clock ceiling travels with
+             * the factors (audit A003) -- the per-node copy used a literal
+             * 700 MHz and no reference-clock anchor at all. */
+            /* 1.11.35 (user ruling E13): the feasible ceiling is CALCULATED,
+             * not cited. The threshold comes from the device physics in the
+             * CACTI tables; published parts are used to CHECK it, never to set
+             * it.
+             *
+             * A DRAM-periphery device is slower than a logic device by its
+             * CV/I delay ratio -- computed from the same two columns the area
+             * and dynamic factors already use:
+             *     t = (C_g_ideal + C_fringe) * Vdd / I_on
+             *     22 nm  hp 1.179e-13 s   comm-dram 2.491e-13 s   -> 2.113x
+             *     32 nm                                           -> 1.291x
+             * NOTE this is NOT the I_on ratio (2.885x at 22 nm). Drive alone
+             * overstates the penalty, because the periphery device also has
+             * LOWER gate capacitance (1.99e-16 against 3.27e-16 F/um), which
+             * partly offsets its weaker drive. An earlier draft of this guard
+             * used I_on alone and was wrong by 37%.
+             *
+             * So the ceiling for a periphery PE is the logic reference clock
+             * this machine runs at, divided by that ratio. Above it, the same
+             * design in a logic process would have to exceed the reference --
+             * the clock is not a cost question, it is unreachable.
+             *
+             * CORROBORATION, deliberately not the threshold: shipped parts sit
+             * well under this bound, because real designs are limited by power,
+             * thermals and pitch as well as by transistor delay --
+             *   UPMEM DPU  500 MHz  (Devaux, Hot Chips 31 p3/p4; p10 notes the
+             *                        14 pipeline stages needed to reach it)
+             *   FIMDRAM    300 MHz  (Kwon, ISSCC 2021 25.4)
+             * An earlier comment here claimed "UPMEM DPU: 350-466 MHz", a
+             * figure that appears in no source we hold. */
+            {
+                const double f = freq_mhz;
+                const double delay_ratio =
+                    (gc.cacti_table_nm == 32) ? 1.291 : 2.113;   // CV/I, CACTI columns
+                /* 1.11.35: the anchor is the USER'S logic reference, or a
+                 * genuine logic node's clock (the host) when co-simulating.
+                 * It is NOT reference_frequency_mhz -- that is the max over ALL
+                 * nodes, which in device scope is the PE itself, making the
+                 * test circular. An earlier draft did that and warned on every
+                 * device-scope run. */
+                double ref = config.logic_reference_mhz;
+                const char* ref_src = "power.logic_reference_mhz";
+                if (!(ref > 0.0)) {
+                    for (const auto& n2 : config.system_nodes)
+                        if (n2.role == UnifiedConfig::SystemNode::HOST &&
+                            n2.frequency_mhz > ref) {
+                            ref = n2.frequency_mhz; ref_src = "host node clock";
+                        }
+                }
+                const double demonstrated_max = 500.0;   // UPMEM, for the note only
+                if (!(ref > 0.0)) {
+                    /* No logic anchor exists. Say so instead of inventing one
+                     * or comparing the PE against itself. */
+                    if (f > demonstrated_max)
+                        std::cout << "  [tech] " << label << "NOTE: " << f
+                                  << " MHz PE in DRAM periphery. No logic "
+                                     "reference is configured, so the calculated "
+                                     "ceiling (reference / CV/I ratio "
+                                  << delay_ratio << ") cannot be evaluated -- set "
+                                     "power.logic_reference_mhz to enable it. For "
+                                     "context only, demonstrated parts run 300 MHz "
+                                     "(FIMDRAM) to 500 MHz (UPMEM DPU)."
+                                  << std::endl;
+                } else if (f > ref / delay_ratio) {
+                    const double ceiling = ref / delay_ratio;
+                    std::cout << "  [tech] " << label << "WARNING: " << f
+                              << " MHz PE in DRAM periphery exceeds the "
+                                 "calculated ceiling of " << ceiling
+                              << " MHz (logic reference " << ref
+                              << " MHz from " << ref_src
+                              << " / CV/I delay ratio " << delay_ratio
+                              << " from the " << gc.cacti_table_nm
+                              << "nm hp vs comm-dram columns). The same design "
+                                 "in a logic process would have to beat the "
+                                 "reference clock. Power is reported at the "
+                                 "requested clock; the clock is the hypothesis."
+                              << std::endl;
+                } else if (f > demonstrated_max) {
+                    std::cout << "  [tech] " << label << "NOTE: " << f
+                              << " MHz is within the calculated ceiling ("
+                              << (ref / delay_ratio) << " MHz) but above every DEMONSTRATED "
+                                 "DRAM-periphery part -- UPMEM DPU 500 MHz "
+                                 "(Hot Chips 31), FIMDRAM 300 MHz (ISSCC 2021 "
+                                 "25.4). Real parts are bounded by power, "
+                                 "thermals and pitch as well as transistor "
+                                 "delay." << std::endl;
+                }
+            }
+        } else if (corner != 0) {
+            /* 1.11.17: say when a corner is APPLIED, not only when refused --
+             * 1.11.13's own stated defect ("priced hp without saying so")
+             * survived for every non-hp logic run. */
+            std::cout << "  [tech] " << label << "device corner " << config.device_corner
+                      << " applied to logic components (CACTI "
+                      << (corner == 1 ? "lstp" : "lop") << " device column)."
+                      << std::endl;
+        }
+        mcfg.device_type = corner;   // 1.11.21: override already folded in above
+}
+
+
+
 /* 1.11.51 (E17): DRAM power-down residency from the MEASURED devMC gap
  * histogram, at a SOURCED per-generation threshold (settable via
  * memory.power_down_threshold_ns). Bucket b holds gaps in [2^b, 2^(b+1));
@@ -4799,7 +5262,27 @@ static double gapPowerDownResidency(const UnifiedConfig& config,
                  th_ns, (unsigned long long)th_cyc, clock_mhz, src);
         *prov = buf;
     }
+    /* 1.11.52 (audit A014): REBASE ONTO THE PRICED WINDOW. `usable` and
+     * `devmc_gap_span` both live in the histogram's own span -- last event
+     * minus first -- while the consumer multiplies this fraction against
+     * the FULL priced (ROI) duration when weighting background power. Two
+     * denominators fed one weight. The gap span is a sub-interval of the
+     * priced window (it starts at the first access after arming and ends at
+     * the last), so the usable idle it found is rescaled onto that window;
+     * idle outside the first/last access is real idle and is credited as
+     * such only to the extent the window extends beyond the span. */
     double r = static_cast<double>(usable) / static_cast<double>(z.devmc_gap_span);
+    const double window_cyc = static_cast<double>(z.pg_window())
+                            * static_cast<double>(config.phase_length > 0
+                                                  ? config.phase_length : 10000);
+    if (window_cyc > 0.0) {
+        const double span = static_cast<double>(z.devmc_gap_span);
+        if (span > 0.0 && span <= window_cyc) {
+            /* usable idle within the span, plus the untouched remainder of
+             * the priced window, over the priced window. */
+            r = (static_cast<double>(usable) + (window_cyc - span)) / window_cyc;
+        }
+    }
     return (r > 1.0) ? 1.0 : r;
 }
 
@@ -4924,7 +5407,11 @@ static void runPowerAnalysis(const UnifiedConfig& config,
      * generation table (the N2 proposal) is a pending user ruling. For LOGIC
      * placements the knob is the real process choice, as it should be. */
     mcfg.tech_node_nm = validateTechNodeNm(config.tech_node_nm, "device PE node");
-    mcfg.temperature_k = 350;
+    mcfg.temperature_k = config.temperature_k;   // 1.11.52: was a literal 350
+    if (config.temperature_k != 350)
+        std::cout << "  [tech] temperature " << config.temperature_k
+                  << " K (leakage rows snapped to the nearest 10 C step)"
+                  << std::endl;
 
     /* 1.11.2: placement x technology -> PE process family. Every row is
      * anchored to shipped silicon:
@@ -5066,94 +5553,9 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                       << ", class " << gc.cls << "); factors from CACTI "
                       << gc.cacti_table_nm << "nm hp/comm-dram columns"
                       << std::endl;
-            /* 1.11.35 (user ruling E13): the feasible ceiling is CALCULATED,
-             * not cited. The threshold comes from the device physics in the
-             * CACTI tables; published parts are used to CHECK it, never to set
-             * it.
-             *
-             * A DRAM-periphery device is slower than a logic device by its
-             * CV/I delay ratio -- computed from the same two columns the area
-             * and dynamic factors already use:
-             *     t = (C_g_ideal + C_fringe) * Vdd / I_on
-             *     22 nm  hp 1.179e-13 s   comm-dram 2.491e-13 s   -> 2.113x
-             *     32 nm                                           -> 1.291x
-             * NOTE this is NOT the I_on ratio (2.885x at 22 nm). Drive alone
-             * overstates the penalty, because the periphery device also has
-             * LOWER gate capacitance (1.99e-16 against 3.27e-16 F/um), which
-             * partly offsets its weaker drive. An earlier draft of this guard
-             * used I_on alone and was wrong by 37%.
-             *
-             * So the ceiling for a periphery PE is the logic reference clock
-             * this machine runs at, divided by that ratio. Above it, the same
-             * design in a logic process would have to exceed the reference --
-             * the clock is not a cost question, it is unreachable.
-             *
-             * CORROBORATION, deliberately not the threshold: shipped parts sit
-             * well under this bound, because real designs are limited by power,
-             * thermals and pitch as well as by transistor delay --
-             *   UPMEM DPU  500 MHz  (Devaux, Hot Chips 31 p3/p4; p10 notes the
-             *                        14 pipeline stages needed to reach it)
-             *   FIMDRAM    300 MHz  (Kwon, ISSCC 2021 25.4)
-             * An earlier comment here claimed "UPMEM DPU: 350-466 MHz", a
-             * figure that appears in no source we hold. */
-            {
-                const double f = config.frequency_mhz;
-                const double delay_ratio =
-                    (gc.cacti_table_nm == 32) ? 1.291 : 2.113;   // CV/I, CACTI columns
-                /* 1.11.35: the anchor is the USER'S logic reference, or a
-                 * genuine logic node's clock (the host) when co-simulating.
-                 * It is NOT reference_frequency_mhz -- that is the max over ALL
-                 * nodes, which in device scope is the PE itself, making the
-                 * test circular. An earlier draft did that and warned on every
-                 * device-scope run. */
-                double ref = config.logic_reference_mhz;
-                const char* ref_src = "power.logic_reference_mhz";
-                if (!(ref > 0.0)) {
-                    for (const auto& n2 : config.system_nodes)
-                        if (n2.role == UnifiedConfig::SystemNode::HOST &&
-                            n2.frequency_mhz > ref) {
-                            ref = n2.frequency_mhz; ref_src = "host node clock";
-                        }
-                }
-                const double demonstrated_max = 500.0;   // UPMEM, for the note only
-                if (!(ref > 0.0)) {
-                    /* No logic anchor exists. Say so instead of inventing one
-                     * or comparing the PE against itself. */
-                    if (f > demonstrated_max)
-                        std::cout << "  [tech] NOTE: " << f
-                                  << " MHz PE in DRAM periphery. No logic "
-                                     "reference is configured, so the calculated "
-                                     "ceiling (reference / CV/I ratio "
-                                  << delay_ratio << ") cannot be evaluated -- set "
-                                     "power.logic_reference_mhz to enable it. For "
-                                     "context only, demonstrated parts run 300 MHz "
-                                     "(FIMDRAM) to 500 MHz (UPMEM DPU)."
-                                  << std::endl;
-                } else if (f > ref / delay_ratio) {
-                    const double ceiling = ref / delay_ratio;
-                    std::cout << "  [tech] WARNING: " << f
-                              << " MHz PE in DRAM periphery exceeds the "
-                                 "calculated ceiling of " << ceiling
-                              << " MHz (logic reference " << ref
-                              << " MHz from " << ref_src
-                              << " / CV/I delay ratio " << delay_ratio
-                              << " from the " << gc.cacti_table_nm
-                              << "nm hp vs comm-dram columns). The same design "
-                                 "in a logic process would have to beat the "
-                                 "reference clock. Power is reported at the "
-                                 "requested clock; the clock is the hypothesis."
-                              << std::endl;
-                } else if (f > demonstrated_max) {
-                    std::cout << "  [tech] NOTE: " << f
-                              << " MHz is within the calculated ceiling ("
-                              << (ref / delay_ratio) << " MHz) but above every DEMONSTRATED "
-                                 "DRAM-periphery part -- UPMEM DPU 500 MHz "
-                                 "(Hot Chips 31), FIMDRAM 300 MHz (ISSCC 2021 "
-                                 "25.4). Real parts are bounded by power, "
-                                 "thermals and pitch as well as transistor "
-                                 "delay." << std::endl;
-                }
-            }
+            /* 1.11.52: the periphery clock ceiling moved into
+             * applyCornerAndPeripheryPricing() with the factors it belongs
+             * to, so the per-node path gets it too (audit A003). */
         } else {
             mcfg.process_family = 0;  // LOGIC (native)
             std::cout << "  [tech] PE process family: logic ("
@@ -5216,102 +5618,13 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     mcfg.num_alus = ov_get_int("num_alus", mcfg.num_alus);
     mcfg.num_muls = ov_get_int("num_muls", mcfg.num_muls);
     mcfg.num_fpus = ov_get_int("num_fpus", mcfg.num_fpus);
-    /* 1.11.13 (#121): corner selection, refused where the data has no
-     * corners. The area-factor UNCERTAINTY BAND is printed beside the value
-     * in use: the linear pitch ratio is the conservative end of a band whose
-     * other end is the square of the same ratio. */
-    {
-        int corner = (config.device_corner == "lstp") ? 1
-                   : (config.device_corner == "lop")  ? 2 : 0;
-        /* 1.11.21 (user ruling E1+E2): the BASELINE McPAT will actually price
-         * at -- override included. The refusal below tests THIS, not the
-         * corner alone, because power.mcpat_overrides.device_type used to be
-         * applied AFTER the refusal and silently reinstated what was refused. */
-        int baseline = ov_get_int("device_type", corner);
-        /* 1.11.21 (E2): on a DRAM-periphery placement the low-power device is
-         * lp-dram (CACTI column 3), not logic lstp/lop. The corner names an
-         * intent; the family decides which column carries it. */
-        if (mcfg.process_family == 1 && !overrides.count("device_type") &&
-            (baseline == 1 || baseline == 2)) {
-            std::cout << "  [tech] power.device_corner=" << config.device_corner
-                      << " on a DRAM-periphery placement maps to the lp-dram "
-                         "column: the low-power variant of a DRAM periphery "
-                         "device is lp-dram, not logic lstp/lop." << std::endl;
-            baseline = 3;
-        }
-        if (mcfg.process_family == 1) {
-            double fa_c = 0, fd_c = 0, fl_c = 0;
-            const bool coherent = pimid::McPATWrapper::periphFactorsFor(
-                mcfg.dram_periph_table_nm, mcfg.tech_node_nm, baseline,
-                mcfg.temperature_k, fa_c, fd_c, fl_c);
-            if (!coherent) {
-                std::cerr << "[config] FATAL: DRAM-periphery components cannot be "
-                             "priced at device column " << baseline
-                          << " (power.device_corner=" << config.device_corner
-                          << (overrides.count("device_type")
-                                  ? ", overridden by power.mcpat_overrides.device_type"
-                                  : "")
-                          << ").\n"
-                             "  All three family factors are ratios against "
-                             "that column in the "
-                          << mcfg.dram_periph_table_nm << " nm table, and the "
-                             "column is not populated there (lp-dram is all-zero "
-                             "at 22 nm; it is real data at 32 and 45 nm). "
-                             "Deriving a factor from an empty column would "
-                             "produce a number with no referent.\n"
-                             "  Either run this placement at 32/45 nm, drop the "
-                             "corner, or move the PE to a LOGIC placement.\n";
-                std::exit(2);
-            }
-            corner = baseline;
-            /* 1.11.17 (audit go-through): report the factor actually APPLIED
-             * -- the emitted XML carries fa x subarray_pitch_factor, and the
-             * old print showed fa alone, so at SUBARRAY placement the
-             * reported factor was not the one in use. */
-            /* 1.11.21: the value in USE, read from the table, not a literal. */
-            double fa = fa_c;
-            double pitch = (mcfg.subarray_pitch_factor > 0.0)
-                               ? mcfg.subarray_pitch_factor : 1.0;
-            std::cout << "  [tech] periphery factors READ: comm-dram from "
-                      << mcfg.dram_periph_table_nm << "nm.dat / baseline from "
-                      << mcfg.tech_node_nm << "nm.dat at "
-                      << (mcfg.temperature_k - 273) << "C: area " << fa
-                      << "x, dynamic " << fd_c << "x, leakage " << fl_c << "x";
-            if (pitch != 1.0)
-                std::cout << " x pitch " << pitch << " = " << (fa * pitch)
-                          << "x applied";
-            /* 1.11.27: the band is no longer open at the top. Samsung's
-             * FIMDRAM (Kwon, ISSCC 2021 25.4) replaced half the cell array in
-             * each bank with a 16-wide SIMD PCU on a 20nm DRAM process, at
-             * unchanged HBM2 dimensions: 8 GB -> 6 GB, so 2 GB of array bought
-             * the compute. At our measured HBM2 density (Sohn, ISSCC 2016
-             * 18.2: 8 Gb / 96 mm^2) that is ~24 mm^2 per die over 16 PCUs, so
-             * ~1.5 mm^2 per PCU -- an UPPER bound, since some of the reclaimed
-             * area is control and routing.
-             * Our comparable PE prices at 0.4925 mm^2 in logic. The linear end
-             * puts it at 1.204 mm^2, UNDER that bound; the squared end puts it
-             * at 2.943 mm^2, 1.96x ABOVE it. Silicon therefore contradicts the
-             * pessimistic end and is consistent with the linear one, which is
-             * the value we apply. The UPMEM die is NOT a quantitative anchor:
-             * its Hot Chips 31 deck carries no die area at all. */
-            std::cout << " -- uncertainty band ["
-                      << (fa * pitch) << ", " << (fa * fa * pitch)
-                      << "]: the linear ratio is applied. Samsung FIMDRAM "
-                         "(ISSCC 2021 25.4, ~1.5 mm^2/PCU upper bound) is "
-                         "consistent with the linear end and rules out the "
-                         "squared one, which would exceed it by 1.96x."
-                      << std::endl;
-        } else if (corner != 0) {
-            /* 1.11.17: say when a corner is APPLIED, not only when refused --
-             * 1.11.13's own stated defect ("priced hp without saying so")
-             * survived for every non-hp logic run. */
-            std::cout << "  [tech] device corner " << config.device_corner
-                      << " applied to logic components (CACTI "
-                      << (corner == 1 ? "lstp" : "lop") << " device column)."
-                      << std::endl;
-        }
-        mcfg.device_type = corner;   // 1.11.21: override already folded in above
-    }
+    /* 1.11.13/1.11.21/1.11.35, now shared: corner selection, DRAM-periphery
+     * factors read from the tables, uncertainty band, and the calculated
+     * clock ceiling. 1.11.52 moved the body into ONE OWNER both scopes call
+     * (audit A001-A003). */
+    applyCornerAndPeripheryPricing(mcfg, config, overrides,
+                                   getDRAMGenClass(config.memory_tech),
+                                   config.frequency_mhz, "");
     mcfg.longer_channel_device = ov_get_int("longer_channel_device", 1);
     mcfg.number_hardware_threads = ov_get_int("number_hardware_threads", 1);
     mcfg.interconnect_projection_type =
@@ -5525,9 +5838,16 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     try {
         mcpat.computePower();
     } catch (const std::exception& e) {
+        /* 1.11.52 (gate 1162C C4): POWER WAS ASKED FOR AND NOT PRODUCED.
+         * This used to print two lines and return, leaving the run to exit
+         * 0 with a report that simply has no power in it -- a fleet cell
+         * would land in the corpus looking complete. A tool failure on a
+         * requested analysis is a failed run. */
         std::cerr << "\n[Power] McPAT failed: " << e.what() << std::endl;
-        std::cerr << "[Power] Power analysis skipped." << std::endl;
-        return;
+        std::cerr << "[Power] FATAL: power analysis was requested (--power) "
+                     "and produced nothing. Refusing to report a run with a "
+                     "silently missing power result." << std::endl;
+        std::exit(3);
     }
 
     // ── Print results (gated by report_detail) ──
@@ -5606,7 +5926,13 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         host_cfg.l2_size_bytes = config.host_l2_kb * 1024;
         host_cfg.l3_size_bytes = config.host_l3_kb * 1024;
         host_cfg.num_memory_controllers = 1;
-        host_cfg.mc_clock_mhz = 1200.0;
+        /* 1.11.52 (audit A011): DERIVED, like every other MC clock in this
+         * file (mcfg.mc_clock_mhz = frequency/2 at both other sites). The
+         * literal 1200 had no source and no print, so a host at any clock
+         * was priced with a 1.2 GHz controller. */
+        host_cfg.mc_clock_mhz = (config.host_frequency_mhz > 0.0
+                                 ? config.host_frequency_mhz
+                                 : config.frequency_mhz) / 2.0;
         host_cfg.has_noc = false;
         // Host process node: resolved host override, else the device node (uniform).
         // std::max(22,...) is the CACTI/McPAT lower-bound floor (models below 22nm are
@@ -5616,7 +5942,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                 ? config.host_tech_node_nm : config.tech_node_nm;
             host_cfg.tech_node_nm = validateTechNodeNm(host_tn, "host node");
         }
-        host_cfg.temperature_k = 350;
+        host_cfg.temperature_k = config.temperature_k;   // 1.11.52
 
         McPAT host_mcpat(host_cfg);
         host_mcpat.setDeviceProfile(McPAT::DeviceProfile::OOO);
@@ -5719,6 +6045,27 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         try {
             pimid::RamulatorWrapper ram_oracle("", config.memory_tech);
             ram_oracle.setDeviceWidth(config.dram_device_width);   // 1.11.46 (L181)
+            /* 1.11.52 (audit D003): the array's activate/precharge share is
+             * now weighted by the run's OWN measured row-buffer miss rate
+             * (PE-MI rowHits/rowMisses) instead of a hardcoded 0.5. It is
+             * the dominant term in DRAM access energy, so a coin flip there
+             * was worth roughly +/-40% on per-access read energy. */
+            {
+                const double rmf = zsim_stats.rowMissFraction();
+                ram_oracle.setRowMissFraction(rmf);
+                if (rmf >= 0.0)
+                    std::cout << "  [mem] row-buffer miss fraction MEASURED "
+                              << rmf << " (" << zsim_stats.row_misses << " of "
+                              << (zsim_stats.row_hits + zsim_stats.row_misses)
+                              << " accesses opened a new row); it weights the "
+                                 "activate/precharge share of array energy"
+                              << std::endl;
+                else
+                    std::cout << "  [mem] row-buffer miss fraction NOT MEASURED "
+                                 "in this run (no PE-MI row counters); array "
+                                 "energy uses the stated 0.5 fallback for the "
+                                 "activate/precharge share" << std::endl;
+            }
             ram_oracle.initialize();
             // 1.9.10: use the INTENSIVE per-access accessors (the older
             // extensive pair returned 0 on a fresh oracle). getArrayReadEnergyNJ()
@@ -5737,8 +6084,8 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             // physics, not by this gate).
             double rd_energy = ram_oracle.getArrayReadEnergyNJ();
             double wr_energy = ram_oracle.getArrayWriteEnergyNJ();
-            bool crosses_dq = (config.pe_hierarchy_level >= 4 ||
-                               config.pe_hierarchy_level == -1);  // RANK+ or HOST_MC
+            bool crosses_dq = crossesOffPackageDQ(config.pe_hierarchy_level,
+                                                  config.memory_tech);  // 1.11.52 (A018)
             double iface_energy = crosses_dq ? ram_oracle.getTerminationEnergyNJ() : 0.0;
             /* 1.11.8: with pim.mc.pg the idle controller descends the DRAM
              * into precharge power-down (IDD2P) during measured no-traffic
@@ -5793,9 +6140,13 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             /* 1.11.20 (D13): population-scaled. One DDR chip / one HBM
              * channel is the unit the JEDEC IDD table is written against. */
             const int bg_units =
-                ram_oracle.getBackgroundUnits(config.dram_device_width);
+                ram_oracle.getBackgroundUnits(config.dram_device_width,
+                                              config.hierarchy_ranks_per_channel,
+                                              config.hierarchy_dram_channels);  // 1.11.52 (A015)
             double bg_power_mw = ram_oracle.getBackgroundSystemMW(
-                mc_r_idle, config.mem_power_down, config.dram_device_width);
+                mc_r_idle, config.mem_power_down, config.dram_device_width,
+                config.hierarchy_ranks_per_channel,
+                config.hierarchy_dram_channels);   // 1.11.52 (A015)
             if (mc_r_idle > 0.0) {
                 std::cout << "  [pg] DRAM idle residency " << mc_r_idle
                           << " -> background "
@@ -5865,6 +6216,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                 {
                     DRAMGenClass gc = getDRAMGenClass(config.memory_tech);
                     dram_cfg.tech_node_nm = gc.cacti_table_nm;
+                    dram_cfg.temperature = static_cast<uint32_t>(config.temperature_k);  // D055
                     std::cout << "  [tech] DRAM array process: generation class "
                               << gc.cls << " (derived from " << config.memory_tech
                               << "; CACTI " << gc.cacti_table_nm
@@ -5985,6 +6337,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             sram_cfg.associativity = 1;
             sram_cfg.banks = 1;
             sram_cfg.tech_node_nm = validateTechNodeNm(config.tech_node_nm, "SRAM array");
+            sram_cfg.temperature = static_cast<uint32_t>(config.temperature_k);  // 1.11.52 (D055)
             sram_cfg.is_cache = false;  // RAM mode
             sram_cfg.read_write_ports = config.ports_per_bank;
 
@@ -6142,6 +6495,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             nvm_cfg.capacity_bytes = 64 * 1024;  // one bank
             nvm_cfg.word_width_bits = config.cache_line_size * 8;  // one full line per access (64 B = 512 b), matching the CACTI/SRAM path
             nvm_cfg.process_node_nm = validateTechNodeNm(config.tech_node_nm, "NVM array");
+            nvm_cfg.temperature_k = config.temperature_k;   // 1.11.52 (D055)
             if (config.memory_tech == "STT_MRAM")
                 nvm_cfg.nvm_type = pimid::NVSimWrapper::NVMType::STTRAM;
             else if (config.memory_tech == "PCM")
@@ -6377,9 +6731,30 @@ static void runPowerAnalysis(const UnifiedConfig& config,
  * queries the device-scope path already makes (CACTI for SRAM, NVSim
  * pre-generated cache for the NVMs), per bank x banks. Returns 0 with a note
  * on failure; the caller's fallback story is the note, not a guess. */
+/* 1.11.52 (audit A009/A021): the SAME array, queried the SAME way in both
+ * scopes. This helper built its CACTI/NVSim configs from a short argument
+ * list and left out everything else -- device_corner, the interconnect
+ * projection, read/write ports (SRAM) and the corner again (NVM) -- so one
+ * machine's non-DRAM memory was characterized differently depending on
+ * which scope asked. It now takes the config and sets the same fields the
+ * device-scope blocks set.
+ *
+ * A021: the non-exception failure paths returned 0 SILENTLY, deleting the
+ * memory from System Total area while the header promised "Returns 0 with a
+ * note on failure; the caller's fallback story is the note". Every return 0
+ * now says which query failed and what that costs. */
 static double computeNonDramMemAreaMM2(const std::string& tech, int banks,
-                                       int tech_node_nm, int line_size) {
+                                       int tech_node_nm, int line_size,
+                                       const UnifiedConfig& config) {
     if (banks < 1) banks = 1;
+    const int corner = (config.device_corner == "lstp") ? 1
+                     : (config.device_corner == "lop")  ? 2 : 0;
+    auto omitted = [&](const char* why) -> double {
+        std::cerr << "[area] NOTE: " << tech << " memory die area unavailable ("
+                  << why << "); System Total AREA omits this memory, stated "
+                     "here rather than reported as zero silicon." << std::endl;
+        return 0.0;
+    };
     try {
         if (tech == "SRAM") {
             pimid::CACTIWrapper::SRAMConfig cfg;
@@ -6391,21 +6766,29 @@ static double computeNonDramMemAreaMM2(const std::string& tech, int banks,
             cfg.is_cache = false;
             cfg.is_main_memory = true;
             cfg.quiet = true;
+            cfg.device_corner = corner;                              // A009
+            cfg.temperature = static_cast<uint32_t>(config.temperature_k);  // D055
+            cfg.ic_proj_type = config.interconnect_projection;       // A009 (E5)
+            cfg.read_write_ports = config.ports_per_bank;            // A009
             pimid::CACTIWrapper cacti(cfg);
             cacti.initialize();
             if (cacti.isValid() && cacti.getArea() > 0.0)
                 return cacti.getArea() * banks;
+            return omitted("CACTI returned no valid SRAM area");
         } else if (tech == "STT_MRAM" || tech == "PCM" || tech == "RERAM") {
             pimid::NVSimWrapper::NVMConfig cfg;
             cfg.capacity_bytes = 64 * 1024;                 // one bank
             cfg.word_width_bits = static_cast<uint32_t>((line_size > 0 ? line_size : 64) * 8);
             cfg.process_node_nm = tech_node_nm > 0 ? tech_node_nm : 22;
+            cfg.device_corner = corner;                              // A009 (L77)
+            cfg.temperature_k = config.temperature_k;                // D055
             cfg.nvm_type = (tech == "STT_MRAM") ? pimid::NVSimWrapper::NVMType::STTRAM
                          : (tech == "PCM")      ? pimid::NVSimWrapper::NVMType::PCRAM
                                                 : pimid::NVSimWrapper::NVMType::RERAM;
             pimid::NVSimWrapper nvsim(cfg);
             nvsim.initialize();
             if (nvsim.getArea() > 0.0) return nvsim.getArea() * banks;
+            return omitted("NVSim returned no valid array area");
         }
     } catch (const std::exception& e) {
         std::cerr << "[area] NOTE: " << tech << " memory die area query failed ("
@@ -6413,7 +6796,7 @@ static double computeNonDramMemAreaMM2(const std::string& tech, int banks,
                   << std::endl;
         return 0.0;
     }
-    return 0.0;
+    return omitted("technology has no non-DRAM area model in this build");
 }
 
 static int memorySystemDieCount(const std::string& tech,
@@ -6520,15 +6903,33 @@ static double computeDramDieAreaMM2(const std::string& memory_tech, bool print,
                 return die;
             }
         }
+        /* 1.11.52 (audit D036): SAY WHAT THIS NUMBER IS. When the run does
+         * not reconfigure the organisation, k = jedec/raw and area = raw*k
+         * cancels exactly -- the reported die is the VENDOR ANCHOR
+         * (capacity / measured density) and carries no CACTI content at
+         * all. 1.11.45 (E28) identified that algebra and fixed only the
+         * reconfigured branch; this branch kept printing "CACTI x k", which
+         * reads as a tool result. The number is unchanged (it is the right
+         * number -- the vendor anchor is the sourced one); what changes is
+         * that it no longer claims to be something it is not, and the raw
+         * CACTI figure beside it is labelled as the divergence it measures. */
         if (print) {
+            const bool anchor_only = (effective_banks <= 0);
             std::cout << "  Die area:      " << std::fixed << std::setprecision(2)
-                      << ca.area_mm2 << " mm^2/die (CACTI x k, k="
-                      << std::setprecision(3) << ca.k
-                      << " JEDEC-calibrated, FULL-DIE basis"
+                      << ca.area_mm2 << " mm^2/die ("
+                      << (anchor_only
+                            ? "VENDOR ANCHOR: capacity / measured die density; "
+                              "the CACTI run cancels out of this branch "
+                              "(k = jedec/raw, area = raw*k), so no CACTI "
+                              "structure is in this number"
+                            : "CACTI x k")
+                      << ", k=" << std::setprecision(3) << ca.k
+                      << " FULL-DIE basis"
                       << (pimid::CACTIWrapper::vendorDieDensitySourced(memory_tech)
                               ? "" : ", density DERIVED not measured")
                       << "; raw CACTI " << std::setprecision(2)
-                      << ca.raw_mm2 << ")" << std::defaultfloat << std::endl;
+                      << ca.raw_mm2 << " -- the gap between the tool and the "
+                         "vendor anchor)" << std::defaultfloat << std::endl;
         }
         return ca.area_mm2;
     } catch (const std::exception&) {
@@ -6553,15 +6954,68 @@ static double computeDramDieAreaMM2(const std::string& memory_tech, bool print,
  * McPAT power uses -- while the background is already a rate and adds
  * directly. wall_seconds <= 0 returns 0 and the total simply omits memory,
  * as before. */
+/* 1.11.52 (audit A007/A008): ONE definition of "the die's effective bank
+ * organisation". Device scope builds it from the technology's own JEDEC
+ * preset (banks/bank-group x bank-groups/chip) with the YAML overrides
+ * applied; system scope was passing config.num_banks -- a different knob
+ * entirely (memory.organization.num_banks, used elsewhere only as the
+ * SRAM/NVM per-bank multiplier), so a default DDR5 co-sim reported a
+ * 16-bank die where device scope reported the preset-org die. And the die
+ * PRINTED by the memory report used the preset org while the die ADDED to
+ * System Total used num_banks, so the two lines of one report could
+ * disagree. Both now call this. */
+static int effectiveDramBanks(const std::string& memory_tech,
+                              const UnifiedConfig& config) {
+    try {
+        pimid::RamulatorWrapper oracle("", memory_tech);
+        oracle.initialize();
+        int bpb = (config.banks_per_bg_override > 0)
+                  ? config.banks_per_bg_override : oracle.getBanksPerBankGroup();
+        int bgc = (config.bg_per_chip_override > 0)
+                  ? config.bg_per_chip_override : oracle.getBankGroupsPerChip();
+        int n = bpb * bgc;
+        return (n > 0) ? n : 0;
+    } catch (const std::exception& e) {
+        std::cerr << "[area] NOTE: could not read the " << memory_tech
+                  << " bank organisation (" << e.what()
+                  << "); the die is reported at its preset organisation."
+                  << std::endl;
+        return 0;   // 0 = preset org, the documented meaning downstream
+    }
+}
+
 static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
                                           uint64_t mem_rd, uint64_t mem_wr,
                                           double r_idle = -1.0,
                                           bool crosses_dq = false,
                                           bool pg_enabled = false,
                                           const std::string& device_width = "",
-                                          double wall_seconds = 0.0)
+                                          double wall_seconds = 0.0,
+                                          int effective_banks = 0,
+                                          int ranks_per_channel = 1,   // 1.11.52 (A015)
+                                          int channels = 1)
 {
-    if (memory_tech.empty() || (mem_rd + mem_wr) == 0) return 0.0;
+    if (memory_tech.empty()) return 0.0;
+    /* 1.11.52 (audit A020): A MEMORY WITH NO ACCESSES IS NOT A MEMORY WITH NO
+     * POWER. This returned 0.0 silently on zero accesses, deleting the whole
+     * memory section from the report and its BACKGROUND term from System
+     * Total -- but DRAM standby and refresh are rates that exist whether or
+     * not the workload touched the array. It is the same argument 1.11.46
+     * (L236) made for AREA ("the silicon exists whether or not the workload
+     * touched it"), which was fixed there and left standing here. On the
+     * reference co-sim cell the memory term is 1.12 W of a 2.34 W total, so
+     * an untouched memory could cut reported system power by tens of
+     * percent. Zero-access memories now report their background honestly;
+     * only the dynamic terms are zero. */
+    if ((mem_rd + mem_wr) == 0) {
+        const bool is_dram_zero = !(memory_tech == "SRAM" || memory_tech == "STT_MRAM" ||
+                                    memory_tech == "PCM"  || memory_tech == "RERAM");
+        if (!is_dram_zero) return 0.0;   // non-DRAM: no standby/refresh model here
+        std::cout << "  [mem] " << memory_tech
+                  << ": no accesses in this run -- dynamic terms are zero, but "
+                     "standby and refresh are not: the background term is "
+                     "reported and counted." << std::endl;
+    }
 
     const bool is_dram = !(memory_tech == "SRAM" || memory_tech == "STT_MRAM" ||
                            memory_tech == "PCM"  || memory_tech == "RERAM");
@@ -6590,7 +7044,8 @@ static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
          * was never measured, which is NOT the same as measured-zero: the
          * former reports pure active standby, the latter is a real busy
          * device. */
-        const int bg_units = ram_oracle.getBackgroundUnits(device_width);
+        const int bg_units = ram_oracle.getBackgroundUnits(
+            device_width, ranks_per_channel, channels);   // 1.11.52 (A015)
         const double bg_mw = ram_oracle.getBackgroundSystemMW(
             (r_idle > 0.0 ? r_idle : 0.0), pg_enabled, device_width);
         /* 1.11.20 (D6): DQ termination, placement-aware like 1.11.5. */
@@ -6630,7 +7085,8 @@ static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
                   << " + wr=" << total_wr_mj
                   << " + term=" << total_term_mj << ")"
                   << std::defaultfloat << std::endl;
-        computeDramDieAreaMM2(memory_tech, /*print=*/true);  // 1.11.9
+        computeDramDieAreaMM2(memory_tech, /*print=*/true,
+                              effective_banks);   // 1.11.9; 1.11.52 A008: same org as the total
         /* 1.11.45 (E31): the wattage this report just printed, on the wall
          * clock. Energy terms divide by the same seconds node power uses;
          * background is already a rate. */
@@ -6720,7 +7176,7 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
         mcfg.num_cores = node.num_cores;
         mcfg.core_clock_mhz = node.frequency_mhz;
         mcfg.tech_node_nm = validateTechNodeNm(node.tech_node_nm, "system node");
-        mcfg.temperature_k = 350;
+        mcfg.temperature_k = config.temperature_k;   // 1.11.52
 
         /* 1.11.2: same placement x technology -> process family matrix as the
          * device-scope path. Placement is global (pim.placement), the memory
@@ -6793,47 +7249,18 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                           << ngc.cacti_table_nm << "nm hp/comm-dram columns)"
                           << std::endl;
             }
-            /* 1.11.17 (audit go-through): the system-scope path was a
-             * divergent copy -- power.device_corner was silently ignored,
-             * and neither 1.11.13's refusal, the area band, nor 1.11.2's
-             * UPMEM frequency guard ever ran for a system-scope device
-             * node. Same behavior as the device-scope site, per node. */
-            {
-                int corner = (config.device_corner == "lstp") ? 1
-                           : (config.device_corner == "lop")  ? 2 : 0;
-                if (mcfg.process_family == 1) {
-                    if (corner != 0) {
-                        std::cout << "  [tech] " << node.name
-                                  << ": power.device_corner=" << config.device_corner
-                                  << " refused for DRAM-periphery components "
-                                     "(one comm-dram column per table); priced "
-                                     "at the single available device." << std::endl;
-                        corner = 0;
-                    }
-                    double fa = (mcfg.dram_periph_table_nm == 32) ? 2.46 : 2.44;
-                    double pitch = (mcfg.subarray_pitch_factor > 0.0)
-                                       ? mcfg.subarray_pitch_factor : 1.0;
-                    std::cout << "  [tech] " << node.name
-                              << ": periphery area factor " << (fa * pitch)
-                              << "x applied -- uncertainty band ["
-                              << (fa * pitch) << ", " << (fa * fa * pitch)
-                              << "]" << std::endl;
-                    if (node.frequency_mhz > 700) {
-                        std::cout << "  [tech] WARNING: " << node.name << " at "
-                                  << node.frequency_mhz
-                                  << " MHz in DRAM periphery exceeds the "
-                                     "plausible band (UPMEM DPU 500 MHz). "
-                                     "Power is reported at the requested clock; "
-                                     "the clock itself is the hypothesis."
-                                  << std::endl;
-                    }
-                } else if (corner != 0) {
-                    std::cout << "  [tech] " << node.name << ": device corner "
-                              << config.device_corner
-                              << " applied to logic components." << std::endl;
-                }
-                mcfg.device_type = corner;
-            }
+            /* 1.11.17 tried to end the system-scope divergence by COPYING
+             * the device-scope logic here; 1.11.52 (audit A001-A003) ends it
+             * by DELETING the copy. The copy had drifted on all three of its
+             * claims -- it refused the corner instead of mapping it to
+             * lp-dram, priced the area factor from literals instead of the
+             * tables, and guarded the clock with a literal 700 MHz -- while
+             * its comment said "Same behavior as the device-scope site". One
+             * owner, called from both scopes. */
+            applyCornerAndPeripheryPricing(
+                mcfg, config, config.mcpat_overrides,
+                getDRAMGenClass(node.memory_tech),
+                node.frequency_mhz, node.name + ": ");
         } else if (node.role == UnifiedConfig::SystemNode::HOST) {
             /* 1.11.49 (gate 1159I Y2, completing L119): the corner block above
              * is DEVICE-only, so a system-scope HOST node kept device_type=0
@@ -6931,8 +7358,31 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
             mcfg.l3_size_bytes = node.enable_l3 ? node.l3_kb * 1024ULL : 0;
         }
 
-        // MC
-        mcfg.num_memory_controllers = 1;
+        /* MC. 1.11.52 (audit A004): the DEVICE node's controller count is
+         * the same model quantity device scope derives -- one controller per
+         * REGION of the placement tree (1.10.5), not the literal 1 this path
+         * used to emit. The literal made MC area and leakage differ between
+         * the two scopes by the endpoint count (tens to hundreds) for one
+         * machine. A HOST node keeps a single controller: it has no PE
+         * placement tree, and its channel count is the memory-side quantity
+         * priced by the MC-tech parameters, not by this field. */
+        if (node.role == UnifiedConfig::SystemNode::DEVICE) {
+            if (config.htree_endpoints > 0) {
+                mcfg.num_memory_controllers = config.htree_endpoints;
+            } else if (config.pe_mc_enabled && config.pes_per_mc > 0) {
+                mcfg.num_memory_controllers =
+                    std::max(1, config.num_pes / config.pes_per_mc);
+            } else {
+                mcfg.num_memory_controllers = 1;
+            }
+            if (mcfg.num_memory_controllers != 1)
+                std::cout << "  [power] " << node.name << ": "
+                          << mcfg.num_memory_controllers
+                          << " element controllers (one per placement-tree "
+                             "region, as in device scope)" << std::endl;
+        } else {
+            mcfg.num_memory_controllers = 1;
+        }
         mcfg.mc_clock_mhz = node.frequency_mhz / 2.0;
 
         // NoC (for device nodes with PEs)
@@ -7391,7 +7841,18 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 pe_lvl.vertical_nodes   = mcfg.has_noc ? mcfg.noc_num_rows : 1;
                 pe_lvl.clock_mhz = mcfg.has_noc ? mcfg.noc_clock_mhz
                                                : node.frequency_mhz;
-                pe_lvl.chip_coverage = 0.5;
+                /* 1.11.52 (audit A010): DERIVED, not invented. McPAT scales
+                 * NoC area and leakage by chip_coverage, so the literals 0.5
+                 * and 0.1 here priced real host silicon from two numbers with
+                 * no source -- on a branch every co-simulated HOST takes.
+                 * There is no measurement of a host fabric (PIMID does not
+                 * model one), so the honest basis is the STRUCTURE we do
+                 * describe: the two entries exist only because McPAT's
+                 * homogeneous-NoC path crashes below two levels, and they
+                 * carry leakage alone (duty and accesses are zero). Split the
+                 * die between them by their own node counts instead of by
+                 * assertion, and say that the split is structural. */
+                pe_lvl.chip_coverage = 0.0;   // set below from node counts
                 /* 1.9.25: do NOT fabricate activity. The previous hardcoded
                  * duty cycle charged a fixed fraction of peak to a fabric that
                  * may not exist at all -- a 1-core host has no meaningful
@@ -7412,7 +7873,28 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 NoCLevel mc_lvl = pe_lvl;
                 mc_lvl.name = "MC_noc";
                 mc_lvl.type = 0;  // bus
-                mc_lvl.chip_coverage = 0.1;
+                mc_lvl.chip_coverage = 0.0;   // set below from node counts
+                {
+                    /* Structural split: the PE/core mesh covers its own node
+                     * count, the MC bus one node. Both are leakage-only
+                     * entries (duty 0, accesses 0); this decides only how the
+                     * die area is apportioned between them, and it is now a
+                     * ratio of described structure rather than 0.5 / 0.1. */
+                    const double pe_nodes =
+                        std::max(1.0, static_cast<double>(pe_lvl.horizontal_nodes) *
+                                      static_cast<double>(pe_lvl.vertical_nodes));
+                    const double mc_nodes = 1.0;
+                    const double tot = pe_nodes + mc_nodes;
+                    pe_lvl.chip_coverage = pe_nodes / tot;
+                    mc_lvl.chip_coverage = mc_nodes / tot;
+                    two_levels[0].chip_coverage = pe_lvl.chip_coverage;
+                    std::cout << "  [NoC] " << node.name
+                              << ": placeholder fabric coverage split "
+                              << pe_lvl.chip_coverage << " / "
+                              << mc_lvl.chip_coverage
+                              << " by node count (leakage-only entries; no host"
+                                 " fabric is measured)" << std::endl;
+                }
                 two_levels.push_back(mc_lvl);
                 mcpat.setNoCLevels(two_levels);
                 if (node.role == UnifiedConfig::SystemNode::HOST) {
@@ -7677,18 +8159,51 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
         /* 1.11.20 (D6): the same two inputs device scope uses, computed ONCE
          * here and handed to every array report below, so system scope and
          * device scope cannot drift apart again. */
+        /* 1.11.52 (audit A005/A006): the DRAM idle descent is gated on
+         * memory.power_down OR the controller flag, not on pim.mc.pg alone.
+         * 1.11.45 split those flags apart -- power_down is the DRAM's own
+         * IDD2P state, pg_mc is the CONTROLLER's gating -- and device scope
+         * was updated (its comment says so explicitly: "no config.pg_mc in
+         * this condition"), while this path kept the controller gate. A
+         * co-sim run with memory.power_down: true and no pim.mc.pg reported
+         * IDD3N standby while device scope descended, for one machine.
+         *
+         * A006: the UNARMED-COUNTER refusal device scope has since 1.11.18
+         * was also missing here. A dead pg_devmc_active yields r_idle = 1.0
+         * -- the whole memory reported idle -- and it was fed to the
+         * background model with no message at all. */
+        const bool sys_pd_asked = config.mem_power_down || config.pg_mc;
+        const bool sys_devmc_armed =
+            (zsim_stats.pg_devmc_active > 0) ||
+            (zsim_stats.mem_rd + zsim_stats.mem_wr == 0);
         double sys_r_idle = -1.0;
-        if (config.pg_mc && zsim_stats.pg_window() > 0) {
+        if (sys_pd_asked && zsim_stats.pg_window() > 0 && sys_devmc_armed) {
             sys_r_idle = 1.0 - std::min(1.0,
                 static_cast<double>(zsim_stats.pg_devmc_active)
                     / static_cast<double>(zsim_stats.pg_window()));
+        } else if (sys_pd_asked && !sys_devmc_armed) {
+            std::cout << "  [pg] DRAM idle residency UNAVAILABLE: the "
+                         "device-MC phase counter never advanced despite "
+                      << (zsim_stats.mem_rd + zsim_stats.mem_wr)
+                      << " accesses. Background reported at active standby "
+                         "(IDD3N); no idle descent claimed." << std::endl;
         }
         /* 1.11.51 (E17): same supersession as device scope (D6: one
          * derivation, two scopes). */
-        if (config.pg_mc) {
+        if (sys_pd_asked && sys_devmc_armed) {
             std::string gprov;
+            /* 1.11.52 (audit A017): the histogram's cycles are in the clock
+             * the SYSTEM zsim config was emitted at -- the reference clock,
+             * i.e. the max over all nodes -- not the device's own frequency.
+             * Converting the tXP threshold with the device clock put the
+             * threshold in the wrong units by their ratio; since the buckets
+             * are powers of two, a ratio past 2x admits or drops a whole
+             * bucket of idle. */
+            const double hist_mhz = (config.reference_frequency_mhz > 0.0)
+                                    ? config.reference_frequency_mhz
+                                    : config.frequency_mhz;
             double r_gap = gapPowerDownResidency(config, zsim_stats,
-                                                 config.frequency_mhz, &gprov);
+                                                 hist_mhz, &gprov);
             if (r_gap >= 0.0) {
                 std::cout << "  [pg] power-down residency from the MEASURED "
                              "gap histogram: " << r_gap << " (" << gprov
@@ -7696,8 +8211,18 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 sys_r_idle = r_gap;
             }
         }
-        const bool sys_crosses_dq = (config.pe_hierarchy_level >= 4 ||
-                                     config.pe_hierarchy_level == -1);
+        /* 1.11.52 (audit A018/A019): the shared predicate, and it is asked
+         * PER MEMORY, not once for the whole system. The device's PE
+         * placement decided whether the HOST's own array paid termination:
+         * with elements at BANK placement the host's DIMM was reported as
+         * "on-die placement: no DQ crossing, no termination" -- about its
+         * own memory, which a host CPU always drives across real DQ pins.
+         * The host's memory is always off-package from the host's point of
+         * view (HOST_MC semantics); the device's memory is judged by the
+         * device's placement. */
+        const bool sys_crosses_dq =
+            crossesOffPackageDQ(config.pe_hierarchy_level, config.memory_tech);
+        const bool host_crosses_dq = crossesOffPackageDQ(-1, config.memory_tech);
 
         uint64_t line_b = (config.cache_line_size > 0)
                               ? static_cast<uint64_t>(config.cache_line_size) : 64;
@@ -7726,13 +8251,17 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                                               sys_r_idle, sys_crosses_dq,
                                               config.mem_power_down,        // 1.11.45: split flag (was pg_mc)
                                               config.dram_device_width,
-                                              wall_seconds);    // 1.11.20 D13
+                                              wall_seconds,     // 1.11.20 D13
+                                              effectiveDramBanks(tech, config),   // A008
+                                              config.hierarchy_ranks_per_channel, // A015
+                                              config.hierarchy_dram_channels);
                 {
-                double die = computeDramDieAreaMM2(tech, false, config.num_banks);
+                double die = computeDramDieAreaMM2(tech, false,
+                                                   effectiveDramBanks(tech, config));
                 if (die <= 0.0)   // 1.11.46 (L242)
                     mem_area_total += computeNonDramMemAreaMM2(
                         tech, config.num_banks, config.tech_node_nm,
-                        config.cache_line_size);
+                        config.cache_line_size, config);
                 int dies = memorySystemDieCount(tech, config.dram_device_width,
                                                 config.hierarchy_ranks_per_channel,
                                                 config.hierarchy_dram_channels);
@@ -7753,11 +8282,13 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
              * ENERGY is activity-dependent. Area was inside the activity
              * gates below, so an idle memory vanished from System Total area. */
             if (priced_techs.insert(node.memory_tech).second) {
-                double die = computeDramDieAreaMM2(node.memory_tech, false, node.banks);
+                double die = computeDramDieAreaMM2(
+                    node.memory_tech, false,
+                    effectiveDramBanks(node.memory_tech, config));   // 1.11.52 A007
                 if (die <= 0.0) {   // 1.11.46 (L242): non-DRAM silicon counts too
                     mem_area_total += computeNonDramMemAreaMM2(
                         node.memory_tech, node.banks > 0 ? node.banks : config.num_banks,
-                        config.tech_node_nm, config.cache_line_size);
+                        config.tech_node_nm, config.cache_line_size, config);
                     /* no continue: the ENERGY branches below must still run --
                      * their reporter states its own non-DRAM scope honestly. */
                 } else {
@@ -7776,10 +8307,13 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                 mem_power_total += reportSharedMemoryArrayEnergy(node.memory_tech,
                                               zsim_stats.host.mem_rd,
                                               zsim_stats.host.mem_wr + flush_wr,  // 1.11.15
-                                              sys_r_idle, sys_crosses_dq,         // 1.11.20
+                                              sys_r_idle, host_crosses_dq,        // 1.11.52 (A019)
                                               config.mem_power_down,  // 1.11.45: split flag (1.11.41)
                                               config.dram_device_width,
-                                              wall_seconds);
+                                              wall_seconds,
+                                              effectiveDramBanks(node.memory_tech, config),
+                                              config.hierarchy_ranks_per_channel,  // A015
+                                              config.hierarchy_dram_channels);
                 host_done = true;
             } else if (node.role == UnifiedConfig::SystemNode::DEVICE && !dev_done &&
                        zsim_stats.dev.has_activity()) {
@@ -7794,7 +8328,10 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                                               sys_r_idle, sys_crosses_dq,         // 1.11.20
                                               config.mem_power_down,  // 1.11.45: split flag (1.11.41)
                                               config.dram_device_width,
-                                              wall_seconds);
+                                              wall_seconds,
+                                              effectiveDramBanks(node.memory_tech, config),
+                                              config.hierarchy_ranks_per_channel,  // A015
+                                              config.hierarchy_dram_channels);
                 dev_done = true;
             }
         }
@@ -7917,7 +8454,8 @@ public:
                                                   config_.use_yaml_memory_params,
                                                   config_.memory_params.read_latency_ns,
                                                   array_cap,
-                                                  config_.pe_hierarchy_level);
+                                                  config_.pe_hierarchy_level,
+                                                  config_.temperature_k);  // 1.11.52 (D055)
         }
 
         // Cache latencies: YAML override > CACTI > defaults
@@ -10452,6 +10990,59 @@ int main(int argc, char** argv) {
         if (yaml_cfg["memory"]["power_down_threshold_ns"])   // 1.11.51 (E17)
             config.power_down_threshold_ns =
                 yaml_cfg["memory"]["power_down_threshold_ns"].as<double>(-1.0);
+        /* 1.11.52: temperature knob; K wins if both given. */
+        if (yaml_cfg["power"] && yaml_cfg["power"]["temperature_c"])
+            config.temperature_k =
+                yaml_cfg["power"]["temperature_c"].as<int>(77) + 273;
+        if (yaml_cfg["power"] && yaml_cfg["power"]["temperature_k"])
+            config.temperature_k =
+                yaml_cfg["power"]["temperature_k"].as<int>(350);
+        /* 1.11.52 (user ruling: "the temp accepted range should follow the
+         * upstream tools"): the range is the INTERSECTION of what the linked
+         * tools actually accept, each read from its own source rather than
+         * restated here as a preference:
+         *
+         *   CACTI   external/cacti/io.cc:2259 --
+         *             if (temp < 300 || temp > 400 || temp%10 != 0) -> error
+         *           A CHECKED constraint: violating it aborts the power run.
+         *   NVSim   external/nvsim/Technology.h:81-84 --
+         *             double currentOnNmos[101]  ... currentOffNmos[101]
+         *             /* NMOS off current (from 300K to 400K) *[/]
+         *           and every consumer indexes tech->currentOnNmos[
+         *             inputParameter->temperature - 300] (SubArray.cpp:131,
+         *           Mux.cpp:69, OutputDriver.cpp:68). NVSim performs NO check,
+         *           so a temperature outside 300..400 K is an out-of-bounds
+         *           READ, not an error -- silent corruption. Our validation is
+         *           what protects it. NVSim's granularity is 1 K.
+         *   CACTI leakage rows -- I_off_n is tabulated at 0..100 C in 10 C
+         *           steps; periphFamilyFactors() snaps to the nearest row and
+         *           says so, so this one shapes accuracy, not legality.
+         *
+         * Intersection: 300..400 K in steps of 10 (CACTI's step is the
+         * binding one; NVSim's wider 1 K granularity is a superset). The
+         * first cut of this knob used [273, 373] with no step rule -- my own
+         * numbers, not the tools' -- and accepted 358 K, after which McPAT
+         * aborted and the run printed "Power analysis skipped" while still
+         * exiting 0 (gate 1162C C4). */
+        if (config.temperature_k < 300 || config.temperature_k > 400 ||
+            (config.temperature_k % 10) != 0) {
+            int lo = (config.temperature_k / 10) * 10;
+            if (lo < 300) lo = 300;
+            if (lo > 400) lo = 400;
+            int hi = lo + 10; if (hi > 400) hi = 400;
+            std::cerr << "[config] FATAL: power.temperature_k="
+                      << config.temperature_k
+                      << " is not evaluable by the linked tools: CACTI "
+                         "accepts 300..400 K in steps of 10 "
+                         "(external/cacti/io.cc:2259, checked); NVSim indexes "
+                         "a 300..400 K table with no bounds check at all "
+                         "(external/nvsim/Technology.h:81-84). Nearest legal: "
+                      << lo << " K (" << (lo - 273) << " C) or "
+                      << hi << " K (" << (hi - 273) << " C). Default 350 K "
+                         "(77 C) is what the corpus is priced at."
+                      << std::endl;
+            std::exit(2);
+        }
         if (yaml_cfg["memory"]["array_pg"])
             config.mem_array_pg = yaml_cfg["memory"]["array_pg"].as<bool>(config.mem_array_pg);
     }
@@ -11364,7 +11955,21 @@ int main(int argc, char** argv) {
             }
 
         } catch (const YAML::Exception& e) {
-            std::cerr << "Warning: Failed to load YAML config: " << e.what() << std::endl;
+            /* 1.11.52 (audit B019): A HALF-APPLIED CONFIG IS NOT A CONFIG.
+             * This caught every YAML error -- including one thrown midway
+             * through applying the file -- printed "Warning", and let the run
+             * continue with whatever subset of keys had been assigned before
+             * the throw. The result is a simulation of a machine the user
+             * never described, reported as if it were theirs, with defaults
+             * silently standing in for the rest. A config that cannot be
+             * fully applied is a fatal input error. */
+            std::cerr << "[config] FATAL: failed to apply the YAML config: "
+                      << e.what() << "\n"
+                         "  Keys applied before the error are already in effect,"
+                         " so continuing would simulate a machine that is"
+                         " neither the file's nor the defaults'. Fix the config"
+                         " and re-run." << std::endl;
+            std::exit(2);
         }
     }
 
@@ -11770,7 +12375,9 @@ int main(int argc, char** argv) {
                         ? (noc_energy_nj * 1000.0) / result.totalPackets : 0.0;
 
                     if (!doSweep) {
-                        printf("\n── NoC Power Analysis (McPAT, %dnm) ──\n", config.tech_node_nm);
+                        /* 1.11.52: name the node actually PRICED (the family
+                         * pin may have overridden the config knob). */
+                        printf("\n── NoC Power Analysis (McPAT, %dnm) ──\n", mcfg.tech_node_nm);
                         printf("  Leakage power:    %.4f W (sub=%.4f, gate=%.4f)\n",
                                noc_power.total_leakage, noc_power.subthreshold_leakage,
                                noc_power.gate_leakage);

@@ -65,6 +65,7 @@ private:
         uint32_t read_ports;
         uint32_t write_ports;
         uint32_t tech_node_nm;   // Technology node
+        uint32_t temperature_k = 350;  // 1.11.52 (D055): run temperature, K
         Cycle access_time;
     };
 
@@ -105,6 +106,7 @@ private:
     void setArrayCapacityBytes(uint64_t bytes) override;
     void setAccessWidthBits(uint32_t bits) override;
     void setTechNodeNm(int nm) override;   // 1.11.51 (L70)
+    void setTemperatureK(int k) override;  // 1.11.52 (D055)
     uint32_t access_width_bits_ = 0;   // 0 = model default
 };
 

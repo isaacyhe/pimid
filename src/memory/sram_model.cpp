@@ -62,6 +62,7 @@ void SRAMModel::initialize() {
         cacti_config.read_ports = sram_config_.read_ports;
         cacti_config.write_ports = sram_config_.write_ports;
         cacti_config.tech_node_nm = sram_config_.tech_node_nm;
+    cacti_config.temperature = sram_config_.temperature_k;   // 1.11.52 (D055)
         cacti_config.is_cache = true;
 
         // Create and initialize CACTI wrapper
@@ -416,6 +417,12 @@ void SRAMModel::setArrayCapacityBytes(uint64_t bytes) {
  * initialize(). 0 keeps the model default. */
 /* 1.11.51 (L70): the run's node, replacing the compiled-in default.
  * Must precede initialize(). */
+/* 1.11.52 (D055): the run's temperature, replacing the hardcoded 350 K in
+ * the tool query below. Must precede initialize(). */
+void SRAMModel::setTemperatureK(int k) {
+    if (k > 0) sram_config_.temperature_k = static_cast<uint32_t>(k);
+}
+
 void SRAMModel::setTechNodeNm(int nm) {
     if (nm > 0) sram_config_.tech_node_nm = nm;
 }

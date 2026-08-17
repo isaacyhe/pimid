@@ -31,8 +31,12 @@ std::shared_ptr<MemoryModel> MemoryModelFactory::createMemoryModel(
             case MemoryTechnology::GDDR6:
             case MemoryTechnology::HBM2:
             case MemoryTechnology::HBM3:
-                std::cout << "  Creating DRAM model (Ramulator)" << std::endl;
-                return std::make_shared<DRAMModel>(config_path);
+                /* 1.11.52 (D024): pass the TECHNOLOGY. Seven DRAM
+                 * generations arrive here and all seven used to become a
+                 * DDR4 model. */
+                std::cout << "  Creating DRAM model (Ramulator) for "
+                          << static_cast<int>(tech) << std::endl;
+                return std::make_shared<DRAMModel>(config_path, tech);
 
             case MemoryTechnology::SRAM:
                 std::cout << "  Creating SRAM model (CACTI) with inner-bank timing" << std::endl;

@@ -92,6 +92,12 @@ public:
      * not use. Must precede initialize(). <=0 keeps the model default. */
     virtual void setTechNodeNm(int /*nm*/) {}
 
+    /* 1.11.52 (audit D055): the RUN's operating temperature. Every NVM model
+     * hardcoded 350 K, so with power.temperature_k set the cores and caches
+     * were priced hot while every memory array stayed at 77 C -- one machine,
+     * two temperatures, silently. <=0 keeps the model default. */
+    virtual void setTemperatureK(int /*k*/) {}
+
     enum class Tier { SUBARRAY, BANK, BANKGROUP, CHIP, RANK, CHANNEL };
     enum class Op   { READ, WRITE, SET, RESET };
 

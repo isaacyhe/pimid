@@ -86,19 +86,31 @@ inline int devicesPerAccess(const std::string& tech,
 // > 0 forces the legacy bank-energy path (user knob); 0 = IDD default.
 inline double arrayReadNJ(const std::string& tech, double tRC, double tRAS,
                           double tBurst, double bank_override_pJ_per_byte,
-                          const std::string& device_width = "") {
+                          const std::string& device_width = "",
+                          double row_miss_frac = -1.0) {
     if (bank_override_pJ_per_byte > 0.0)
         return bank_override_pJ_per_byte * 64.0 / 1000.0;
     IDDSpec s = iddFor(tech);
     double e_actpre_pJ = s.vdd * (s.idd0 * tRC - s.idd3n * tRAS - s.idd2n * (tRC - tRAS));
     double e_rd_pJ     = s.vdd * (s.idd4r - s.idd3n) * tBurst;
-    const double ROW_MISS_FRAC = 0.5;
+    /* 1.11.52 (audit D003): the activate/precharge share is MEASURED, not
+     * assumed. It is the dominant term -- on DDR4 the act+pre part is ~1.42
+     * nJ against ~0.39 nJ of burst -- and it used to be weighted by a
+     * hardcoded ROW_MISS_FRAC = 0.5, so the largest number in the array
+     * energy was a coin flip. The memory interface now tracks one open row
+     * per unit and exports rowHits/rowMisses; the caller passes the measured
+     * miss fraction. A negative value means the run carried no row
+     * measurement, and the caller is responsible for saying so -- the 0.5
+     * below is then the stated fallback, not a silent default. */
+    const double ROW_MISS_FRAC = (row_miss_frac >= 0.0 && row_miss_frac <= 1.0)
+                                 ? row_miss_frac : 0.5;
     return (ROW_MISS_FRAC * e_actpre_pJ + e_rd_pJ) / 1000.0
            * devicesPerAccess(tech, device_width);   // 1.11.46 (L181)
 }
 inline double arrayWriteNJ(const std::string& tech, double tRC, double tRAS,
                            double tBurst, double bank_override_pJ_per_byte,
-                           const std::string& device_width = "") {
+                           const std::string& device_width = "",
+                           double row_miss_frac = -1.0) {
     /* 1.11.5 (audit): writes consult IDD4W, not read*1.2. Same shape as the
      * read term: activate/precharge share plus the write burst current. */
     if (bank_override_pJ_per_byte > 0.0)
@@ -106,7 +118,8 @@ inline double arrayWriteNJ(const std::string& tech, double tRC, double tRAS,
     IDDSpec s = iddFor(tech);
     double e_actpre_pJ = s.vdd * (s.idd0 * tRC - s.idd3n * tRAS - s.idd2n * (tRC - tRAS));
     double e_wr_pJ     = s.vdd * (s.idd4w - s.idd3n) * tBurst;
-    const double ROW_MISS_FRAC = 0.5;
+    const double ROW_MISS_FRAC = (row_miss_frac >= 0.0 && row_miss_frac <= 1.0)
+                                 ? row_miss_frac : 0.5;   // 1.11.52 (D003)
     return (ROW_MISS_FRAC * e_actpre_pJ + e_wr_pJ) / 1000.0
            * devicesPerAccess(tech, device_width);   // 1.11.46 (L181)
 }
@@ -201,7 +214,11 @@ inline double terminationNJ(const std::string& tech, double term_override_pJ_per
     if      (tech=="DDR3")   {sch=SSTL; vddq=1.35; rtt=40;  rpd=34;  mtps=1600;}   // SSTL-135; JESD79-3-1 + T38/T41
                                                                                    // (RTT40=RZQ/6) + T38
                                                                                    // (RON34=RZQ/7), RZQ=240
-    else if (tech=="DDR4")   {sch=POD;  vddq=1.2;  rtt=48;  rpd=40;  mtps=3200;}   // POD12  (JESD8-24)
+    /* 1.11.52 (audit D002): mtps is the SIMULATED part's rate (DDR4-2400:
+     * Ramulator preset DDR4_2400R and the architecture object), not a
+     * different bin. POD12 (JESD8-24) is the interface standard and applies
+     * at either rate, so vddq/rtt/rpd are untouched. */
+    else if (tech=="DDR4")   {sch=POD;  vddq=1.2;  rtt=48;  rpd=40;  mtps=2400;}   // POD12  (JESD8-24)
     else if (tech=="DDR5")   {sch=POD;  vddq=1.1;  rtt=48;  rpd=40;  mtps=4800;}   // POD11  (same family)
     else if (tech=="GDDR6")  {sch=POD;  vddq=1.35; rtt=60;  rpd=40;  mtps=14000;}  // POD135 (JESD8-21C, Cl.D:
                                                                                    // RTT programmable 48/60 via MR6)
@@ -212,6 +229,13 @@ inline double terminationNJ(const std::string& tech, double term_override_pJ_per
      * "General LPDDR5 Specifications 2: AC/DC and Interface" document, which
      * we do not have -- so 240 ohm (RZQ, the LPDDR4/5 ODT reference) is the
      * one UNSOURCED input here and is flagged as such below. */
+    /* 1.11.52 (audit D008): the LPDDR5 Rtt below is the one UNSOURCED
+     * electrical input in this table -- Micron's datasheets state
+     * "programmable VSS ODT" and give VDDQ and RON but not the termination
+     * value we need, so 240 ohm is an assumption, and it is 240 of the
+     * 280-ohm loop (a 2x error in it moves LPDDR5 termination energy
+     * ~1.75x). It was disclosed only in a comment 45 lines away; the
+     * consumer now reports it at the point of use (see terminationNJ). */
     else if (tech=="LPDDR5") {sch=LVSTL; vddq=0.5; rtt=240; rpd=40; mtps=6400;}
     else if (tech.substr(0,3)=="HBM") return 0.0;                                  // interposer (JESD238B cl.9.1)
     else                     {sch=POD;  vddq=1.2;  rtt=48;  rpd=40;  mtps=3200;}
@@ -307,18 +331,37 @@ inline double backgroundMW(const std::string& tech) {
  *   LPDDR5      1: an x16 die serves its own channel.
  *   GDDR6       1: point-to-point, one device per channel.
  *   SRAM/NVM    1 (they do not reach this path; the fallthrough is DDR4). */
+/* 1.11.52 (audit A015): the POPULATION arguments. This returns the devices
+ * in ONE rank (DDR) or ONE stack (HBM); the SYSTEM may hold several ranks
+ * and channels, and the area path already counts them all
+ * (memorySystemDieCount = chips x ranks x channels). The two lines of one
+ * report therefore described memories differing by ranks x channels: e.g.
+ * two ranks put 54 mm^2 of memory area beside 1.12 W of single-rank memory
+ * power. Callers pass the system's rank and channel counts so background
+ * power is population-scaled the same way area is; the defaults reproduce
+ * the pre-1.11.52 single-rank basis for any caller not yet updated. */
 inline int backgroundUnits(const std::string& tech,
-                           const std::string& device_width = "") {
+                           const std::string& device_width = "",
+                           int ranks_per_channel = 1,
+                           int channels = 1) {
+    if (ranks_per_channel < 1) ranks_per_channel = 1;
+    if (channels < 1) channels = 1;
     if (tech.substr(0, 3) == "HBM") {
+        /* An HBM stack's channels ARE its population; a system with several
+         * stacks multiplies by the channel count the caller reports. */
         int ch = iddFor(tech).channels;
-        return ch > 0 ? ch : 1;
+        int per_stack = ch > 0 ? ch : 1;
+        int stacks = (channels > per_stack && per_stack > 0)
+                     ? (channels / per_stack) : 1;
+        return per_stack * stacks;
     }
     if (tech == "DDR3" || tech == "DDR4" || tech == "DDR5") {
-        if (device_width == "x4")  return 16;
-        if (device_width == "x16") return 4;
-        return 8;                       // x8, the default 64-bit rank
+        int chips = 8;                  // x8, the default 64-bit rank
+        if (device_width == "x4")  chips = 16;
+        if (device_width == "x16") chips = 4;
+        return chips * ranks_per_channel * channels;
     }
-    return 1;
+    return ranks_per_channel * channels;
 }
 
 /* 1.11.20 (user decision D15): STATE. Background power for ONE unit, given
@@ -372,9 +415,12 @@ inline double backgroundUnitMW(const std::string& tech, double r_idle,
  * This is the only function the report should call. */
 inline double backgroundSystemMW(const std::string& tech, double r_idle,
                                  bool pg_enabled,
-                                 const std::string& device_width = "") {
+                                 const std::string& device_width = "",
+                                 int ranks_per_channel = 1,
+                                 int channels = 1) {   // 1.11.52 (A015)
     return backgroundUnitMW(tech, r_idle, pg_enabled) *
-           static_cast<double>(backgroundUnits(tech, device_width));
+           static_cast<double>(backgroundUnits(tech, device_width,
+                                               ranks_per_channel, channels));
 }
 
 } // namespace pimid_energy

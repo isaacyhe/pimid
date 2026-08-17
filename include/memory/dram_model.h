@@ -18,7 +18,15 @@ class RamulatorWrapper;
  */
 class DRAMModel : public MemoryModel {
 public:
-    explicit DRAMModel(const std::string& config_path);
+    /* 1.11.52 (audit 1162 D024): the TECHNOLOGY, which this model used to
+     * drop on the floor. The constructor hardcoded MemoryTechnology::DDR4
+     * and handed RamulatorWrapper a default-argument "DDR4", while
+     * MemoryModelFactory routed DDR3, DDR4, DDR5, LPDDR5, GDDR6, HBM2 and
+     * HBM3 all into it -- so an HBM3 PE at BANK placement was timed on the
+     * DDR4-2400 ladder (subarray 26.6 ns, bank 39.9 ns) and the log printed
+     * that number as the technology's own. */
+    explicit DRAMModel(const std::string& config_path,
+                       MemoryTechnology tech = MemoryTechnology::DDR4);
     ~DRAMModel() override;  // Defined in .cpp for unique_ptr<RamulatorWrapper>
 
     // MemoryModel interface implementation

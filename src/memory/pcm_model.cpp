@@ -456,7 +456,7 @@ void PCMModel::initializeNVSim() {
         nvsim_config.word_width_bits = (access_width_bits_ > 0) ? access_width_bits_ : 64;
         nvsim_config.nvm_type = NVSimWrapper::NVMType::PCRAM;  // PCM type
         nvsim_config.process_node_nm = pcm_config_.tech_node_nm;
-        nvsim_config.temperature_k = 350;  // ~77°C typical operating temp
+        nvsim_config.temperature_k = temperature_k_;   // 1.11.52 (D055)  // ~77°C typical operating temp
         nvsim_config.optimize_read_energy = true;
         nvsim_config.optimize_write_energy = false;  // PCM writes are inherently slow
         nvsim_config.optimize_leakage = true;
@@ -559,6 +559,12 @@ void PCMModel::setArrayCapacityBytes(uint64_t bytes) {
  * initialize(). 0 keeps the model default. */
 /* 1.11.51 (L70): the run's node, replacing the compiled-in default.
  * Must precede initialize(). */
+/* 1.11.52 (D055): the run's temperature, replacing the hardcoded 350 K in
+ * the tool query below. Must precede initialize(). */
+void PCMModel::setTemperatureK(int k) {
+    if (k > 0) temperature_k_ = k;
+}
+
 void PCMModel::setTechNodeNm(int nm) {
     if (nm > 0) pcm_config_.tech_node_nm = nm;
 }

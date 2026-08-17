@@ -14,8 +14,22 @@ namespace pimid {
 // DRAMModel Implementation (Ramulator Integration)
 //=============================================================================
 
-DRAMModel::DRAMModel(const std::string& config_path)
-    : MemoryModel(MemoryTechnology::DDR4, config_path)
+/* 1.11.52 (D024): one name for the technology, used for the base class, the
+ * Ramulator wrapper and the defaults below. */
+static const char* dramTechName(MemoryTechnology t) {
+    switch (t) {
+        case MemoryTechnology::DDR3:   return "DDR3";
+        case MemoryTechnology::DDR5:   return "DDR5";
+        case MemoryTechnology::LPDDR5: return "LPDDR5";
+        case MemoryTechnology::GDDR6:  return "GDDR6";
+        case MemoryTechnology::HBM2:   return "HBM2";
+        case MemoryTechnology::HBM3:   return "HBM3";
+        default:                       return "DDR4";
+    }
+}
+
+DRAMModel::DRAMModel(const std::string& config_path, MemoryTechnology tech)
+    : MemoryModel(tech, config_path)
     , total_reads_(0)
     , total_writes_(0)
     , row_hits_(0)
@@ -29,7 +43,12 @@ DRAMModel::DRAMModel(const std::string& config_path)
     , current_cycle_(0) {
 
     // Initialize default DRAM configuration
-    dram_config_.standard = "DDR4";
+    /* 1.11.52 (D024): the standard is the RUN'S technology. The literals
+     * below remain the DDR4-2400 shape and are overwritten by the
+     * architecture extraction in initialize(); what matters is that the
+     * Ramulator wrapper is now constructed for the right part, so the
+     * extracted timing ladder is the technology's own. */
+    dram_config_.standard = dramTechName(tech);
     dram_config_.org = "4Gb_x8";
     dram_config_.channels = 1;
     dram_config_.ranks_per_channel = 1;
@@ -44,7 +63,8 @@ DRAMModel::DRAMModel(const std::string& config_path)
     dram_config_.tRAS = 39;  // Row active time
 
     // Create Ramulator wrapper instance
-    ramulator_instance_ = std::make_unique<RamulatorWrapper>(config_path);
+    ramulator_instance_ = std::make_unique<RamulatorWrapper>(config_path,
+                                                             dramTechName(tech));
 }
 
 DRAMModel::~DRAMModel() {

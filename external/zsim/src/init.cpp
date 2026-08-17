@@ -514,6 +514,7 @@ static void InitSystem(Config& config) {
         // PE-MC distributed memory controller fields
         zinfo->hierarchy.totalUnits = config.get<uint32_t>("sys.hierarchy.totalUnits", 128);
         zinfo->hierarchy.pagesPerUnit = config.get<uint32_t>("sys.hierarchy.pagesPerUnit", 32);
+        zinfo->hierarchy.dramRowBytes = config.get<uint32_t>("sys.hierarchy.dramRowBytes", 0);  // 1.11.52 (D003)
         zinfo->hierarchy.assumeLocal = config.get<uint32_t>("sys.hierarchy.assumeLocal", 0) != 0;
         zinfo->hierarchy.chargePrep = config.get<uint32_t>("sys.hierarchy.chargePrep", 0) != 0;
         zinfo->hierarchy.hostLinkXferCycles = config.get<uint32_t>("sys.hierarchy.hostLinkXferCycles", 0);

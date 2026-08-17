@@ -343,9 +343,20 @@ static bool periphFamilyFactors(int dram_table_nm, int logic_node_nm,
     const double vr = vd_d[CD] / vd_l[B];
     fd = (c_cd / c_base) * vr * vr;
 
-    /* nearest tabulated 10 C step to the configured temperature */
-    int t_c = static_cast<int>(temp_k) - 273;
-    int t_row = ((t_c + 5) / 10) * 10;
+    /* 1.11.52 (audit C001): index the row the way CACTI itself does.
+     *
+     * The I_off_n rows are labelled by an OFFSET FROM 300 K, not by Celsius:
+     * external/cacti/parameter.cc:175 selects a row with
+     *     if (thermal_temp == (temperature - 300))
+     * where `temperature` is g_ip->temp, the same Kelvin value PIMID emits as
+     * sys.temperature. This code read the label as Celsius (temp_k - 273), so
+     * at the default 350 K it took row 80 -- the row CACTI uses for 380 K --
+     * while McPAT priced the design at 350 K. Measured on 22nm.dat: the
+     * leakage factor was 6.81e-6 where the correct row gives 1.035e-5, i.e.
+     * the DRAM-periphery leakage ratio was understated by ~34%. With the
+     * 1.11.52 temperature knob the error was a fixed +27..+30 K offset at
+     * every legal setting, coinciding only at 400 K by clamping accident. */
+    int t_row = ((static_cast<int>(temp_k) - 300 + 5) / 10) * 10;
     if (t_row < 0) t_row = 0;
     if (t_row > 100) t_row = 100;
     if (!cactiRow(dram_table_nm, "-I_off_n", io_d, t_row)) return false;

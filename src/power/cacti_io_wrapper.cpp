@@ -326,7 +326,14 @@ bool dramIOMapFor(const std::string& t, DramIOMap& m) {
  * a specification fixes exactly -- the only kind that belongs in a table. */
 double CactiIOWrapper::dramRateMTs(const std::string& t) {
     if (t == "DDR3")   return 1600;
-    if (t == "DDR4")   return 3200;
+    /* 1.11.52 (audit D002): the rate of the part THIS TREE SIMULATES. DDR4
+     * ran as DDR4-2400 everywhere that decides timing -- the Ramulator
+     * preset (DDR4_2400R), the architecture object, and the wrapper's own
+     * 19.2 GB/s -- while this table said 3200, so one access had its array
+     * half priced at 2400 and its DQ-termination half at 3200 (termination
+     * 1.33x understated). POD12 is an interface standard, not a speed bin,
+     * so the electricals are unchanged by this. */
+    if (t == "DDR4")   return 2400;
     if (t == "DDR5")   return 4800;
     if (t == "LPDDR5") return 6400;
     if (t == "GDDR6")  return 14000;

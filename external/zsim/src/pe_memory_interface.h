@@ -94,6 +94,18 @@ protected:
     Counter profRemoteLatency_;
     Counter profReads_;
     Counter profWrites_;
+    /* 1.11.52 (audit D003): MEASURED row-buffer behaviour. The array energy
+     * model weighted its activate/precharge term by a hardcoded
+     * ROW_MISS_FRAC = 0.5 -- the dominant term in DRAM access energy set by
+     * a coin flip. The interface already sees every access address and the
+     * unit it belongs to, so the open-row state is observable here: one
+     * last-row register per unit, exactly what a closed-page-vs-open-page
+     * controller would track. Hits/misses are exported and the energy model
+     * uses the measured fraction (and refuses to invent one when this was
+     * never armed, i.e. dramRowBytes == 0). */
+    Counter profRowHits_;
+    Counter profRowMisses_;
+    std::vector<uint64_t> lastRow_;   // per unit; ~0ull = no open row yet
 
 public:
     // Contiguous coverage
@@ -526,6 +538,7 @@ public:
 
             profLocalAccesses_.inc();
             profLocalLatency_.inc(lat);
+            noteRowAccess(targetUnit, req.lineAddr);   // 1.11.52 (D003)
             return req.cycle + lat;
         } else {
             // Remote: route through network to destination MI
@@ -557,7 +570,8 @@ public:
                         zinfo->pgres.noc.touch(zinfo->numPhases);
                 zinfo->pgres.nocGaps.event(req.cycle);   // E17 measurement
                     }
-                    profRemoteAccesses_.inc();
+                    noteRowAccess(targetUnit, req.lineAddr);   // 1.11.52 (D003)
+            profRemoteAccesses_.inc();
                     profRemoteLatency_.inc(lat);
                     return req.cycle + lat;
                 }
@@ -684,7 +698,8 @@ public:
                 if (zinfo->hierarchy.mcStandalone) {
                     totalLat += mcHopLatency(targetUnit, req.cycle, req.srcId);
                 }
-                profRemoteAccesses_.inc();
+                noteRowAccess(targetUnit, req.lineAddr);   // 1.11.52 (D003)
+            profRemoteAccesses_.inc();
                 profRemoteLatency_.inc(totalLat);
                 return req.cycle + totalLat;
             }
@@ -832,6 +847,7 @@ public:
             if (zinfo->hierarchy.mcStandalone) {
                 totalLat += mcHopLatency(targetUnit, req.cycle, req.srcId);
             }
+            noteRowAccess(targetUnit, req.lineAddr);   // 1.11.52 (D003)
             profRemoteAccesses_.inc();
             profRemoteLatency_.inc(totalLat);
             return req.cycle + totalLat;
@@ -869,6 +885,10 @@ public:
     void initStats(AggregateStat* parentStat) override {
         AggregateStat* s = new AggregateStat();
         s->init(name_.c_str(), "PE memory interface stats");
+        profRowHits_.init("rowHits", "Accesses hitting the unit's open row (measured)");
+        s->append(&profRowHits_);
+        profRowMisses_.init("rowMisses", "Accesses opening a different row (measured)");
+        s->append(&profRowMisses_);
         profLocalAccesses_.init("localAcc", "Local accesses (within coverage)");
         s->append(&profLocalAccesses_);
         profRemoteAccesses_.init("remoteAcc", "Remote accesses (hierarchy traversal)");
@@ -1100,6 +1120,20 @@ protected:
         }
         // Simple model: one analytical NoC RTT to the MC node.
         return 2 * zinfo->hierarchy.nocAvgOneWayLatency;
+    }
+
+    /* 1.11.52 (D003): one last-open-row register per unit. A row hit is an
+     * access to the row already open in that unit; anything else is a miss
+     * that pays activate+precharge. Armed only when the row size is known
+     * (zinfo->hierarchy.dramRowBytes > 0), so nothing is claimed for a
+     * configuration where the row geometry was never established. */
+    inline void noteRowAccess(uint32_t unit, Address lineAddr) {
+        const uint32_t rowBytes = zinfo->hierarchy.dramRowBytes;
+        if (rowBytes == 0) return;
+        if (lastRow_.size() <= unit) lastRow_.resize(unit + 1, ~0ull);
+        const uint64_t row = (uint64_t)(lineAddr << 6) / rowBytes;
+        if (lastRow_[unit] == row) profRowHits_.inc();
+        else { profRowMisses_.inc(); lastRow_[unit] = row; }
     }
 
     uint32_t addrToUnit(Address lineAddr) const {

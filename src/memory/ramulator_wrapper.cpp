@@ -103,21 +103,62 @@ void RamulatorWrapper::parseConfiguration() {
                    "  AddrMapper:\n    impl: RoBaRaCoCh\n";
         };
 
+        /* 1.11.52 (audit D016): BANDWIDTH IS DERIVED, and a preset that
+         * cannot express the modelled rate says so.
+         *
+         * These branches carried a literal MB/s beside a Ramulator timing
+         * preset, and the two drifted apart from the rate the ENERGY path
+         * prices at: DDR5 was configured at the DDR5_3200AN preset with a
+         * literal 25600 MB/s while pimid_energy and CACTI-IO price DDR5 at
+         * 4800 MT/s; GDDR6 carried 64000 MB/s against a 14000 MT/s energy
+         * rate. Bandwidth is now rate x channel width x channels from the
+         * SAME rate table the energy path uses (spec primitives), so the
+         * literal cannot drift.
+         *
+         * The preset mismatch is NOT silently resolved: upstream Ramulator2
+         * ships no DDR5 timing bin above 3200, so the timing model genuinely
+         * cannot run at the modelled 4800. That is a modelling limitation,
+         * and it is announced once here rather than hidden in two numbers
+         * that disagree. */
+        auto derivedBwMBs = [](const std::string& t, uint32_t chans) -> uint64_t {
+            double mts = PIMID::CactiIOWrapper::dramRateMTs(t);
+            int wbits  = PIMID::CactiIOWrapper::dramChannelWidthBits(t);
+            if (mts <= 0.0 || wbits <= 0) return 0;
+            return static_cast<uint64_t>(mts * (wbits / 8.0) * chans);
+        };
+        auto sayPresetRate = [](const std::string& t, const char* preset,
+                                double preset_mts) {
+            double mts = PIMID::CactiIOWrapper::dramRateMTs(t);
+            if (mts > 0.0 && preset_mts > 0.0 &&
+                std::fabs(mts - preset_mts) > 1.0) {
+                std::cerr << "[mem] NOTE: " << t << " is modelled at " << mts
+                          << " MT/s (energy, termination and bandwidth), while "
+                             "the Ramulator2 timing preset in use is " << preset
+                          << " at " << preset_mts << " MT/s -- upstream ships "
+                             "no timing bin at the modelled rate. Timing comes "
+                             "from the preset; everything else from the "
+                             "modelled rate." << std::endl;
+            }
+        };
+
         if (dt == "DDR3") {
             config_yaml_ = makeConfig("DDR3", "DDR3_8Gb_x8", "DDR3_1600H");
             channels_ = 1; ranks_per_channel_ = 1; banks_per_rank_ = 8;
             capacity_ = 8ULL * 1024 * 1024 * 1024;
-            bandwidth_ = 12800;  // 12.8 GB/s for DDR3-1600
+            bandwidth_ = derivedBwMBs("DDR3", channels_);   // 1.11.52 (D016)
+            sayPresetRate("DDR3", "DDR3_1600H", 1600);
         } else if (dt == "DDR5") {
             config_yaml_ = makeConfig("DDR5", "DDR5_8Gb_x8", "DDR5_3200AN");
             channels_ = 1; ranks_per_channel_ = 1; banks_per_rank_ = 16;
             capacity_ = 8ULL * 1024 * 1024 * 1024;
-            bandwidth_ = 25600;  // 25.6 GB/s for DDR5-3200
+            bandwidth_ = derivedBwMBs("DDR5", channels_);   // 1.11.52 (D016)
+            sayPresetRate("DDR5", "DDR5_3200AN", 3200);
         } else if (dt == "LPDDR5") {
             config_yaml_ = makeConfig("LPDDR5", "LPDDR5_8Gb_x16", "LPDDR5_6400");
             channels_ = 1; ranks_per_channel_ = 1; banks_per_rank_ = 16;
             capacity_ = 8ULL * 1024 * 1024 * 1024;
-            bandwidth_ = 12800;  // 12.8 GB/s per channel for LPDDR5-6400
+            bandwidth_ = derivedBwMBs("LPDDR5", channels_);  // 1.11.52 (D016)
+            sayPresetRate("LPDDR5", "LPDDR5_6400", 6400);
         } else if (dt == "GDDR6") {
             config_yaml_ = makeConfig("GDDR6", "GDDR6_8Gb_x16", "GDDR6_2000_1.35V_x16");
             // GDDR6 is a dual-channel part (2 x 16-bit channels per device,
@@ -126,7 +167,8 @@ void RamulatorWrapper::parseConfiguration() {
             // analytical model treat the full 64 GB/s as one channel's rate.
             channels_ = 2; ranks_per_channel_ = 1; banks_per_rank_ = 16;
             capacity_ = 8ULL * 1024 * 1024 * 1024;
-            bandwidth_ = 64000;  // 64 GB/s aggregate for GDDR6 16Gbps (2 ch)
+            bandwidth_ = derivedBwMBs("GDDR6", channels_);   // 1.11.52 (D016)
+            sayPresetRate("GDDR6", "GDDR6_2000_1.35V_x16", 16000);
         } else if (dt == "HBM2") {
             config_yaml_ = makeConfig("HBM2", "HBM2_4Gb", "HBM2_2.4Gbps");
             channels_ = 8; ranks_per_channel_ = 1; banks_per_rank_ = 16;
@@ -459,12 +501,14 @@ Cycle RamulatorWrapper::getAverageLatency() const {
 double RamulatorWrapper::getArrayReadEnergyNJ() const {
     return Ramulator::pimid_energy::arrayReadNJ(
         dram_type_, getTRC(), getTRAS(), getTBurst(), energy_bank_override_pJ_per_byte_,
-        device_width_);   // 1.11.46 (L181): whole-rank basis
+        device_width_,        // 1.11.46 (L181): whole-rank basis
+        row_miss_frac_);      // 1.11.52 (D003): measured row-miss fraction
 }
 double RamulatorWrapper::getArrayWriteEnergyNJ() const {
     return Ramulator::pimid_energy::arrayWriteNJ(
         dram_type_, getTRC(), getTRAS(), getTBurst(), energy_bank_override_pJ_per_byte_,
-        device_width_);   // 1.11.46 (L181)
+        device_width_,        // 1.11.46 (L181)
+        row_miss_frac_);      // 1.11.52 (D003)
 }
 double RamulatorWrapper::getTerminationEnergyNJ() const {
     /* 1.11.40 (audit N8, user ruling: harness the model, do not table the
@@ -525,6 +569,19 @@ double RamulatorWrapper::getTerminationEnergyNJ() const {
                   << dram_type_ << "'; DQ termination falls back to the "
                      "pimid_energy scheme table (termination term only)."
                   << std::endl;
+        /* 1.11.52 (audit D008): name the UNSOURCED input where it is used.
+         * LPDDR5's termination resistance is an assumption (Micron states
+         * programmable VSS ODT and gives VDDQ/RON, not Rtt), and it is the
+         * larger half of the 280-ohm loop, so the reported number swings
+         * ~1.75x for a 2x error in it. Disclosing this only in a comment in
+         * another file is not disclosure. */
+        if (dram_type_ == "LPDDR5") {
+            std::cerr << "[power] NOTE: the LPDDR5 termination number rests on "
+                         "an UNSOURCED Rtt = 240 ohm (of a 280-ohm loop); "
+                         "Micron's datasheets give VDDQ and RON but not Rtt. "
+                         "Treat LPDDR5 termination as an assumption, not a "
+                         "sourced value." << std::endl;
+        }
     }
     return Ramulator::pimid_energy::terminationNJ(dram_type_, energy_term_override_pJ_per_bit_);
 }
@@ -559,13 +616,19 @@ double RamulatorWrapper::getRefreshPowerMW() const {
 double RamulatorWrapper::getBackgroundPowerMW() const {
     return Ramulator::pimid_energy::backgroundMW(dram_type_);
 }
-int RamulatorWrapper::getBackgroundUnits(const std::string& device_width) const {
-    return Ramulator::pimid_energy::backgroundUnits(dram_type_, device_width);  // 1.11.20 D13
+int RamulatorWrapper::getBackgroundUnits(const std::string& device_width,
+                                         int ranks_per_channel,
+                                         int channels) const {
+    return Ramulator::pimid_energy::backgroundUnits(dram_type_, device_width,
+                                                    ranks_per_channel, channels);  // 1.11.20 D13 / 1.11.52 A015
 }
 double RamulatorWrapper::getBackgroundSystemMW(double r_idle, bool pg_enabled,
-                                               const std::string& device_width) const {
+                                               const std::string& device_width,
+                                               int ranks_per_channel,
+                                               int channels) const {
     return Ramulator::pimid_energy::backgroundSystemMW(dram_type_, r_idle,
-                                                       pg_enabled, device_width);  // D13+D15
+                                                       pg_enabled, device_width,
+                                                       ranks_per_channel, channels);
 }
 
 void RamulatorWrapper::updateEnergyMetrics() const {
@@ -938,9 +1001,22 @@ double RamulatorWrapper::getTBurst() const {
      * 2.5 ns; GDDR6-14000 BL16 -> 1.14 ns. The DDR4-2400 fallback priced all
      * three at 3.33 ns, and the SPEED BIN now matches the IDD row's part for
      * each technology (L168). */
+    /* 1.11.52 (audit D002): DDR4 and DDR5 join the same rule. The list
+     * above covered three technologies and left DDR4/DDR5 on the
+     * architecture object's tBurst, which is the DDR4-2400 bin (3.33 ns) --
+     * while BOTH DDR4 termination paths (CACTI-IO's dramRateMTs and the
+     * pimid_energy scheme table) price the same part at 3200 MT/s. One
+     * part, two speed bins, and the array/termination split of a single
+     * access disagreed by 1.33x. Burst time is beats/rate arithmetic from
+     * the SAME rate table the termination path uses, so the two halves of
+     * an access can no longer be priced at different rates. */
     if (dram_type_ == "GDDR6")  return 16.0 * 1000.0 / 14000.0;  // 1.143 ns
     if (dram_type_ == "LPDDR5") return 16.0 * 1000.0 / 6400.0;   // 2.5 ns
     if (dram_type_ == "DDR3")   return  8.0 * 1000.0 / 1600.0;   // 5.0 ns
+    /* 1.11.52 (D002, resolved at the RATE): DDR4/DDR5 keep the architecture
+     * object's burst, because the fix belongs one level up -- the rate table
+     * now names the part this tree actually simulates, so array, termination
+     * and bandwidth all derive from one number. */
     if (dram_arch_) {
         return dram_arch_->timing.tBurst_ns;
     }

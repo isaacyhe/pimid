@@ -72,6 +72,12 @@ public:
     // Override the IDD-derived array energy with a fixed pJ/byte (0 = use IDD default).
     void setBankEnergyOverridePJPerByte(double v) { energy_bank_override_pJ_per_byte_ = v; }
     void setDeviceWidth(const std::string& w) { device_width_ = w; }  // 1.11.46
+    /* 1.11.52 (audit D003): the MEASURED row-buffer miss fraction from the
+     * run (PE-MI rowHits/rowMisses). <0 = not measured, and the array energy
+     * then uses the stated 0.5 fallback while the caller says so. */
+    void setRowMissFraction(double f) { row_miss_frac_ = f; }
+    double getRowMissFraction() const { return row_miss_frac_; }
+
     double getArrayReadEnergyNJ() const;     // array rd (act+col, amortized) per 64B
     double getArrayWriteEnergyNJ() const;    // array wr per 64B
     double getTerminationEnergyNJ() const;   // ODT/termination per 64B, from CACTI-IO
@@ -89,9 +95,15 @@ public:
      * (one DDR chip / one HBM channel is the IDD unit) and state-aware
      * (IDD3N busy, IDD2N idle, IDD2P idle-with-pg). device_width is the
      * JEDEC x4/x8/x16 string; "" means the x8 default. */
-    int    getBackgroundUnits(const std::string& device_width = "") const;
+    /* 1.11.52 (audit A015): population = devices/rank x ranks x channels, the
+     * same basis memorySystemDieCount() uses for AREA, so the Power and Area
+     * lines of one report describe the same memory system. */
+    int    getBackgroundUnits(const std::string& device_width = "",
+                              int ranks_per_channel = 1, int channels = 1) const;
     double getBackgroundSystemMW(double r_idle, bool pg_enabled,
-                                 const std::string& device_width = "") const;
+                                 const std::string& device_width = "",
+                                 int ranks_per_channel = 1,
+                                 int channels = 1) const;   // 1.11.52 (A015)
 
     // Configuration queries
     uint64_t getCapacity() const { return capacity_; }
@@ -230,6 +242,7 @@ private:
     // PIM Support Components
     bool pim_enabled_;
     std::string dram_type_;
+    double row_miss_frac_ = -1.0;   // 1.11.52 (D003): measured; <0 = unmeasured
     /* 1.11.46 (L181): device width for the whole-rank array-energy basis.
      * Empty = x8 default (the same convention backgroundUnits uses). */
     std::string device_width_;

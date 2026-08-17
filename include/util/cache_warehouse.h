@@ -58,6 +58,13 @@ const std::string& warehouseRoot();
 /// "<root>/<backend>" — created (mkdir -p) on demand. e.g. backendDir("nvsim").
 std::string backendDir(const std::string& backend);
 
+/* 1.11.52: the pre-1.11.52 warehouse (~/.cache/pimid/<backend>), READ-ONLY.
+ * The cache now ships with pimid and starts empty; a miss in the tree store
+ * consults this so characterizations that already cost minutes are reused
+ * (and copied forward) instead of regenerated. Returns "" when there is no
+ * legacy location or it coincides with the active root. */
+std::string legacyBackendDir(const std::string& backend);
+
 /// Version stamp written into manifest records (for staleness detection).
 std::string toolVersion();
 

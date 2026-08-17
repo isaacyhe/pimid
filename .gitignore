@@ -115,3 +115,8 @@ benchmarks/cosim/**/*_shared_memory
 benchmarks/cosim/reduction_tree/rt_peer
 !benchmarks/cosim/**/*_peer.cpp
 !benchmarks/cosim/**/*.h
+
+# 1.11.52: the cache ships EMPTY and fills at runtime (see cache/README.md).
+cache/*
+!cache/.gitkeep
+!cache/README.md

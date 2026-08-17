@@ -4,7 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
-[![Version](https://img.shields.io/badge/version-1.11.51-green.svg)]()
+[![Version](https://img.shields.io/badge/version-1.11.52-green.svg)]()
 [![arXiv](https://img.shields.io/badge/arXiv-2607.24196-b31b1b.svg)](https://arxiv.org/abs/2607.24196)
 
 PIMID is a cycle-accurate simulator for Processing-in-Memory (PIM)
@@ -111,6 +111,7 @@ noc: { model: detailed }      # default; 'analytical' for fast sweeps
 | [docs/memory_spec_structs.md](docs/memory_spec_structs.md) | C++ architecture-spec structs |
 | [docs/cache_warehouse.md](docs/cache_warehouse.md) | characterization cache internals |
 | [docs/external.md](docs/external.md) | vendored external simulators |
+| [docs/sources.md](docs/sources.md) | every external number's provenance (papers, JEDEC standards, datasheets) |
 | [docs/external_models.md](docs/external_models.md) | plugging in your own models |
 
 ## Citation
@@ -147,6 +148,10 @@ also cite its paper:
 |---|---|---|---|
 | Ramulator 2.0 | DRAM timing and energy | [Luo et al., IEEE CAL 2024](https://doi.org/10.1109/LCA.2023.3333759) | [CMU-SAFARI/ramulator2](https://github.com/CMU-SAFARI/ramulator2) |
 | CACTI 7 | SRAM arrays, cache timing/area | [Balasubramonian et al., ACM TACO 2017](https://doi.org/10.1145/3085572) | [HewlettPackard/cacti](https://github.com/HewlettPackard/cacti) |
+| CACTI-IO | off-chip DRAM interface: termination, PHY, IO area | [Jouppi et al., ICCAD 2012](https://doi.org/10.1145/2429384.2429504) | ships inside CACTI 7 (`external/cacti/extio*`) |
+| CACTI-P | power gating / sleep-transistor and retention (Vcc_min) model | [Li et al., ICCAD 2011](https://doi.org/10.1109/ICCAD.2011.6105405) | grafted into `external/cacti` (the 6.5-P fields McPAT consumes) |
+| CACTI-D | DRAM cell/device technology (`comm-dram`, `lp-dram`) and DRAM arrays | [Thoziyoor et al., ISCA 2008](https://doi.org/10.1109/ISCA.2008.16) | ships inside CACTI 7 (`external/cacti`, dram cell/device paths) |
+| CACTI-3DD | 3D-stacked DRAM + TSV model — present and compiled, **not yet invoked** (see [docs/sources.md](docs/sources.md)) | [Chen et al., DATE 2012](https://doi.org/10.1109/DATE.2012.6176428) | ships inside CACTI 7 (`external/cacti/TSV.cc`) |
 | NVSim | STT-MRAM, PCM, ReRAM arrays | [Dong et al., IEEE TCAD 2012](https://doi.org/10.1109/TCAD.2012.2185930) | [SEAL-UCSB/NVSim](https://github.com/SEAL-UCSB/NVSim) |
 | Garnet | cycle-accurate in-memory network | [Agarwal et al., ISPASS 2009](https://doi.org/10.1109/ISPASS.2009.4919636) | [gem5/gem5](https://github.com/gem5/gem5) |
 | McPAT | power and area | [Li et al., MICRO 2009](https://doi.org/10.1145/1669112.1669172) | [HewlettPackard/mcpat](https://github.com/HewlettPackard/mcpat) |

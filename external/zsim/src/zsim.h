@@ -258,6 +258,11 @@ struct GlobSimInfo {
         // Distributed PE-MI fields
         uint32_t totalUnits = 128;        // total units at placement level
         uint32_t pagesPerUnit = 32;       // contiguous block (4KB-pages) per unit (device-local addressing)
+        /* 1.11.52 (audit D003): the DRAM ROW (page) size in bytes, so the
+         * memory interface can MEASURE the row-buffer hit rate instead of
+         * the energy model assuming one. 0 = unknown -> no measurement is
+         * claimed and the consumer says so. */
+        uint32_t dramRowBytes = 0;
         bool assumeLocal = false;         // perfect data prep: device computes on its local working set
         bool chargePrep = false;          // co-sim: first touch of a line pays reorg (cross-unit) + transfer
         uint32_t hostLinkXferCycles = 0;  // per first-touch host->device link transfer (0 = internal/on-package)

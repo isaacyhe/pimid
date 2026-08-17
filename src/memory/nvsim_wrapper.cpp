@@ -329,15 +329,23 @@ void NVSimWrapper::loadCellParameters() {
 namespace {
     struct NVMCacheKey {
         int nvm_type; uint64_t capacity_bytes; int process_node_nm; uint32_t word_width_bits;
+        /* 1.11.52 (audit D055 + the D-series cache-key findings): TEMPERATURE
+         * is a key axis now that power.temperature_k exists. It was safe to
+         * omit only while every call site passed 350 K; wiring the knob into
+         * the array queries makes two reachable configurations differ in it,
+         * which is exactly the LSTP-served-an-HP-entry failure that put
+         * device_corner in the key in 1.11.49. */
         /* 1.11.49 (gate 1159H X1): the DEVICE CORNER is part of the result's
          * identity. Without it, an LSTP query silently served the pre-generated
          * HP entry -- the L77 fix compiled and did nothing, and the gate
          * caught it: LSTP leakage == HP leakage exactly. */
         int device_corner;
+        int temperature_k;
         bool operator<(const NVMCacheKey& o) const {
             if (nvm_type != o.nvm_type) return nvm_type < o.nvm_type;
             if (capacity_bytes != o.capacity_bytes) return capacity_bytes < o.capacity_bytes;
             if (process_node_nm != o.process_node_nm) return process_node_nm < o.process_node_nm;
+            if (temperature_k != o.temperature_k) return temperature_k < o.temperature_k;
             if (word_width_bits != o.word_width_bits) return word_width_bits < o.word_width_bits;
             return device_corner < o.device_corner;
         }
@@ -377,16 +385,44 @@ namespace {
          * HP set keeps its names (no regeneration for the default), while
          * LSTP/LOP can never collide with it. */
         if (k.device_corner != 0) os << "_dc" << k.device_corner;
+        /* 1.11.52: same discipline as the corner -- the DEFAULT 350 K keeps
+         * the pre-existing filenames (no regeneration of the warmed set),
+         * any other temperature gets its own entry. */
+        if (k.temperature_k != 350) os << "_t" << k.temperature_k;
         os << ".xml";
         return os.str();
     }
     // Minimal scalar XML reader (looks for <field>value</field>). Returns true on
     // a complete, well-formed hit.
     static bool nvsimDiskLoad(const NVMCacheKey& k, NVMCacheVal& v) {
-        std::ifstream f(nvsimCachePath(k));
-        if (!f.good()) return false;
+        std::string path = nvsimCachePath(k);
+        std::ifstream f(path);
+        /* 1.11.52 (user ruling: the cache ships with pimid, initially empty):
+         * on a miss in the TREE store, consult the pre-1.11.52 per-user
+         * location once. A characterization costs a full design-space search
+         * (584k-1.16M valid points in this tree's own logs), so silently
+         * regenerating entries that already exist would be the expensive
+         * kind of wrong. A hit is copied forward and announced; the legacy
+         * store is never written. */
+        std::string from_legacy;
+        if (!f.good()) {
+            const std::string ldir = pimid::cache::legacyBackendDir("nvsim");
+            if (ldir.empty()) return false;
+            std::string base = path.substr(path.find_last_of('/') + 1);
+            from_legacy = ldir + "/" + base;
+            f.open(from_legacy);
+            if (!f.good()) return false;
+        }
         std::string xml((std::istreambuf_iterator<char>(f)),
                          std::istreambuf_iterator<char>());
+        if (!from_legacy.empty()) {
+            std::ofstream out(path);
+            if (out.good()) {
+                out << xml;
+                std::cout << "[NVSimWrapper] migrated cached characterization "
+                          << "into the tree cache (" << path << ")" << std::endl;
+            }
+        }
         auto get = [&](const char* tag, double& out) -> bool {
             std::string open = std::string("<") + tag + ">";
             std::string close = std::string("</") + tag + ">";
@@ -446,7 +482,10 @@ namespace {
 void NVSimWrapper::runNVSim() {
     // Cache short-circuit: if this exact (type, capacity, node) was characterized
     // before, reuse the scalar outputs and skip the expensive design-space search.
-    NVMCacheKey key{ (int)config_.nvm_type, config_.capacity_bytes, config_.process_node_nm, config_.word_width_bits, config_.device_corner };  // 1.11.49: corner in the key
+    NVMCacheKey key{ (int)config_.nvm_type, config_.capacity_bytes,
+                     config_.process_node_nm, config_.word_width_bits,
+                     config_.device_corner,          // 1.11.49
+                     config_.temperature_k };        // 1.11.52 (D055)
     // Reads (both the in-memory map and the on-disk XML) are skipped unless the
     // warehouse mode permits reading — OFF/WO must truly recompute.
     if (pimid::cache::readEnabled()) {
@@ -673,6 +712,29 @@ void NVSimWrapper::runNVSim() {
             valid_ = false;
             error_message_ = "NVSim found no valid design points for the given configuration";
             std::cerr << "[NVSimWrapper] " << error_message_ << std::endl;
+            /* 1.11.52 (found by the corner cache-warming sweep): say WHICH
+             * input has no feasible design instead of leaving a bare "no
+             * valid design points" for the caller to guess at. MEASURED at
+             * 22 nm, 64 KB, widths 512 and 64: PCM characterizes at HP and
+             * returns ZERO design points at BOTH low-power corners (4/4
+             * failures), while STT-MRAM and ReRAM succeed at all three.
+             * That is the expected direction physically -- a PCM RESET
+             * needs a high drive current that low-power periphery devices
+             * cannot supply -- but the measurement is per (type, corner,
+             * node, capacity, width), so this reports the correlation and
+             * does not assert it as a law. */
+            if (config_.device_corner != 0) {
+                std::cerr << "[NVSimWrapper]   the requested DEVICE CORNER is "
+                          << (config_.device_corner == 1 ? "LSTP" : "LOP")
+                          << ": no array organisation in NVSim's search space "
+                             "meets the cell's drive requirement with "
+                             "low-power periphery devices. Measured 2026-08-17 "
+                             "at 22 nm / 64 KB: PCM fails at LSTP and LOP "
+                             "(both widths); STT-MRAM and ReRAM succeed at all "
+                             "corners. Use the HP corner for this technology, "
+                             "or a technology whose write current the corner "
+                             "can drive." << std::endl;
+            }
         }
 
     } catch (const std::exception& e) {
