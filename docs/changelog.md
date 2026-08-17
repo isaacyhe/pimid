@@ -7,6 +7,54 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.50 -- the family transform stops at the die edge
+
+FIX-PRE-FLEET Batch H: the DRAM-periphery family transform's scope inside the
+McPAT fork (L74/L80/L103/L104/L112/L115/L116). The 1.11.12 transform priced
+everything it touched with the same three device factors; this release makes
+each factor stop where its physics stops.
+
+- L74: the family blanketed EVERY NoC level in a multi-level run, including
+  the rank/channel/system fabrics the placement matrix itself declares to be
+  logic (buffer die or host board). Each XML NoC instance now carries an
+  on_dram_die flag from that same matrix (subarray..chip on die; channel
+  on die only for channel-centric parts; rank and system always off-die),
+  and processor.cc transforms only the flagged levels. The aggregate is
+  rebuilt from the mixed-family parts with the constructor's own pppm
+  arithmetic, so total and breakdown cannot disagree.
+- L103: within an on-die level, the dynamic factor is device physics (CACTI
+  comm-dram vs hp columns, gate-capacitance dominated) and cannot price the
+  WIRE share of fabric dynamic -- metal capacitance does not follow the
+  device. The link/bus dynamic share is restored to its metal price after
+  the transform; leakage stays transformed for both shares (link drivers
+  are periphery devices). A bus-type subarray/bank level is all link, so
+  its dynamic is untouched -- the pass-through-wire fabric the 1.10.5
+  census flagged.
+- L104: the MC PHY, when built, is an empirical fit (die-photo area curve,
+  mW/Gb/s dynamic; interposer tier from O'Connor MICRO-50 2017) -- a
+  device-column ratio cannot transform a measured curve. Its dynamic and
+  area are restored after the transform; its leakage (gate counts x Isub)
+  stays transformed. Inert at the D2/D3 on-die tiers, where withPHY=0.
+- L116: the transistor-pitch penalty applied to the WHOLE core, including
+  the SRAM arrays whose cell area CACTI's tables declare device-independent.
+  The on-pitch logic share is now measured from McPAT's own breakdown (exu
+  minus its register-file and scheduler arrays, plus pipeline and undiff
+  core) and the penalty applies to that share only, with the boundary
+  stated (IFU decode logic stays classed with its arrays).
+- L80 reconciled: the co-sim link's device end stays untransformed for a
+  stated reason now covering every family class -- HBM reaches the host
+  through its logic base die, DDR controllers are host-side, and a
+  channel-centric LPDDR/GDDR module reaches the link through an interface
+  chip; the SerDes endpoint is logic silicon in all three.
+- L112 reconciled: the dead `sc & 2` cache arm was already removed with the
+  scope mask in 1.11.34 (E10); with Private_L2=1 the shared-l2 Component is
+  zero and its transform a no-op.
+- L115 reconciled: the rebuilt Processor totals are consciously unread --
+  1.11.29 verified nothing consumes them and completed them anyway; marked.
+
+Gate 1160H (old = released 1.11.49, new = this, same job): see gate header
+for the eight stated predictions.
+
 ## 1.11.49 -- readers read the last dump; the corner reaches what it claims
 
 FIX-PRE-FLEET batches F (L220/L248/L249/L250) and G (L59/L69/L77/L119).

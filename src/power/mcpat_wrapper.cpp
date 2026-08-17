@@ -1637,7 +1637,16 @@ std::string McPATWrapper::generateXMLConfig() const {
          * than a missing mask bit: our placement ladder maps LOGIC_DIE (the
          * HBM base die) to family 0, and an HBM device reaches its host
          * THROUGH that base die; for DDR-class parts the controller is
-         * host-side. Either way it is logic silicon. */
+         * host-side. Either way it is logic silicon.
+         *
+         * 1.11.50 (L80, closing the audit finding): the same reason covers
+         * the remaining family, stated per class rather than left implied.
+         * A channel-centric LPDDR/GDDR PIM module reaches the host link
+         * through an interface/buffer chip (there is no host-socket LPDDR
+         * or GDDR link; the SerDes endpoint is standard-logic SerDes IP
+         * either way) -- so the device end of the co-sim link is logic
+         * silicon at EVERY family placement, and adding it to the rebuilt
+         * totals untransformed is the correct pricing, not an omission. */
     }
     /* 1.11.8: sys.power_gating enables McPAT/CACTI's sleep-transistor
      * model so per-component power_gated_leakage endpoints are computed.
@@ -2137,6 +2146,8 @@ std::string McPATWrapper::generateXMLConfig() const {
                 << std::max(1, config_.noc_vc_buffer_size) << "\"/>\n";
             xml << "      <param name=\"flit_bits\" value=\"" << lvl.flit_bits << "\"/>\n";
             xml << "      <param name=\"chip_coverage\" value=\"" << lvl.chip_coverage << "\"/>\n";
+            /* 1.11.50 (L74): per-level family scope -- see NoCLevelConfig. */
+            xml << "      <param name=\"on_dram_die\" value=\"" << lvl.on_dram_die << "\"/>\n";
             xml << "      <param name=\"link_routing_over_percentage\" value=\"0.5\"/>\n";
             xml << "      <stat name=\"total_accesses\" value=\"" << lvl.total_accesses << "\"/>\n";
             xml << "      <stat name=\"duty_cycle\" value=\"" << lvl.duty_cycle << "\"/>\n";

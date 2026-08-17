@@ -454,6 +454,14 @@ typedef struct{
 	double chip_coverage;
 	double vdd;
 	double power_gating_vcc;
+	/* PIMID 1.11.50 (L74): whether THIS fabric level sits on the DRAM die.
+	 * The dram_periph_family transform used to apply to every NoC instance
+	 * in the run, but a multi-level build spans the physical hierarchy --
+	 * subarray..chip fabrics live on the die while rank/channel/system
+	 * fabrics live on a buffer die or the host board, i.e. logic silicon
+	 * per the same placement matrix that decides the family itself.
+	 * Default 1 keeps unannotated XMLs (single on-die fabric) unchanged. */
+	int on_dram_die;
 	//stats
 	double total_accesses;
 	double duty_cycle;

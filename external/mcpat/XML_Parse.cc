@@ -1144,6 +1144,7 @@ void ParseXML::parse(char* filepath)
 							if (strcmp(xNode3.getChildNode("param",k).getAttribute("name"),"horizontal_nodes")==0) {sys.NoC[i].horizontal_nodes=atoi(xNode3.getChildNode("param",k).getAttribute("value"));continue;}
 							if (strcmp(xNode3.getChildNode("param",k).getAttribute("name"),"vertical_nodes")==0) {sys.NoC[i].vertical_nodes=atoi(xNode3.getChildNode("param",k).getAttribute("value"));continue;}
 							if (strcmp(xNode3.getChildNode("param",k).getAttribute("name"),"has_global_link")==0) {sys.NoC[i].has_global_link=(bool)atoi(xNode3.getChildNode("param",k).getAttribute("value"));continue;}
+							if (strcmp(xNode3.getChildNode("param",k).getAttribute("name"),"on_dram_die")==0) {sys.NoC[i].on_dram_die=atoi(xNode3.getChildNode("param",k).getAttribute("value"));continue;} /* PIMID 1.11.50 (L74) */
 							if (strcmp(xNode3.getChildNode("param",k).getAttribute("name"),"link_throughput")==0) {sys.NoC[i].link_throughput=atoi(xNode3.getChildNode("param",k).getAttribute("value"));continue;}
 							if (strcmp(xNode3.getChildNode("param",k).getAttribute("name"),"link_latency")==0) {sys.NoC[i].link_latency=atoi(xNode3.getChildNode("param",k).getAttribute("value"));continue;}
 							if (strcmp(xNode3.getChildNode("param",k).getAttribute("name"),"input_ports")==0) {sys.NoC[i].input_ports=atoi(xNode3.getChildNode("param",k).getAttribute("value"));continue;}
@@ -1770,6 +1771,7 @@ void ParseXML::initialize() //Initialize all
 		sys.NoC[i].vdd =0;
 		sys.NoC[i].power_gating_vcc = -1;
 		sys.NoC[i].has_global_link = true;
+		sys.NoC[i].on_dram_die = 1;   /* PIMID 1.11.50 (L74) */
 		strcpy(sys.NoC[i].topology,"default");
 		sys.NoC[i].horizontal_nodes=1;
 		sys.NoC[i].vertical_nodes=1;

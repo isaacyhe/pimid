@@ -73,6 +73,13 @@ public:
         int flit_bits;
         double clock_mhz;
         double chip_coverage;     // fraction of chip area
+        /* 1.11.50 (L74): does this fabric level sit on the DRAM die? The
+         * DRAM-periphery family transform follows this per level instead of
+         * blanketing every level in the run: subarray..chip fabrics are on
+         * the die; rank/channel/system fabrics are buffer-die or host-board
+         * logic per the placement matrix. Default 1 = on die (the single-
+         * fabric device case, which is what an unannotated level meant). */
+        int on_dram_die;
         // Activity
         uint64_t total_accesses;  // packets at this level
         double duty_cycle;        // derived: total_accesses / total_cycles
@@ -81,6 +88,7 @@ public:
             : name("noc"), type(1), horizontal_nodes(4), vertical_nodes(4)
             , input_ports(5), output_ports(5), flit_bits(128)
             , clock_mhz(1000.0), chip_coverage(1.0)
+            , on_dram_die(1)
             , total_accesses(0), duty_cycle(0.0)
         {}
     };

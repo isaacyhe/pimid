@@ -4500,9 +4500,25 @@ static std::vector<pimid::McPATWrapper::NoCLevelConfig> buildNoCLevelsForMcPAT(
         uint64_t garnet_packets = (garnet.total_hops > 0)
                                 ? garnet.total_hops : garnet.total_packets;
 
+        /* 1.11.50 (L74): the DRAM-periphery family used to blanket EVERY
+         * level in this vector -- processor.cc transformed rank/channel/
+         * system fabrics that the placement matrix itself declares to be
+         * logic (buffer die or host board). Each level now carries the
+         * matrix's own verdict: subarray..chip (0-3) fabrics sit on the
+         * die; the channel fabric (5) is on-die only for channel-centric
+         * parts (LPDDR/GDDR/HBM), where the channel periphery is the die's
+         * own interface; rank (4) and system (6) are always off-die logic.
+         * Same predicate as applyProcessFamily -- one matrix, two readers. */
+        const bool noc_channel_centric =
+            config.memory_tech.rfind("LPDDR", 0) == 0 ||
+            config.memory_tech.rfind("GDDR", 0) == 0 ||
+            config.memory_tech.rfind("HBM", 0) == 0;
+
         for (int lvl = pe_level; lvl < 7; lvl++) {
             NoCLevel nc;
             nc.name = level_names[lvl];
+            nc.on_dram_die = ((lvl <= 3) ||
+                              (lvl == 5 && noc_channel_centric)) ? 1 : 0;
 
             // Lower levels (subarray/bank) → bus; upper levels → router NoC
             nc.type = (lvl <= 1) ? 0 : topologyToMcPATType(config.noc_topology);

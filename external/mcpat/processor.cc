@@ -544,16 +544,146 @@ Processor::Processor(ParseXML *XML_interface)
       /* 1.11.34 (E10): the scope mask had one reachable value (15, emitted as
        * a literal with no surface), so it is gone and the transform applies
        * unconditionally -- which is what 15 meant. */
-      applyFam(core, true, "core", fpitch);   // core alone takes the pitch penalty
+      /* PIMID 1.11.50 (L116): the PITCH penalty applies to the core's
+       * ON-PITCH LOGIC share, not to its SRAM arrays. The penalty models
+       * layout constrained to the array's bitline pitch (Vogelsang MICRO
+       * 2010: sense-amp stripes and local wordline drivers); the core's own
+       * SRAM arrays -- caches, TLBs, register files, scheduler CAMs -- are
+       * placed as macro blocks whose CELL area CACTI's tables declare
+       * device-independent, so multiplying them by a transistor-pitch ratio
+       * priced silicon that does not exist. The on-pitch share is measured
+       * from McPAT's own breakdown: execution unit MINUS its register-file
+       * and scheduler arrays, plus pipeline and the undifferentiated core.
+       * (Decode logic inside the IFU stays classed with the IFU's arrays --
+       * a stated approximation, the units are not separable there.) */
+      double pitch_core_mul = fpitch;
+      if (fpitch != 1.0 && numCore > 0) {
+          double a_tot = 0.0, a_logic = 0.0;
+          for (int ci = 0; ci < numCore; ci++) {
+              Core* c = cores[ci];
+              double lg = 0.0;
+              if (c->exu) {
+                  lg += c->exu->area.get_area();
+                  if (c->exu->rfu)   lg -= c->exu->rfu->area.get_area();
+                  if (c->exu->scheu) lg -= c->exu->scheu->area.get_area();
+              }
+              if (c->corepipe)   lg += c->corepipe->area.get_area();
+              if (c->undiffCore) lg += c->undiffCore->area.get_area();
+              double t = c->area.get_area();
+              if (lg < 0.0) lg = 0.0;
+              if (lg > t)   lg = t;
+              a_tot += t; a_logic += lg;
+          }
+          double logic_frac = (a_tot > 0.0) ? a_logic / a_tot : 1.0;
+          pitch_core_mul = 1.0 + (fpitch - 1.0) * logic_frac;
+          /* stderr: the fork's stdout is /dev/null (see wrapper). */
+          std::cerr << "  [fam] pitch penalty " << fpitch
+                    << " applies to the on-pitch logic share ("
+                    << logic_frac << " of core area) -> effective x"
+                    << pitch_core_mul << "; SRAM macro blocks keep their"
+                    << " cell-table area." << std::endl;
+      }
+      applyFam(core, true, "core", pitch_core_mul);
       applyFam(l2, true, "l2"); applyFam(l3, true, "l3");
       {
-          applyFam(noc, false, "noc-agg");              // device factors, logic-process area
-          /* The per-level objects the reporting layer reads must carry the
-           * same transform as the aggregate: a breakdown that disagrees with
-           * its own total is the drift this release exists to end. */
-          for (int ni = 0; ni < numNOC; ni++) applyFam(*nocs[ni], false, "noc");
+          /* PIMID 1.11.50 (L74 + L103), replacing the blanket transform.
+           *
+           * L74: the family used to apply to EVERY NoC level in the run,
+           * but a multi-level build spans the physical hierarchy and only
+           * the levels ON the DRAM die are made of periphery transistors.
+           * Each XML NoC instance now carries on_dram_die from the same
+           * placement matrix that decides the family (subarray..chip on
+           * die; channel on die only for channel-centric parts; rank and
+           * system are buffer-die/host-board logic). Off-die levels keep
+           * their logic pricing entirely.
+           *
+           * L103: within an on-die level, the family's DYNAMIC factor is
+           * device physics (CACTI's comm-dram vs hp columns, dominated by
+           * gate capacitance) -- it transforms the ROUTER's buffers,
+           * crossbars and arbiters, but the WIRE share of dynamic is metal
+           * capacitance and does not follow the device. The link/bus share
+           * of dynamic is therefore restored to its metal price after the
+           * transform. LEAKAGE stays transformed for both shares: link
+           * DRIVERS are periphery devices and leak as such. A bus-type
+           * level (subarray/bank) is all link, so its dynamic is untouched
+           * -- which is exactly the pass-through-wire fabric the 1.10.5
+           * census flagged. */
+          bool any_on_die = false;
+          for (int ni = 0; ni < numNOC; ni++) {
+              if (!XML->sys.NoC[ni].on_dram_die) {
+                  std::cerr << "  [fam] noc" << ni << ": off-die fabric"
+                            << " (rank/channel/system tier) stays logic-priced."
+                            << std::endl;
+                  continue;
+              }
+              any_on_die = true;
+              NoC* n = nocs[ni];
+              double link_tdp_dyn = 0.0, link_rt_dyn = 0.0;
+              if (n->link_bus_exist) {
+                  link_tdp_dyn = n->link_bus_tot_per_Router.power.readOp.dynamic
+                               * n->nocdynp.total_nodes;
+                  link_rt_dyn  = n->link_bus->rt_power.readOp.dynamic;
+              }
+              applyFam(*n, false, "noc");
+              n->power.readOp.dynamic    += link_tdp_dyn * (1.0 - fd);
+              n->rt_power.readOp.dynamic += link_rt_dyn  * (1.0 - fd);
+          }
+          (void)any_on_die;
+          /* Rebuild the aggregate from the (now mixed-family) levels with
+           * the SAME pppm arithmetic the constructor's accumulation used,
+           * so the total and the per-level breakdown cannot disagree. The
+           * chip totals are rebuilt from components further down. */
+          noc.power.reset();
+          noc.rt_power.reset();
+          for (int ni = 0; ni < numNOC; ni++) {
+              double pppm_agg[4];
+              if (procdynp.homoNOC) {
+                  set_pppm(pppm_agg, procdynp.numNOC*nocs[ni]->nocdynp.clockRate,
+                           procdynp.numNOC, procdynp.numNOC, procdynp.numNOC);
+                  noc.power = noc.power + nocs[ni]->power*pppm_agg;
+                  set_pppm(pppm_agg, 1/nocs[ni]->nocdynp.executionTime,
+                           procdynp.numNOC, procdynp.numNOC, procdynp.numNOC);
+                  noc.rt_power = noc.rt_power + nocs[ni]->rt_power*pppm_agg;
+              } else {
+                  set_pppm(pppm_agg, nocs[ni]->nocdynp.clockRate, 1, 1, 1);
+                  noc.power = noc.power + nocs[ni]->power*pppm_agg;
+                  set_pppm(pppm_agg, 1/nocs[ni]->nocdynp.executionTime, 1, 1, 1);
+                  noc.rt_power = noc.rt_power + nocs[ni]->rt_power*pppm_agg;
+              }
+          }
       }
-      applyFam(mcs, true, "mcs");
+      /* PIMID 1.11.50 (L104): the MC's logic backend (frontend + transaction
+       * engine) is device-priced McPAT logic and takes the family; the MC
+       * PHY, when built, is an EMPIRICAL fit -- its area is an IO-inclusive
+       * die-photo curve and its dynamic an mW/Gb/s IO figure (Niagara
+       * 1/2-derived; interposer tier from O'Connor MICRO-50 2017). A device
+       * -column ratio cannot transform a measured curve, so the PHY's
+       * dynamic and area are restored after the transform. Its LEAKAGE is
+       * device-computed (gate counts x Isub) and stays transformed. At the
+       * D2/D3 on-die tiers (subarray..chip) withPHY=0 and no PHY exists, so
+       * this fires only for the interposer/off-package tiers that still run
+       * under the family (channel-centric parts). */
+      {
+          double phy_tdp_dyn = 0.0, phy_rt_dyn = 0.0, phy_area_tot = 0.0;
+          if (mc && mc->mcp.withPHY && mc->PHY) {
+              const double n_mcs = XML->sys.mc.number_mcs;
+              phy_tdp_dyn  = mc->PHY->power.readOp.dynamic
+                           * n_mcs * mc->mcp.clockRate;
+              phy_rt_dyn   = mc->PHY->rt_power.readOp.dynamic
+                           / mc->mcp.executionTime;
+              phy_area_tot = mc->PHY->area.get_area() * n_mcs;
+          }
+          applyFam(mcs, true, "mcs");
+          if (phy_tdp_dyn > 0.0 || phy_area_tot > 0.0) {
+              mcs.power.readOp.dynamic    += phy_tdp_dyn * (1.0 - fd);
+              mcs.rt_power.readOp.dynamic += phy_rt_dyn  * (1.0 - fd);
+              mcs.area.set_area(mcs.area.get_area()
+                                + phy_area_tot * (1.0 - fa));
+              std::cerr << "  [fam] MC PHY empirical dynamic/area kept at"
+                        << " their measured values; family applies to the"
+                        << " MC's logic backend and to leakage." << std::endl;
+          }
+      }
       /* Rebuild the processor totals from the transformed components so the
        * aggregate and the parts agree -- the failure mode 1.11.0 found in the
        * NoC census and 1.11.4 found in the CoreBreakdown split. */
@@ -568,7 +698,10 @@ Processor::Processor(ParseXML *XML_interface)
        * ComponentType::FULL_SYSTEM is declared and never populated, and the
        * wrapper extracts CORE/NOC/PCIE/L2/L3/MC individually. So this moves no
        * reported number today. It is completed rather than deleted so the
-       * aggregate is correct if anything ever consumes it. */
+       * aggregate is correct if anything ever consumes it.
+       * (1.11.50: audit finding L115 -- "the rebuilt totals are dead
+       * stores" -- is this same fact, resolved by the paragraph above:
+       * kept, correct, and consciously unread.) */
       power = core.power + l2.power + l3.power + noc.power + mcs.power;
       rt_power = core.rt_power + l2.rt_power + l3.rt_power
                + noc.rt_power + mcs.rt_power;
