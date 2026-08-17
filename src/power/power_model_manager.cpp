@@ -70,20 +70,20 @@ void PowerModelManager::initialize() {
         mcpat_wrapper_ = std::make_shared<McPATWrapper>(mcpat_config_);
         mcpat_wrapper_->initialize();
 
-        std::cout << "  ✓ McPAT initialized successfully" << std::endl;
+        std::cout << "  [OK] McPAT initialized successfully" << std::endl;
     }
 
     // Initialize specialized models (if registered)
     if (ramulator_model_) {
-        std::cout << "  ✓ Ramulator model registered for MEMORY" << std::endl;
+        std::cout << "  [OK] Ramulator model registered for MEMORY" << std::endl;
     }
 
     if (garnet_model_) {
-        std::cout << "  ✓ GARNET model registered for NETWORK" << std::endl;
+        std::cout << "  [OK] GARNET model registered for NETWORK" << std::endl;
     }
 
     if (!custom_models_.empty()) {
-        std::cout << "  ✓ " << custom_models_.size()
+        std::cout << "  [OK] " << custom_models_.size()
                   << " custom model(s) registered" << std::endl;
     }
 
@@ -679,11 +679,11 @@ PowerModelManager::PowerBreakdown PowerModelManager::getPowerBreakdown() const {
 //=============================================================================
 
 void PowerModelManager::printStats() const {
-    std::cout << "\n╔═══════════════════════════════════════════════════════════╗"
+    std::cout << "\n+===========================================================+"
               << std::endl;
-    std::cout << "║      Hierarchical Power Model Manager Statistics         ║"
+    std::cout << "|      Hierarchical Power Model Manager Statistics         |"
               << std::endl;
-    std::cout << "╚═══════════════════════════════════════════════════════════╝"
+    std::cout << "+===========================================================+"
               << std::endl;
 
     std::cout << std::fixed << std::setprecision(3);
@@ -753,16 +753,16 @@ void PowerModelManager::printStats() const {
     }
 
     std::cout << "\nTotal Energy: " << std::setprecision(6)
-              << getTotalEnergy() * 1e6 << " μJ" << std::endl;
+              << getTotalEnergy() * 1e6 << " uJ" << std::endl;
     std::cout << std::string(76, '=') << "\n" << std::endl;
 }
 
 void PowerModelManager::printCoverageReport() const {
-    std::cout << "\n╔═══════════════════════════════════════════════════════════╗"
+    std::cout << "\n+===========================================================+"
               << std::endl;
-    std::cout << "║           Power Model Coverage Report                    ║"
+    std::cout << "|           Power Model Coverage Report                    |"
               << std::endl;
-    std::cout << "╚═══════════════════════════════════════════════════════════╝"
+    std::cout << "+===========================================================+"
               << std::endl;
 
     std::cout << "\nComponent Coverage:\n" << std::endl;
@@ -824,10 +824,10 @@ void PowerModelManager::printCoverageReport() const {
     std::cout << std::endl;
 
     std::cout << "  McPAT fallback: "
-              << (mcpat_fallback_enabled_ ? "✓ Enabled" : "✗ Disabled")
+              << (mcpat_fallback_enabled_ ? "[OK] Enabled" : "[X] Disabled")
               << std::endl;
     std::cout << "  Analytical fallback: "
-              << (analytical_fallback_enabled_ ? "✓ Enabled" : "✗ Disabled")
+              << (analytical_fallback_enabled_ ? "[OK] Enabled" : "[X] Disabled")
               << std::endl;
 
     std::cout << std::string(65, '=') << "\n" << std::endl;

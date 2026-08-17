@@ -38,8 +38,11 @@ ReRAMModel::ReRAMModel(const std::string& config_path)
     reram_config_.banks = 16;
     reram_config_.read_write_ports = 1;
     reram_config_.tech_node_nm = 32;
-    reram_config_.read_latency = 7;      // 7 cycles (moderate)
-    reram_config_.write_latency = 15;    // 15 cycles (fast!)
+    /* 1.11.56 (audit D054): nanoseconds, not cycles. Placeholders that the
+     * NVSim path overwrites on every reachable run; the model refuses when
+     * that binding fails, so they never reach a result. */
+    reram_config_.read_latency_ns = 7.0;      // ns (moderate)
+    reram_config_.write_latency_ns = 15.0;    // ns (fast!)
     reram_config_.analog_compute_latency = 3;  // 3 cycles (VERY fast analog!)
     reram_config_.endurance = 1e11;      // 10^11 writes (good)
     reram_config_.analog_capable = true;
@@ -131,8 +134,11 @@ void ReRAMModel::initialize() {
     std::cout << "  Capacity: " << (reram_config_.capacity / (1024.0 * 1024)) << " MB" << std::endl;
     std::cout << "  Banks: " << reram_config_.banks << std::endl;
     std::cout << "  Technology: " << reram_config_.tech_node_nm << " nm" << std::endl;
-    std::cout << "  Read Latency: " << reram_config_.read_latency << " cycles" << std::endl;
-    std::cout << "  Write Latency: " << reram_config_.write_latency << " cycles (fast!)" << std::endl;
+    /* 1.11.56 (audit D054): printed as NANOSECONDS, which is what NVSim
+     * reported and what these fields hold. They were labelled "cycles" while
+     * carrying a 1 GHz product, so the number was right only at 1 GHz. */
+    std::cout << "  Read Latency: " << reram_config_.read_latency_ns << " ns" << std::endl;
+    std::cout << "  Write Latency: " << reram_config_.write_latency_ns << " ns (fast!)" << std::endl;
     std::cout << "  Analog Compute Latency: " << reram_config_.analog_compute_latency
               << " cycles (VERY fast!)" << std::endl;
     std::cout << "  Endurance: " << reram_config_.endurance << " writes" << std::endl;
@@ -149,17 +155,33 @@ void ReRAMModel::loadConfig(const std::string& config_path) {
     std::cout << "[ReRAMModel] Using default 256MB ReRAM configuration" << std::endl;
 }
 
+/* 1.11.56 (audit D054): THE ONE PLACE TIME BECOMES CYCLES IN THIS MODEL.
+ *
+ * MemoryModel's legacy access()/getLatency() return Cycle, and this model is
+ * handed no clock -- the simulator drives it through getTierLatencyNs(), which
+ * is nanoseconds end to end and never comes through here. So the conversion
+ * below is 1 cycle per nanosecond, i.e. exactly the 1 GHz the old code assumed;
+ * the difference is that it is stated once, at the boundary that forces it,
+ * instead of being baked into the stored fields and mislabelled in the log. If
+ * this path ever becomes live, give the model a frequency and convert with
+ * that -- do not restore the assumption upstream. (analog_compute_latency is
+ * still a Cycle preset and is not a tool read; it is untouched here.) */
+static inline Cycle legacyNsAsCycles(double ns) {
+    if (ns <= 0.0) return 0;
+    return static_cast<Cycle>(std::ceil(ns));   // 1 GHz: no clock is supplied
+}
+
 Cycle ReRAMModel::access(const MemoryRequest& req) {
-    Cycle latency = reram_config_.read_latency;  // safe default
+    Cycle latency = legacyNsAsCycles(reram_config_.read_latency_ns);  // safe default
 
     // ReRAM has moderate read/write latency (better than PCM!)
     switch (req.type) {
         case MemoryRequestType::READ:
-            latency = reram_config_.read_latency;
+            latency = legacyNsAsCycles(reram_config_.read_latency_ns);
             total_reads_++;
             break;
         case MemoryRequestType::WRITE:
-            latency = reram_config_.write_latency;  // Fast writes!
+            latency = legacyNsAsCycles(reram_config_.write_latency_ns);  // Fast writes!
             total_writes_++;
             write_cycles_++;
             updateEndurance(req.addr);
@@ -174,12 +196,13 @@ Cycle ReRAMModel::access(const MemoryRequest& req) {
             bool is_analog_compute = reram_config_.analog_capable &&
                 (req.size == 0 || (req.flags & 0x80) != 0);
             if (is_analog_compute) {
-                // Analog compute is VERY fast — in-situ matrix-vector multiplication
+                // Analog compute is VERY fast -- in-situ matrix-vector multiplication
                 latency = reram_config_.analog_compute_latency;
                 total_analog_ops_++;
             } else {
                 // Standard atomic: read-modify-write
-                latency = reram_config_.read_latency + reram_config_.write_latency;
+                latency = legacyNsAsCycles(reram_config_.read_latency_ns +
+                                           reram_config_.write_latency_ns);
                 total_reads_++;
                 total_writes_++;
                 write_cycles_++;
@@ -225,18 +248,20 @@ void ReRAMModel::tick() {
 
 Cycle ReRAMModel::getLatency(MemoryRequestType type) const {
     switch (type) {
+        // 1.11.56 (audit D054): see legacyNsAsCycles above.
         case MemoryRequestType::READ:
-            return reram_config_.read_latency;
+            return legacyNsAsCycles(reram_config_.read_latency_ns);
         case MemoryRequestType::WRITE:
-            return reram_config_.write_latency;
+            return legacyNsAsCycles(reram_config_.write_latency_ns);
         case MemoryRequestType::ATOMIC:
             if (reram_config_.analog_capable) {
                 return reram_config_.analog_compute_latency;
             } else {
-                return reram_config_.read_latency + reram_config_.write_latency;
+                return legacyNsAsCycles(reram_config_.read_latency_ns +
+                                        reram_config_.write_latency_ns);
             }
         default:
-            return reram_config_.read_latency;
+            return legacyNsAsCycles(reram_config_.read_latency_ns);
     }
 }
 
@@ -462,7 +487,7 @@ void ReRAMModel::initializeNVSim() {
         nvsim_config.word_width_bits = (access_width_bits_ > 0) ? access_width_bits_ : 64;
         nvsim_config.nvm_type = NVSimWrapper::NVMType::RERAM;  // ReRAM type
         nvsim_config.process_node_nm = reram_config_.tech_node_nm;
-        nvsim_config.temperature_k = temperature_k_;   // 1.11.52 (D055)  // ~77°C typical operating temp
+        nvsim_config.temperature_k = temperature_k_;   // 1.11.52 (D055)  // ~77 degC typical operating temp
         nvsim_config.optimize_read_energy = true;
         nvsim_config.optimize_write_energy = true;  // ReRAM has fast writes
         nvsim_config.optimize_leakage = true;
@@ -474,15 +499,20 @@ void ReRAMModel::initializeNVSim() {
 
         // Extract NVSim results if valid
         if (nvsim_wrapper_->isValid()) {
-            // Update config latencies from NVSim
+            /* 1.11.56 (audit D054): NVSim reports SECONDS. Carry them as
+             * nanoseconds. The old code truncated the ns figure into a `Cycle`
+             * field the printout labelled "cycles", so a run at 2 GHz reported
+             * half the cycles it would really spend -- and sub-nanosecond
+             * differences were rounded away on top. There is no clock in this
+             * model to convert with, so time is what it keeps. */
             double read_ns = nvsim_wrapper_->getReadLatency() * 1e9;
             double write_ns = nvsim_wrapper_->getWriteLatency() * 1e9;
 
             if (read_ns > 0) {
-                reram_config_.read_latency = static_cast<Cycle>(read_ns);
+                reram_config_.read_latency_ns = read_ns;
             }
             if (write_ns > 0) {
-                reram_config_.write_latency = static_cast<Cycle>(write_ns);
+                reram_config_.write_latency_ns = write_ns;
             }
 
             // Update energy values

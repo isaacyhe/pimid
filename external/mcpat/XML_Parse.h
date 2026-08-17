@@ -632,7 +632,12 @@ typedef struct{
 	double dram_periph_pitch;   /* PIMID 1.11.34 (E11): core-only pitch penalty */        // area factor
 	double dram_periph_dyn;         // dynamic factor
 	double dram_periph_leak;        // leakage factor (on PLAIN leakage)
-	int    dram_periph_scope;       // bitmask: 1=core 2=caches 4=noc 8=mcs
+	/* PIMID 1.11.56 (audit C010): dram_periph_scope is DELETED. It was a
+	 * bitmask (1=core 2=caches 4=noc 8=mcs) that nobody emitted and nobody
+	 * read -- the wrapper stopped writing the parameter and processor.cc
+	 * removed the mask -- leaving a declaration, a parse hook and a default
+	 * of 0 that between them described a scoping mechanism this fork no
+	 * longer has. Per-level scoping is now NoC[i].on_dram_die. */
 } root_system;
 
 class ParseXML

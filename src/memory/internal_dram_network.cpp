@@ -171,14 +171,14 @@ static int totalChannels(const std::string& topology, int N) {
     if (topology == "ring") return 2 * N;  // bidirectional: N CW + N CCW
     if (topology == "mesh" || topology == "mesh_2d") {
         int k = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(N))));
-        return 4 * k * (k - 1);  // 2 dir × 2 dim × k rows × (k-1) links
+        return 4 * k * (k - 1);  // 2 dir x 2 dim x k rows x (k-1) links
     }
     if (topology == "torus" || topology == "torus_2d") {
         int k = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(N))));
-        return 4 * k * k;  // 2 dir × 2 dim × k rows × k links (wrap-around)
+        return 4 * k * k;  // 2 dir x 2 dim x k rows x k links (wrap-around)
     }
     if (topology == "fat_tree" || topology == "h_tree") {
-        // Binary tree: (N_routers - 1) parent-child links × 2 directions
+        // Binary tree: (N_routers - 1) parent-child links x 2 directions
         int levels = static_cast<int>(std::ceil(std::log2(static_cast<double>(N))));
         int total_routers = (1 << levels) - 1;
         return 2 * std::max(1, total_routers - 1);
@@ -190,15 +190,15 @@ static int totalChannels(const std::string& topology, int N) {
  * @brief Hotspot factor: ratio of max-loaded channel to average.
  *
  * Accounts for non-uniform link loading in different topologies.
- * XY-routed mesh: center links carry ~2× average.
+ * XY-routed mesh: center links carry ~2x average.
  * Trees: root link carries much more than leaves.
  */
 static double hotspotFactor(const std::string& topology) {
     if (topology == "bus" || topology == "crossbar") return 1.0;  // N/A (switch models)
     if (topology == "ring") return 1.0;        // bidirectional ring: fairly uniform
-    if (topology == "mesh" || topology == "mesh_2d") return 2.0;  // center links ~2× average (XY routing)
+    if (topology == "mesh" || topology == "mesh_2d") return 2.0;  // center links ~2x average (XY routing)
     if (topology == "torus" || topology == "torus_2d") return 3.5; // DOR dateline VC class separation
-    if (topology == "fat_tree" || topology == "h_tree") return 1.5; // root ~1.5× average (uniform BW)
+    if (topology == "fat_tree" || topology == "h_tree") return 1.5; // root ~1.5x average (uniform BW)
     return 1.0;
 }
 
@@ -261,7 +261,7 @@ void InternalDRAMNetwork::initialize(int num_subarrays_per_bank,
     num_chips_per_rank_ = num_chips_per_rank;
 
     // Configure network based on memory type (DRAM and NVM). Accept both
-    // hyphen and underscore spellings of the NVM technologies — the README,
+    // hyphen and underscore spellings of the NVM technologies -- the README,
     // YAML_REFERENCE, and Ramulator2's tech tables use STT_MRAM (underscore),
     // RERAM, etc.; earlier branches only handled the hyphen forms, so
     // underscore configs silently fell through to "Unknown, using DDR4
@@ -339,7 +339,7 @@ void InternalDRAMNetwork::initialize(int num_subarrays_per_bank,
                       << " bits, " << network_configs_[i].bandwidth_GBs << " GB/s";
             if (i < NUM_TIER_BOUNDARIES) {
                 std::cout << "  [bridge: " << bridges_[i].count
-                          << "x " << bridges_[i].lower_width_bits << "b→"
+                          << "x " << bridges_[i].lower_width_bits << "b->"
                           << bridges_[i].upper_width_bits << "b, "
                           << bridges_[i].latency_ns << "ns]";
             }
@@ -359,12 +359,12 @@ void InternalDRAMNetwork::configureDDR4Network() {
     // (DRAM), CACTI (SRAM), or NVSim (NVM) characterization, or user YAML overrides
     // (noc.levels.*). See TODO for proper integration.
 
-    // DDR4 x8 device: 8n prefetch → 64-bit internal data bus
+    // DDR4 x8 device: 8n prefetch -> 64-bit internal data bus
     // Internal paths (L0-L2) are all at prefetch width.
     // The bottleneck is L3 (DQ pins): x8 = 8-bit per chip.
-    // L4 (rank bus) = 8 chips × 8 DQ = 64-bit channel.
+    // L4 (rank bus) = 8 chips x 8 DQ = 64-bit channel.
 
-    // L0: Subarray network (within bank): column mux → prefetch buffer
+    // L0: Subarray network (within bank): column mux -> prefetch buffer
     network_configs_[0].link_width_bits = 512;  // L0 subarray: wide on-die (~4x channel)
     network_configs_[0].frequency_GHz = 1.2;    // DDR4-2400 core clock
     network_configs_[0].bandwidth_GBs =
@@ -391,7 +391,7 @@ void InternalDRAMNetwork::configureDDR4Network() {
     network_configs_[2].latency_cycles = 2;        // BG mux + tCCD_S penalty
     network_configs_[2].topology = "bus";
 
-    // L3: Chip network (chip DQ pins → rank bus)
+    // L3: Chip network (chip DQ pins -> rank bus)
     network_configs_[3].link_width_bits = 192;     // channel-derived width, no device-width bottleneck
     network_configs_[3].frequency_GHz = 1.2;
     network_configs_[3].bandwidth_GBs =
@@ -435,10 +435,10 @@ void InternalDRAMNetwork::configureDDR5Network() {
     // (DRAM), CACTI (SRAM), or NVSim (NVM) characterization, or user YAML overrides
     // (noc.levels.*). See TODO for proper integration.
 
-    // DDR5 x8 device: 16n prefetch → 128-bit internal data bus
+    // DDR5 x8 device: 16n prefetch -> 128-bit internal data bus
     // Two independent 32-bit subchannels per DIMM (modeled as channels).
     // Internal paths (L0-L2) at prefetch width; L3 = x8 DQ pin bottleneck.
-    // L4 (rank bus) = 4 chips × x8 = 32b per subchannel, 64b total.
+    // L4 (rank bus) = 4 chips x x8 = 32b per subchannel, 64b total.
 
     // L0: Subarray network: 16n prefetch buffer
     network_configs_[0].link_width_bits = 512;  // ~153 GB/s
@@ -467,7 +467,7 @@ void InternalDRAMNetwork::configureDDR5Network() {
     network_configs_[2].latency_cycles = 2;
     network_configs_[2].topology = "bus";
 
-    // L3: Chip DQ pins → rank bus
+    // L3: Chip DQ pins -> rank bus
     network_configs_[3].link_width_bits = 128;     // channel-derived width, no device-width bottleneck (~38.4)
     network_configs_[3].frequency_GHz = 2.4;
     network_configs_[3].bandwidth_GBs =
@@ -625,11 +625,11 @@ void InternalDRAMNetwork::configureDDR3Network() {
     // (DRAM), CACTI (SRAM), or NVSim (NVM) characterization, or user YAML overrides
     // (noc.levels.*). See TODO for proper integration.
 
-    // DDR3 x8 device: 8n prefetch → 64-bit internal data bus
+    // DDR3 x8 device: 8n prefetch -> 64-bit internal data bus
     // No bank groups in DDR3 (L2 = passthrough-like, same internal width).
-    // L3 = x8 DQ pin bottleneck. L4 = 8 chips × x8 = 64b channel.
+    // L3 = x8 DQ pin bottleneck. L4 = 8 chips x x8 = 64b channel.
 
-    // L0: Subarray network: 8n prefetch × x8 = 64b internal
+    // L0: Subarray network: 8n prefetch x x8 = 64b internal
     network_configs_[0].link_width_bits = 512;  // L0 subarray: wide on-die (~4x channel)
     network_configs_[0].frequency_GHz = 0.8;    // DDR3-1600 core clock
     network_configs_[0].bandwidth_GBs =
@@ -638,7 +638,7 @@ void InternalDRAMNetwork::configureDDR3Network() {
     network_configs_[0].latency_cycles = 6;    // Older process, slightly slower
     network_configs_[0].topology = "crossbar";
 
-    // L1: Bank network (banks within chip — no BGs in DDR3): internal bus
+    // L1: Bank network (banks within chip -- no BGs in DDR3): internal bus
     network_configs_[1].link_width_bits = 256;     // L1 bank: ~2x channel
     network_configs_[1].frequency_GHz = 0.8;
     network_configs_[1].bandwidth_GBs =
@@ -647,7 +647,7 @@ void InternalDRAMNetwork::configureDDR3Network() {
     network_configs_[1].latency_cycles = 3;        // Mux arbitration
     network_configs_[1].topology = "bus";
 
-    // L2: Bank group network: DDR3 has no bank groups — passthrough
+    // L2: Bank group network: DDR3 has no bank groups -- passthrough
     network_configs_[2].link_width_bits = 256;     // L2 bankgroup: ~2x channel
     network_configs_[2].frequency_GHz = 0.8;
     network_configs_[2].bandwidth_GBs =
@@ -656,7 +656,7 @@ void InternalDRAMNetwork::configureDDR3Network() {
     network_configs_[2].latency_cycles = 1;        // No BG overhead
     network_configs_[2].topology = "bus";
 
-    // L3: Chip DQ pins → rank bus: x8 bottleneck
+    // L3: Chip DQ pins -> rank bus: x8 bottleneck
     network_configs_[3].link_width_bits = 192;     // channel-derived width, no device-width bottleneck
     network_configs_[3].frequency_GHz = 0.8;
     network_configs_[3].bandwidth_GBs =
@@ -665,7 +665,7 @@ void InternalDRAMNetwork::configureDDR3Network() {
     network_configs_[3].latency_cycles = 6;        // I/O driver + package (older tech)
     network_configs_[3].topology = "point-to-point";
 
-    // L4: Rank network: 8 chips × x8 = 64b channel
+    // L4: Rank network: 8 chips x x8 = 64b channel
     network_configs_[4].link_width_bits = 128;
     network_configs_[4].frequency_GHz = 0.8;
     network_configs_[4].bandwidth_GBs =
@@ -700,11 +700,11 @@ void InternalDRAMNetwork::configureLPDDR5Network() {
     // (DRAM), CACTI (SRAM), or NVSim (NVM) characterization, or user YAML overrides
     // (noc.levels.*). See TODO for proper integration.
 
-    // LPDDR5 x16 device: 16n prefetch → 256-bit internal data bus
+    // LPDDR5 x16 device: 16n prefetch -> 256-bit internal data bus
     // Mobile PoP: x16 per die, no rank typically.
     // L3 = x16 DQ pins (wider than DDR). L4 = single die per channel = 16b.
 
-    // L0: Subarray network: 16n prefetch × x16 = 256b internal
+    // L0: Subarray network: 16n prefetch x x16 = 256b internal
     network_configs_[0].link_width_bits = 256;  // Wide internal prefetch
     network_configs_[0].frequency_GHz = 1.6;    // LPDDR5-6400 core clock
     network_configs_[0].bandwidth_GBs =
@@ -762,7 +762,7 @@ void InternalDRAMNetwork::configureLPDDR5Network() {
     network_configs_[5].topology = "crossbar";
 
     // L6: System network (multi-channel)
-    network_configs_[6].link_width_bits = 64;      // 4 × 16b channels combined
+    network_configs_[6].link_width_bits = 64;      // 4 x 16b channels combined
     network_configs_[6].frequency_GHz = 1.6;
     network_configs_[6].bandwidth_GBs =
         (network_configs_[6].link_width_bits / 8.0) *
@@ -778,12 +778,12 @@ void InternalDRAMNetwork::configureGDDR6Network() {
     // (DRAM), CACTI (SRAM), or NVSim (NVM) characterization, or user YAML overrides
     // (noc.levels.*). See TODO for proper integration.
 
-    // GDDR6 x16 device: 16n prefetch → 256-bit internal data bus
-    // Dual-channel per chip: 2 × 8-bit channels (x8 per channel externally).
-    // No rank in GDDR6 — point-to-point per chip.
-    // L3 = 16b per chip (2 × x8 channels). L4+ = PCB level.
+    // GDDR6 x16 device: 16n prefetch -> 256-bit internal data bus
+    // Dual-channel per chip: 2 x 8-bit channels (x8 per channel externally).
+    // No rank in GDDR6 -- point-to-point per chip.
+    // L3 = 16b per chip (2 x x8 channels). L4+ = PCB level.
 
-    // L0: Subarray network: 16n × x16 = 256b internal
+    // L0: Subarray network: 16n x x16 = 256b internal
     network_configs_[0].link_width_bits = 256;  // Wide internal prefetch
     network_configs_[0].frequency_GHz = 2.0;    // GDDR6 @ ~2 GHz core
     network_configs_[0].bandwidth_GBs =
@@ -822,7 +822,7 @@ void InternalDRAMNetwork::configureGDDR6Network() {
     network_configs_[3].latency_cycles = 4;        // On-board traces, short
     network_configs_[3].topology = "point-to-point";
 
-    // L4: Rank network (no ranks in GDDR6 — point-to-point): sustains device BW.
+    // L4: Rank network (no ranks in GDDR6 -- point-to-point): sustains device BW.
     network_configs_[4].link_width_bits = 128;     // x16 @ 16Gbps -> 32 GB/s
     network_configs_[4].frequency_GHz = 2.0;
     network_configs_[4].bandwidth_GBs =
@@ -843,7 +843,7 @@ void InternalDRAMNetwork::configureGDDR6Network() {
     network_configs_[5].topology = "crossbar";
 
     // L6: System network (multiple chips to GPU MC)
-    network_configs_[6].link_width_bits = 256;     // 16 chips × 16b = 256b aggregate
+    network_configs_[6].link_width_bits = 256;     // 16 chips x 16b = 256b aggregate
     network_configs_[6].frequency_GHz = 2.0;
     network_configs_[6].bandwidth_GBs =
         (network_configs_[6].link_width_bits / 8.0) *
@@ -1289,7 +1289,7 @@ void InternalDRAMNetwork::tick() {
         processGarnetArrivedPackets();
     }
 
-    // Process bridge buffers — release packets whose release_cycle <= current_cycle_
+    // Process bridge buffers -- release packets whose release_cycle <= current_cycle_
     // (completion is handled by processInflightPackets below).
     for (int b = 0; b < NUM_TIER_BOUNDARIES; ++b) {
         for (auto& buffer : bridge_buffers_[b]) {
@@ -1322,6 +1322,82 @@ uint64_t InternalDRAMNetwork::getTransferLatency(NetworkLevel level,
     uint64_t base = static_cast<uint64_t>(std::ceil(hops * per_hop + serialization));
     if (base == 0) base = 1;
     return base;
+}
+
+double InternalDRAMNetwork::getTransferLatencyNs(NetworkLevel level,
+                                                 int source_id, int dest_id,
+                                                 uint64_t data_bytes) {
+    /* 1.11.56 (audit B051): the cycles version above, divided by the clock
+     * those cycles belong to. Both terms are per-level: the router pipeline
+     * and the fixed link latency tick at frequency_GHz, and a serialisation
+     * beat moves link_width_bits at the same frequency. */
+    int idx = levelToIndex(level);
+    const InternalNetworkLink& link = network_configs_[idx];
+    double f_ghz = link.frequency_GHz > 0.0 ? link.frequency_GHz : 1.0;
+
+    double hops = avgHops(link.topology, link.num_nodes);
+    int per_hop_router = link.router_latency;
+    if (hops <= 1.0 && link.router_bypass && per_hop_router > 1)
+        per_hop_router = std::max(1, per_hop_router - 1);
+
+    double per_hop = static_cast<double>(per_hop_router + link.latency_cycles);
+    double width = link.link_width_bits > 0 ? link.link_width_bits : 1;
+    double serialization = std::ceil(static_cast<double>(data_bytes) * 8.0 / width);
+    return (hops * per_hop + serialization) / f_ghz;
+}
+
+double InternalDRAMNetwork::getBridgeLatencyNs(int boundary, uint64_t data_bytes,
+                                               int lower_width_override,
+                                               int upper_width_override,
+                                               double base_ns_override,
+                                               int router_latency_override,
+                                               int router_bypass_override) const {
+    if (boundary < 0 || boundary >= NUM_TIER_BOUNDARIES) return 0.0;
+    const BridgeConfig& br = bridges_[boundary];
+
+    int lower_w = lower_width_override > 0 ? lower_width_override : br.lower_width_bits;
+    int upper_w = upper_width_override > 0 ? upper_width_override : br.upper_width_bits;
+    if (lower_w <= 0) lower_w = 1;
+    if (upper_w <= 0) upper_w = 1;
+    double base_ns = base_ns_override >= 0.0 ? base_ns_override : br.latency_ns;
+
+    int per_hop_router = router_latency_override >= 0 ? router_latency_override
+                                                      : br.router_latency;
+    bool bypass = router_bypass_override >= 0 ? (router_bypass_override != 0)
+                                              : br.router_bypass;
+    if (bypass && per_hop_router > 1) per_hop_router = std::max(1, per_hop_router - 1);
+
+    double f_lo = br.lower_frequency_mhz / 1000.0;   // GHz
+    double f_hi = br.upper_frequency_mhz / 1000.0;
+    if (f_lo <= 0.0) f_lo = 1.0;
+    if (f_hi <= 0.0) f_hi = 1.0;
+
+    /* Store-and-forward: the bridge must both ingest the packet from the
+     * lower tier and emit it to the upper one, so the crossing cannot be
+     * faster than the slower of the two. The old form added a BEAT COUNT
+     * taken at the narrower width straight into a cycle total, with no
+     * clock attached to either side. */
+    double bits = static_cast<double>(data_bytes) * 8.0;
+    double ser_lo_ns = std::ceil(bits / lower_w) / f_lo;
+    double ser_hi_ns = std::ceil(bits / upper_w) / f_hi;
+    double ser_ns = std::max(ser_lo_ns, ser_hi_ns);
+
+    // The router sits on the ingress side, so its pipeline ticks at f_lo.
+    return per_hop_router / f_lo + base_ns + ser_ns;
+}
+
+void InternalDRAMNetwork::applySourcedLadder(const int width_bits[7],
+                                             const double bandwidth_GBs[7]) {
+    for (int i = 0; i < NUM_HIERARCHY_LEVELS && i < 7; ++i) {
+        if (width_bits[i] <= 0 || bandwidth_GBs[i] <= 0.0) continue;
+        auto& cfg = network_configs_[i];
+        cfg.link_width_bits = width_bits[i];
+        cfg.bandwidth_GBs   = bandwidth_GBs[i];
+        // f = BW * 8 / width reproduces the sourced bandwidth exactly, and
+        // lands on the data rate for the DQ tiers and the core clock for the
+        // array tiers without this class classifying them.
+        cfg.frequency_GHz = bandwidth_GBs[i] * 8.0 / static_cast<double>(width_bits[i]);
+    }
 }
 
 bool InternalDRAMNetwork::canAcceptPacket(NetworkLevel level) {
@@ -1412,7 +1488,7 @@ uint64_t InternalDRAMNetwork::getTierLatency(int level,
     // For Garnet-managed levels, the detailed model handles timing
     if (level_models_[level] == NetworkModelType::DETAILED &&
         use_garnet_models_ && garnet_networks_[level]) {
-        // Garnet tick-based timing — caller injects packet separately
+        // Garnet tick-based timing -- caller injects packet separately
         return 0;
     }
 
@@ -1444,12 +1520,12 @@ uint64_t InternalDRAMNetwork::getTierLatency(int level,
         state.lastUpdateCycle = current_cycle_;
     }
 
-    // ── Topology-aware contention: per-channel M/M/1 ──────────────
+    // -- Topology-aware contention: per-channel M/M/1 --------------
     //
     // Three regimes:
-    //  A) BUS: shared medium, M/M/1 with (1-ρ)^1.5 steeper divergence
+    //  A) BUS: shared medium, M/M/1 with (1-rho)^1.5 steeper divergence
     //  B) CROSSBAR: per-output M/M/1 with HOL factor 1.58
-    //  C) Multi-hop: per-channel M/M/1 × avgHops, hotspot-adjusted
+    //  C) Multi-hop: per-channel M/M/1 x avgHops, hotspot-adjusted
     //
     // M/M/1 chosen over M/D/1 because real networks have higher service
     // time variance from wormhole blocking and backpressure cascades.
@@ -1472,7 +1548,7 @@ uint64_t InternalDRAMNetwork::getTierLatency(int level,
 
     if (link.topology == "bus") {
         // Shared bus: every access crosses the single shared medium.
-        // ρ = aggregate rate × svcTime. Steeper divergence for round-robin + HOL.
+        // rho = aggregate rate x svcTime. Steeper divergence for round-robin + HOL.
         double rho = arrivalRate * svcTime;
         if (rho >= 0.90) {
             wait_time = 10.0 * static_cast<double>(base);
@@ -1490,7 +1566,7 @@ uint64_t InternalDRAMNetwork::getTierLatency(int level,
             wait_time = rhoEff * svcTime / (1.0 - rhoEff);
         }
     } else {
-        // Multi-hop: per-channel M/M/1 × avgHops
+        // Multi-hop: per-channel M/M/1 x avgHops
         int channels = totalChannels(link.topology, link.num_nodes);
         double hopCount = std::max(hops, 0.01);
 
@@ -1505,7 +1581,7 @@ uint64_t InternalDRAMNetwork::getTierLatency(int level,
         if (rhoMax >= 0.75) {
             wait_time = 10.0 * static_cast<double>(base);
         } else if (rhoMax > 0.01) {
-            // M/M/1 per channel: E[W] = ρ×S/(1-ρ), with VC factor
+            // M/M/1 per channel: E[W] = rhoxS/(1-rho), with VC factor
             wait_time = vc_factor * rhoMax * svcTime / (1.0 - rhoMax);
             wait_time *= hopCount;  // accumulated over all hops
         }
@@ -1548,7 +1624,7 @@ uint64_t InternalDRAMNetwork::getBridgeLatency(int boundary, uint64_t data_bytes
         per_hop_router + link_ns + serialization));
     if (base == 0) base = 1;
 
-    // M/D/1 queuing — VCs reduce HOL blocking, don't multiply bandwidth
+    // M/D/1 queuing -- VCs reduce HOL blocking, don't multiply bandwidth
     auto& state = bridge_md1_state_[boundary];
     state.curWindowAccesses++;
 
@@ -1570,7 +1646,7 @@ uint64_t InternalDRAMNetwork::getBridgeLatency(int boundary, uint64_t data_bytes
     int total_vcs = br.virtual_networks * br.virtual_channels_per_vn;
     double vc_factor = (total_vcs > 1) ? 1.0 / std::sqrt(static_cast<double>(total_vcs)) : 1.0;
 
-    // M/D/1 with saturation clamp: if ρ ≥ 0.95, clamp to 10× base
+    // M/D/1 with saturation clamp: if rho >= 0.95, clamp to 10x base
     double wait_time = 0.0;
     if (rho >= 0.95) {
         wait_time = 10.0 * static_cast<double>(base);
@@ -1583,27 +1659,27 @@ uint64_t InternalDRAMNetwork::getBridgeLatency(int boundary, uint64_t data_bytes
 void InternalDRAMNetwork::initializeBridgeDefaults() {
     if (isHBM(technology_)) {
         // HBM: wide TSV interconnects, symmetric links
-        bridges_[0] = {256, 800, 8, 256, 800, 0.5, 1};   // L0↔L1: GSA internal
-        bridges_[1] = {128, 1000, 8, 128, 1000, 0.5, 1};  // L1↔L2: crossbar
+        bridges_[0] = {256, 800, 8, 256, 800, 0.5, 1};   // L0<->L1: GSA internal
+        bridges_[1] = {128, 1000, 8, 128, 1000, 0.5, 1};  // L1<->L2: crossbar
         if (technology_ == MemoryTechnology::HBM2 || technology_ == MemoryTechnology::HBM3) {
-            bridges_[2] = {128, 1000, 8, 128, 1000, 0.5, 2}; // L2↔L3: TSV (2 pseudo-ch)
+            bridges_[2] = {128, 1000, 8, 128, 1000, 0.5, 2}; // L2<->L3: TSV (2 pseudo-ch)
         } else {
-            bridges_[2] = {128, 1000, 8, 128, 1000, 0.5, 1}; // L2↔L3: TSV (single)
+            bridges_[2] = {128, 1000, 8, 128, 1000, 0.5, 1}; // L2<->L3: TSV (single)
         }
-        bridges_[3] = {128, 1000, 8, 128, 500, 1.0, 1};   // L3↔L4: TSV to logic die
-        bridges_[4] = {128, 500, 8, 128, 500, 0.5, 1};    // L4↔L5: PHY
-        bridges_[5] = {128, 500, 8, 64, 500, 2.0, 1};     // L5↔L6: interposer
+        bridges_[3] = {128, 1000, 8, 128, 500, 1.0, 1};   // L3<->L4: TSV to logic die
+        bridges_[4] = {128, 500, 8, 128, 500, 0.5, 1};    // L4<->L5: PHY
+        bridges_[5] = {128, 500, 8, 64, 500, 2.0, 1};     // L5<->L6: interposer
     } else if (isDRAM(technology_)) {
-        // DDR: internal paths are wide, bottleneck at chip DQ pins (L2↔L3)
-        bridges_[0] = {128, 800, 8, 64, 800, 0.5, 1};     // L0↔L1: bank internal
-        bridges_[1] = {64, 800, 8, 64, 800, 0.25, 1};     // L1↔L2: internal mux
-        bridges_[2] = {64, 800, 8, 8, 1600, 1.0, 1};      // L2↔L3: DQ pin bottleneck
-        bridges_[3] = {8, 1600, 8, 64, 1600, 1.5, 1};     // L3↔L4: rank bus (8×x8=64b)
-        bridges_[4] = {64, 1600, 8, 64, 1600, 0.5, 1};    // L4↔L5: channel
-        bridges_[5] = {64, 1600, 8, 64, 800, 2.0, 1};     // L5↔L6: system bus
+        // DDR: internal paths are wide, bottleneck at chip DQ pins (L2<->L3)
+        bridges_[0] = {128, 800, 8, 64, 800, 0.5, 1};     // L0<->L1: bank internal
+        bridges_[1] = {64, 800, 8, 64, 800, 0.25, 1};     // L1<->L2: internal mux
+        bridges_[2] = {64, 800, 8, 8, 1600, 1.0, 1};      // L2<->L3: DQ pin bottleneck
+        bridges_[3] = {8, 1600, 8, 64, 1600, 1.5, 1};     // L3<->L4: rank bus (8xx8=64b)
+        bridges_[4] = {64, 1600, 8, 64, 1600, 0.5, 1};    // L4<->L5: channel
+        bridges_[5] = {64, 1600, 8, 64, 800, 2.0, 1};     // L5<->L6: system bus
     } else {
-        // NVM/SRAM: monolithic, only L0↔L1 boundary meaningful
-        bridges_[0] = {64, 1000, 4, 64, 1000, 0.25, 1};   // L0↔L1: on-chip
+        // NVM/SRAM: monolithic, only L0<->L1 boundary meaningful
+        bridges_[0] = {64, 1000, 4, 64, 1000, 0.25, 1};   // L0<->L1: on-chip
         // L1-L5 boundaries: passthrough (zero additional latency)
         for (int i = 1; i < NUM_TIER_BOUNDARIES; ++i) {
             bridges_[i] = {64, 1000, 1, 64, 1000, 0.0, 1};
@@ -1745,9 +1821,9 @@ void InternalDRAMNetwork::printStats() const {
     SwitchHierarchyConfig tmp_cfg;
     tmp_cfg.technology = technology_;
 
-    std::cout << "\n╔══════════════════════════════════════════════════════════════════╗\n";
-    std::cout << "║ In-Memory Network Statistics (" << dram_type_ << ")                    ║\n";
-    std::cout << "╚══════════════════════════════════════════════════════════════════╝\n\n";
+    std::cout << "\n+==================================================================+\n";
+    std::cout << "| In-Memory Network Statistics (" << dram_type_ << ")                    |\n";
+    std::cout << "+==================================================================+\n\n";
 
     std::cout << "Total Packets:             " << total_packets_sent_ << "\n";
     std::cout << "Completed Packets:         " << total_packets_completed_ << "\n";
@@ -1762,7 +1838,7 @@ void InternalDRAMNetwork::printStats() const {
     }
 
     std::cout << "\nNetwork Level Usage:\n";
-    std::cout << "────────────────────\n";
+    std::cout << "--------------------\n";
     for (int i = 0; i < NUM_HIERARCHY_LEVELS; ++i) {
         std::cout << "  " << std::setw(16) << std::left
                   << (tmp_cfg.levelName(i) + " network:")
@@ -2118,7 +2194,7 @@ void InternalDRAMNetwork::overrideLevelConfig(int level, int link_width_bits,
         }
         bool valid = true;
         if (topology == "mesh" || topology == "mesh_2d" || topology == "torus" || topology == "torus_2d") {
-            // Need at least 4 nodes (2×2) and a perfect square
+            // Need at least 4 nodes (2x2) and a perfect square
             int side = static_cast<int>(std::sqrt(nodes));
             if (nodes < 4 || side * side != nodes) {
                 std::cerr << "WARNING: L" << level << " topology '" << topology
@@ -2154,7 +2230,7 @@ void InternalDRAMNetwork::overrideLevelConfig(int level, int link_width_bits,
     if (input_buffer_depth > 0)         cfg.input_buffer_depth = input_buffer_depth;
     if (output_buffer_depth > 0)        cfg.output_buffer_depth = output_buffer_depth;
 
-    // Recompute bandwidth from (possibly overridden) width × frequency
+    // Recompute bandwidth from (possibly overridden) width x frequency
     cfg.bandwidth_GBs = (cfg.link_width_bits / 8.0) * cfg.frequency_GHz;
 }
 
@@ -2235,7 +2311,7 @@ std::shared_ptr<NetworkModel> InternalDRAMNetwork::createGarnetBridgeRouter(
     garnet->addNode(NetworkNode(1, PEPlacementLevel::SUBARRAY, 1));
 
     std::cout << "[GARNET Bridge] Bridge " << boundary
-              << " (L" << boundary << "↔L" << (boundary+1)
+              << " (L" << boundary << "<->L" << (boundary+1)
               << "): 2-node crossbar, VNs=" << br.virtual_networks
               << ", VCs/VN=" << br.virtual_channels_per_vn
               << ", router_lat=" << br.router_latency << "\n";
@@ -2289,7 +2365,7 @@ std::shared_ptr<NetworkModel> createGarnetHTreeForDRAM(
     }
 
     // Link width must be byte-aligned (a multiple of 8 bits) and at least 8 bits.
-    // Real DRAM channel/bus widths are NOT necessarily powers of two — this file
+    // Real DRAM channel/bus widths are NOT necessarily powers of two -- this file
     // deliberately configures 88-, 96-, and 192-bit channel links for various
     // technologies. Requiring a power of two would reject those valid configs and
     // abort the cycle-accurate H-tree at init (simple mode skips this builder).

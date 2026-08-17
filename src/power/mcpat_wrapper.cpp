@@ -528,7 +528,16 @@ McPATWrapper::linkEnergyBandPJPerBit(const std::string& link_type) {
      * and inventing a TX+RX total from it would be fabrication. */
     if (link_type.rfind("pcie_gen4", 0) == 0) {
         b.lo = 1.93; b.hi = 6.0;
-        b.provenance = "1.93 TX-ONLY 28nm (lower bound, not a full link) .. 6.0 full SerDes Samsung 7LPP/5LPE";
+        /* 1.11.56 (audit C002): mark the floor as a BOUND, so the scalar the
+         * XML is priced from stops being the midpoint of it. The band text
+         * three lines up already said 1.93 is a figure no complete link can
+         * reach, and the applied number was 0.5*(1.93+6.0) = 3.965 -- 0.66x
+         * the only full-link source in the entry. Averaging an unreachable
+         * end into an applied value is not a band, it is a discount. With the
+         * flag set, applied() returns the full-link end and the band is still
+         * reported whole, floor included, so nothing is hidden. */
+        b.lo_is_bound = true;
+        b.provenance = "1.93 TX-ONLY 28nm (LOWER BOUND, not a full link; excluded from the applied value) .. 6.0 full SerDes Samsung 7LPP/5LPE (applied)";
         return b;
     }
     /* PCIe gen3: one figure, and it RETIRES the 5.0 this table used to return,
@@ -543,10 +552,31 @@ McPATWrapper::linkEnergyBandPJPerBit(const std::string& link_type) {
      * asserted, so the two cannot drift apart. */
     if (link_type.rfind("cxl", 0) == 0) {
         LinkEnergyBand g5 = linkEnergyBandPJPerBit("pcie_gen5");
-        const double coherence_delta = 1.4;   // was 8.4 - 7.0 in the old scalars
+        /* 1.11.56 (audit C003): the delta is UNSOURCED and now says so out
+         * loud. It is not a published measurement -- it is the difference
+         * between two scalars this file has since retired as unsourced
+         * themselves (cxl 8.4 minus pcie_gen5 7.0), so it inherits their
+         * standing rather than repairing it. We cannot source it: no
+         * published figure separates CXL's coherence-controller energy from
+         * the gen5 PHY it rides. It is kept because deleting it would assert
+         * the opposite unsourced claim (that coherence is free), and it is
+         * warned about once per process so a run that prices a CXL link
+         * cannot present the +1.4 pJ/bit as a fact. */
+        const double coherence_delta = 1.4;
+        static bool warned_cxl_delta = false;
+        if (!warned_cxl_delta) {
+            warned_cxl_delta = true;
+            std::cerr << "[McPATWrapper] WARNING: the CXL coherence delta ("
+                      << coherence_delta << " pJ/bit, added to both ends of "
+                         "the PCIe gen5 band) is UNSOURCED -- it is the "
+                         "difference of two retired unsourced scalars, not a "
+                         "published measurement. It governs the link SerDes "
+                         "dynamic energy and the reported link-energy band "
+                         "for every cxl* link type." << std::endl;
+        }
         b.lo = g5.lo + coherence_delta;
         b.hi = g5.hi + coherence_delta;
-        b.provenance = "gen5 band + 1.4 coherence delta (delta itself a single point)";
+        b.provenance = "gen5 band + 1.4 coherence delta (delta UNSOURCED: difference of two retired scalars, not a measurement)";
         return b;
     }
     /* UCIe. The range was ALREADY sourced and written down here, then thrown
@@ -586,7 +616,9 @@ McPATWrapper::linkEnergyBandPJPerBit(const std::string& link_type) {
 
 double McPATWrapper::linkEnergyPJPerBit(const std::string& link_type) {
     LinkEnergyBand b = linkEnergyBandPJPerBit(link_type);
-    return b.valid() ? b.mid() : -1.0;
+    /* 1.11.56 (audit C002): applied(), not mid(). A band end flagged as a
+     * BOUND is not a candidate value to average -- see the gen4 entry. */
+    return b.valid() ? b.applied() : -1.0;
 }
 
 void McPATWrapper::setPCIeStats(const PCIeStats& stats) {
@@ -600,10 +632,16 @@ void McPATWrapper::setDeviceProfile(DeviceProfile profile) {
 }
 
 void McPATWrapper::createMcPATInput() {
-    std::cout << "[McPATWrapper] Creating McPAT configuration" << std::endl;
+    /* 1.11.56 (audit C014): these lines go to STDERR now. This function used
+     * to run twice -- once in the parent (dead work, removed) and once in the
+     * forked child -- and the parent's copy was where the log line came from.
+     * With the dead call gone the only remaining caller is the child, whose
+     * STDOUT is /dev/null, so on std::cout the diagnostic would have
+     * disappeared along with the dead work. Stderr survives the redirect. */
+    std::cerr << "[McPATWrapper] Creating McPAT configuration" << std::endl;
 
     if (!config_.xml_file.empty() && user_provided_xml_) {
-        std::cout << "  Using XML file: " << config_.xml_file << std::endl;
+        std::cerr << "  Using XML file: " << config_.xml_file << std::endl;
         valid_ = true;
         return;
     }
@@ -611,12 +649,28 @@ void McPATWrapper::createMcPATInput() {
     // Generate XML configuration from parameters
     std::string xml_content = generateXMLConfig();
 
-    // Write to temporary file for McPAT
-    // Unique per call so cosim per-node analysis doesn't overwrite the host
-    // XML before we can examine it (diagnostic only — no functional effect).
-    static int xml_call_idx = 0;
-    std::string temp_xml = "/tmp/mcpat_input_" +
-                           std::to_string(xml_call_idx++) + ".xml";
+    // Write to temporary file for McPAT.
+    /* Unique per call so cosim per-node analysis does not overwrite the host
+     * XML before we can examine it.
+     * 1.11.56 (audit C014): this path is NOT diagnostic-only, whatever the
+     * old note said -- it is the file the forked child hands to ParseXML, so
+     * the index is load-bearing. It is also why the parent-side generation in
+     * computePower() was dead work: a second call here hands back a different
+     * name, so a caller cannot pre-generate "the" XML for the child. */
+    /* 1.11.56 (audit C014, main.cpp half): the PARENT names the file when it
+     * wants to archive it. The index lives in a function-local static that
+     * only the child increments, so the parent could never predict the path
+     * -- which is why the archive step in main.cpp had been copying a name
+     * nothing writes. When pending_xml_path_ is set the child writes there
+     * and the parent knows where to look; otherwise the old indexed name
+     * stands. */
+    std::string temp_xml;
+    if (!pending_xml_path_.empty()) {
+        temp_xml = pending_xml_path_;
+    } else {
+        static int xml_call_idx = 0;
+        temp_xml = "/tmp/mcpat_input_" + std::to_string(xml_call_idx++) + ".xml";
+    }
     std::ofstream xml_file(temp_xml);
     if (!xml_file) {
         throw std::runtime_error("Failed to create McPAT XML file");
@@ -628,7 +682,7 @@ void McPATWrapper::createMcPATInput() {
     config_.xml_file = temp_xml;
     valid_ = true;
 
-    std::cout << "  Generated XML configuration: " << temp_xml << std::endl;
+    std::cerr << "  Generated XML configuration: " << temp_xml << std::endl;  // 1.11.56 (C014)
 }
 
 void McPATWrapper::runMcPAT() {
@@ -674,7 +728,7 @@ void McPATWrapper::runMcPAT() {
         path_buf.push_back('\0');
         mcpat_parser_->parse(path_buf.data());
 
-        // CACTI reads tech_params/*.dat via relative paths — chdir to CACTI data dir
+        // CACTI reads tech_params/*.dat via relative paths -- chdir to CACTI data dir
 #ifdef CACTI_DATA_DIR
         if (chdir(CACTI_DATA_DIR) != 0) {
             std::cerr << "[McPATWrapper] Warning: Could not chdir to CACTI data directory: "
@@ -687,7 +741,7 @@ void McPATWrapper::runMcPAT() {
         // computePower()), skip the rdbuf swap entirely: CACTI may call exit(0)
         // on error_checking() failure, and the atexit cleanup of std::cout
         // would then dereference an rdbuf whose stack lifetime ended via the
-        // throw/unwind path — producing a spurious SIGSEGV in the child even
+        // throw/unwind path -- producing a spurious SIGSEGV in the child even
         // when CACTI itself exited cleanly. fd-level redirection (done by the
         // child) handles silencing for the subprocess case.
         const bool in_isolated_child = (getenv("PIMID_MCPAT_CHILD") != nullptr);
@@ -755,7 +809,7 @@ void McPATWrapper::runMcPAT() {
 // cache. Existing getXxxPower()/area accessors are unchanged because they
 // read from those cache fields, not the Processor object itself.
 //
-// On child crash (non-zero exit / signal), the parent throws — same surface
+// On child crash (non-zero exit / signal), the parent throws -- same surface
 // as the original in-process exception path.
 // ---------------------------------------------------------------------------
 namespace {
@@ -803,14 +857,30 @@ void McPATWrapper::computePower() {
         throw std::runtime_error("[McPATWrapper] Not initialized");
     }
 
-    // Generate the XML in the parent so the child reads the same file path
-    // we configured (avoids races on /tmp/mcpat_input.xml when callers chain
-    // host/device power analyses).
-    createMcPATInput();
+    /* 1.11.56 (audit C014): the parent-side createMcPATInput() call is GONE,
+     * and with it a comment that described the opposite of what happened. It
+     * claimed the parent generated the XML "so the child reads the same file
+     * path we configured". It could not: the child calls runMcPAT(), which
+     * calls createMcPATInput() again, and that function allocates a NEW path
+     * from a function-local `static int xml_call_idx`. The child therefore
+     * never read the parent's file -- the parent wrote one orphan
+     * /tmp/mcpat_input_N.xml per computePower() call that nothing read and
+     * nothing removed, and (because the counter is copied at fork) the
+     * parent's next call reused the path the previous child had written.
+     * The child still generates the XML it actually parses; nothing else in
+     * the parent reads config_.xml_file or valid_ after this point. */
 
     char blob_path[64];
     std::snprintf(blob_path, sizeof(blob_path),
                   "/tmp/pimid_mcpat_blob_%d.bin", (int)getpid());
+
+    /* 1.11.56 (audit C014): choose the XML path HERE, in the parent, so
+     * lastInputXmlPath() can tell a caller where the priced inputs went. */
+    {
+        static int parent_xml_idx = 0;
+        pending_xml_path_ = "/tmp/mcpat_input_p" + std::to_string((int)getpid()) +
+                            "_" + std::to_string(parent_xml_idx++) + ".xml";
+    }
 
     pid_t child = fork();
     if (child < 0) {
@@ -824,7 +894,7 @@ void McPATWrapper::computePower() {
         // Silence McPAT/CACTI chatter at the fd level (not std::cout.rdbuf).
         // CACTI calls exit(0) on error_checking() failure; std::cout cleanup
         // during atexit then reads from an rdbuf whose stack lifetime ended
-        // inside runMcPAT() — that produces a spurious SIGSEGV in the child
+        // inside runMcPAT() -- that produces a spurious SIGSEGV in the child
         // even when CACTI's own logic exited cleanly. fd-level redirect
         // survives atexit because it does not require any C++ object state.
         int devnull = open("/dev/null", O_WRONLY);
@@ -883,7 +953,11 @@ void McPATWrapper::computePower() {
                  * values under a family-priced total. Scale each block's
                  * dynamic and leakage by the family factors DIRECTLY -- the
                  * per-core sub-objects are not transformed by processor.cc's
-                 * applyFam (it works on the Processor-level aggregates). */
+                 * applyFam (it works on the Processor-level aggregates).
+                 * 1.11.56 (audit C027): fam_core_power_ratio_ itself is now
+                 * DELETED from the header. It had been dead since 1.11.12 and
+                 * its declaration still claimed these weights were multiplied
+                 * by it. They are scaled here, by fdW/flW, and nowhere else. */
                 double fdW = 1.0, flW = 1.0;
                 if (config_.process_family == 1) {
                     double faW = 1.0;   // 1.11.16: same authority as the XML emission
@@ -1076,7 +1150,7 @@ void McPATWrapper::computePower() {
 
 void McPATWrapper::extractResults() {
     if (!mcpat_processor_) {
-        throw std::runtime_error("[McPATWrapper] McPAT processor object is null — cannot extract results");
+        throw std::runtime_error("[McPATWrapper] McPAT processor object is null -- cannot extract results");
     }
 
     // Extract real results from McPAT Processor object
@@ -1105,7 +1179,7 @@ void McPATWrapper::extractResults() {
 
     // Core (includes L1 caches in McPAT's model)
     component_power_[ComponentType::CORE] = extractComponent(mcpat_processor_->core);
-    // L1 is embedded in core — zero out separate L1 to avoid double-counting
+    // L1 is embedded in core -- zero out separate L1 to avoid double-counting
     component_power_[ComponentType::L1_CACHE] = PowerMetrics();
 
     // L2
@@ -1117,7 +1191,7 @@ void McPATWrapper::extractResults() {
     // Memory Controller
     component_power_[ComponentType::MEMORY_CONTROLLER] = extractComponent(mcpat_processor_->mcs);
 
-    // NoC — use Processor-level aggregate (already normalized energy→Watts)
+    // NoC -- use Processor-level aggregate (already normalized energy->Watts)
     // The per-NoC nocs[i]->rt_power stores raw energy; Processor multiplies
     // by 1/executionTime during aggregation into noc.rt_power (Watts).
     noc_level_power_.clear();
@@ -1246,9 +1320,23 @@ void McPATWrapper::extractResults() {
         if (pg_spec_.pg_mc)   applyPG(ComponentType::MEMORY_CONTROLLER, pg_spec_.r_mc);
     }
 
-    // System total
+    /* System total.
+     * 1.11.56 (audit C032): sum ONLY the components the described system
+     * has. This loop used to add every entry of component_power_, including
+     * two that exist purely to satisfy McPAT's positional XML parser: the
+     * 1x1, zero-activity, chip_coverage=0 NoC stub emitted even when
+     * has_noc is false, and the memory controller, which is emitted and
+     * extracted unconditionally. The breakdown printed next to the total
+     * already refused to show them, so the parts did not sum to the whole --
+     * reachable today on the dual-McPAT host (has_noc false, no setNoCLevels)
+     * and on the NoC probe (num_memory_controllers 0). This MOVES the total
+     * on those two paths, downward, by the stubs' leakage. What it does not
+     * move is getTotalArea(), which is McPAT's own Processor area and would
+     * have to be rebuilt from the parts to be gated the same way; the stub's
+     * area is still inside it. */
     system_power_ = PowerMetrics();
     for (const auto& pair : component_power_) {
+        if (!componentIsDescribed(pair.first)) continue;
         system_power_.runtime_dynamic += pair.second.runtime_dynamic;
         system_power_.subthreshold_leakage += pair.second.subthreshold_leakage;
         system_power_.gate_leakage += pair.second.gate_leakage;
@@ -1485,6 +1573,29 @@ void McPATWrapper::printSummaryLine() const {
               << std::defaultfloat << std::endl;
 }
 
+/* 1.11.56 (audit C032): see the declaration. L1 is folded into McPAT's core
+ * and is extracted as a zero, so its answer never changes a sum; it is listed
+ * for completeness and to keep the printer and the total on one predicate. */
+bool McPATWrapper::componentIsDescribed(ComponentType t) const {
+    switch (t) {
+        case ComponentType::CORE:
+            return config_.num_cores > 0;
+        case ComponentType::L1_CACHE:
+            return config_.l1i_size_bytes > 0 || config_.l1d_size_bytes > 0;
+        case ComponentType::L2_CACHE:
+            return config_.l2_size_bytes > 0;
+        case ComponentType::L3_CACHE:
+            return config_.l3_size_bytes > 0;
+        case ComponentType::MEMORY_CONTROLLER:
+            return config_.num_memory_controllers > 0;
+        case ComponentType::NOC:
+            return config_.has_noc || !noc_levels_.empty();
+        case ComponentType::PCIE:
+            return pcie_stats_.number_units > 0;
+    }
+    return true;
+}
+
 void McPATWrapper::printComponentBreakdown() const {
     std::cout << "\nComponent Power Breakdown:" << std::endl;
 
@@ -1501,21 +1612,25 @@ void McPATWrapper::printComponentBreakdown() const {
      * already gated; cores, caches and MCs were not, so a device with no L3
      * printed "L3 Cache: 0 W" as though the model had priced one. Same
      * principle as the E8 rollup: never report a component nobody asked for. */
-    if (config_.num_cores > 0)
+    /* 1.11.56 (audit C032): these gates were the ONLY place the ruling was
+     * applied; the system total summed everything. Both now go through
+     * componentIsDescribed(), so the breakdown adds up to the total printed
+     * beside it. */
+    if (componentIsDescribed(ComponentType::CORE))
         print_component("Cores", getComponentPower(ComponentType::CORE));
-    if (config_.l1d_size_bytes > 0 || config_.l1i_size_bytes > 0)
+    if (componentIsDescribed(ComponentType::L1_CACHE))
         print_component("L1 Caches", getComponentPower(ComponentType::L1_CACHE));
-    if (config_.l2_size_bytes > 0)
+    if (componentIsDescribed(ComponentType::L2_CACHE))
         print_component("L2 Caches", getComponentPower(ComponentType::L2_CACHE));
-    if (config_.l3_size_bytes > 0)
+    if (componentIsDescribed(ComponentType::L3_CACHE))
         print_component("L3 Cache", getComponentPower(ComponentType::L3_CACHE));
-    if (config_.num_memory_controllers > 0)
+    if (componentIsDescribed(ComponentType::MEMORY_CONTROLLER))
         print_component("Memory Controllers",
                         getComponentPower(ComponentType::MEMORY_CONTROLLER));
-    if (config_.has_noc || !noc_levels_.empty()) {
+    if (componentIsDescribed(ComponentType::NOC)) {
         print_component("NoC", getComponentPower(ComponentType::NOC));
     }
-    if (pcie_stats_.number_units > 0) {
+    if (componentIsDescribed(ComponentType::PCIE)) {
         print_component("Link controller (" + pcie_stats_.link_type_name + ")",
                         getComponentPower(ComponentType::PCIE));
         std::cout << "    Area:    " << getComponentArea(ComponentType::PCIE)
@@ -1530,12 +1645,37 @@ void McPATWrapper::printComponentBreakdown() const {
 std::string McPATWrapper::generateXMLConfig() const {
     std::ostringstream xml;
 
-    // ALU-only config: no caches; also skip L3 if size is 0
-    bool alu_only = (config_.l1i_size_bytes == 0);
-    int num_l2s = alu_only ? 0 : config_.num_cores;
+    /* No instruction cache => the element is described with a resident
+     * instruction store instead of a cache hierarchy.
+     * 1.11.56 (audit C034): the name is now honest about what it selects.
+     * `alu_only` reads like "this is an ALU element", but it is not the ALU
+     * SWITCH -- that is `is_alu` (device_profile_ == DEVICE_ALU) below, which
+     * selects the DATAPATH sizing. This one keys on l1i_size_bytes and
+     * selects the INSTRUCTION SUPPLY description. The two agree on every
+     * configuration the fleet ships, but they are independent, and one
+     * reachable configuration separates them: cache.l1i.size_kb: 0 with a
+     * non-ALU pe_type gives an element whose instruction supply is described
+     * as a scratchpad while its register files, buffers and issue width come
+     * from the in-order profile rather than from pe_lanes. That is a
+     * defensible description of a real machine, so it is not forced into
+     * agreement here -- but it is no longer silent (see the warning below). */
+    const bool no_icache = (config_.l1i_size_bytes == 0);
+    bool alu_only = no_icache;
+    /* 1.11.56 (audit C036): the L2 must be gated on the L2's OWN size. This
+     * keyed only on l1i, so a config with an instruction cache and
+     * cache.l2.enabled: false (l2_size_bytes == 0, reachable from three
+     * places in main.cpp) still emitted <param name="L2_config"
+     * value="0,64,..."/>. That is not a harmless zero: sharedcache.cc sets
+     * interface_ip.cache_sz = 0, array.cc clamps it to 64 against nbanks 8,
+     * and io.cc rejects the geometry ("Cache size must >=64") -- the McPAT
+     * child throws and the whole run dies with exit code 21. A cache the
+     * user switched off is now simply not described, which is the same thing
+     * the ALU path has always done. */
+    const bool has_l2 = (config_.l2_size_bytes > 0);
+    int num_l2s = (alu_only || !has_l2) ? 0 : config_.num_cores;
     bool has_l3 = !alu_only && (config_.l3_size_bytes > 0);
     int num_l3s = has_l3 ? 1 : 0;
-    int num_cache_levels = alu_only ? 0 : (has_l3 ? 3 : 2);
+    int num_cache_levels = alu_only ? 0 : (has_l3 ? 3 : (has_l2 ? 2 : 1));
 
     // Determine number of NoC instances
     // McPAT XML parser uses positional component counting; with 0 NoCs + 0 L2s +
@@ -1582,6 +1722,32 @@ std::string McPATWrapper::generateXMLConfig() const {
      * McPAT primitives (ArrayST, FunctionalUnit, interconnect), which inherit no
      * undifferentiated term. Recorded in the release notes rather than hidden. */
     const bool is_alu = (device_profile_ == DeviceProfile::DEVICE_ALU);
+    /* 1.11.56 (audit C034): the two switches for one concept, said out loud.
+     * `no_icache` (above) decides the INSTRUCTION SUPPLY -- resident imem and
+     * no caches -- and `is_alu` decides the DATAPATH -- register files,
+     * buffers, result buses and issue width sized from pe_lanes. They are set
+     * from different inputs (cache.l1i.size_kb vs pe_type) and nothing
+     * reconciles them, so a config can describe one machine's front end
+     * beside another machine's back end. Only one direction is reachable
+     * (l1i 0 on a non-ALU profile; the ALU profile forces all four cache
+     * sizes to 0), and it is a legitimate machine, so it is described rather
+     * than refused -- but it is stated, once, so nobody reads the resulting
+     * XML as an ALU element's. */
+    if (!warned_profile_split_ && (no_icache != is_alu)) {
+        warned_profile_split_ = true;
+        std::cerr << "[McPATWrapper] NOTE: instruction supply and datapath are "
+                     "described from different switches in this configuration -- "
+                     "l1i_size_bytes=" << config_.l1i_size_bytes
+                  << " selects a " << (no_icache ? "resident instruction store, "
+                                                   "no caches"
+                                                 : "cache hierarchy")
+                  << ", while the device profile selects the "
+                  << (is_alu ? "ALU datapath (sized from pe_lanes)"
+                             : "in-order/OOO datapath (register files, buffers "
+                               "and issue width from the core profile, NOT from "
+                               "pe_lanes)")
+                  << ". Both halves are emitted as configured." << std::endl;
+    }
     const int  lanes  = (config_.pe_lanes > 0) ? config_.pe_lanes : 1;
 
     int machine_type = is_ooo ? 0 : 1;
@@ -1663,7 +1829,11 @@ std::string McPATWrapper::generateXMLConfig() const {
     xml << "    <param name=\"number_of_L1Directories\" value=\"0\"/>\n";
     xml << "    <param name=\"number_of_L2Directories\" value=\"0\"/>\n";
     xml << "    <param name=\"number_of_L2s\" value=\"" << num_l2s << "\"/>\n";
-    xml << "    <param name=\"Private_L2\" value=\"" << (alu_only ? 0 : 1) << "\"/>\n";
+    /* 1.11.56 (audit C036): Private_L2 must follow num_l2s, not alu_only --
+     * processor.cc:74 errors out when Private_L2 is set and numCore !=
+     * numL2, which is exactly the state an l1i-present/L2-absent config
+     * reached once num_l2s stopped being num_cores. */
+    xml << "    <param name=\"Private_L2\" value=\"" << (num_l2s > 0 ? 1 : 0) << "\"/>\n";
     xml << "    <param name=\"number_of_L3s\" value=\"" << num_l3s << "\"/>\n";
     xml << "    <param name=\"number_of_NoCs\" value=\"" << num_nocs << "\"/>\n";
     xml << "    <param name=\"homogeneous_cores\" value=\"1\"/>\n";
@@ -1823,7 +1993,7 @@ std::string McPATWrapper::generateXMLConfig() const {
     xml << "    <stat name=\"idle_cycles\" value=\"" << (total_cycles_ - busy_cycles_) << "\"/>\n";
     xml << "    <stat name=\"busy_cycles\" value=\"" << busy_cycles_ << "\"/>\n";
 
-    // Core component — homogeneous_cores=1 means emit exactly ONE core template
+    // Core component -- homogeneous_cores=1 means emit exactly ONE core template
     for (int i = 0; i < 1; i++) {
         xml << "    <component id=\"system.core" << i << "\" name=\"core" << i << "\">\n";
         xml << "      <param name=\"clock_rate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
@@ -2200,7 +2370,7 @@ std::string McPATWrapper::generateXMLConfig() const {
         }
 
         if (!alu_only) {
-            // L1 icache — use actual per-core stats
+            // L1 icache -- use actual per-core stats
             uint64_t l1i_reads_per_core = l1i_reads_ / std::max(1, config_.num_cores);
             uint64_t l1i_misses_per_core = l1i_read_misses_ / std::max(1, config_.num_cores);
             xml << "      <component id=\"system.core" << i << ".icache\" name=\"icache\">\n";
@@ -2212,7 +2382,7 @@ std::string McPATWrapper::generateXMLConfig() const {
             xml << "        <stat name=\"conflicts\" value=\"0\"/>\n";
             xml << "      </component>\n";
 
-            // L1 dcache — use actual per-core stats
+            // L1 dcache -- use actual per-core stats
             uint64_t l1d_reads_per_core = l1d_reads_ / std::max(1, config_.num_cores);
             uint64_t l1d_writes_per_core = l1d_writes_ / std::max(1, config_.num_cores);
             uint64_t l1d_rmisses_per_core = l1d_read_misses_ / std::max(1, config_.num_cores);
@@ -2231,8 +2401,9 @@ std::string McPATWrapper::generateXMLConfig() const {
         xml << "    </component>\n";  // close coreN
     }
 
-    // L2 cache — homogeneous_L2s=1 means emit exactly ONE L2 template
-    if (!alu_only) {
+    // L2 cache: homogeneous_L2s=1 means emit exactly ONE L2 template.
+    // 1.11.56 (audit C036): emitted only when an L2 was actually configured.
+    if (num_l2s > 0) {
         for (int i = 0; i < 1; i++) {
             uint64_t l2_reads_per = l2_reads_ / std::max(1, config_.num_cores);
             uint64_t l2_writes_per = l2_writes_ / std::max(1, config_.num_cores);
@@ -2254,13 +2425,32 @@ std::string McPATWrapper::generateXMLConfig() const {
             xml << "      <stat name=\"read_misses\" value=\"" << l2_rmisses_per << "\"/>\n";
             xml << "      <stat name=\"write_misses\" value=\"" << l2_wmisses_per << "\"/>\n";
             xml << "      <stat name=\"conflicts\" value=\"0\"/>\n";
-            xml << "      <stat name=\"duty_cycle\" value=\""
-                << (total_cycles_ > 0 ? static_cast<double>(busy_cycles_) / total_cycles_ * 0.5 : 0.0) << "\"/>\n";
+            /* 1.11.56 (audit C006): MEASURED, not an unsourced fraction of a
+             * tautology. This read busy_cycles_/total_cycles_ * 0.5. Every
+             * reachable caller passes the same value to setTotalCycles and
+             * setBusyCycles, so the first factor is identically 1.0 and the
+             * emitted number was the bare literal 0.5 -- "this L2 is 50% busy"
+             * asserted about every run this simulator has ever produced, with
+             * no source. (0.5 is the value in McPAT's own Xeon reference XML,
+             * which is a description of a Xeon, not of a PIM element.)
+             * The quantity is measurable and we already count it: accesses
+             * per cycle at this cache instance. McPAT uses cachep.duty_cycle
+             * only on the is_tdp branch of SharedCache::computeEnergy, where
+             * it sets the peak-power access rate, so what moves is the
+             * reported PEAK power of L2 (and L3 below) -- runtime dynamic is
+             * driven by the access counts and does not change. Clamped to
+             * [0,1] because McPAT reads it as a per-port rate. */
+            const double l2_duty =
+                (total_cycles_ > 0)
+                    ? std::min(1.0, static_cast<double>(l2_reads_per + l2_writes_per)
+                                        / static_cast<double>(total_cycles_))
+                    : 0.0;
+            xml << "      <stat name=\"duty_cycle\" value=\"" << l2_duty << "\"/>\n";
             xml << "    </component>\n";
         }
     }
 
-    // L3 cache (shared) — skip if ALU-only or no L3
+    // L3 cache (shared) -- skip if ALU-only or no L3
     if (has_l3) {
         xml << "    <component id=\"system.L3\" name=\"L3\">\n";
         // 1.9.10 fix: McPAT/CACTI cache_config field 1 is capacity in BYTES (as L2
@@ -2278,12 +2468,21 @@ std::string McPATWrapper::generateXMLConfig() const {
         xml << "      <stat name=\"read_misses\" value=\"" << l3_read_misses_ << "\"/>\n";
         xml << "      <stat name=\"write_misses\" value=\"" << l3_write_misses_ << "\"/>\n";
         xml << "      <stat name=\"conflicts\" value=\"0\"/>\n";
-        xml << "      <stat name=\"duty_cycle\" value=\""
-            << (total_cycles_ > 0 ? static_cast<double>(busy_cycles_) / total_cycles_ * 0.3 : 0.0) << "\"/>\n";
+        /* 1.11.56 (audit C006): measured, same reasoning as the L2 above --
+         * the old expression was busy_cycles_/total_cycles_ * 0.3, i.e. the
+         * literal 0.3, and 0.3 was not even McPAT's own reference value for a
+         * shared L3 (that XML uses 1). The L3 is shared, so its accesses are
+         * not divided per core. */
+        const double l3_duty =
+            (total_cycles_ > 0)
+                ? std::min(1.0, static_cast<double>(l3_reads_ + l3_writes_)
+                                    / static_cast<double>(total_cycles_))
+                : 0.0;
+        xml << "      <stat name=\"duty_cycle\" value=\"" << l3_duty << "\"/>\n";
         xml << "    </component>\n";
     }
 
-    // NoC — N instances from noc_levels_ (or single legacy instance)
+    // NoC -- N instances from noc_levels_ (or single legacy instance)
     if (!noc_levels_.empty()) {
         // N heterogeneous NoC instances
         for (size_t ni = 0; ni < noc_levels_.size(); ni++) {
@@ -2347,7 +2546,7 @@ std::string McPATWrapper::generateXMLConfig() const {
         xml << "      <stat name=\"duty_cycle\" value=\"" << noc_duty_cycle << "\"/>\n";
         xml << "    </component>\n";
     } else {
-        // Minimal NoC stub — McPAT's positional XML parser requires at least 1 NoC
+        // Minimal NoC stub -- McPAT's positional XML parser requires at least 1 NoC
         // component to correctly offset to the MC section
         xml << "    <component id=\"system.noc0\" name=\"noc0\">\n";
         xml << "      <param name=\"clockrate\" value=\"" << static_cast<int>(config_.core_clock_mhz) << "\"/>\n";
@@ -2369,7 +2568,7 @@ std::string McPATWrapper::generateXMLConfig() const {
         xml << "    </component>\n";
     }
 
-    // Memory controller — uses actual mc_reads_/mc_writes_ and mc_tech_ params
+    // Memory controller -- uses actual mc_reads_/mc_writes_ and mc_tech_ params
     xml << "    <component id=\"system.mc\" name=\"mc\">\n";
     /* 1.11.19 (user decisions D2+D3): ONE BACKEND MODEL, THREE INTERFACE
      * TIERS. The backend is always type=0 -- McPAT's Cadence full-MC fit --
@@ -2391,9 +2590,30 @@ std::string McPATWrapper::generateXMLConfig() const {
     xml << "      <param name=\"vdd\" value=\"0\"/>\n";
     xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
     xml << "      <param name=\"peak_transfer_rate\" value=\"" << mc_tech_.peak_transfer_rate << "\"/>\n";
-    xml << "      <param name=\"block_size\" value=\"64\"/>\n";
+    /* 1.11.56 (audit C008): the five structural numbers below come from
+     * MCTechParams now instead of being literals in this stream. They still
+     * default to the values the literals held, so nothing moves; what changes
+     * is that a controller with more than one channel, a deeper queue or a
+     * different transaction granularity has somewhere to be described, and
+     * that the run SAYS the description is unsourced (see the warning below)
+     * instead of presenting single-channel/32/32/64/51 as facts. */
+    if (!warned_mc_structure_) {
+        warned_mc_structure_ = true;
+        std::cerr << "[McPATWrapper] WARNING: the memory controller's structure is "
+                     "UNSOURCED and in force in every run: "
+                  << mc_tech_.memory_channels_per_mc << " channel(s) per MC, "
+                  << mc_tech_.req_window_size_per_channel << "-entry request window, "
+                  << mc_tech_.io_buffer_size_per_channel << "-entry IO buffer, "
+                  << mc_tech_.block_size_bytes << " B blocks, "
+                  << mc_tech_.addressbus_width << "-bit address bus (this last one "
+                     "disagrees with the 48-bit physical_address_width emitted for "
+                     "the cores, unreconciled). No YAML key sets any of them; they "
+                     "govern MC queue/buffer area and power." << std::endl;
+    }
+    xml << "      <param name=\"block_size\" value=\"" << mc_tech_.block_size_bytes << "\"/>\n";
     xml << "      <param name=\"number_mcs\" value=\"" << mc_tech_.number_mcs << "\"/>\n";
-    xml << "      <param name=\"memory_channels_per_mc\" value=\"1\"/>\n";
+    xml << "      <param name=\"memory_channels_per_mc\" value=\""
+        << mc_tech_.memory_channels_per_mc << "\"/>\n";
     xml << "      <param name=\"number_ranks\" value=\"" << mc_tech_.number_ranks << "\"/>\n";
     /* 1.11.19: the interface tier (see the type comment above). */
     xml << "      <param name=\"withPHY\" value=\""
@@ -2407,10 +2627,13 @@ std::string McPATWrapper::generateXMLConfig() const {
      * right class for every DDR-family part we model, so the value is the
      * same -- but it is now SAID, and the cited figure is reproducible. */
     xml << "      <param name=\"LVDS\" value=\"1\"/>\n";
-    xml << "      <param name=\"req_window_size_per_channel\" value=\"32\"/>\n";
-    xml << "      <param name=\"IO_buffer_size_per_channel\" value=\"32\"/>\n";
+    xml << "      <param name=\"req_window_size_per_channel\" value=\""
+        << mc_tech_.req_window_size_per_channel << "\"/>\n";   // 1.11.56 (C008)
+    xml << "      <param name=\"IO_buffer_size_per_channel\" value=\""
+        << mc_tech_.io_buffer_size_per_channel << "\"/>\n";     // 1.11.56 (C008)
     xml << "      <param name=\"databus_width\" value=\"" << mc_tech_.databus_width << "\"/>\n";
-    xml << "      <param name=\"addressbus_width\" value=\"51\"/>\n";
+    xml << "      <param name=\"addressbus_width\" value=\""
+        << mc_tech_.addressbus_width << "\"/>\n";               // 1.11.56 (C008)
     {
         int num_mcs = std::max(1, mc_tech_.number_mcs);
         xml << "      <stat name=\"memory_accesses\" value=\"" << (mc_reads_ + mc_writes_) / num_mcs << "\"/>\n";
@@ -2419,7 +2642,7 @@ std::string McPATWrapper::generateXMLConfig() const {
     }
     xml << "    </component>\n";
 
-    // NIU — mandatory stub
+    // NIU -- mandatory stub
     xml << "    <component id=\"system.niu\" name=\"niu\">\n";
     xml << "      <param name=\"type\" value=\"1\"/>\n";
     xml << "      <param name=\"clockrate\" value=\"350\"/>\n";
@@ -2430,13 +2653,34 @@ std::string McPATWrapper::generateXMLConfig() const {
     xml << "      <stat name=\"total_load_perc\" value=\"0\"/>\n";
     xml << "    </component>\n";
 
-    // PCIe — active when co-sim transfers present, otherwise stub.
+    // PCIe -- active when co-sim transfers present, otherwise stub.
     // 1.11.7: clock from the configured link (350 was a hardwired literal),
     // measured bytes + per-link-type pJ/bit drive the dynamic term inside
     // the fork (iocontrollers.cc) -- zero traffic = zero link dynamic.
     {
-        int link_clk = (pcie_stats_.link_clock_mhz > 0)
-                           ? pcie_stats_.link_clock_mhz : 350;
+        /* 1.11.56 (audit C017): the 350 is UNSOURCED and was silent. It is
+         * McPAT's historical niu/pcie stub clock, not a property of any link
+         * this tree models, and the link controller's digital dynamic power
+         * scales linearly with it -- for a gen5/CXL link whose derived
+         * controller clock is 1000 MHz, falling back to 350 prices that
+         * controller at 0.35x. One caller derives the clock and warns
+         * (the co-sim path); the dual-McPAT HOST site does not set
+         * link_clock_mhz at all, so the fallback fires there on every system
+         * -scope run with a host node and power.pcie.enabled. We cannot fix
+         * that caller from here, and we will not present its result as
+         * priced: say what stood in, name what it governs, once. */
+        int link_clk = pcie_stats_.link_clock_mhz;
+        if (link_clk <= 0) {
+            link_clk = 350;
+            if (!warned_link_clock_ && pcie_stats_.number_units > 0) {
+                warned_link_clock_ = true;
+                std::cerr << "[McPATWrapper] WARNING: no link controller clock was "
+                             "supplied for link type '" << pcie_stats_.link_type_name
+                          << "'; the UNSOURCED 350 MHz literal is in force. The "
+                             "link controller's digital dynamic power scales "
+                             "linearly with this clock." << std::endl;
+            }
+        }
         xml << "    <component id=\"system.pcie\" name=\"pcie\">\n";
         xml << "      <param name=\"type\" value=\"1\"/>\n";
         /* 1.11.29 step 1: from the link CLASS, not a literal. */
@@ -2445,9 +2689,24 @@ std::string McPATWrapper::generateXMLConfig() const {
             << "\"/>\n";
         /* 1.11.29 step 3: the class's own signalling rate, not PCIe 2.0's. */
         const double lane_gbps = linkSerDesLaneGbps(pcie_stats_.link_type_name);
-        if (lane_gbps > 0.0)
+        if (lane_gbps > 0.0) {
             xml << "      <param name=\"serdes_lane_gbps\" value=\"" << lane_gbps
                 << "\"/>\n";
+        } else if (pcie_stats_.number_units > 0 && !warned_link_class_) {
+            warned_link_class_ = true;
+            /* 1.11.56 (audit C017): a link type this table cannot name gets
+             * McPAT's historical 4 Gb/s (PCIe 2.0) SerDes rate, silently. The
+             * bare name "pcie" -- which is PCIeStats' own default, and what
+             * the host site leaves in place -- matches no prefix here, so a
+             * host link is priced at PCIe 2.0 while the report calls it
+             * whatever the run configured. Not repaired here (the rate is
+             * only knowable from the class); said. */
+            std::cerr << "[McPATWrapper] WARNING: link type '"
+                      << pcie_stats_.link_type_name << "' names no known SerDes "
+                         "class, so serdes_lane_gbps is not emitted and McPAT's "
+                         "historical 4 Gb/s (PCIe 2.0) rate prices this link."
+                      << std::endl;
+        }
         xml << "      <param name=\"clockrate\" value=\"" << link_clk << "\"/>\n";
         xml << "      <param name=\"vdd\" value=\"0\"/>\n";
         xml << "      <param name=\"power_gating_vcc\" value=\"-1\"/>\n";
@@ -2460,7 +2719,7 @@ std::string McPATWrapper::generateXMLConfig() const {
         xml << "    </component>\n";
     }
 
-    // Flash controller — mandatory stub
+    // Flash controller -- mandatory stub
     xml << "    <component id=\"system.flashc\" name=\"flashc\">\n";
     xml << "      <param name=\"number_flashcs\" value=\"0\"/>\n";
     xml << "      <param name=\"type\" value=\"1\"/>\n";

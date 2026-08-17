@@ -42,12 +42,25 @@
  * advanced 0.25-0.5) are the test set for whatever model eventually covers
  * serial links -- not the model itself.
  *
- * GLOBAL-STATE DISCIPLINE (audit E30). CACTI-IO reads g_ip -- num_dq, num_dqs,
- * num_ca, num_clk, duty_cycle, io_type, iostate -- the same global CACTIWrapper
- * and the McPAT fork also use. E30 records that CACTIWrapper leaves it dangling.
- * This wrapper therefore SAVES the whole InputParameter, mutates only the IO
- * fields it needs, and RESTORES it, so adding a second consumer cannot turn
- * into a race between callers.
+ * GLOBAL-STATE DISCIPLINE (audit E30, and 1.11.45's correction of it).
+ * CACTI-IO reads g_ip -- num_dq, num_dqs, num_ca, num_clk, duty_cycle,
+ * io_type, iostate -- the same global CACTIWrapper and the McPAT fork also
+ * use, and E30 records that CACTIWrapper leaves it dangling.
+ *
+ * 1.11.56 (audit C025): this paragraph used to describe the SAVE/MUTATE/
+ * RESTORE pattern ("SAVES the whole InputParameter ... and RESTORES it") --
+ * that is exactly the pattern 1.11.45 removed, and the .cpp calls it a
+ * use-after-free: saving *g_ip and later writing *g_ip = saved is a write
+ * THROUGH whatever the global points at, which after any CACTIWrapper's
+ * death is freed memory (a dangling pointer is not null, so a null check
+ * cannot save you). Leaving the retired pattern documented in the header as
+ * the discipline is how it gets reintroduced.
+ *
+ * What the implementation ACTUALLY does is a POINTER SWAP: each entry point
+ * points g_ip at its own function-static InputParameter for the duration of
+ * the call, resets that object to defaults, fills the IO fields, and on every
+ * exit path restores the PREVIOUS POINTER -- dereferencing nothing it does
+ * not own.
  */
 #ifndef PIMID_POWER_CACTI_IO_WRAPPER_H
 #define PIMID_POWER_CACTI_IO_WRAPPER_H

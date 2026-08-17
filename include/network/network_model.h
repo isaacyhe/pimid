@@ -53,9 +53,9 @@ enum class FlowControl {
  * Controls how many stages are in the router pipeline
  */
 enum class RouterPipelineComplexity {
-    FULL,       // RC → VA → SA → ST (4-stage, full NoC router with VC allocation)
-    REDUCED,    // RC → SA → ST (3-stage, no VC allocation, simpler)
-    SIMPLE,     // SA → ST (2-stage, just arbitration + traversal)
+    FULL,       // RC -> VA -> SA -> ST (4-stage, full NoC router with VC allocation)
+    REDUCED,    // RC -> SA -> ST (3-stage, no VC allocation, simpler)
+    SIMPLE,     // SA -> ST (2-stage, just arbitration + traversal)
     MINIMAL     // ST only (1-stage, just a mux/switch, for DRAM)
 };
 

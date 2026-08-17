@@ -96,7 +96,7 @@ PEBusConstraints PEPlacementManager::calculateBusConstraints(
                 constraints.shared_bus_pes = 1;  // Dedicated logic die
                 break;
             case PEPlacementLevel::HOST_MC:
-                // PEs share host's memory controller — host owns the rank bus.
+                // PEs share host's memory controller -- host owns the rank bus.
                 constraints.shared_bus_pes = hierarchy_.num_banks_per_chip *
                                             hierarchy_.num_chips_per_rank;
                 break;
@@ -166,7 +166,7 @@ PEBusConstraints PEPlacementManager::calculateBusConstraints(
             break;
 
         case PEPlacementLevel::HOST_MC:
-            // Host MC: PEs share host's memory controller — rank-level visibility
+            // Host MC: PEs share host's memory controller -- rank-level visibility
             constraints.data_bus_width_bits = 64;
             constraints.max_bandwidth_gbps = 25;
             constraints.row_buffer_size_bytes = 0;
@@ -256,7 +256,7 @@ PEAddressConstraints PEPlacementManager::calculateAddressConstraints(
             break;
 
         case PEPlacementLevel::BANK_GROUP: {
-            // Access span ≈ chip / 4 (typical DDR5 has 4 bank groups per chip).
+            // Access span ~= chip / 4 (typical DDR5 has 4 bank groups per chip).
             const uint64_t BG_SIZE = CHIP_SIZE / 4;
             constraints.accessible_base = pe.rank_id * RANK_SIZE +
                                          pe.chip_id * CHIP_SIZE;
@@ -269,7 +269,7 @@ PEAddressConstraints PEPlacementManager::calculateAddressConstraints(
         }
 
         case PEPlacementLevel::HOST_MC:
-            // PEs share host's MC — host's address visibility is rank-level.
+            // PEs share host's MC -- host's address visibility is rank-level.
             constraints.accessible_base = pe.rank_id * RANK_SIZE;
             constraints.accessible_size_bytes = RANK_SIZE;
             constraints.accessible_limit = constraints.accessible_base +

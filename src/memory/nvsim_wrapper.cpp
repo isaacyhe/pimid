@@ -324,7 +324,7 @@ void NVSimWrapper::loadCellParameters() {
 
 // Process-wide cache of NVSim characterization results, keyed on the parameters
 // the design-space search depends on. Avoids re-running the (~minutes-long)
-// search for identical configs — notably the timing + power paths of a single
+// search for identical configs -- notably the timing + power paths of a single
 // simulation, which build the same config twice.
 namespace {
     struct NVMCacheKey {
@@ -487,7 +487,7 @@ void NVSimWrapper::runNVSim() {
                      config_.device_corner,          // 1.11.49
                      config_.temperature_k };        // 1.11.52 (D055)
     // Reads (both the in-memory map and the on-disk XML) are skipped unless the
-    // warehouse mode permits reading — OFF/WO must truly recompute.
+    // warehouse mode permits reading -- OFF/WO must truly recompute.
     if (pimid::cache::readEnabled()) {
         // 1) In-memory cache (same process, e.g. timing + power paths).
         auto it = g_nvsim_cache.find(key);
@@ -585,7 +585,7 @@ void NVSimWrapper::runNVSim() {
         int localWireRepeaterType, globalWireRepeaterType;
         int isLocalWireLowSwing, isGlobalWireLowSwing;
 
-        long long capacity = (long long)nvsim_input_->capacity * 8;  // bytes → bits
+        long long capacity = (long long)nvsim_input_->capacity * 8;  // bytes -> bits
         long blockSize = nvsim_input_->wordWidth;
         int associativity = nvsim_input_->associativity;
 
@@ -735,12 +735,23 @@ void NVSimWrapper::runNVSim() {
                              "or a technology whose write current the corner "
                              "can drive." << std::endl;
             }
+            /* 1.11.56 (D032): THROW. Every query returns 0.0 when !valid_,
+             * so a swallowed failure here does not surface as an error --
+             * it surfaces as an NVM array of 0.000 nJ read, 0.000 nJ write,
+             * 0.000 mW leakage and 0.000 mm^2, which is a fabricated number
+             * wearing a real number's units. Callers that can degrade
+             * (the model classes, the area query) already catch and say so;
+             * the ones that cannot must not be handed a zero. */
+            throw std::runtime_error(error_message_);
         }
 
     } catch (const std::exception& e) {
-        valid_ = false;
-        error_message_ = std::string("NVSim execution failed: ") + e.what();
-        std::cerr << "[NVSimWrapper] " << error_message_ << std::endl;
+        if (valid_) {   // not our own no-design-points throw, which already reported
+            valid_ = false;
+            error_message_ = std::string("NVSim execution failed: ") + e.what();
+            std::cerr << "[NVSimWrapper] " << error_message_ << std::endl;
+        }
+        throw;   // 1.11.56 (D032): see above -- a swallowed failure reads as zeros
     }
 }
 
@@ -792,19 +803,19 @@ double NVSimWrapper::getResetLatency() const {
 double NVSimWrapper::getReadDynamicEnergy() const {
     if (cached_) return cached_read_energy_nj_;
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->readDynamicEnergy * 1e9;  // J → nJ
+    return nvsim_result_->bank->readDynamicEnergy * 1e9;  // J -> nJ
 }
 
 double NVSimWrapper::getWriteDynamicEnergy() const {
     if (cached_) return cached_write_energy_nj_;
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->writeDynamicEnergy * 1e9;  // J → nJ
+    return nvsim_result_->bank->writeDynamicEnergy * 1e9;  // J -> nJ
 }
 
 double NVSimWrapper::getLeakagePower() const {
     if (cached_) return cached_leakage_mw_;
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->leakage * 1000.0;  // W → mW
+    return nvsim_result_->bank->leakage * 1000.0;  // W -> mW
 }
 
 double NVSimWrapper::getReadEDP() const {
@@ -818,17 +829,17 @@ double NVSimWrapper::getWriteEDP() const {
 double NVSimWrapper::getArea() const {
     if (cached_) return cached_area_mm2_;
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->area * 1e6;  // m² → mm²
+    return nvsim_result_->bank->area * 1e6;  // m^2 -> mm^2
 }
 
 double NVSimWrapper::getHeight() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->height * 1e3;  // m → mm
+    return nvsim_result_->bank->height * 1e3;  // m -> mm
 }
 
 double NVSimWrapper::getWidth() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->width * 1e3;  // m → mm
+    return nvsim_result_->bank->width * 1e3;  // m -> mm
 }
 
 double NVSimWrapper::getCellReadLatency() const {
@@ -845,9 +856,9 @@ double NVSimWrapper::getCellWriteLatency() const {
 
 double NVSimWrapper::getCellArea() const {
     if (!valid_ || !nvsim_cell_) return 0.0;
-    // cell->area is in units of F² (feature size squared)
-    double F = nvsim_cell_->processNode * 1e-3;  // nm → um
-    return nvsim_cell_->area * F * F;  // um²
+    // cell->area is in units of F^2 (feature size squared)
+    double F = nvsim_cell_->processNode * 1e-3;  // nm -> um
+    return nvsim_cell_->area * F * F;  // um^2
 }
 
 uint32_t NVSimWrapper::getNumRows() const {
@@ -893,44 +904,82 @@ std::string NVSimWrapper::getErrorMessage() const {
 // Subarray-Level Characteristics
 //=============================================================================
 
+/* 1.11.56 (audit D031): THE BREAKDOWN IS NVSIM'S OWN, NOT A PERCENTAGE SPLIT.
+ *
+ * These six accessors used to return fixed fractions of mat.readLatency
+ * (0.10 / 0.20 / 0.45 / 0.15 / 0.05 / 0.05). Nothing about a particular array
+ * reached them: change the cell, the node, the mux ratio or the aspect ratio
+ * and every component moved in exact lockstep, because they were one number
+ * scaled six ways. They also summed to 0.95, so the "breakdown" did not even
+ * reproduce the total it was cut from. The extractors assign them into
+ * inner_bank.row_decoder_ns / wordline_ns / bitline_read_ns / sense_amp_ns /
+ * column_mux_ns, which the NVM models sum and PRINT as "Inner-bank read
+ * latency" -- an invented split presented as tool output.
+ *
+ * NVSim resolves all of it. SubArray::CalculateLatency() composes
+ *
+ *   subarray.readLatency = MAX(rowDecoder.readLatency, columnDecoderLatency)
+ *                        + bitlineDelay + bitlineMux.readLatency
+ *                        + senseAmp.readLatency
+ *                        + senseAmpMuxLev1.readLatency
+ *                        + senseAmpMuxLev2.readLatency
+ *
+ * and Mat::CalculateLatency() adds predecoderLatency on top. The accessors
+ * below read those terms directly, so the five delay components an extractor
+ * sums reconstruct the array NVSim characterized instead of 95% of a single
+ * scalar, and each one now responds to the array it describes.
+ *
+ * Two structural quirks, stated rather than papered over:
+ *  - There is no separate wordline term. NVSim charges the wordline INSIDE the
+ *    row decoder -- RowDecoder::capLoad is documented as "Load capacitance,
+ *    i.e. wordline capacitance" -- so getWordlineDelay() returns 0 and
+ *    getDecoderDelay() carries predecode + decode + wordline drive. Splitting
+ *    a number NVSim never separated is what produced this finding.
+ *  - columnDecoderLatency is MAX'd against the row decoder, not added, so it
+ *    is not the additive column term. The additive column path is the mux data
+ *    path (bitline mux + both sense-amp mux levels), which is what
+ *    getColumnDecoderDelay() returns.
+ *
+ * All return SECONDS, and 0.0 when there is no result to read -- notably on a
+ * cache hit, where the pregenerated NVSim cache carries only the top-level
+ * figures. That is the pre-existing contract for these six and is unchanged.
+ */
 double NVSimWrapper::getDecoderDelay() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    // Bank read latency includes decoder; approximate from mat-level breakdown
-    // Mat readLatency = decoder + wordline + bitline + SA + mux
-    double mat_total = nvsim_result_->bank->mat.readLatency;
-    if (mat_total <= 0) return 0.0;
-    // Proportional estimate: decoder ≈ 10% of mat latency
-    return mat_total * 0.10;
+    const auto& mat = nvsim_result_->bank->mat;
+    // Predecode + row decode + wordline drive: NVSim's row-access path.
+    return mat.predecoderLatency + mat.subarray.rowDecoder.readLatency;
 }
 
 double NVSimWrapper::getWordlineDelay() const {
-    if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    double mat_total = nvsim_result_->bank->mat.readLatency;
-    return mat_total * 0.20;  // ~20% of mat latency
+    /* Folded into the row decoder above (RowDecoder drives the wordline and
+     * its capLoad IS the wordline capacitance). Reporting a separate term here
+     * would double-count the same picoseconds. */
+    return 0.0;
 }
 
 double NVSimWrapper::getBitlineDelay() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    double mat_total = nvsim_result_->bank->mat.readLatency;
-    return mat_total * 0.45;  // ~45% (dominant for NVM)
+    return nvsim_result_->bank->mat.subarray.bitlineDelay;
 }
 
 double NVSimWrapper::getSenseAmpDelay() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    double mat_total = nvsim_result_->bank->mat.readLatency;
-    return mat_total * 0.15;
+    return nvsim_result_->bank->mat.subarray.senseAmp.readLatency;
 }
 
 double NVSimWrapper::getColumnDecoderDelay() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    double mat_total = nvsim_result_->bank->mat.readLatency;
-    return mat_total * 0.05;
+    const auto& sub = nvsim_result_->bank->mat.subarray;
+    // The ADDITIVE column path: bitline mux + both sense-amp mux levels.
+    return sub.bitlineMux.readLatency
+         + sub.senseAmpMuxLev1.readLatency
+         + sub.senseAmpMuxLev2.readLatency;
 }
 
 double NVSimWrapper::getPrechargeDelay() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    double mat_total = nvsim_result_->bank->mat.readLatency;
-    return mat_total * 0.05;
+    return nvsim_result_->bank->mat.subarray.precharger.readLatency;
 }
 
 uint32_t NVSimWrapper::getSubarrayRows() const {
@@ -1027,7 +1076,7 @@ double NVSimWrapper::getPrechargerEnergy() const {
 
 double NVSimWrapper::getDecoderLeakage() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->mat.leakage * 1000.0 * 0.15;  // W → mW, 15%
+    return nvsim_result_->bank->mat.leakage * 1000.0 * 0.15;  // W -> mW, 15%
 }
 
 double NVSimWrapper::getWordlineLeakage() const {
@@ -1043,14 +1092,14 @@ double NVSimWrapper::getSenseAmpLeakage() const {
 double NVSimWrapper::getSubarrayArea() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
     // Mat area / subarrays_per_mat
-    double mat_area_mm2 = nvsim_result_->bank->mat.area * 1e6;  // m² → mm²
+    double mat_area_mm2 = nvsim_result_->bank->mat.area * 1e6;  // m^2 -> mm^2
     uint32_t sa_per_mat = getSubarraysPerMat();
     return (sa_per_mat > 0) ? mat_area_mm2 / sa_per_mat : mat_area_mm2;
 }
 
 double NVSimWrapper::getMatArea() const {
     if (!valid_ || !nvsim_result_ || !nvsim_result_->bank) return 0.0;
-    return nvsim_result_->bank->mat.area * 1e6;  // m² → mm²
+    return nvsim_result_->bank->mat.area * 1e6;  // m^2 -> mm^2
 }
 
 void NVSimWrapper::printDetailedResults() const {

@@ -229,7 +229,7 @@ inline std::unique_ptr<DRAMArchitecture> createDDR4_2400() {
     arch->ports.bank_group_port_bits = 16;    // 16-bit bank group (still narrow)
     arch->ports.chip_internal_bits = 16;      // Internal chip routing
     arch->ports.chip_io_bits = 8;             // x8 device (1 byte per cycle)
-    arch->ports.rank_data_bits = 64;          // 8 chips × 8 bits = 64-bit WIDE interface
+    arch->ports.rank_data_bits = 64;          // 8 chips x 8 bits = 64-bit WIDE interface
     arch->ports.channel_data_bits = 64;       // Single channel 64-bit
 
     // Organization
@@ -240,10 +240,10 @@ inline std::unique_ptr<DRAMArchitecture> createDDR4_2400() {
     arch->organization.ranks_per_channel = 2;
     arch->organization.channels_per_mc = 1;
     arch->organization.subarray_size_kb = 512;
-    arch->organization.bank_size_mb = 2;      // 4 subarrays × 512 KB
-    arch->organization.chip_size_mb = 128;    // 16 banks × 2 MB
-    arch->organization.rank_size_gb = 1;      // 8 chips × 128 MB
-    arch->organization.channel_capacity_gb = 2; // 2 ranks × 1 GB
+    arch->organization.bank_size_mb = 2;      // 4 subarrays x 512 KB
+    arch->organization.chip_size_mb = 128;    // 16 banks x 2 MB
+    arch->organization.rank_size_gb = 1;      // 8 chips x 128 MB
+    arch->organization.channel_capacity_gb = 2; // 2 ranks x 1 GB
 
     // Timing (DDR4-2400, CL17)
     arch->timing.clock_freq_mhz = 1200;
@@ -293,8 +293,8 @@ inline std::unique_ptr<DRAMArchitecture> createDDR5_4800() {
     arch->ports.bank_group_port_bits = 32;    // 32-bit bank group
     arch->ports.chip_internal_bits = 32;      // Wider internal routing
     arch->ports.chip_io_bits = 8;             // x8 device (but 2 sub-channels)
-    arch->ports.rank_data_bits = 64;          // 2 sub-channels × 32 bits
-    arch->ports.channel_data_bits = 64;       // 64-bit channel (2 × 32-bit sub-channels)
+    arch->ports.rank_data_bits = 64;          // 2 sub-channels x 32 bits
+    arch->ports.channel_data_bits = 64;       // 64-bit channel (2 x 32-bit sub-channels)
 
     // Organization (DDR5 has 2 independent sub-channels per chip)
     arch->organization.subarrays_per_bank = 4;
@@ -305,7 +305,7 @@ inline std::unique_ptr<DRAMArchitecture> createDDR5_4800() {
     arch->organization.channels_per_mc = 1;
     arch->organization.subarray_size_kb = 512;
     arch->organization.bank_size_mb = 2;
-    arch->organization.chip_size_mb = 256;    // 32 banks × 2 MB
+    arch->organization.chip_size_mb = 256;    // 32 banks x 2 MB
     arch->organization.rank_size_gb = 2;
     arch->organization.channel_capacity_gb = 4;
 

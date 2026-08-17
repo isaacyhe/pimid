@@ -110,7 +110,7 @@ void NearestPEScheduler::printStats() const {
         std::cout << "(Note: May be higher than round-robin due to locality optimization)" << std::endl;
     }
 
-    std::cout << "\n📍 Data Locality Optimization:" << std::endl;
+    std::cout << "\n[at] Data Locality Optimization:" << std::endl;
     std::cout << "This scheduler prioritizes data locality over load balance." << std::endl;
     std::cout << "Tasks are assigned to PEs closest to their data to minimize" << std::endl;
     std::cout << "remote access penalties and maximize performance." << std::endl;

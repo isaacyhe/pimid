@@ -39,7 +39,10 @@ SRAMModel::SRAMModel(const std::string& config_path)
     sram_config_.read_ports = 0;
     sram_config_.write_ports = 0;
     sram_config_.tech_node_nm = 22;      // 22nm technology
-    sram_config_.access_time = 2;        // 2 cycles
+    /* 1.11.56 (audit D054): nanoseconds, not cycles. A placeholder the CACTI
+     * path overwrites on every reachable run; the model refuses when that
+     * binding fails, so it never reaches a result. */
+    sram_config_.access_time_ns = 2.0;   // ns
 }
 
 void SRAMModel::initialize() {
@@ -76,9 +79,11 @@ void SRAMModel::initialize() {
             leakage_power_ = cacti_wrapper_->getLeakagePower() / 1000.0; // Convert mW to W
             area_mm2_ = cacti_wrapper_->getArea();
 
-            // Update access time from CACTI (assuming 1 GHz clock)
-            double freq_hz = 1e9;
-            sram_config_.access_time = cacti_wrapper_->getAccessLatencyCycles(freq_hz);
+            /* 1.11.56 (audit D054): CACTI reports SECONDS. Take the time and
+              * keep it. getAccessLatencyCycles(1e9) turned it into a "cycle"
+              * count against a clock nobody supplied, and the log then printed
+              * that count as cycles -- correct only for a 1 GHz PE. */
+            sram_config_.access_time_ns = cacti_wrapper_->getAccessTime() * 1e9;
 
             std::cout << "[SRAMModel] Using CACTI-generated parameters" << std::endl;
         } else {
@@ -103,7 +108,8 @@ void SRAMModel::initialize() {
     std::cout << "  Banks: " << sram_config_.banks << std::endl;
     std::cout << "  Ports (RW): " << sram_config_.read_write_ports << std::endl;
     std::cout << "  Technology: " << sram_config_.tech_node_nm << " nm" << std::endl;
-    std::cout << "  Access Time: " << sram_config_.access_time << " cycles" << std::endl;
+    // 1.11.56 (audit D054): nanoseconds, which is what CACTI reported.
+    std::cout << "  Access Time: " << sram_config_.access_time_ns << " ns" << std::endl;
     std::cout << "  Area: " << area_mm2_ << " mm^2" << std::endl;
     std::cout << "  Read Energy: " << read_energy_ << " nJ" << std::endl;
     std::cout << "  Write Energy: " << write_energy_ << " nJ" << std::endl;
@@ -201,8 +207,22 @@ void SRAMModel::loadConfig(const std::string& config_path) {
         // Load timing
         if (sram["timing"]) {
             auto timing = sram["timing"];
-            if (timing["read_latency_cycles"]) {
-                sram_config_.access_time = timing["read_latency_cycles"].as<uint32_t>();
+            /* 1.11.56 (audit D054): the YAML knob is named in CYCLES but this
+             * model holds TIME and has no clock to convert with, so a cycle
+             * count cannot be honoured as written. Prefer an explicit
+             * read_latency_ns; accept the legacy cycles key but say once, at
+             * the point of use, that it is being read as nanoseconds -- the
+             * same 1 GHz the code silently assumed, now disclosed. */
+            if (timing["read_latency_ns"]) {
+                sram_config_.access_time_ns = timing["read_latency_ns"].as<double>();
+            } else if (timing["read_latency_cycles"]) {
+                sram_config_.access_time_ns =
+                    timing["read_latency_cycles"].as<double>();
+                std::cerr << "[SRAMModel] NOTE: memory.timing.read_latency_cycles "
+                             "is being read as NANOSECONDS. This model carries no "
+                             "clock, so a cycle count cannot be converted; use "
+                             "read_latency_ns to state what you mean."
+                          << std::endl;
             }
         }
 
@@ -236,9 +256,24 @@ void SRAMModel::loadConfig(const std::string& config_path) {
     }
 }
 
+/* 1.11.56 (audit D054): THE ONE PLACE TIME BECOMES CYCLES IN THIS MODEL.
+ *
+ * MemoryModel's legacy access()/getLatency() return Cycle, and this model is
+ * handed no clock -- the simulator drives it through getTierLatencyNs(), which
+ * is nanoseconds end to end and never comes through here. So the conversion
+ * below is 1 cycle per nanosecond, i.e. exactly the 1 GHz the old code assumed;
+ * the difference is that it is stated once, at the boundary that forces it,
+ * instead of being baked into the stored field and mislabelled in the log. If
+ * this path ever becomes live, give the model a frequency and convert with
+ * that -- do not restore the assumption upstream. */
+static inline Cycle legacyNsAsCycles(double ns) {
+    if (ns <= 0.0) return 0;
+    return static_cast<Cycle>(std::ceil(ns));   // 1 GHz: no clock is supplied
+}
+
 Cycle SRAMModel::access(const MemoryRequest& req) {
     // SRAM has fixed access time
-    Cycle latency = sram_config_.access_time;
+    Cycle latency = legacyNsAsCycles(sram_config_.access_time_ns);
 
     // Update statistics and energy
     total_accesses_++;
@@ -287,8 +322,9 @@ void SRAMModel::tick() {
 }
 
 Cycle SRAMModel::getLatency(MemoryRequestType type) const {
-    // SRAM has fixed latency regardless of request type
-    return sram_config_.access_time;
+    // SRAM has fixed latency regardless of request type.
+    // 1.11.56 (audit D054): see legacyNsAsCycles above.
+    return legacyNsAsCycles(sram_config_.access_time_ns);
 }
 
 double SRAMModel::getTotalEnergy() const {

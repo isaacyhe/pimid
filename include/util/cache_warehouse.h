@@ -35,7 +35,7 @@ enum class Mode { RW, RO, WO, OFF };
  * before any backend characterization. Empty strings mean "not set at this
  * level" and fall through to the next precedence tier.
  *
- * @param cli_mode  CLI-provided mode ("rw"|"ro"|"wo"|"off"|"") — highest priority.
+ * @param cli_mode  CLI-provided mode ("rw"|"ro"|"wo"|"off"|"") -- highest priority.
  * @param cli_dir   CLI-provided warehouse root, or "".
  * @param yaml_mode YAML-provided mode, or "".
  * @param yaml_dir  YAML-provided warehouse root, or "".
@@ -55,7 +55,7 @@ bool writeEnabled();  ///< true for RW, WO  (may persist new entries)
 /// if configure() was never called, lazily resolves defaults+env on first use.
 const std::string& warehouseRoot();
 
-/// "<root>/<backend>" — created (mkdir -p) on demand. e.g. backendDir("nvsim").
+/// "<root>/<backend>" -- created (mkdir -p) on demand. e.g. backendDir("nvsim").
 std::string backendDir(const std::string& backend);
 
 /* 1.11.52: the pre-1.11.52 warehouse (~/.cache/pimid/<backend>), READ-ONLY.
@@ -70,7 +70,7 @@ std::string toolVersion();
 
 /**
  * Append one record to the warehouse manifest (<root>/index.jsonl), one JSON
- * object per line (append-only → safe for many concurrent sweep processes).
+ * object per line (append-only -> safe for many concurrent sweep processes).
  * timestamp and tool_version are added automatically. params_json / value_json
  * are caller-formatted JSON *object bodies without the surrounding braces*, e.g.
  *   recordManifest("nvsim", "t1_c8388608_n22",

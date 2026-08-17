@@ -66,10 +66,10 @@ struct VerifiedValue {
  *   - Reads data from row buffer to peripheral circuitry
  *
  * Stage 3: Prefetch Datapath
- *   - DDR4 x8: 64 bits (8n prefetch × 8-bit I/O) [VERIFIED: JEDEC]
- *   - DDR5 x8: 128 bits (16n prefetch × 8-bit I/O) [VERIFIED: JEDEC]
- *   - HBM2: 256 bits (2n × 128-bit channel) [VERIFIED: JEDEC]
- *   - HBM3: 512 bits (8n × 64-bit channel) [VERIFIED: JEDEC]
+ *   - DDR4 x8: 64 bits (8n prefetch x 8-bit I/O) [VERIFIED: JEDEC]
+ *   - DDR5 x8: 128 bits (16n prefetch x 8-bit I/O) [VERIFIED: JEDEC]
+ *   - HBM2: 256 bits (2n x 128-bit channel) [VERIFIED: JEDEC]
+ *   - HBM3: 512 bits (8n x 64-bit channel) [VERIFIED: JEDEC]
  *
  * Stage 4: Bank-to-Peripheral Serialization
  *   - UNKNOWN! Not publicly documented.
@@ -78,21 +78,21 @@ struct VerifiedValue {
  *
  * Stage 5: Chip I/O Pins
  *   - DDR4: x4/x8/x16 (4, 8, or 16 bits) [VERIFIED: JEDEC]
- *   - HBM2: 1024 bits total (8 × 128-bit channels) [VERIFIED: JEDEC]
- *   - HBM3: 1024 bits total (16 × 64-bit channels) [VERIFIED: JEDEC]
+ *   - HBM2: 1024 bits total (8 x 128-bit channels) [VERIFIED: JEDEC]
+ *   - HBM3: 1024 bits total (16 x 64-bit channels) [VERIFIED: JEDEC]
  */
 struct DRAMDatapathStages {
     // Stage 1: Row Buffer (widest, but not a "port")
     VerifiedValue row_buffer_bits;        // Bitline sense amps
 
     // Stage 2: Global Sense Amplifiers (column I/O)
-    VerifiedValue gsa_datapath_bits;      // Subarray → peripheral
+    VerifiedValue gsa_datapath_bits;      // Subarray -> peripheral
 
     // Stage 3: Prefetch Datapath (well-documented)
     VerifiedValue prefetch_datapath_bits; // Prefetch buffer width
 
     // Stage 4: Bank Serialization (CRITICAL UNKNOWN!)
-    VerifiedValue bank_serialization_bits; // Bank → chip peripheral (BOTTLENECK!)
+    VerifiedValue bank_serialization_bits; // Bank -> chip peripheral (BOTTLENECK!)
 
     // Stage 5: Chip I/O (well-documented)
     VerifiedValue chip_io_bits;           // External package pins
@@ -211,8 +211,8 @@ public:
 
             // For PIM: Subarray-to-subarray (within same bank)
             double getSubarrayToSubarrayHTree() const {
-                // Egress: subarray A → bank center
-                // Ingress: bank center → subarray B
+                // Egress: subarray A -> bank center
+                // Ingress: bank center -> subarray B
                 return 2.0 * (htree_horizontal_ns + htree_vertical_ns);
             }
         } inner_bank;
@@ -320,10 +320,10 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR4_2400_Verified() {
 
     // Stage 3: Prefetch Datapath (JEDEC verified)
     arch->datapath.prefetch_datapath_bits = {
-        64,  // 8n prefetch × 8-bit I/O
+        64,  // 8n prefetch x 8-bit I/O
         VerificationStatus::VERIFIED,
         "JEDEC JESD79-4: DDR4 has 8n prefetch architecture, x8 device",
-        "8 bursts × 8 bits = 64 bits prefetch buffer"
+        "8 bursts x 8 bits = 64 bits prefetch buffer"
     };
 
     // Stage 4: Bank Serialization (CRITICAL UNKNOWN!)
@@ -345,7 +345,7 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR4_2400_Verified() {
 
     // Rank databus
     arch->datapath.rank_databus_bits = {
-        64,  // 8 chips × 8 bits
+        64,  // 8 chips x 8 bits
         VerificationStatus::VERIFIED,
         "JEDEC standard: 64-bit rank interface for DDR4",
         "FIRST WIDE interface in DDR4 hierarchy"
@@ -365,8 +365,8 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR4_2400_Verified() {
     arch->bandwidth_limits.bank_group_effective_bw_GBs = 2.4;
     arch->bandwidth_limits.chip_internal_bw_GBs = 4.8;
     arch->bandwidth_limits.inference_method =
-        "Calculated from: (port_bits / 8) × clock_freq_GHz. "
-        "Bank: 8 bits / 8 × 1.2 GHz = 1.2 GB/s. "
+        "Calculated from: (port_bits / 8) x clock_freq_GHz. "
+        "Bank: 8 bits / 8 x 1.2 GHz = 1.2 GB/s. "
         "CONSERVATIVE: Assumes serialization bottleneck.";
     arch->bandwidth_limits.confidence_level = "Medium - based on estimated internal port widths";
 
@@ -378,9 +378,9 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR4_2400_Verified() {
     arch->organization.chips_per_rank = 8;  // x8 organization
     arch->organization.ranks_per_channel = 2;  // Typical DIMM
     arch->organization.subarray_size_kb = 512;  // Typical
-    arch->organization.bank_size_mb = 2;  // 4 subarrays × 512KB
+    arch->organization.bank_size_mb = 2;  // 4 subarrays x 512KB
     arch->organization.chip_size_mb = 128;  // Typical 1Gb chip
-    arch->organization.rank_size_gb = 1;  // 8 × 128MB
+    arch->organization.rank_size_gb = 1;  // 8 x 128MB
 
     // ===== TIMING (JEDEC DDR4-2400 CL17) =====
 
@@ -409,7 +409,7 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR4_2400_Verified() {
         "Tiered-Latency DRAM HPCA'13 (Donghyuk Lee et al.)";
 
     // Total inner-bank delay = 6.65ns
-    // Remaining for sense amp + row decoder: 13.32 - 6.65 = 6.67ns ✓
+    // Remaining for sense amp + row decoder: 13.32 - 6.65 = 6.67ns OK
     // This breakdown is consistent with tCAS = 13.32ns
 
     arch->timing.subarray_access_ns = 26.64;  // tRCD + tCAS
@@ -498,10 +498,10 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified() {
 
     // Stage 3: Prefetch Datapath (JEDEC verified)
     arch->datapath.prefetch_datapath_bits = {
-        256,  // 2n prefetch × 128-bit channel
+        256,  // 2n prefetch x 128-bit channel
         VerificationStatus::VERIFIED,
         "JEDEC JESD235A: HBM2 has 2n prefetch, 128-bit channels",
-        "2 bursts × 128 bits = 256 bits prefetch buffer"
+        "2 bursts x 128 bits = 256 bits prefetch buffer"
     };
 
     // Stage 4: Bank Serialization (BETTER THAN DDR!)
@@ -516,7 +516,7 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified() {
 
     // Stage 5: Chip I/O (JEDEC verified)
     arch->datapath.chip_io_bits = {
-        1024,  // 8 channels × 128 bits
+        1024,  // 8 channels x 128 bits
         VerificationStatus::VERIFIED,
         "JEDEC JESD235A: HBM2 has 8 independent 128-bit channels per stack",
         "Total 1024-bit interface (128 bytes per cycle)"
@@ -531,7 +531,7 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified() {
     };
 
     arch->datapath.channel_databus_bits = {
-        1024,  // 8 channels × 128 bits
+        1024,  // 8 channels x 128 bits
         VerificationStatus::VERIFIED,
         "JEDEC JESD235A: 8 channels per stack",
         "Full stack bandwidth"
@@ -539,7 +539,7 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified() {
 
     // ===== BANDWIDTH LIMITS (INFERRED) =====
 
-    arch->bandwidth_limits.bank_effective_bw_GBs = 8.0;  // 64 bits / 8 × 1 GHz
+    arch->bandwidth_limits.bank_effective_bw_GBs = 8.0;  // 64 bits / 8 x 1 GHz
     arch->bandwidth_limits.bank_group_effective_bw_GBs = 16.0;
     arch->bandwidth_limits.chip_internal_bw_GBs = 64.0;
     arch->bandwidth_limits.inference_method =
@@ -560,15 +560,23 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified() {
     arch->organization.chip_size_mb = 1024;  // 1GB per stack (typical)
     arch->organization.rank_size_gb = 8;
 
-    // ===== TIMING (JEDEC HBM2) =====
+    // ===== TIMING (JEDEC HBM2; rate = the simulated HBM2_2.4Gbps bin) =====
 
-    arch->timing.clock_freq_mhz = 1000;  // VERIFIED: 1 GHz core
-    arch->timing.data_rate_mtps = 2000;  // VERIFIED: 2.0 GT/s
+    /* 1.11.56 (audit D002's defect, found by the B042 reconciliation check):
+     * NAME THE BIN THIS TREE SIMULATES. The Ramulator preset selected for
+     * HBM2 is HBM2_2.4Gbps (ramulator_wrapper.cpp), so the cycle counts this
+     * simulator produces are a 2.4 GT/s part -- while this object said 2.0
+     * GT/s and every bandwidth derived from it (chip I/O, rank, channel, and
+     * since 1.11.56 the whole hierarchy link ladder) described a slower one.
+     * One part, two speed bins, exactly the split D002 closed for DDR4. The
+     * ns timings above are absolute and stay; the RATE follows the preset. */
+    arch->timing.clock_freq_mhz = 1200;  // 2.4 GT/s DDR -> 1.2 GHz core
+    arch->timing.data_rate_mtps = 2400;  // preset HBM2_2.4Gbps
     arch->timing.tRCD_ns = 16.0;  // JESD235C spec-minimum (was 12.5, pre-audit optimistic)
     arch->timing.tCAS_ns = 16.0;  // JESD235C
     arch->timing.tRP_ns = 12.5;  // VERIFIED
     arch->timing.tRAS_ns = 28.0;  // VERIFIED
-    arch->timing.tBurst_ns = 2.0;  // VERIFIED
+    arch->timing.tBurst_ns = 8.0 * 1000.0 / 2400.0;  // 8 beats @ 2400 MT/s = 3.33 ns
 
     // Inner-bank datapath timing (INFERRED, much faster than DDR4 due to TSV!)
     arch->timing.inner_bank.column_decoder_ns = 0.25;       // Faster process node
@@ -585,7 +593,7 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified() {
         "HBM architecture papers (shorter wires, 3D stacking, wider internal paths)";
 
     // Total inner-bank delay = 3.05ns (~2.2x faster than DDR4!)
-    // Remaining for sense amp + row decoder: 12.5 - 3.05 = 9.45ns ✓
+    // Remaining for sense amp + row decoder: 12.5 - 3.05 = 9.45ns OK
     // TSVs enable much shorter H-tree paths and wider datapaths
 
     arch->timing.subarray_access_ns = 25.0;
@@ -622,7 +630,7 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified() {
     arch->pe_bus_constraints.chip_level.has_dedicated_bus = false;
 
     // Rank-level PEs: HBM uses stacks, not traditional ranks
-    arch->pe_bus_constraints.rank_level.data_bus_width_bits = 1024;  // 8 channels × 128 bits
+    arch->pe_bus_constraints.rank_level.data_bus_width_bits = 1024;  // 8 channels x 128 bits
     arch->pe_bus_constraints.rank_level.max_bandwidth_gbps = 256.0;  // Full HBM2 bandwidth
     arch->pe_bus_constraints.rank_level.has_dedicated_bus = false;
 
@@ -674,10 +682,10 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR5_4800_Verified() {
 
     // Stage 3: Prefetch Datapath (JEDEC verified - 16n prefetch!)
     arch->datapath.prefetch_datapath_bits = {
-        128,  // 16n prefetch × 8-bit I/O
+        128,  // 16n prefetch x 8-bit I/O
         VerificationStatus::VERIFIED,
         "JEDEC JESD79-5: DDR5 has 16n prefetch architecture, x8 device",
-        "16 bursts × 8 bits = 128 bits prefetch buffer (2x DDR4!)"
+        "16 bursts x 8 bits = 128 bits prefetch buffer (2x DDR4!)"
     };
 
     // Stage 4: Bank Serialization (estimated, likely similar to DDR4)
@@ -698,7 +706,7 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR5_4800_Verified() {
 
     // Rank databus - DDR5 has two independent 32-bit subchannels!
     arch->datapath.rank_databus_bits = {
-        64,  // 8 chips × 8 bits (or 2 subchannels × 32 bits)
+        64,  // 8 chips x 8 bits (or 2 subchannels x 32 bits)
         VerificationStatus::VERIFIED,
         "JEDEC JESD79-5: DDR5 introduces dual 32-bit subchannels",
         "TWO independent 32-bit channels per DIMM (key DDR5 feature!)"
@@ -719,7 +727,7 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR5_4800_Verified() {
     arch->bandwidth_limits.chip_internal_bw_GBs = 9.6;
     arch->bandwidth_limits.inference_method =
         "Calculated from estimated 8-bit bank paths at 2x DDR4 frequency. "
-        "DDR5-4800: 8 bits × 2.4 GHz = 2.4 GB/s per bank.";
+        "DDR5-4800: 8 bits x 2.4 GHz = 2.4 GB/s per bank.";
     arch->bandwidth_limits.confidence_level = "Medium - based on DDR4 scaling";
 
     // ===== ORGANIZATION (VERIFIED) =====
@@ -734,15 +742,22 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR5_4800_Verified() {
     arch->organization.chip_size_mb = 256;  // Larger chips (2Gb+)
     arch->organization.rank_size_gb = 2;
 
-    // ===== TIMING (JEDEC DDR5-4800 CL40) =====
+    // ===== TIMING (JEDEC DDR5; rate = the simulated DDR5_3200AN bin) =====
 
-    arch->timing.clock_freq_mhz = 2400;  // VERIFIED: DDR5 runs at 2400 MHz (4800 MT/s)
-    arch->timing.data_rate_mtps = 4800;  // VERIFIED
+    /* 1.11.56 (audit D002's defect, found by the B042 reconciliation check):
+     * the Ramulator preset selected for DDR5 is DDR5_3200AN, so this tree
+     * simulates a 3200 MT/s part. This object said 4800 -- a 1.5x gap
+     * between the bin whose cycles are counted and the bin whose bandwidth
+     * is reported as mem.bandwidth (the device M/D/1 service rate). The ns
+     * timings are absolute and stay within JEDEC's range across bins; the
+     * RATE and the burst follow the preset. */
+    arch->timing.clock_freq_mhz = 1600;  // 3200 MT/s DDR -> 1.6 GHz core
+    arch->timing.data_rate_mtps = 3200;  // preset DDR5_3200AN
     arch->timing.tRCD_ns = 16.67;  // VERIFIED: CL40 at 4800 MT/s
     arch->timing.tCAS_ns = 16.67;  // VERIFIED
     arch->timing.tRP_ns = 16.67;  // VERIFIED
     arch->timing.tRAS_ns = 32.0;  // VERIFIED
-    arch->timing.tBurst_ns = 3.33;  // VERIFIED: 16 beats @ 4800 MT/s
+    arch->timing.tBurst_ns = 16.0 * 1000.0 / 3200.0;  // 16 beats @ 3200 MT/s = 5.0 ns
 
     // Inner-bank datapath timing (INFERRED - scaled from DDR4 with better process)
     arch->timing.inner_bank.column_decoder_ns = 0.30;       // Faster process
@@ -835,10 +850,10 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM3_Verified() {
 
     // Stage 3: Prefetch Datapath (JEDEC verified - 8n prefetch!)
     arch->datapath.prefetch_datapath_bits = {
-        512,  // 8n prefetch × 64-bit pseudo-channel
+        512,  // 8n prefetch x 64-bit pseudo-channel
         VerificationStatus::VERIFIED,
         "JEDEC JESD238: HBM3 has 8n prefetch, 64-bit pseudo-channels",
-        "8 bursts × 64 bits = 512 bits (4x DDR4!)"
+        "8 bursts x 64 bits = 512 bits (4x DDR4!)"
     };
 
     // Stage 4: Bank Serialization (wider than HBM2 due to higher speed TSV)
@@ -851,7 +866,7 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM3_Verified() {
 
     // Stage 5: Chip I/O (JEDEC verified)
     arch->datapath.chip_io_bits = {
-        1024,  // 16 pseudo-channels × 64 bits
+        1024,  // 16 pseudo-channels x 64 bits
         VerificationStatus::VERIFIED,
         "JEDEC JESD238: HBM3 has 16 pseudo-channels of 64-bit each",
         "Total 1024-bit interface (same as HBM2, but higher speed)"
@@ -866,7 +881,7 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM3_Verified() {
     };
 
     arch->datapath.channel_databus_bits = {
-        1024,  // 16 pseudo-channels × 64 bits
+        1024,  // 16 pseudo-channels x 64 bits
         VerificationStatus::VERIFIED,
         "JEDEC JESD238: 16 pseudo-channels per stack",
         "Full stack bandwidth"
@@ -894,15 +909,23 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM3_Verified() {
     arch->organization.chip_size_mb = 2048;  // 2GB per stack (typical)
     arch->organization.rank_size_gb = 16;  // 16GB stacks available
 
-    // ===== TIMING (JEDEC HBM3) =====
+    // ===== TIMING (JEDEC HBM3; rate = the simulated HBM3_6.4Gbps bin) =====
 
-    arch->timing.clock_freq_mhz = 2000;  // VERIFIED: 2 GHz core (faster than HBM2)
-    arch->timing.data_rate_mtps = 4000;  // VERIFIED: 4.0 GT/s (2x HBM2)
+    /* 1.11.56 (audit D002's defect, found by the B042 reconciliation check):
+     * the Ramulator preset selected for HBM3 is HBM3_6.4Gbps and the wrapper
+     * asserts bandwidth_ = 819000 MB/s (1024 b x 6.4 GT/s / 8) beside it.
+     * This object said 4.0 GT/s, so its rank/channel/chip-I/O bandwidths --
+     * and, since 1.11.56, the hierarchy link ladder derived from them --
+     * described a part 1.6x slower than the one whose cycles are counted.
+     * That 1.6x is what made HBM3's three bandwidth scopes fail to
+     * reconcile. The ns timings are absolute and stay; the RATE follows. */
+    arch->timing.clock_freq_mhz = 3200;  // 6.4 GT/s DDR -> 3.2 GHz core
+    arch->timing.data_rate_mtps = 6400;  // preset HBM3_6.4Gbps
     arch->timing.tRCD_ns = 16.0;  // JESD238 spec-minimum (was 10.0, below physical minimum)
     arch->timing.tCAS_ns = 16.0;  // JESD238
     arch->timing.tRP_ns = 10.0;  // VERIFIED
     arch->timing.tRAS_ns = 24.0;  // VERIFIED
-    arch->timing.tBurst_ns = 2.0;  // VERIFIED: 8 beats @ 4000 MT/s
+    arch->timing.tBurst_ns = 8.0 * 1000.0 / 6400.0;  // 8 beats @ 6400 MT/s = 1.25 ns
 
     // Inner-bank datapath timing (INFERRED - faster than HBM2)
     arch->timing.inner_bank.column_decoder_ns = 0.20;
@@ -973,17 +996,23 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM3_Verified(double port_width
 //=============================================================================
 
 inline void DRAMArchitectureV2::printVerificationReport() const {
-    std::cout << "\n╔══════════════════════════════════════════════════════════════════╗\n";
-    std::cout << "║  VERIFICATION REPORT: " << std::left << std::setw(43) << name << "║\n";
-    std::cout << "╚══════════════════════════════════════════════════════════════════╝\n\n";
+    std::cout << "\n+==================================================================+\n";
+    std::cout << "|  VERIFICATION REPORT: " << std::left << std::setw(43) << name << "|\n";
+    std::cout << "+==================================================================+\n\n";
 
+    /* 1.11.56 (audit D073): ASCII TAGS. These strings carried emoji and box-
+     * drawing characters, which violates the project's ASCII-only rule for
+     * source and generated files and makes the log unreadable on any terminal
+     * or parser that is not UTF-8. The status a line reports is unchanged;
+     * only its glyph is. The rest of this file was swept the same way (times
+     * signs, arrows, superscripts, degree and micro signs in comments). */
     auto printStatus = [](const VerifiedValue& v) {
         std::string status_str;
         switch (v.status) {
-            case VerificationStatus::VERIFIED:  status_str = "✅ VERIFIED  "; break;
-            case VerificationStatus::INFERRED:  status_str = "📊 INFERRED  "; break;
-            case VerificationStatus::ESTIMATED: status_str = "📐 ESTIMATED "; break;
-            case VerificationStatus::UNKNOWN:   status_str = "❓ UNKNOWN   "; break;
+            case VerificationStatus::VERIFIED:  status_str = "[VERIFIED]  "; break;
+            case VerificationStatus::INFERRED:  status_str = "[INFERRED]  "; break;
+            case VerificationStatus::ESTIMATED: status_str = "[ESTIMATED] "; break;
+            case VerificationStatus::UNKNOWN:   status_str = "[UNKNOWN]   "; break;
         }
         std::cout << "  " << status_str << std::setw(6) << v.value_bits << " bits\n";
         std::cout << "     Source: " << v.source << "\n";
@@ -994,7 +1023,7 @@ inline void DRAMArchitectureV2::printVerificationReport() const {
     };
 
     std::cout << "DATAPATH STAGES:\n";
-    std::cout << "─────────────────\n";
+    std::cout << "-----------------\n";
     std::cout << "Row Buffer:\n";
     printStatus(datapath.row_buffer_bits);
 
@@ -1014,14 +1043,14 @@ inline void DRAMArchitectureV2::printVerificationReport() const {
     printStatus(datapath.rank_databus_bits);
 
     std::cout << "\nBANDWIDTH LIMITS (INFERRED):\n";
-    std::cout << "────────────────────────────\n";
+    std::cout << "----------------------------\n";
     std::cout << "  Bank effective BW:       " << bandwidth_limits.bank_effective_bw_GBs << " GB/s\n";
     std::cout << "  Bank Group effective BW: " << bandwidth_limits.bank_group_effective_bw_GBs << " GB/s\n";
     std::cout << "  Method: " << bandwidth_limits.inference_method << "\n";
     std::cout << "  Confidence: " << bandwidth_limits.confidence_level << "\n";
 
     std::cout << "\nENERGY:\n";
-    std::cout << "───────\n";
+    std::cout << "-------\n";
     std::cout << "  Source: " << energy.energy_source << "\n";
     std::cout << "  Subarray: " << energy.subarray_energy_pJ << " pJ/byte\n";
     std::cout << "  Bank:     " << energy.bank_energy_pJ << " pJ/byte\n";

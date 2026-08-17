@@ -118,7 +118,7 @@ void ensureDir(const std::string& path) {
 void resolveIfNeeded() {
     State& s = state();
     if (s.configured) return;
-    // configure() not called yet → resolve from env + defaults only.
+    // configure() not called yet -> resolve from env + defaults only.
     configure("", "", "", "");
 }
 
@@ -154,7 +154,7 @@ void configure(const std::string& cli_mode, const std::string& cli_dir,
     else if (env("PIMID_CACHE_MODE")) mode_str = env("PIMID_CACHE_MODE");
     else if (env("PIMID_NVSIM_CACHE_DISABLE")) mode_str = "off";  // back-compat
     else if (!yaml_mode.empty())      mode_str = yaml_mode;
-    s.mode = parseMode(mode_str);  // empty → RW
+    s.mode = parseMode(mode_str);  // empty -> RW
 
     // ---- Dir: CLI > env > YAML > default ----
     std::string dir;

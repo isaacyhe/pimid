@@ -1,4 +1,4 @@
-/* babelstream.cpp — Self-contained OpenMP BabelStream implementation.
+/* babelstream.cpp -- Self-contained OpenMP BabelStream implementation.
  *
  * Performs the 5 standard BabelStream kernels:
  *   Copy:  c[i] = a[i]
@@ -183,10 +183,10 @@ int main(int argc, char* argv[]) {
     /* Validation: compute expected values after numtimes iterations.
      * Initial: a=0.1, b=0.2, c=0.0, scalar=0.4
      * Each iteration:
-     *   c = a               → c = a_prev
-     *   b = scalar * c      → b = scalar * a_prev
-     *   c = a + b           → c = a_prev + scalar * a_prev = a_prev * (1 + scalar)
-     *   a = b + scalar * c  → a = scalar*a_prev + scalar*a_prev*(1+scalar)
+     *   c = a               -> c = a_prev
+     *   b = scalar * c      -> b = scalar * a_prev
+     *   c = a + b           -> c = a_prev + scalar * a_prev = a_prev * (1 + scalar)
+     *   a = b + scalar * c  -> a = scalar*a_prev + scalar*a_prev*(1+scalar)
      *                        = a_prev * scalar * (2 + scalar)
      *   dot = a * b (not cumulative, just last iteration) */
     double gold_a = startA;

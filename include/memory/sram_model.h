@@ -66,7 +66,14 @@ private:
         uint32_t write_ports;
         uint32_t tech_node_nm;   // Technology node
         uint32_t temperature_k = 350;  // 1.11.52 (D055): run temperature, K
-        Cycle access_time;
+        /* 1.11.56 (audit D054): NANOSECONDS, and named so. This was a `Cycle`
+         * filled by getAccessLatencyCycles(1e9) -- CACTI returns SECONDS, and
+         * the 1 GHz was not the run's clock but the absence of one: this model
+         * is never told a frequency. initialize() then printed the product as
+         * "cycles", which at the sweep's 1-2 GHz PE clocks is wrong by the
+         * clock ratio. Ask CACTI for the time (getAccessTime, seconds) and
+         * keep it as time. */
+        double access_time_ns;
     };
 
     SRAMConfig sram_config_;

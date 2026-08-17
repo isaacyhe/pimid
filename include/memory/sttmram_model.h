@@ -68,8 +68,17 @@ private:
         uint32_t banks;
         uint32_t read_write_ports;
         uint32_t tech_node_nm;
-        Cycle read_latency;
-        Cycle write_latency;
+        /* 1.11.56 (audit D054): NANOSECONDS, and named so. These were `Cycle`,
+         * filled as `getReadLatency() * freq_hz` with freq_hz hardcoded to
+         * 1e9 under the comment "Assume 1 GHz" -- but NVSim returns SECONDS
+         * and this model is never given a clock, so the 1 GHz was the absence
+         * of one rather than an estimate of it. initialize() then printed the
+         * product as "cycles", which is wrong by the clock ratio at the
+         * sweep's 1-2 GHz PE clocks. They also silently truncated the YAML
+         * knobs stt_mram.timing.read_latency_ns / write_latency_ns, which were
+         * always nanoseconds, to integers. Carry time. */
+        double read_latency_ns;
+        double write_latency_ns;
         uint64_t endurance;
         bool is_pim_enabled;
     };

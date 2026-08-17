@@ -1,5 +1,5 @@
 /**
- * pimid_mpi.h — MPI-compatible API for unified in-process PIM simulation
+ * pimid_mpi.h -- MPI-compatible API for unified in-process PIM simulation
  *
  * All MPI ranks run as threads in a single process.  Message passing uses
  * shared-memory mailboxes.  When running under ZSim/QEMU, magic ops inject

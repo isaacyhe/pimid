@@ -37,9 +37,13 @@ PCMModel::PCMModel(const std::string& config_path)
     pcm_config_.banks = 16;
     pcm_config_.read_write_ports = 1;
     pcm_config_.tech_node_nm = 90;
-    pcm_config_.read_latency = 12;         // 12 cycles (moderate)
-    pcm_config_.set_write_latency = 100;   // 100 cycles (VERY SLOW!)
-    pcm_config_.reset_write_latency = 40;  // 40 cycles (faster than SET)
+    /* 1.11.56 (audit D054): nanoseconds, not cycles. These are placeholders
+     * that initializeNVSim() overwrites on every reachable path; they exist so
+     * the struct is not read uninitialized if the tool binding fails, and the
+     * model refuses (throws) in that case anyway. */
+    pcm_config_.read_latency_ns = 12.0;         // ns (moderate)
+    pcm_config_.set_write_latency_ns = 100.0;   // ns (VERY SLOW!)
+    pcm_config_.reset_write_latency_ns = 40.0;  // ns (faster than SET)
     pcm_config_.endurance = 1e8;           // 10^8 writes (limited)
     pcm_config_.is_pim_enabled = true;
 }
@@ -106,8 +110,14 @@ void PCMModel::initialize() {
 
     std::cout << "[PCMModel] Inner-bank read latency: "
               << pcm_arch_->timing.inner_bank.getTotalReadLatency() << " ns" << std::endl;
+    /* 1.11.56 (audit D062): say when the SET path is a substitution. */
     std::cout << "[PCMModel] Inner-bank SET write latency: "
-              << pcm_arch_->timing.inner_bank.getTotalSetWriteLatency() << " ns" << std::endl;
+              << pcm_arch_->timing.inner_bank.getTotalSetWriteLatency() << " ns"
+              << (pcm_arch_->timing.set_from_generic_write
+                  ? " (NVSim did not resolve setLatency -- this IS the generic"
+                    " write path)"
+                  : "")
+              << std::endl;
     std::cout << "[PCMModel] Inner-bank RESET write latency: "
               << pcm_arch_->timing.inner_bank.getTotalResetWriteLatency() << " ns" << std::endl;
     std::cout << "[PCMModel] Architecture source: "
@@ -122,13 +132,29 @@ void PCMModel::initialize() {
     std::cout << "  Capacity: " << (pcm_config_.capacity / (1024.0 * 1024 * 1024)) << " GB" << std::endl;
     std::cout << "  Banks: " << pcm_config_.banks << std::endl;
     std::cout << "  Technology: " << pcm_config_.tech_node_nm << " nm" << std::endl;
-    std::cout << "  Read Latency: " << pcm_config_.read_latency << " cycles" << std::endl;
-    std::cout << "  SET Write Latency: " << pcm_config_.set_write_latency << " cycles (SLOW!)" << std::endl;
-    std::cout << "  RESET Write Latency: " << pcm_config_.reset_write_latency << " cycles" << std::endl;
+    /* 1.11.56 (audit D054): printed as NANOSECONDS, which is what NVSim
+     * reported and what these fields hold. They were labelled "cycles" while
+     * carrying a 1 GHz product, so the number was right only for a 1 GHz PE. */
+    std::cout << "  Read Latency: " << pcm_config_.read_latency_ns << " ns" << std::endl;
+    std::cout << "  SET Write Latency: " << pcm_config_.set_write_latency_ns << " ns (SLOW!)" << std::endl;
+    /* 1.11.56 (audit D045): name the substitution when there is one. */
+    std::cout << "  RESET Write Latency: " << pcm_config_.reset_write_latency_ns << " ns"
+              << (reset_latency_is_set_path_
+                  ? " (NVSim did not resolve resetLatency -- this IS the SET path)"
+                  : " (NVSim FunctionUnit::resetLatency)")
+              << std::endl;
     std::cout << "  Endurance: " << pcm_config_.endurance << " writes (limited)" << std::endl;
     std::cout << "  WARNING: PCM only suitable for read-heavy PIM workloads!" << std::endl;
     std::cout << "  Read Energy: " << read_energy_ << " pJ/byte" << std::endl;
-    std::cout << "  Write Energy: " << write_energy_ << " pJ/byte (30x read!)" << std::endl;
+    /* 1.11.56 (audit D046): the "(30x read!)" tag was a constant printed over
+     * a computed number. Nothing ever compared the two -- on the shipped
+     * characterization the real ratio is nowhere near 30 -- so the log asserted
+     * a headline figure that the run itself contradicted. Compute the ratio
+     * from the two numbers being printed, or print no ratio at all. */
+    std::cout << "  Write Energy: " << write_energy_ << " pJ/byte";
+    if (read_energy_ > 0.0)
+        std::cout << " (" << (write_energy_ / read_energy_) << "x read)";
+    std::cout << std::endl;
     std::cout << "  Leakage Power: " << leakage_power_ << " W" << std::endl;
     std::cout << "[PCMModel] Initialization complete" << std::endl;
 }
@@ -138,18 +164,33 @@ void PCMModel::loadConfig(const std::string& config_path) {
     std::cout << "[PCMModel] Using default 1GB PCM configuration" << std::endl;
 }
 
+/* 1.11.56 (audit D054): THE ONE PLACE TIME BECOMES CYCLES IN THIS MODEL.
+ *
+ * MemoryModel's legacy access()/getLatency() return Cycle, and this model is
+ * handed no clock -- the simulator drives it through getTierLatencyNs(), which
+ * is nanoseconds end to end and never comes through here. So the conversion
+ * below is 1 cycle per nanosecond, i.e. exactly the 1 GHz the old code assumed;
+ * the difference is that it is now stated once, at the boundary that forces it,
+ * instead of being baked into the stored fields and then mislabelled in the
+ * log. If this path ever becomes live, give the model a frequency and convert
+ * with that -- do not restore the assumption upstream. */
+static inline Cycle legacyNsAsCycles(double ns) {
+    if (ns <= 0.0) return 0;
+    return static_cast<Cycle>(std::ceil(ns));   // 1 GHz: no clock is supplied
+}
+
 Cycle PCMModel::access(const MemoryRequest& req) {
-    Cycle latency = pcm_config_.read_latency;  // safe default
+    Cycle latency = legacyNsAsCycles(pcm_config_.read_latency_ns);  // safe default
 
     // PCM has VERY asymmetric read/write latency
     switch (req.type) {
         case MemoryRequestType::READ:
-            latency = pcm_config_.read_latency;
+            latency = legacyNsAsCycles(pcm_config_.read_latency_ns);
             total_reads_++;
             break;
         case MemoryRequestType::WRITE:
             // Use SET latency (conservative estimate)
-            latency = pcm_config_.set_write_latency;  // VERY SLOW!
+            latency = legacyNsAsCycles(pcm_config_.set_write_latency_ns);  // VERY SLOW!
             total_set_writes_++;
             write_cycles_++;
             updateEndurance(req.addr);
@@ -158,7 +199,8 @@ Cycle PCMModel::access(const MemoryRequest& req) {
             }
             break;
         case MemoryRequestType::ATOMIC:
-            latency = pcm_config_.read_latency + pcm_config_.set_write_latency;
+            latency = legacyNsAsCycles(pcm_config_.read_latency_ns +
+                                       pcm_config_.set_write_latency_ns);
             total_reads_++;
             total_set_writes_++;
             write_cycles_++;
@@ -201,14 +243,16 @@ void PCMModel::tick() {
 
 Cycle PCMModel::getLatency(MemoryRequestType type) const {
     switch (type) {
+        // 1.11.56 (audit D054): see legacyNsAsCycles above.
         case MemoryRequestType::READ:
-            return pcm_config_.read_latency;
+            return legacyNsAsCycles(pcm_config_.read_latency_ns);
         case MemoryRequestType::WRITE:
-            return pcm_config_.set_write_latency;  // Conservative (SET)
+            return legacyNsAsCycles(pcm_config_.set_write_latency_ns);  // Conservative (SET)
         case MemoryRequestType::ATOMIC:
-            return pcm_config_.read_latency + pcm_config_.set_write_latency;
+            return legacyNsAsCycles(pcm_config_.read_latency_ns +
+                                    pcm_config_.set_write_latency_ns);
         default:
-            return pcm_config_.read_latency;
+            return legacyNsAsCycles(pcm_config_.read_latency_ns);
     }
 }
 
@@ -253,7 +297,11 @@ void PCMModel::printStats() const {
 
     std::cout << "\nEnergy Consumption:" << std::endl;
     std::cout << "  Read Energy (per byte): " << read_energy_ << " pJ" << std::endl;
-    std::cout << "  Write Energy (per byte): " << write_energy_ << " pJ (30x read!)" << std::endl;
+    // 1.11.56 (audit D046): the ratio is measured here, not asserted.
+    std::cout << "  Write Energy (per byte): " << write_energy_ << " pJ";
+    if (read_energy_ > 0.0)
+        std::cout << " (" << (write_energy_ / read_energy_) << "x read)";
+    std::cout << std::endl;
     std::cout << "  Total Read Energy: " << (total_reads_ * read_energy_) << " pJ" << std::endl;
     std::cout << "  Total Write Energy: "
               << ((total_set_writes_ + total_reset_writes_) * write_energy_) << " pJ" << std::endl;
@@ -456,7 +504,7 @@ void PCMModel::initializeNVSim() {
         nvsim_config.word_width_bits = (access_width_bits_ > 0) ? access_width_bits_ : 64;
         nvsim_config.nvm_type = NVSimWrapper::NVMType::PCRAM;  // PCM type
         nvsim_config.process_node_nm = pcm_config_.tech_node_nm;
-        nvsim_config.temperature_k = temperature_k_;   // 1.11.52 (D055)  // ~77°C typical operating temp
+        nvsim_config.temperature_k = temperature_k_;   // 1.11.52 (D055)  // ~77 degC typical operating temp
         nvsim_config.optimize_read_energy = true;
         nvsim_config.optimize_write_energy = false;  // PCM writes are inherently slow
         nvsim_config.optimize_leakage = true;
@@ -468,16 +516,39 @@ void PCMModel::initializeNVSim() {
 
         // Extract NVSim results if valid
         if (nvsim_wrapper_->isValid()) {
-            // Update config latencies from NVSim (assumes 1 GHz: 1 ns = 1 cycle)
+            /* 1.11.56 (audit D054): NVSim reports SECONDS. Carry them as
+             * nanoseconds. The old code multiplied by a hardcoded 1 GHz and
+             * stored the product in a field called *_latency, which the
+             * printout then labelled "cycles" -- so a run at 2 GHz reported
+             * half the cycles it would really spend. There is no clock in this
+             * model to convert with, so time is what it keeps. */
             double read_ns = nvsim_wrapper_->getReadLatency() * 1e9;
             double write_ns = nvsim_wrapper_->getWriteLatency() * 1e9;
 
             if (read_ns > 0) {
-                pcm_config_.read_latency = static_cast<Cycle>(read_ns);
+                pcm_config_.read_latency_ns = read_ns;
             }
             if (write_ns > 0) {
-                pcm_config_.set_write_latency = static_cast<Cycle>(write_ns);
-                pcm_config_.reset_write_latency = static_cast<Cycle>(write_ns * 0.3);  // RESET faster
+                pcm_config_.set_write_latency_ns = write_ns;
+                /* 1.11.56 (audit D045): RESET is a MELT-QUENCH PULSE, and its
+                 * duration is a cell property NVSim resolves as
+                 * FunctionUnit::resetLatency -- not 30% of a composed write
+                 * latency. 1.11.23 removed that assertion from the extractor
+                 * and its release note said so, but this copy survived and is
+                 * what the "RESET Write Latency" line prints. Ask the tool; if
+                 * the tool does not resolve it (notably on a cache hit, where
+                 * the pregenerated entry carries only the top-level figures),
+                 * collapse to the SET path and say so, exactly as
+                 * extractPCMArchitecture does. Reporting SET under a RESET
+                 * label is honest; manufacturing a RESET number is not. */
+                const double rst_s = nvsim_wrapper_->getResetLatency();
+                if (rst_s > 0.0) {
+                    pcm_config_.reset_write_latency_ns = rst_s * 1e9;
+                    reset_latency_is_set_path_ = false;
+                } else {
+                    pcm_config_.reset_write_latency_ns = write_ns;
+                    reset_latency_is_set_path_ = true;
+                }
             }
 
             // Update energy values
@@ -541,8 +612,18 @@ bool PCMModel::hasTier(Tier tier) const {
 }
 std::string PCMModel::tierLatencySource(Tier tier, Op op) const {
     if (getTierLatencyNs(tier, op) < 0.0) return "";
+    /* 1.11.56 (audit D062): ATTRIBUTE WHAT WAS ACTUALLY READ. This claimed
+     * "NVSim FunctionUnit::setLatency" for the SET/WRITE ops unconditionally,
+     * including on the cache-hit path where getSetLatency() returns -1 and the
+     * extractor substitutes the generic write latency -- which is the normal
+     * path, not a corner. A provenance string that cannot be wrong is not
+     * provenance. */
+    const bool set_substituted =
+        pcm_arch_ && pcm_arch_->timing.set_from_generic_write;
     const char* q = (op == Op::RESET) ? "NVSim FunctionUnit::resetLatency"
                   : (op == Op::READ)  ? "NVSim read path"
+                  : set_substituted   ? "NVSim write path (setLatency not "
+                                        "resolved; generic write substituted)"
                                       : "NVSim FunctionUnit::setLatency";
     return std::string(q) + " @ " + tierName(tier);
 }

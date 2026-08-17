@@ -70,7 +70,7 @@ void pimid_finalize(pimid_context_t ctx) {
     std::cout << "\n[PIMID] Simulation Summary:" << std::endl;
     std::cout << "  Total cycles:        " << g_stats.cycles << std::endl;
     std::cout << "  Total time:          " << g_stats.time_ns / 1e6 << " ms" << std::endl;
-    std::cout << "  Total energy:        " << g_stats.energy_pj / 1e6 << " μJ" << std::endl;
+    std::cout << "  Total energy:        " << g_stats.energy_pj / 1e6 << " uJ" << std::endl;
     std::cout << "  PIM regions entered: " << g_stats.pim_regions << std::endl;
 }
 
@@ -197,7 +197,7 @@ void pimid_print_region_stats(const char* region_name) {
     std::cout << "\n[PIMID] Statistics for region '" << region_name << "':" << std::endl;
     std::cout << "  Cycles: " << stats.cycles << std::endl;
     std::cout << "  Time:   " << stats.time_ns / 1e6 << " ms" << std::endl;
-    std::cout << "  Energy: " << stats.energy_pj / 1e6 << " μJ" << std::endl;
+    std::cout << "  Energy: " << stats.energy_pj / 1e6 << " uJ" << std::endl;
 }
 
 void pimid_reset_stats(void) {

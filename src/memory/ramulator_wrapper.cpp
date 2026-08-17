@@ -53,7 +53,7 @@ void RamulatorWrapper::initialize() {
 
     // Only create a full Ramulator2 instance when a config file is provided
     // (for cycle-accurate simulation). Default configs (empty path) are used
-    // as parameter oracles — timing/power from DRAMArchitectureV2 suffices.
+    // as parameter oracles -- timing/power from DRAMArchitectureV2 suffices.
     if (!config_path_.empty()) {
         createRamulatorInstance();
     }
@@ -186,6 +186,42 @@ void RamulatorWrapper::parseConfiguration() {
             capacity_ = 8ULL * 1024 * 1024 * 1024;
             bandwidth_ = 19200;  // 19.2 GB/s for DDR4-2400
         }
+
+        /* 1.11.56: ONE PART, ONE SPEED BIN -- checked, not trusted.
+         *
+         * The Ramulator preset above decides the cycles this simulator
+         * counts. The DRAM architecture object beside it decides every
+         * bandwidth the simulator REPORTS -- chip I/O, rank, channel, and
+         * since 1.11.56 the whole per-level hierarchy link ladder. Nothing
+         * held the two together, and three of the four had drifted: HBM2
+         * 2000 vs the 2400 preset, DDR5 4800 vs the 3200 preset, HBM3 4000
+         * vs the 6400 preset. That is D002's defect (DDR4 array at 2400,
+         * termination at 3200) repeated at three more technologies, and it
+         * is how a device's reported memory bandwidth came to describe a
+         * part 1.6x faster than the one whose cycles were being counted.
+         *
+         * The aggregate is the arithmetic the preset implies, so it is the
+         * cross-check: channel_databus_bits x data_rate / 8 must reproduce
+         * bandwidth_. A future preset change that forgets the architecture
+         * object now fails here instead of quietly re-describing the part. */
+        if (dram_arch_) {
+            double implied_mbs =
+                (dram_arch_->datapath.channel_databus_bits.value_bits / 8.0) *
+                dram_arch_->timing.data_rate_mtps;
+            if (bandwidth_ > 0 && implied_mbs > 0.0 &&
+                std::fabs(implied_mbs - static_cast<double>(bandwidth_)) >
+                    0.02 * static_cast<double>(bandwidth_)) {
+                std::cerr << "[ramulator] WARNING: " << dt
+                          << " speed-bin mismatch. The simulated preset implies "
+                          << bandwidth_ << " MB/s aggregate, but the architecture "
+                             "object's databus x data rate gives " << implied_mbs
+                          << " MB/s (" << dram_arch_->timing.data_rate_mtps
+                          << " MT/s). Cycles come from the preset and reported "
+                             "bandwidths come from the architecture object, so "
+                             "this run counts one part and prices another."
+                          << std::endl;
+            }
+        }
     } else {
         // Load configuration from file
         std::ifstream config_file(config_path_);
@@ -228,7 +264,7 @@ void RamulatorWrapper::createRamulatorInstance() {
         }
 
     } catch (const std::exception& e) {
-        // Ramulator2 instance creation failed — timing/power queries
+        // Ramulator2 instance creation failed -- timing/power queries
         // will use DRAMArchitectureV2 fallback values instead.
         ramulator_memory_system_.reset();
     }
@@ -385,11 +421,11 @@ double RamulatorWrapper::getRefreshEnergy() const {
     // Based on JEDEC specs and literature
     //
     // DDR4 refresh parameters:
-    //   - tREFI = 7.8µs (average refresh interval)
+    //   - tREFI = 7.8us (average refresh interval)
     //   - Each refresh activates one row per bank
-    //   - Energy per refresh ≈ activation energy
+    //   - Energy per refresh ~= activation energy
     //
-    // Refresh energy = (num_refreshes) × (energy_per_refresh) × (num_banks)
+    // Refresh energy = (num_refreshes) x (energy_per_refresh) x (num_banks)
 
     double refresh_energy_per_row_nJ = 2.0;  // Default: similar to activation
 
@@ -400,7 +436,7 @@ double RamulatorWrapper::getRefreshEnergy() const {
     }
 
     // Calculate number of refresh cycles
-    // tREFI for DDR4 = 7.8µs = 7800ns
+    // tREFI for DDR4 = 7.8us = 7800ns
     // At 1ns cycle time (typical for modeling), tREFI = 7800 cycles
     // At actual DRAM clock (1.2GHz = 0.833ns), tREFI = 9360 cycles
 
@@ -409,10 +445,10 @@ double RamulatorWrapper::getRefreshEnergy() const {
         clock_period_ns = 1000.0 / dram_arch_->timing.clock_freq_mhz;
     }
 
-    double tREFI_cycles = 7800.0 / clock_period_ns;  // 7.8µs refresh interval
+    double tREFI_cycles = 7800.0 / clock_period_ns;  // 7.8us refresh interval
     uint64_t refresh_count = current_cycle_ / static_cast<uint64_t>(tREFI_cycles);
 
-    // Total refresh energy = refreshes × banks × energy_per_refresh
+    // Total refresh energy = refreshes x banks x energy_per_refresh
     uint32_t total_banks = banks_per_rank_ * ranks_per_channel_ * channels_;
     return refresh_count * total_banks * refresh_energy_per_row_nJ;
 }
@@ -626,6 +662,30 @@ double RamulatorWrapper::getBackgroundSystemMW(double r_idle, bool pg_enabled,
                                                const std::string& device_width,
                                                int ranks_per_channel,
                                                int channels) const {
+    /* 1.11.56 (audit D006): NAME THE UNSOURCED COLUMN WHERE IT GOVERNS A
+     * PRINTED NUMBER. pimid_energy.h's header calls the whole IDD table
+     * part-number-sourced, but idd2p is not one of the sourced columns: the
+     * HBM rows were entered as a "30-40% of IDD2N" rule of thumb (and HBM2's
+     * own entry is 41.2%, outside that band), and the rest are rounded
+     * figures, not datasheet reads. idd2p is only reachable through the
+     * power-down state, so it changes nothing unless power gating is on AND
+     * the run measured some idle residency -- which is exactly when the
+     * Background line stops being a pure IDD2N/IDD3N number. Say so once,
+     * there, instead of leaving the disclosure in a comment in another repo. */
+    if (pg_enabled && r_idle > 0.0) {
+        static bool warned_idd2p = false;
+        if (!warned_idd2p) {
+            warned_idd2p = true;
+            std::cerr << "[power] NOTE: memory.power_down is on and the run "
+                         "measured idle residency, so the Background line for '"
+                      << dram_type_ << "' rests on the APPROXIMATE IDD2P "
+                         "(precharge power-down) column of pimid_energy.h. That "
+                         "column is not part-number-sourced -- the HBM entries "
+                         "are a 30-40%-of-IDD2N rule of thumb -- so treat the "
+                         "idle share of Background as an assumption, not a "
+                         "datasheet value." << std::endl;
+        }
+    }
     return Ramulator::pimid_energy::backgroundSystemMW(dram_type_, r_idle,
                                                        pg_enabled, device_width,
                                                        ranks_per_channel, channels);
@@ -674,7 +734,7 @@ void RamulatorWrapper::updateEnergyMetrics() const {
     cached_read_energy_ = total_reads_ * read_energy_per_access;
     cached_write_energy_ = total_writes_ * write_energy_per_access;
 
-    // Leakage power (mW) = capacity (GB) × leakage_per_GB
+    // Leakage power (mW) = capacity (GB) x leakage_per_GB
     double capacity_gb = capacity_ / (1024.0 * 1024.0 * 1024.0);
     cached_leakage_power_ = capacity_gb * leakage_power_per_gb;
 
@@ -1113,7 +1173,7 @@ int RamulatorWrapper::getRankDataBits() const {
     if (dram_arch_) {
         return dram_arch_->datapath.rank_databus_bits.value_bits;
     }
-    return 64;  // DDR4 default (8 × x8 chips)
+    return 64;  // DDR4 default (8 x x8 chips)
 }
 
 int RamulatorWrapper::getChannelDataBits() const {

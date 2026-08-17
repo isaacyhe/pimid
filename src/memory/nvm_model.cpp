@@ -480,7 +480,7 @@ void NVMModel::initializeNVSim() {
         nvsim_config.word_width_bits = 64;
         nvsim_config.nvm_type = nvsim_type;
         nvsim_config.process_node_nm = nvm_config_.tech_node_nm;
-        nvsim_config.temperature_k = 350;  // 77°C typical operating temp
+        nvsim_config.temperature_k = 350;  // 77 degC typical operating temp
         nvsim_config.optimize_read_energy = true;
         nvsim_config.optimize_write_energy = true;
         nvsim_config.optimize_leakage = true;

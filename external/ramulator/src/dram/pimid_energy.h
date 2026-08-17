@@ -9,7 +9,16 @@
 // a thin reader that forwards its timing getters into these functions.
 //
 // The per-tech IDD/VDD tables here are PART-NUMBER-SOURCED datasheet values
-// (Micron part classes named below). 1.11.46 (FIX-PRE-FLEET L189): the claim
+// (Micron part classes named below) -- WITH ONE EXCEPTION, the idd2p column.
+// 1.11.56 (audit D006): that blanket claim covered a column that was never
+// read off a datasheet. idd2p is a precharge-POWER-DOWN current; the DDR/LPDDR
+// classes above publish IDD2P, but the HBM rows were entered as "30-40% of
+// IDD2N per JESD precharge-standby-powerdown deltas" -- a rule of thumb, not a
+// part number -- and HBM2's own entry (17 -> 7) is 41.2%, outside the band its
+// comment states. The claim is narrowed here, and the consumer says so at the
+// point of use (RamulatorWrapper::getBackgroundSystemMW) rather than leaving a
+// header comment to carry the disclosure. The other columns are unaffected.
+// 1.11.46 (FIX-PRE-FLEET L189): the claim
 // that they "mirror the per-impl current_presets" was FALSE and is withdrawn:
 // measured against the tree, DDR4.cpp's Default preset is {60,50,55,145,145,
 // IDD5B 362} vs this table's {58,35,42,140,150, IDD5 155} -- the divergence
@@ -49,10 +58,17 @@ struct IDDSpec {
 //   DDR3  Micron 4Gb DDR3L-1600 (1.35);     LPDDR5 Micron 12Gb LPDDR5-6400 (1.05);
 //   GDDR6 Micron 8Gb GDDR6-14000 (1.35);    HBM2 JESD235 (1.2); HBM3 JESD238 (1.1).
 inline IDDSpec iddFor(const std::string& tech) {
-    /* idd2p (last column) from the same part-number classes: DDR5-4800 ~20mA,
-     * DDR4-2400 ~25 (IDD2P fast-exit), DDR3L ~18, LPDDR5 ~4 (deep mobile
-     * power-down class), GDDR6 ~30, HBM2/3 ~30-40% of IDD2N per JESD
-     * precharge-standby-powerdown deltas. */
+    /* idd2p (last column). 1.11.56 (audit D006): this column is APPROXIMATE
+     * and is the one column in the table that is not a datasheet read. The
+     * DDR/LPDDR/GDDR entries are rounded IDD2P fast-exit figures for the part
+     * classes named above (DDR5-4800 ~20 mA, DDR4-2400 ~25, DDR3L ~18, LPDDR5
+     * ~4 -- the deep mobile power-down class, GDDR6 ~30); the HBM entries are
+     * NOT read from a part at all, they were set as "~30-40% of IDD2N per JESD
+     * precharge-standby-powerdown deltas", and HBM2's 17 -> 7 is 41.2%, i.e.
+     * outside the band that sentence claims. The column is live: it is the
+     * IDD2P baseline backgroundUnitMW() uses under pg_enabled, so it moves the
+     * printed Background line whenever measured idle residency is non-zero.
+     * Keep it, but do not quote it as sourced -- the consumer emits a note. */
     if (tech == "DDR5")   return {1.1, 55,34,42,148,168,120, 295.0, 3900.0, 1, 20};
     if (tech == "DDR4")   return {1.2, 58,35,42,140,150,155, 350.0, 7800.0, 1, 25};
     if (tech == "DDR3")   return {1.35,60,32,45,175,180,210, 260.0, 7800.0, 1, 18};

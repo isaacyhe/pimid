@@ -18,7 +18,7 @@ namespace pimid {
  * Provides integrated power, area, and timing modeling for:
  * - CPU cores
  * - Caches (L1, L2, L3)
- * - NoCs (Network-on-Chip) — N instances, one per hierarchy level
+ * - NoCs (Network-on-Chip) -- N instances, one per hierarchy level
  * - Memory controllers
  * - PCIe (for co-sim transfers)
  */
@@ -107,6 +107,34 @@ public:
         int databus_width = 64;         // bits
         int number_ranks = 2;
         int number_mcs = 1;
+        /* 1.11.56 (audit C008): the controller's STRUCTURE used to be five
+         * literals written straight into the XML, with no field to carry
+         * them and therefore no way for any caller to describe a controller
+         * that differs. They are fields now, so the structure is at least
+         * addressable from C++ even before a YAML surface exists; the
+         * defaults reproduce exactly what the literals emitted, so this
+         * change moves no number on its own.
+         *
+         * NONE OF THESE FIVE IS SOURCED, and generateXMLConfig() says so
+         * once per process rather than letting them pass silently:
+         *   channels_per_mc 1   every MC is priced as single-channel, so a
+         *                       multi-channel controller cannot be described
+         *                       and MC area/queue power scales only through
+         *                       number_mcs.
+         *   req_window 32       scheduler queue depth (McPAT reference XML).
+         *   io_buffer 32        front-end buffer depth (same reference).
+         *   block_size 64       cache-line granularity of an MC transaction.
+         *   addressbus_width 51 McPAT's own reference value. It contradicts
+         *                       the physical_address_width of 48 this same
+         *                       file emits; the usual explanation is that
+         *                       the MC bus carries command and bank/rank
+         *                       select beside the address, but we have not
+         *                       verified that and do not assert it. */
+        int memory_channels_per_mc = 1;
+        int req_window_size_per_channel = 32;
+        int io_buffer_size_per_channel = 32;
+        int block_size_bytes = 64;
+        int addressbus_width = 51;
     };
 
     /**
@@ -154,13 +182,16 @@ public:
 
     /* 1.11.7: per-link-type transfer energy, pJ/bit, PHY/link share only
      * (McPAT's ctrl term prices the controller logic separately -- no
-     * double count). Sources are ballpark figures from published PHY
-     * surveys and vendor claims, flagged for the bounds gate:
-     *   pcie_gen3 5.0   pcie_gen4 6.0   pcie_gen5 7.0
-     *   cxl       8.4   (gen5 PHY + ~20% coherence-controller delta)
-     *   nvlink    1.3   (NVIDIA NVLink4 per-bit claim)
-     * Unknown types return -1: caller must reject loudly or use the
-     * user override knob (printed k-style). */
+     * double count). Unknown types return -1: caller must reject loudly or
+     * use the user override knob (printed k-style).
+     * 1.11.56 (audit C003): the scalar table that used to be listed here
+     * (pcie_gen3 5.0, gen4 6.0, gen5 7.0, cxl 8.4, nvlink 1.3) is RETIRED and
+     * has been since 1.11.40 -- it was still printed in this header as though
+     * it were the live surface, which is how a reader would have concluded
+     * that "cxl 8.4" was a sourced figure. The live surface is the band table
+     * in linkEnergyBandPJPerBit(), whose entries carry their own provenance
+     * strings; the only residue of the old scalars is the CXL coherence
+     * delta, which that function warns about as unsourced. */
     /* 1.11.40 (user ruling): a physical rate is NOT one number. Every energy
      * per bit here is a point on a distribution that moves with process node,
      * operating point, and what the measurement included (PLL and clocking in
@@ -176,14 +207,28 @@ public:
         double lo = -1.0;
         double hi = -1.0;
         bool   single_point = false;
+        /* 1.11.56 (audit C002): is the LOW end a BOUND rather than an
+         * achievable value? The gen4 entry's 1.93 pJ/bit is a
+         * transmitter-only measurement, so no complete link can reach it --
+         * the entry said so in prose while mid() quietly averaged it into
+         * the number the XML was priced from (3.965 against a full-link
+         * 6.0). A bound belongs in the reported band and NOT in the applied
+         * scalar, which is what this flag separates. */
+        bool   lo_is_bound = false;
         const char* provenance = "";
         bool valid() const { return lo > 0.0 && hi >= lo; }
         double mid() const { return 0.5 * (lo + hi); }
+        /* The value actually applied to the model: the midpoint, unless the
+         * floor is a bound, in which case the only end that describes a
+         * complete link is the one to price from. */
+        double applied() const { return lo_is_bound ? hi : mid(); }
     };
     static LinkEnergyBand linkEnergyBandPJPerBit(const std::string& link_type);
 
-    /* Midpoint of the band. Kept because McPAT's interface takes a scalar;
-     * every CALLER that reports a number must report the band alongside it. */
+    /* The band's applied value (its midpoint, or its top when the floor is a
+     * bound -- see LinkEnergyBand::applied). Kept because McPAT's interface
+     * takes a scalar; every CALLER that reports a number must report the
+     * band alongside it. */
     static double linkEnergyPJPerBit(const std::string& link_type);
     /* 1.11.29: does this link class carry an off-package SerDes? Drives
      * McPAT withPHY, which includes/excludes the SerDes area AND its
@@ -201,10 +246,24 @@ public:
     static double linkSerDesLaneGbps(const std::string& link_type);
     /* 1.11.21 (E1+E2): the DRAM-periphery AREA factor is a ratio between two
      * columns of one CACTI table, and baseline_device names the denominator
-     * (0 hp, 1 lstp, 2 lop, 3 lp-dram, 4 comm-dram). Returns false when the
-     * composition would be incoherent: an unpopulated column at that node
-     * (lp-dram at 22 nm), or a non-hp baseline, for which fd/fl have no
-     * derivation. Callers REFUSE on false -- they must not price from it. */
+     * (0 hp, 1 lstp, 2 lop, 3 lp-dram, 4 comm-dram).
+     *
+     * 1.11.56 (audit C030): the refusal contract stated here was FALSE, and
+     * the .cpp had said the opposite three lines from the code. This claimed
+     * a non-hp baseline was refused "for which fd/fl have no derivation";
+     * the implementation accepts ANY baseline in 0..4 and derives all three
+     * factors against that column, which is the whole point of the 1.11.21
+     * rework and is what the shared caller in main.cpp now depends on (it
+     * passes the user's power.mcpat_overrides.device_type straight through).
+     * The header mattered here: a reader of this comment would have believed
+     * that device_type: 1 on a family-1 placement at 22 nm could not be
+     * priced, when in fact it is accepted and gives fa = 1.571 rather than
+     * the hp 2.444.
+     *
+     * The ACTUAL contract: returns false only when the composition is
+     * arithmetically impossible -- baseline_device outside 0..4, or a column
+     * that the table does not populate at that node (lp-dram at 22 nm).
+     * Callers REFUSE on false -- they must not price from it. */
     static bool periphFactorsFor(int dram_table_nm, int logic_node_nm,
                                  int baseline_device, int temp_k,
                                  double& fa, double& fd, double& fl);
@@ -358,7 +417,16 @@ public:
         MCPhyTier mc_phy_tier = MCPhyTier::OFFCHIP;
 
         // McPAT system-level parameters (exposed for architecture exploration)
-        int device_type;                    // 0=HP, 1=LSTP, 2=LOP
+        /* CACTI device corner. 0=HP, 1=LSTP, 2=LOP, 3=LP-DRAM, 4=COMM-DRAM.
+         * 1.11.56 (audit C033): the enumeration used to stop at 2, and 3 is
+         * not hypothetical -- applyCornerAndPeripheryPricing() in main.cpp
+         * maps a family-1 placement onto the lp-dram column and assigns 3
+         * here. It is forwarded three ways: as McPAT's global CACTI device,
+         * as the periphery baseline index, and (since 1.11.49) as the L2 and
+         * L3 array device. A reader working from "0=HP, 1=LSTP, 2=LOP" had
+         * no way to anticipate a DRAM corner reaching the cache arrays.
+         * validateConfiguration() does not range-check this field. */
+        int device_type;
         int longer_channel_device;          // 0 or 1
         int number_hardware_threads;        // threads per core
         int interconnect_projection_type;   // 0=aggressive, 1=conservative
@@ -439,7 +507,7 @@ public:
 
     void setTotalInstructions(uint64_t instructions);
 
-    // Split cache stat setters — use actual ZSim counters, not combined reads/writes
+    // Split cache stat setters -- use actual ZSim counters, not combined reads/writes
     void setL1IAccesses(uint64_t reads, uint64_t read_misses);
     void setL1DAccesses(uint64_t reads, uint64_t writes, uint64_t read_misses, uint64_t write_misses);
     void setL2Accesses(uint64_t reads, uint64_t writes, uint64_t read_misses, uint64_t write_misses);
@@ -536,6 +604,20 @@ private:
      * three blocks substitute invented activity when nothing was measured,
      * and all three were silent. */
     mutable bool warned_narrow_datapath_ = false;  // 1.9.40
+    /* 1.11.56 (audit C034): latch for the one-time note that this run's
+     * instruction supply and datapath were selected by different switches
+     * (l1i_size_bytes vs device_profile_). */
+    mutable bool warned_profile_split_ = false;
+    /* 1.11.56 (audit C017): latch for the one-time warning that no link
+     * clock was supplied and the unsourced 350 MHz literal is in force. */
+    mutable bool warned_link_clock_ = false;
+    /* 1.11.56 (audit C017): latch for the one-time warning that the link
+     * class is unknown, so McPAT's historical 4 Gb/s SerDes rate stands. */
+    mutable bool warned_link_class_ = false;
+    /* 1.11.56 (audit C008): latch for the one-time warning naming the
+     * memory-controller structural literals that have no configuration
+     * surface. */
+    mutable bool warned_mc_structure_ = false;
     /* 1.9.36: per-core intra-core power split, transported from the forked child
      * (which alone holds the model object). Diagnostic only -- nothing consumes
      * these -- but they are what makes the ALU-versus-core error MEASURABLE
@@ -600,10 +682,15 @@ private:
      * total. Measured: the controller carries 0.0037 W of leakage per
      * end, so it is present; only its area was invisible. */
     double mcpat_pcie_area_mm2_ = 0.0;
-    // 1.11.4: scaled/unscaled core power ratio under the DRAM-periphery
-    // family; the CoreBreakdown block weights are multiplied by this so the
-    // printed split stays consistent with the scaled core total.
-    double fam_core_power_ratio_ = 1.0;
+    /* 1.11.56 (audit C027): fam_core_power_ratio_ is DELETED. Its comment
+     * said "the CoreBreakdown block weights are multiplied by this", and
+     * they are not -- the member lost its assignment in the 1.11.12
+     * migration, and 1.11.15 responded by scaling each block by fdW/flW
+     * directly at the capture site (mcpat_wrapper.cpp, in the child). The
+     * member survived as a zero-referenced 1.0 with a comment describing a
+     * mechanism that does not exist, in the header a future edit reads as
+     * the contract. No number moves: the scaling that the comment claimed
+     * happens elsewhere, and did already. */
     PGSpec pg_spec_;   // 1.11.8
     double mcpat_l2_area_mm2_ = 0.0;
     double mcpat_l3_area_mm2_ = 0.0;
@@ -618,10 +705,29 @@ private:
     bool user_provided_xml_;
     std::string error_message_;
 
+    /* 1.11.56 (audit C032): ONE predicate for "is this component part of the
+     * system the user described". The 1.11.29 ruling ("never report a
+     * component nobody asked for") had been implemented in the printer only,
+     * so the system total kept summing components the breakdown refused to
+     * print -- the two disagreed by exactly the stubs this file is forced to
+     * emit for McPAT's positional parser. Both callers now ask the same
+     * question. */
+    bool componentIsDescribed(ComponentType t) const;
+
     // Helper functions
     void runMcPAT();
     void validateConfiguration();
     void createMcPATInput();
+    /* 1.11.56 (audit C014): the XML path the parent chose for the next
+     * computePower(). The child writes there, so a caller can archive the
+     * exact inputs a power number came from. Empty = use the old indexed
+     * name (no archiving expected). */
+    std::string pending_xml_path_;
+public:
+    /* The McPAT input XML this wrapper last priced from, for archiving.
+     * Empty before the first computePower(). */
+    const std::string& lastInputXmlPath() const { return pending_xml_path_; }
+private:
     void extractResults();
     std::string generateXMLConfig() const;
 };

@@ -74,14 +74,30 @@ private:
         uint32_t banks;
         uint32_t read_write_ports;
         uint32_t tech_node_nm;
-        Cycle read_latency;
-        Cycle set_write_latency;    // SET (crystallization)
-        Cycle reset_write_latency;  // RESET (amorphization)
+        /* 1.11.56 (audit D054): NANOSECONDS, and named so. These three used to
+         * be `Cycle`, filled from NVSim under a comment reading "assumes 1 GHz:
+         * 1 ns = 1 cycle" -- but NVSim returns SECONDS and this model has no
+         * clock to convert them with (nothing here ever reads a frequency).
+         * The 1 GHz was not an approximation of the run's clock, it was the
+         * absence of one, and initialize() then printed the result as "cycles".
+         * At the sweep's 1-2 GHz PE clocks that label was wrong by the clock
+         * ratio. Carry the time the tool actually reported; the legacy
+         * Cycle-returning access()/getLatency() convert at one stated point. */
+        double read_latency_ns;
+        double set_write_latency_ns;    // SET (crystallization)
+        double reset_write_latency_ns;  // RESET (amorphization)
         uint64_t endurance;
         bool is_pim_enabled;
     };
 
     PCMConfig pcm_config_;
+
+    /* 1.11.56 (audit D045): true when NVSim did not resolve
+     * FunctionUnit::resetLatency and reset_write_latency_ns therefore HOLDS
+     * THE SET PATH. The old code filled the gap with write * 0.3 and printed
+     * the product as a RESET measurement; the substitution is now recorded so
+     * the printout can name it instead of hiding it. */
+    bool reset_latency_is_set_path_ = false;
 
     // NVSim wrapper instance
     std::unique_ptr<NVSimWrapper> nvsim_wrapper_;

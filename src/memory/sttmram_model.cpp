@@ -35,8 +35,11 @@ STTMRAMModel::STTMRAMModel(const std::string& config_path)
     mram_config_.banks = 8;
     mram_config_.read_write_ports = 1;
     mram_config_.tech_node_nm = 22;
-    mram_config_.read_latency = 5;    // 5 cycles (fast read)
-    mram_config_.write_latency = 20;  // 20 cycles (slow MTJ switching)
+    /* 1.11.56 (audit D054): nanoseconds, not cycles. Placeholders that the
+     * NVSim path overwrites on every reachable run; the model refuses when
+     * that binding fails, so they never reach a result. */
+    mram_config_.read_latency_ns = 5.0;    // ns (fast read)
+    mram_config_.write_latency_ns = 20.0;  // ns (slow MTJ switching)
     mram_config_.endurance = 1e15;    // 10^15 writes (very high)
     mram_config_.is_pim_enabled = true;
 }
@@ -118,8 +121,11 @@ void STTMRAMModel::initialize() {
     std::cout << "  Capacity: " << (mram_config_.capacity / (1024.0 * 1024)) << " MB" << std::endl;
     std::cout << "  Banks: " << mram_config_.banks << std::endl;
     std::cout << "  Technology: " << mram_config_.tech_node_nm << " nm" << std::endl;
-    std::cout << "  Read Latency: " << mram_config_.read_latency << " cycles" << std::endl;
-    std::cout << "  Write Latency: " << mram_config_.write_latency << " cycles" << std::endl;
+    /* 1.11.56 (audit D054): printed as NANOSECONDS, which is what NVSim
+     * reported and what these fields hold. They were labelled "cycles" while
+     * carrying a 1 GHz product, so the number was right only at 1 GHz. */
+    std::cout << "  Read Latency: " << mram_config_.read_latency_ns << " ns" << std::endl;
+    std::cout << "  Write Latency: " << mram_config_.write_latency_ns << " ns" << std::endl;
     std::cout << "  Endurance: " << mram_config_.endurance << " writes" << std::endl;
     std::cout << "  PIM Enabled: " << (mram_config_.is_pim_enabled ? "Yes" : "No") << std::endl;
     std::cout << "  Read Energy: " << read_energy_ << " pJ/byte" << std::endl;
@@ -158,14 +164,14 @@ void STTMRAMModel::loadConfig(const std::string& config_path) {
     if (config.find("stt_mram.timing.read_latency_ns") != config.end()) {
         try {
             double read_ns = std::stod(config["stt_mram.timing.read_latency_ns"]);
-            mram_config_.read_latency = static_cast<Cycle>(read_ns);
+            mram_config_.read_latency_ns = read_ns;   // 1.11.56 (D054): ns in, ns kept
         } catch (...) {}
     }
 
     if (config.find("stt_mram.timing.write_latency_ns") != config.end()) {
         try {
             double write_ns = std::stod(config["stt_mram.timing.write_latency_ns"]);
-            mram_config_.write_latency = static_cast<Cycle>(write_ns);
+            mram_config_.write_latency_ns = write_ns;  // 1.11.56 (D054): ns in, ns kept
         } catch (...) {}
     }
 
@@ -186,17 +192,32 @@ void STTMRAMModel::loadConfig(const std::string& config_path) {
     std::cout << "[STTMRAMModel] Configuration loaded successfully" << std::endl;
 }
 
+/* 1.11.56 (audit D054): THE ONE PLACE TIME BECOMES CYCLES IN THIS MODEL.
+ *
+ * MemoryModel's legacy access()/getLatency() return Cycle, and this model is
+ * handed no clock -- the simulator drives it through getTierLatencyNs(), which
+ * is nanoseconds end to end and never comes through here. So the conversion
+ * below is 1 cycle per nanosecond, i.e. exactly the 1 GHz the old code assumed;
+ * the difference is that it is stated once, at the boundary that forces it,
+ * instead of being baked into the stored fields and mislabelled in the log. If
+ * this path ever becomes live, give the model a frequency and convert with
+ * that -- do not restore the assumption upstream. */
+static inline Cycle legacyNsAsCycles(double ns) {
+    if (ns <= 0.0) return 0;
+    return static_cast<Cycle>(std::ceil(ns));   // 1 GHz: no clock is supplied
+}
+
 Cycle STTMRAMModel::access(const MemoryRequest& req) {
-    Cycle latency = mram_config_.read_latency;  // safe default
+    Cycle latency = legacyNsAsCycles(mram_config_.read_latency_ns);  // safe default
 
     // STT-MRAM has asymmetric read/write latency
     switch (req.type) {
         case MemoryRequestType::READ:
-            latency = mram_config_.read_latency;
+            latency = legacyNsAsCycles(mram_config_.read_latency_ns);
             total_reads_++;
             break;
         case MemoryRequestType::WRITE:
-            latency = mram_config_.write_latency;  // MTJ switching dominates!
+            latency = legacyNsAsCycles(mram_config_.write_latency_ns);  // MTJ switching dominates!
             total_writes_++;
             write_cycles_++;
             updateEndurance(req.addr);
@@ -205,7 +226,8 @@ Cycle STTMRAMModel::access(const MemoryRequest& req) {
             }
             break;
         case MemoryRequestType::ATOMIC:
-            latency = mram_config_.read_latency + mram_config_.write_latency;
+            latency = legacyNsAsCycles(mram_config_.read_latency_ns +
+                                       mram_config_.write_latency_ns);
             total_reads_++;
             total_writes_++;
             write_cycles_++;
@@ -249,14 +271,16 @@ void STTMRAMModel::tick() {
 
 Cycle STTMRAMModel::getLatency(MemoryRequestType type) const {
     switch (type) {
+        // 1.11.56 (audit D054): see legacyNsAsCycles above.
         case MemoryRequestType::READ:
-            return mram_config_.read_latency;
+            return legacyNsAsCycles(mram_config_.read_latency_ns);
         case MemoryRequestType::WRITE:
-            return mram_config_.write_latency;
+            return legacyNsAsCycles(mram_config_.write_latency_ns);
         case MemoryRequestType::ATOMIC:
-            return mram_config_.read_latency + mram_config_.write_latency;
+            return legacyNsAsCycles(mram_config_.read_latency_ns +
+                                    mram_config_.write_latency_ns);
         default:
-            return mram_config_.read_latency;
+            return legacyNsAsCycles(mram_config_.read_latency_ns);
     }
 }
 
@@ -346,7 +370,7 @@ void STTMRAMModel::initializeNVSim() {
         nvsim_config.word_width_bits = (access_width_bits_ > 0) ? access_width_bits_ : 64;
         nvsim_config.nvm_type = NVSimWrapper::NVMType::STTRAM;
         nvsim_config.process_node_nm = mram_config_.tech_node_nm;
-        nvsim_config.temperature_k = temperature_k_;   // 1.11.52 (D055)  // 77°C typical operating temp
+        nvsim_config.temperature_k = temperature_k_;   // 1.11.52 (D055)  // 77 degC typical operating temp
         nvsim_config.optimize_read_energy = true;
         nvsim_config.optimize_write_energy = true;
         nvsim_config.optimize_leakage = true;
@@ -363,12 +387,16 @@ void STTMRAMModel::initializeNVSim() {
             leakage_power_ = nvsim_wrapper_->getLeakagePower() / 1000.0;  // mW to W
             area_mm2_ = nvsim_wrapper_->getArea();
 
-            // Update latencies based on NVSim
-            double freq_hz = 1e9;  // Assume 1 GHz
-            mram_config_.read_latency = static_cast<Cycle>(
-                nvsim_wrapper_->getReadLatency() * freq_hz);
-            mram_config_.write_latency = static_cast<Cycle>(
-                nvsim_wrapper_->getWriteLatency() * freq_hz);
+            /* 1.11.56 (audit D054): NVSim reports SECONDS. Carry them as
+             * nanoseconds. The old code multiplied by a hardcoded 1 GHz and
+             * stored the product in a field the printout labelled "cycles", so
+             * a run at 2 GHz reported half the cycles it would really spend.
+             * There is no clock in this model to convert with, so time is what
+             * it keeps. */
+            mram_config_.read_latency_ns =
+                nvsim_wrapper_->getReadLatency() * 1e9;
+            mram_config_.write_latency_ns =
+                nvsim_wrapper_->getWriteLatency() * 1e9;
 
             std::cout << "[STTMRAMModel] Using NVSim-generated parameters" << std::endl;
         } else {

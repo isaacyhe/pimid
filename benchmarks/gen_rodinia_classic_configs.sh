@@ -18,7 +18,7 @@ MAX_INSTRS[large]=1000000000
 
 COUNT=0
 
-# ── Helper: write a Rodinia YAML ──────────────────────────────────────────────
+# -- Helper: write a Rodinia YAML ----------------------------------------------
 write_rodinia() {
     local name="$1"
     local tier="$2"
@@ -74,7 +74,7 @@ EOF
     echo "  [${COUNT}] ${file#${SCRIPT_DIR}/}"
 }
 
-# ── Helper: write a Classic YAML ──────────────────────────────────────────────
+# -- Helper: write a Classic YAML ----------------------------------------------
 write_classic() {
     local name="$1"
     local tier="$2"
@@ -128,9 +128,9 @@ EOF
     echo "  [${COUNT}] ${file#${SCRIPT_DIR}/}"
 }
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # Rodinia benchmarks (10 x 4 = 40)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 echo "=== Generating Rodinia configs ==="
 
 # hotspot: --rows --cols --iters
@@ -193,9 +193,9 @@ write_rodinia myocyte small  "--cells" "1"  "--steps" "1000"
 write_rodinia myocyte medium "--cells" "4"  "--steps" "1000"
 write_rodinia myocyte large  "--cells" "16" "--steps" "5000"
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # Classic benchmarks (6 x 4 = 24)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 echo ""
 echo "=== Generating Classic configs ==="
 
@@ -235,6 +235,6 @@ write_classic naive_matmul small  "--size" "128"
 write_classic naive_matmul medium "--size" "256"
 write_classic naive_matmul large  "--size" "512"
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 echo ""
 echo "=== Done: ${COUNT} YAML config files generated ==="

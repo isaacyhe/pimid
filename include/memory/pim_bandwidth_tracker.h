@@ -18,7 +18,7 @@
  *
  * CRITICAL INSIGHT:
  * When multiple PEs share a DRAM hierarchy level, they SHARE the port bandwidth!
- * Example: 4 bank-level PEs in one bank → each gets 1.2 GB/s / 4 = 300 MB/s
+ * Example: 4 bank-level PEs in one bank -> each gets 1.2 GB/s / 4 = 300 MB/s
  */
 
 #ifndef PIMID_PIM_BANDWIDTH_TRACKER_H

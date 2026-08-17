@@ -76,7 +76,7 @@ public:
             , word_width_bits(64)
             , nvm_type(NVMType::STTRAM)
             , process_node_nm(22)
-            , temperature_k(350)  // ~77°C
+            , temperature_k(350)  // ~77 degC
             , optimize_read_latency(false)
             , optimize_write_latency(false)
             , optimize_read_energy(true)
@@ -125,8 +125,10 @@ public:
      * from FunctionUnit (readLatency/writeLatency) and Mat contains a SubArray
      * -- but this wrapper never exposed it. Instead getDecoderDelay() and its
      * four siblings returned INVENTED percentages of mat.readLatency (10/20/
-     * 45/15/5, summing to 0.95), which read as tool output and are not. Those
-     * are deprecated by these two.
+     * 45/15/5, summing to 0.95), which read as tool output and were not.
+     * 1.11.56 (audit D031) rebuilt those five on NVSim's own per-component
+     * latencies, so they are tool reads now too; these two remain the right
+     * source for a TIER, being the totals NVSim itself composed.
      * Return <0 when unavailable (notably on a cache hit -- the pregenerated
      * cache predates these fields), so callers refuse rather than substitute. */
     double getSubarrayLatency() const;      // bank->mat.subarray.readLatency, s

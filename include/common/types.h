@@ -44,10 +44,10 @@ enum class PEPlacementLevel {
     CHIP,         // L3
     RANK,         // L4
     LOGIC_DIE,    // L5
-    HOST_MC       // No PE-MCs needed — PEs share host MC directly
+    HOST_MC       // No PE-MCs needed -- PEs share host MC directly
 };
 
-// Memory technology types (canonical definition — all DRAM/NVM/SRAM variants)
+// Memory technology types (canonical definition -- all DRAM/NVM/SRAM variants)
 enum class MemoryTechnology {
     DDR3,
     DDR4,

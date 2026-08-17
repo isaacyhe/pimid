@@ -1,5 +1,5 @@
 /**
- * pimid_mpi.cpp — Multi-process MPI implementation for PIMID.
+ * pimid_mpi.cpp -- Multi-process MPI implementation for PIMID.
  *
  * Replaces the previous pthread-mailbox implementation. Each MPI rank now
  * runs as a separate process, with PIMID itself as the launcher (no mpirun
@@ -8,12 +8,12 @@
  * in-process design serialized under qemu-user's TCG core lock).
  *
  * Process-level rank assignment is via env vars set by the PIMID launcher:
- *   PIMID_MPI_RANKS  — total rank count (required, set by launcher)
- *   PIMID_MPI_RANK   — this process's rank id (0..N-1, set by launcher)
- *   PIMID_MPI_SHM    — name of the POSIX shm object backing the mailboxes
+ *   PIMID_MPI_RANKS  -- total rank count (required, set by launcher)
+ *   PIMID_MPI_RANK   -- this process's rank id (0..N-1, set by launcher)
+ *   PIMID_MPI_SHM    -- name of the POSIX shm object backing the mailboxes
  *                      (optional; defaults to /pimid_mpi_<pid_of_rank0>)
  *
- * Workloads that never call MPI symbols simply ignore all of this — each
+ * Workloads that never call MPI symbols simply ignore all of this -- each
  * rank runs independently. Workloads that DO call MPI get a working
  * cross-process shm transport, with magic-op latency injection unchanged.
  *
@@ -108,7 +108,7 @@ static inline void zsim_magic_op(uint64_t op) {
  *
  * Single POSIX shm object holds:
  *   SharedHeader (barrier state, init flags)
- *   Mailbox[N]   — one inbound queue per rank
+ *   Mailbox[N]   -- one inbound queue per rank
  *
  * Each Mailbox is a fixed-size ring of MessageSlots, each MessageSlot
  * holding up to PIMID_MPI_MAX_MSG_BYTES of payload. Messages larger than
@@ -473,7 +473,7 @@ static bool open_or_create_shm(int rank, int nranks, const char* shm_name) {
             mb->lk = 0;
             mb->head = mb->tail = mb->count = 0;
         }
-        /* Publish "ready" marker — non-zero ranks busy-wait on this. */
+        /* Publish "ready" marker -- non-zero ranks busy-wait on this. */
         __sync_synchronize();
         g_shared->barrier_gen = 1;   /* >0 == initialized */
     } else {
@@ -884,7 +884,7 @@ int MPI_Sendrecv(const void *sendbuf, int sendcount, MPI_Datatype sendtype,
     return MPI_SUCCESS;
 }
 
-/* ---- Non-blocking (synchronous semantics — shm is fast enough) ---- */
+/* ---- Non-blocking (synchronous semantics -- shm is fast enough) ---- */
 
 int MPI_Isend(const void *buf, int count, MPI_Datatype datatype,
               int dest, int tag, MPI_Comm comm, MPI_Request *request) {
@@ -1000,7 +1000,7 @@ int MPI_Reduce(const void *sendbuf, void *recvbuf, int count,
     } else {
         if (sendbuf && recvbuf) memcpy(recvbuf, sendbuf, nbytes);
         /* Receive from each non-root rank in turn. Reduction op not applied
-         * — this is a timing-accurate simulation, not a numerics oracle.
+         * -- this is a timing-accurate simulation, not a numerics oracle.
          * Workloads that need actual reduction values should compute them
          * on rank 0 from the received chunks. */
         char* tmp = (char*)malloc(nbytes ? nbytes : 1);

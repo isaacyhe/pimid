@@ -7,6 +7,263 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.56 -- the last 65 of audit round 2, and the tools get asked
+
+The closing block of audit round 2. Round 1 emptied the FIX-PRE-FLEET queue
+(1.11.46-1.11.51); round 2 raised 254 findings, of which 127 verified REAL.
+This release closes the remaining 65 and the round with it. The theme is one
+sentence: where a tool in this tree can answer a question, ASK IT, and where
+none can, SAY SO instead of writing a number down.
+
+### The hierarchy ladder becomes physical (D064, D065, B051, B041, B060)
+
+- D064/D065: the seven per-level link widths came from ten per-technology
+  tables the file itself labels "design-specific placeholders ... Current
+  values may be inverted". They contradicted the DRAM oracle, which carries
+  the real ladder per tier. DDR4 L3 -- the level named "chip DQ pins" -- was
+  192 bits against the 8 an x8 part has, a factor of 24; DDR5 L5 was 88 bits,
+  a width chosen to land near 26.4 GB/s and a bus no DRAM has. The
+  architecture object is now the one authority (GSA datapath, bank
+  serialisation, bank-group port, chip DQ, rank bus, channel bus) and the run
+  prints the ladder it used. YAML overrides still win; the tables survive only
+  as the fallback for a technology with no architecture object.
+- B051: those levels do not share a clock -- since D064 the DQ tiers run at
+  the data rate and the array tiers at the core clock -- yet seven level
+  results and six bridge results were SUMMED into one integer spent as PE
+  cycles. The bridge term was worse: a router cycle count, a nanosecond
+  constant and a beat count went into one number. Both now return TIME, and
+  the conversion happens once, at the PE clock. Bridge crossings are
+  store-and-forward, so the serialisation cost is the SLOWER of ingest and
+  egress rather than a beat count at the narrower width.
+- B041: the tiered ladder was flattened to a single number with zeroed
+  bridges whenever the topology was still MESH_2D -- which is a proxy for
+  "the analytical model is in use", because the detailed path sets CUSTOM.
+  An analytical and a detailed run of the same device were comparing two
+  HIERARCHY models, not two network models. The flattening now applies only
+  where there is no tiered ladder.
+- B060: RANK, CHANNEL and LOGIC_DIE placements all collapsed to one slot --
+  RANK by an explicit "one rank" that ignored memory.ranks_per_channel, the
+  other two by having no branch at all. A 16-PE LOGIC_DIE HBM3 cell was
+  described as sharing ONE memory organisation, every PE mapped to org 0, and
+  pages_per_unit became the whole device in one block. The three top tiers now
+  count ranks and channels; the finer tiers keep the one-rank frame the
+  placement tree is built in. (Gate 1166B caught the first attempt, which
+  multiplied the fine tiers by the channel count too: arithmetically
+  defensible, but it took an HBM3 BANK cell from 512 organisations to 8192 and
+  the tree-coverage check refused the run -- correctly, since the tree would
+  then have priced a sixteenth of the memory the config described.)
+
+### Ask the tool (B004, B012, B010, B018, D031)
+
+- B004: the M/D/1 bandwidth cap of every SRAM/NVM memory was banks x line
+  divided by an INVENTED access time -- 10 ns for STT-MRAM, 50 for PCM, 20
+  for ReRAM, 2 for SRAM -- while NVSim and CACTI were being queried for the
+  same array's read latency a few thousand lines away. The cap now comes from
+  the array model at the run's node, corner, temperature and line size, and
+  the run states the arithmetic. Where the characterization is unavailable it
+  says so and derives no cap rather than substituting one.
+- B012: "the fastest per-channel DRAM in the lineup" was a literal at three
+  sites (51200 MB/s twice, 115.2 GB/s once), each scaling something reported.
+  Both are now read from the HBM3 preset, so a preset change moves them.
+- B010: pages_per_unit was derived from a fixed 128 KB subarray while
+  memory.subarray_height is a real, resolved knob. Setting subarray_height:
+  1024 doubled the physical subarray and left the workload's contiguous block
+  at 128 KB, so PE locality and routed hop distance were computed against a
+  geometry the config did not ask for.
+- B018: every SRAM/NVM latency query hardcoded a 512-bit access while
+  system.cache_line_size reaches ZSim as sys.lineSize. A 128 B run simulated
+  128 B traffic against an array characterized for 64 B, and array access
+  time is close to linear in output width above the bitline.
+- D031: the six NVSim delay accessors returned fixed fractions of the mat
+  read latency (0.10/0.20/0.45/0.15/0.05/0.05). They now read NVSim's own
+  terms. Two structural facts are stated rather than faked: NVSim has no
+  separate wordline term, and columnDecoderLatency is MAX'd against the row
+  decoder so it is not the additive column term.
+
+### Refuse rather than invent (D032, B028, B029, B015)
+
+- D032: a failed NVSim characterization set valid_ = false and returned, and
+  every query returns 0.0 in that state -- so a reachable configuration
+  (PCM at either low-power corner, measured 4/4 failures at 22 nm / 64 KB)
+  printed an NVM array of 0.000 nJ read, 0.000 nJ write, 0.000 mW leakage and
+  0.000 mm^2 with one stderr line to say why. The failure now propagates.
+  Callers that can degrade already catch it and say so; the power block, for
+  which the array IS the memory power, is fatal like the McPAT path.
+- B028: naming the controller explicitly ("memory.controller.type: simple" on
+  an NVM device -- the controller the code would have chosen anyway) jumped
+  over the SRAM/NVM bandwidth derivation entirely, leaving the struct default
+  of 6400 MB/s standing as the memory's physical cap.
+- B029: two catch-alls dropped user input silently. A non-numeric
+  power.mcpat_overrides value vanished; one malformed key under synthetic:
+  discarded pattern, packets, injection rate and the sweep together, and the
+  run reported the built-in defaults under the requested experiment's name.
+  Both are config errors now.
+- B015: the host link controller's load fraction took a 0.01 default on the
+  system-scope trace path, where the per-node path MEASURES it. Nothing
+  measured one percent. With no crossing statistics the load is zero, stated;
+  leakage is still priced.
+
+### Say what is assumed (B005-B009, B011, B013, B014, B016, B042)
+
+Eleven quantities in the config path are neither measured nor tool-sourced
+and all of them are live: the per-technology host-path latency splits, the
+host/device bridge table, the flush and kernel-launch fixed costs, the
+system-link presets, the analytical H-tree scaling constants, the
+network-interface overhead, the MLP degree, and three bare cycle counts.
+There is no tool in this tree that answers "how long does a kernel launch
+take", and inventing a citation would be worse than admitting there is none.
+The run now DECLARES them -- value, overriding key, and what each governs --
+for the ones in effect, so a reader can see which numbers rest on an
+assumption. B042 joins it: three different quantities were emitted under the
+name "the memory's bandwidth" (rank bus, aggregate, per-channel), differing
+by up to 16x on HBM3 with nothing saying whether that is the channel count
+doing its job. The three are now stated with their scopes and their
+reconciliation is checked.
+
+### Scope parity (B053-B058, B061, B059, B046, B049, B057)
+
+Six features existed in device scope and were inert in co-simulation:
+
+- B053: the placement never reached the array query, so the 1.11.25 tier
+  model was inert for every system-scope run and a SUBARRAY-placed and a
+  CHIP-placed PE were charged the identical access.
+- B054: pim.pe.bit_serial and pim.pe.issue_width were parsed into the global
+  config, which the system-scope emitter does not read -- a bit-serial
+  element was co-simulated as a parallel one (32x per-op cycles at
+  operand_width: 32).
+- B055: the "PEs at this tier require a memory controller" error could never
+  fire in system scope, because the flag it tested was a tautology.
+- B056: reportFpWithoutFpu returned at its first line even when hasFpu=false
+  had been emitted, so the contradiction it exists to surface was invisible
+  in exactly the scope that can configure it.
+- B058: setting devices[].noc.model overwrote every per-tier noc.levels
+  choice -- and did NOT when the key was absent, so the clobber depended on
+  an unrelated key being present.
+- B061: the PCIe cycle conversion used the top-level system clock while the
+  host cores that spend those cycles run at the reference clock. With the
+  reference co-sim that is a 1.5x understatement of every offload transfer.
+- B059: the on-DRAM-die node pin overwrote an invalid technology.node_nm
+  before the "unconditional" validator saw it, so a sweep over {22, 28, 32}
+  silently produced identical numbers at 22 and 28 for on-die placements --
+  the exact plateau 1.11.51 set out to remove.
+- B046: two core-type normalisers had already drifted; "compute_unit_pe" was
+  a valid element in one scope and a fatal error in the other. One function.
+- B049: noc.clock_mhz reads as a fabric override and sets the whole device
+  clock, overriding an explicit system.frequency_mhz because it is parsed
+  later. The effect stands (there is no separate NoC domain here) and the run
+  now says what moved.
+- B057: --print-mem-info answered from inside the argv loop, before any YAML
+  was read, so every config at a node other than 22 nm got a printed access
+  latency for 22 nm silicon -- and the composed co-sim driver copies that
+  number.
+
+### Report honestly (A012, A024-A031, C-block, D-block)
+
+- A012: the upper-level NoC fan-in ladder fell back to a literal ratio of 2
+  where the true ratios are the rank and channel counts. Live on every
+  analytical run, and it divides NoC area and leakage at the top two levels:
+  HBM3's channel level got 2x too few nodes and its system level 4x too many.
+- A029/D074: Refresh, Background and Leakage were printed as three peer lines
+  when they are one quantity -- Background CONTAINS refresh, and a DRAM
+  array's standby current IS its leakage. Adding them double-counts refresh
+  and doubles standby, about 2.1x. Now nested under Background and named.
+- A024: the gap-residency refusal was silent at both call sites, so on GDDR6
+  and HBM the reader could not tell "refused, no sourced tXP" from "applied
+  and agreed". A025: a parsed pipeline_duty_cycle override was echoed as
+  "[OVERRIDE from YAML]" and cannot reach McPAT, which derives the ratio
+  itself. A028: the power-down message named pim.mc.pg, a key 1.11.45 split
+  off and this branch has never read. A030: the printed pJ/bit band was the
+  table's even when an override replaced the value. A031: the per-die
+  factorisation beside the System Total described only the last technology
+  priced, so on a decoupled system it did not multiply out to the number in
+  front of it.
+- C002: the pcie_gen4 link energy took the midpoint of a band whose lower end
+  is a TX-only bound, not a full-link figure. The bound is excluded from the
+  applied value: 3.965 -> 6.0 pJ/bit.
+- C006: the L2/L3 duty cycles were unsourced fractions of a base that is
+  1.0 by construction. Measured now (accesses per cycle at that instance).
+  McPAT reads cache duty_cycle only on the TDP branch, so reported PEAK power
+  moves and runtime dynamic does not.
+- C032: the 1.11.29 "report only what the user defined" rule lived in the
+  printer and not in the total, so stub components left the breakdown and
+  stayed in the sum. One predicate for both; totals move down.
+- C036: an l1i with cache.l2.enabled: false emitted L2_config with a zero
+  capacity, which kills the McPAT child with exit 21. That config runs now.
+- C010/C014/C025/C027/C030/C033/C034/C017/C023/C003/C008: dead hooks removed,
+  false header contracts rewritten to describe what the code does, and
+  one-time warnings added where a constant could not be sourced.
+- D054: a hardcoded 1 GHz turned tool SECONDS into "cycles" in four places.
+  The models carry nanoseconds now; the legacy cycle-returning entry points
+  convert at one documented helper that states the 1 cycle/ns is the ABSENCE
+  of a clock, not an estimate of one.
+- D006/D037/D045/D046/D058/D062: an approximate IDD2P column under a header
+  claiming part-number sourcing; six DRAM generations printed as distinct
+  labels while all are characterized from the same 22 nm CACTI table; a
+  reset latency of write x 0.3; a hardcoded "30x read" printed over a
+  computed number; an inverted leakage basis; and a SET latency that silently
+  falls back to the generic write path on every cached characterization.
+- D073: the ASCII-only guardrail. The census was larger than the finding
+  stated -- 193 non-ASCII bytes in main.cpp alone. src/, include/,
+  benchmarks/, examples/ and docs/figures/ are now byte-clean outside
+  external/.
+
+### One part, one speed bin -- three more technologies (found by B042's check)
+
+B042's reconciliation check is the first thing in this release to find
+something the audit did not. It fired on HBM3: the rank bus reported 32 GB/s,
+the channel 512 GB/s, and the aggregate 819 GB/s over 16 channels, i.e. 51.2
+per channel. Two of those cannot both be a channel.
+
+The cause is D002's defect at three more technologies. A DRAM run has two
+sources of truth -- the Ramulator preset, which decides the CYCLES the
+simulator counts, and the architecture object, which decides every bandwidth
+it REPORTS -- and nothing held them together:
+
+  HBM2   architecture 2000 MT/s   preset HBM2_2.4Gbps    (1.2x)
+  DDR5   architecture 4800 MT/s   preset DDR5_3200AN     (1.5x)
+  HBM3   architecture 4000 MT/s   preset HBM3_6.4Gbps    (1.6x)
+
+Only DDR4 agreed. So a DDR5 device's reported mem.bandwidth -- the M/D/1
+service rate the timing model queues against -- described a part 1.5x faster
+than the one whose cycles were being counted, and since D064 that same rate
+also sets the hierarchy link ladder. The preset is the authority (it is what
+produces the cycles), so each architecture object now names the bin the tree
+actually simulates, with its core clock and burst time following. The ns
+timings are absolute and stay.
+
+A cross-check now runs at wrapper initialisation: channel width x data rate
+must reproduce the preset's aggregate, or the run says that it is counting
+one part and pricing another. A future preset change that forgets the
+architecture object fails there instead of quietly re-describing the part.
+
+B042's own check needed a second pass, for the same reason it was worth
+adding. Its first form compared the architecture object's "channel" bandwidth
+against rank x ranks_per_channel, which is a DDR reading: for HBM that field
+is the whole STACK (16 pseudo-channels of 64 bits) and the field called
+"rank" is one pseudo-channel. So it reported HBM3 as broken after the rate
+fix had already repaired it. The test is now the relation that holds whatever
+each tier is named -- aggregate == rank bus x ranks per channel x channels --
+which is also precisely the relation the speed-bin drift broke (HBM3:
+51.2 x 1 x 16 = 819.2 GB/s, against the preset's 819).
+
+### Data impact
+
+Number-moving, in rough order of size: the three speed-bin corrections
+change every reported bandwidth (and therefore the M/D/1 cap and the link
+ladder) for DDR5, HBM2 and HBM3; the hierarchy ladder and its clock domain
+(D064/D065/B051) change every hierarchy traversal on a DRAM device --
+measured 12.74M -> 13.14M cycles on the HBM3 reference cell, and 323395 ->
+349318 on the OoO device cell;
+B004 changes the M/D/1 cap of every SRAM/NVM cell; D031 changes NVM
+inner-bank latencies; C002 changes gen4 link energy by 1.51x; A012 changes
+NoC area and leakage on analytical runs; C006 changes reported peak power;
+C032 lowers system totals; B061 changes every co-sim offload transfer.
+The whole corpus needs re-simulation on this train, which was already the
+plan. B060, B058, B028 and C036 unblock configurations that previously
+misreported or refused to run; D032 turns a silent zero into a refusal.
+
+Gates 1166A, 1166B and 1166C.
+
 ## 1.11.55 -- the coherence flush stops charging for work it never did
 
 The F block of audit round 2 (zsim fork). The flush trio are one story: the

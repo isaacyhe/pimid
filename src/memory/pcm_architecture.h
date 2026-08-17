@@ -85,6 +85,12 @@ struct PCMTiming {
     double subarray_read_ns, bank_read_ns, chip_read_ns;
     double subarray_set_ns, bank_set_ns, chip_set_ns;
     double subarray_reset_ns, bank_reset_ns, chip_reset_ns;
+    /* 1.11.56 (audit D062): true when NVSim did not resolve
+     * FunctionUnit::setLatency and the *_set_ns fields therefore hold the
+     * GENERIC WRITE latency. getSetLatency() has no cached branch, so this is
+     * the normal state on a cache hit; without the flag the SET tier was
+     * attributed to a tool call that returned nothing. */
+    bool set_from_generic_write = false;
     PCMInnerBankTiming inner_bank;
 };
 

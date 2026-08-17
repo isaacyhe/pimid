@@ -220,9 +220,9 @@ double PIMControllerPlugin::getEffectiveBandwidthPerPE(PIMGranularity granularit
 }
 
 void PIMControllerPlugin::printStats() const {
-    std::cout << "\n╔══════════════════════════════════════════════════════════════════╗\n";
-    std::cout << "║ PIM Controller Plugin Statistics                                 ║\n";
-    std::cout << "╚══════════════════════════════════════════════════════════════════╝\n\n";
+    std::cout << "\n+==================================================================+\n";
+    std::cout << "| PIM Controller Plugin Statistics                                 |\n";
+    std::cout << "+==================================================================+\n\n";
 
     std::cout << "Total Cycles:          " << current_cycle_ << "\n";
     std::cout << "Total PIM Requests:    " << total_pim_requests_ << "\n";

@@ -85,7 +85,7 @@ enum class HBMLevel : int {
 /**
  * @brief Named level indices for NVM/SRAM hierarchy
  *
- * NVM and SRAM are monolithic — only L0 (subarray) and L1 (bank) are active.
+ * NVM and SRAM are monolithic -- only L0 (subarray) and L1 (bank) are active.
  * L2-L6 exist in the 7-level infrastructure but default to passthrough.
  */
 enum class NVMLevel : int {
@@ -368,6 +368,48 @@ public:
                                uint64_t data_bytes);
 
     /**
+     * @brief Same traversal, expressed in NANOSECONDS.
+     *
+     * 1.11.56 (audit B051): every level carries its own frequency_GHz, and
+     * DQ-side levels run at the data rate while the array side runs at the
+     * core clock. getTransferLatency() returns cycles OF THAT LEVEL, and the
+     * caller sums seven of them plus six bridge results into one integer it
+     * then hands to the timing model as PE cycles. That sum is only
+     * meaningful if every term is in the same clock, which they are not.
+     * This returns time, so the caller can convert once, at the PE clock.
+     */
+    double getTransferLatencyNs(NetworkLevel level,
+                                int source_id, int dest_id,
+                                uint64_t data_bytes);
+
+    /**
+     * @brief Bridge crossing time in NANOSECONDS (audit B051).
+     *
+     * A bridge spans two clock domains. The crossing is store-and-forward,
+     * so the serialisation cost is the SLOWER of ingest and egress, and the
+     * router pipeline is charged in the clock of the side it sits on.
+     * Pass -1 for any override to take the bridge's own value.
+     */
+    double getBridgeLatencyNs(int boundary, uint64_t data_bytes,
+                              int lower_width_override = -1,
+                              int upper_width_override = -1,
+                              double base_ns_override = -1.0,
+                              int router_latency_override = -1,
+                              int router_bypass_override = -1) const;
+
+    /**
+     * @brief Replace the per-level link widths and bandwidths with the ones
+     *        the DRAM architecture object reports (audit D064/D065).
+     *
+     * Widths are in bits at each tier's own port; bandwidths are GB/s. The
+     * level frequency is back-derived so width x frequency reproduces the
+     * given bandwidth exactly, which keeps the DQ-side levels at the data
+     * rate and the array side at the core clock without this class needing
+     * to know which is which. A non-positive entry leaves that level alone.
+     */
+    void applySourcedLadder(const int width_bits[7], const double bandwidth_GBs[7]);
+
+    /**
      * @brief Check if network can accept more packets
      * @param level Network level to check
      * @return true if queue depth is below limit, false if congested
@@ -489,7 +531,7 @@ public:
     /**
      * @brief Override link and router parameters for a specific hierarchy level.
      * Negative values or empty string = keep technology default.
-     * Bandwidth is auto-recomputed from width × frequency.
+     * Bandwidth is auto-recomputed from width x frequency.
      */
     void overrideLevelConfig(int level, int link_width_bits, double frequency_ghz,
                              int latency_cycles, const std::string& topology,
@@ -589,7 +631,7 @@ private:
     std::array<NetworkModelType, NUM_HIERARCHY_LEVELS> level_models_;
 
     // Bridge configurations for each tier boundary (6 boundaries for 7 tiers)
-    // bridges_[0] = L0↔L1, bridges_[1] = L1↔L2, ..., bridges_[5] = L5↔L6
+    // bridges_[0] = L0<->L1, bridges_[1] = L1<->L2, ..., bridges_[5] = L5<->L6
     std::array<BridgeConfig, NUM_TIER_BOUNDARIES> bridges_;
 
     // Bridge buffers for packets crossing tier boundaries
@@ -677,7 +719,7 @@ private:
     /**
      * @brief Get latency for routing within a single tier
      *
-     * SIMPLE: avg_hops × (router_latency + link_latency) + serialization + M/D/1 queuing
+     * SIMPLE: avg_hops x (router_latency + link_latency) + serialization + M/D/1 queuing
      * DETAILED: delegates to Garnet (returns 0, Garnet handles timing)
      */
     uint64_t getTierLatency(int level, const HierarchicalAddress& src,

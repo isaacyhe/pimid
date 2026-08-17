@@ -47,11 +47,11 @@ void PIMBandwidthTracker::initialize(int num_channels, int num_ranks,
     resetStats();
 
     std::cout << "PIM Bandwidth Tracker Initialized:\n";
-    std::cout << "  Subarray port: " << subarray_port_bits_ << " bits → "
+    std::cout << "  Subarray port: " << subarray_port_bits_ << " bits -> "
               << subarray_bw_limit_ << " GB/s\n";
-    std::cout << "  Bank port:     " << bank_port_bits_ << " bits → "
+    std::cout << "  Bank port:     " << bank_port_bits_ << " bits -> "
               << bank_bw_limit_ << " GB/s (CRITICAL BOTTLENECK!)\n";
-    std::cout << "  Rank port:     " << rank_port_bits_ << " bits → "
+    std::cout << "  Rank port:     " << rank_port_bits_ << " bits -> "
               << rank_bw_limit_ << " GB/s\n";
 }
 
@@ -268,9 +268,9 @@ void PIMBandwidthTracker::checkStatsWindow() {
 }
 
 void PIMBandwidthTracker::printStats() const {
-    std::cout << "\n╔══════════════════════════════════════════════════════════════════╗\n";
-    std::cout << "║ PIM Bandwidth Tracker Statistics                                 ║\n";
-    std::cout << "╚══════════════════════════════════════════════════════════════════╝\n\n";
+    std::cout << "\n+==================================================================+\n";
+    std::cout << "| PIM Bandwidth Tracker Statistics                                 |\n";
+    std::cout << "+==================================================================+\n\n";
 
     std::cout << "Total Requests:            " << total_requests_ << "\n";
     std::cout << "Bandwidth-Limited:         " << bandwidth_limited_requests_
@@ -281,7 +281,7 @@ void PIMBandwidthTracker::printStats() const {
               << total_bytes_transferred_ / (1024.0 * 1024) << " MB)\n\n";
 
     std::cout << "Requests per Granularity Level:\n";
-    std::cout << "────────────────────────────────\n";
+    std::cout << "--------------------------------\n";
     for (const auto& [granularity, count] : requests_per_level_) {
         PIMRequestPayload dummy;
         dummy.granularity = granularity;
@@ -291,7 +291,7 @@ void PIMBandwidthTracker::printStats() const {
     }
 
     std::cout << "\nPort Utilization:\n";
-    std::cout << "─────────────────\n";
+    std::cout << "-----------------\n";
     for (const auto& [key, usage] : bandwidth_usage_) {
         PIMRequestPayload dummy;
         dummy.granularity = key.first;
@@ -302,10 +302,12 @@ void PIMBandwidthTracker::printStats() const {
                   << usage.num_concurrent_pes << " PEs)\n";
     }
 
+    /* 1.11.56 (audit D073): the "<-" markers here and the unit arrows above
+     * were U+2192/U+2190, against the project's ASCII-only rule. Text only. */
     std::cout << "\nBandwidth Limits:\n";
-    std::cout << "─────────────────\n";
+    std::cout << "-----------------\n";
     std::cout << "  Subarray:      " << subarray_bw_limit_ << " GB/s\n";
-    std::cout << "  Bank:          " << bank_bw_limit_ << " GB/s  ← BOTTLENECK in DDR4!\n";
+    std::cout << "  Bank:          " << bank_bw_limit_ << " GB/s  <- BOTTLENECK in DDR4!\n";
     std::cout << "  Bank Group:    " << bank_group_bw_limit_ << " GB/s\n";
     std::cout << "  Chip:          " << chip_bw_limit_ << " GB/s\n";
     std::cout << "  Rank:          " << rank_bw_limit_ << " GB/s\n";

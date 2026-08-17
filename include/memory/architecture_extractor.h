@@ -7,11 +7,11 @@
  * using hard-coded values.
  *
  * INTEGRATION FLOW:
- *   External Model → Wrapper → Extractor → Architecture Spec
+ *   External Model -> Wrapper -> Extractor -> Architecture Spec
  *
- *   CACTI 7.0      → CACTIWrapper      → extractSRAMArchitecture()  → SRAMArchitecture
- *   NVSim          → NVSimWrapper      → extractNVMArchitecture()   → STTMRAMArchitecture
- *   Ramulator2     → RamulatorWrapper  → (uses DRAMArchitectureV2 directly)
+ *   CACTI 7.0      -> CACTIWrapper      -> extractSRAMArchitecture()  -> SRAMArchitecture
+ *   NVSim          -> NVSimWrapper      -> extractNVMArchitecture()   -> STTMRAMArchitecture
+ *   Ramulator2     -> RamulatorWrapper  -> (uses DRAMArchitectureV2 directly)
  *
  * VERSION: 1.0
  * DATE: January 2026
@@ -275,9 +275,13 @@ inline std::unique_ptr<STTMRAMArchitecture> extractSTTMRAMArchitecture(
      * network term is known; a caller that never supplies it reports
      * chip == bank, which is the correct floor rather than a guess. */
     /* 1.11.25 CORRECTION: this was the sum of five wrapper accessors that look
-     * like NVSim reads and are not -- getDecoderDelay() and friends return
-     * INVENTED percentages of mat.readLatency (10/20/45/15/5, summing to
-     * 0.95). Summing them replaced one invented multiplier with another.
+     * like NVSim reads and, at the time, were not -- getDecoderDelay() and
+     * friends returned INVENTED percentages of mat.readLatency (10/20/45/15/5,
+     * summing to 0.95). Summing them replaced one invented multiplier with
+     * another. (1.11.56, audit D031: those five now read NVSim's own component
+     * latencies, so the objection no longer applies to them -- but the direct
+     * subarray read below is still the right thing to use for a TIER, because
+     * it is the figure NVSim composed rather than a sum we compose.)
      * NVSim resolves the subarray directly (SubArray derives from
      * FunctionUnit; Mat holds one), so read it. <0 means unavailable --
      * notably on a cache hit, since the pregenerated NVSim cache predates
@@ -348,8 +352,31 @@ inline std::unique_ptr<STTMRAMArchitecture> extractSTTMRAMArchitecture(
     arch->energy.subarray_leakage_mw = nvsim_wrapper.getSenseAmpLeakage() /
                                         (arch->organization.banks_per_chip *
                                          arch->organization.subarrays_per_bank);
-    arch->energy.bank_leakage_mw = nvsim_wrapper.getLeakagePower() / arch->organization.banks_per_chip;
-    arch->energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower();
+    /* 1.11.56 (audit D058): ONE BASIS FOR NVSIM'S LEAKAGE, AND IT IS PER-BANK.
+     *
+     * This block used to read NVSim's figure as a WHOLE-CHIP number: chip =
+     * getLeakagePower(), bank = getLeakagePower() / banks_per_chip. main.cpp's
+     * device-power path reads the SAME call the other way round -- it asks
+     * NVSim for one 64 KB bank and then multiplies by config.num_banks -- so
+     * one run's stdout carried two leakage numbers for the same array that
+     * differed by the bank count, with nothing saying which was which.
+     *
+     * The per-bank reading is the correct one, and NVSim says so itself:
+     * getNumBanks() returns 1 with the comment "NVSim models a single bank",
+     * and every live caller hands NVSim the PER-BANK capacity (main.cpp sets
+     * setArrayCapacityBytes(PER_BANK_BYTES) = 64 KB before the plugin models
+     * characterize anything). NVSim reports the leakage of the array it was
+     * asked to model; that array is one bank. So the bank tier IS the tool's
+     * figure, undivided, and the chip tier is banks_per_chip of them.
+     *
+     * Numerically this is inert while banks_per_chip comes from getNumBanks()
+     * (it is 1, so chip == bank either way). It is fixed anyway because the
+     * previous form was a division by a count that could only ever be right by
+     * accident, and because the two sides of the report now state the same
+     * basis. */
+    arch->energy.bank_leakage_mw = nvsim_wrapper.getLeakagePower();
+    arch->energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower() *
+                                   arch->organization.banks_per_chip;
 
     arch->energy.energy_source = "NVSim extraction, " + arch->process_node;
 
@@ -512,9 +539,13 @@ inline std::unique_ptr<PCMArchitecture> extractPCMArchitecture(
      * DRAM-like: bank groups and ranks collapse to 1 and the chip-level
      * network is ours to specify). 1.25 and 1.5 were assertions. */
     /* 1.11.25 CORRECTION: this was the sum of five wrapper accessors that look
-     * like NVSim reads and are not -- getDecoderDelay() and friends return
-     * INVENTED percentages of mat.readLatency (10/20/45/15/5, summing to
-     * 0.95). Summing them replaced one invented multiplier with another.
+     * like NVSim reads and, at the time, were not -- getDecoderDelay() and
+     * friends returned INVENTED percentages of mat.readLatency (10/20/45/15/5,
+     * summing to 0.95). Summing them replaced one invented multiplier with
+     * another. (1.11.56, audit D031: those five now read NVSim's own component
+     * latencies, so the objection no longer applies to them -- but the direct
+     * subarray read below is still the right thing to use for a TIER, because
+     * it is the figure NVSim composed rather than a sum we compose.)
      * NVSim resolves the subarray directly (SubArray derives from
      * FunctionUnit; Mat holds one), so read it. <0 means unavailable --
      * notably on a cache hit, since the pregenerated NVSim cache predates
@@ -533,9 +564,20 @@ inline std::unique_ptr<PCMArchitecture> extractPCMArchitecture(
     // SET is slowest (crystallization), RESET is faster (amorphization)
     /* 1.11.23: SET is a path NVSim resolves (FunctionUnit::setLatency); it was
      * taken as the generic write latency and then inflated. */
+    /* 1.11.56 (audit D062): RECORD THE SUBSTITUTION. getSetLatency() has no
+     * cached_ branch, so it returns -1 on every cache hit -- and a cache hit is
+     * the normal path, since the pregenerated NVSim entries carry only the
+     * top-level figures. That meant the SET tier was almost always the generic
+     * write latency while tierLatencySource() went on reporting "NVSim
+     * FunctionUnit::setLatency" for it. The RESET branch below already
+     * collapses to SET out loud; SET's collapse to the write path was silent,
+     * which is the worse of the two failures: a run could not tell whether it
+     * was reading a resolved SET path or a substituted one. The flag is what
+     * the model prints and what tierLatencySource() attributes from. */
     {
         const double set_s = nvsim_wrapper.getSetLatency();
         const double set_ns = (set_s > 0.0) ? set_s * 1e9 : write_latency_ns;
+        arch->timing.set_from_generic_write = !(set_s > 0.0);
         arch->timing.bank_set_ns     = set_ns;
         arch->timing.subarray_set_ns = pcm_sub_read_ns;
         arch->timing.chip_set_ns     = set_ns;
@@ -618,8 +660,30 @@ inline std::unique_ptr<PCMArchitecture> extractPCMArchitecture(
     // Leakage
     arch->energy.subarray_leakage_mw = nvsim_wrapper.getSenseAmpLeakage() /
                                         (num_banks * arch->organization.mats_per_bank);
-    arch->energy.bank_leakage_mw = nvsim_wrapper.getLeakagePower() / num_banks;
-    arch->energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower();
+    /* 1.11.56 (audit D058): ONE BASIS FOR NVSIM'S LEAKAGE, AND IT IS PER-BANK.
+     *
+     * This block used to read NVSim's figure as a WHOLE-CHIP number: chip =
+     * getLeakagePower(), bank = getLeakagePower() / banks_per_chip. main.cpp's
+     * device-power path reads the SAME call the other way round -- it asks
+     * NVSim for one 64 KB bank and then multiplies by config.num_banks -- so
+     * one run's stdout carried two leakage numbers for the same array that
+     * differed by the bank count, with nothing saying which was which.
+     *
+     * The per-bank reading is the correct one, and NVSim says so itself:
+     * getNumBanks() returns 1 with the comment "NVSim models a single bank",
+     * and every live caller hands NVSim the PER-BANK capacity (main.cpp sets
+     * setArrayCapacityBytes(PER_BANK_BYTES) = 64 KB before the plugin models
+     * characterize anything). NVSim reports the leakage of the array it was
+     * asked to model; that array is one bank. So the bank tier IS the tool's
+     * figure, undivided, and the chip tier is banks_per_chip of them.
+     *
+     * Numerically this is inert while banks_per_chip comes from getNumBanks()
+     * (it is 1, so chip == bank either way). It is fixed anyway because the
+     * previous form was a division by a count that could only ever be right by
+     * accident, and because the two sides of the report now state the same
+     * basis. */
+    arch->energy.bank_leakage_mw = nvsim_wrapper.getLeakagePower();
+    arch->energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower() * num_banks;
 
     arch->energy.energy_source = "NVSim extraction, " + arch->process_node + " PCM";
 
@@ -745,9 +809,13 @@ inline std::unique_ptr<ReRAMArchitecture> extractReRAMArchitecture(
     if (read_latency_ns <= 0) read_latency_ns = 5.0;  // ReRAM typical
     /* 1.11.23: same tier correction (see the STT-MRAM block). */
     /* 1.11.25 CORRECTION: this was the sum of five wrapper accessors that look
-     * like NVSim reads and are not -- getDecoderDelay() and friends return
-     * INVENTED percentages of mat.readLatency (10/20/45/15/5, summing to
-     * 0.95). Summing them replaced one invented multiplier with another.
+     * like NVSim reads and, at the time, were not -- getDecoderDelay() and
+     * friends returned INVENTED percentages of mat.readLatency (10/20/45/15/5,
+     * summing to 0.95). Summing them replaced one invented multiplier with
+     * another. (1.11.56, audit D031: those five now read NVSim's own component
+     * latencies, so the objection no longer applies to them -- but the direct
+     * subarray read below is still the right thing to use for a TIER, because
+     * it is the figure NVSim composed rather than a sum we compose.)
      * NVSim resolves the subarray directly (SubArray derives from
      * FunctionUnit; Mat holds one), so read it. <0 means unavailable --
      * notably on a cache hit, since the pregenerated NVSim cache predates
@@ -839,8 +907,30 @@ inline std::unique_ptr<ReRAMArchitecture> extractReRAMArchitecture(
     // Leakage
     arch->energy.subarray_leakage_mw = nvsim_wrapper.getSenseAmpLeakage() /
                                         (num_banks * arch->organization.subarrays_per_bank);
-    arch->energy.bank_leakage_mw = nvsim_wrapper.getLeakagePower() / num_banks;
-    arch->energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower();
+    /* 1.11.56 (audit D058): ONE BASIS FOR NVSIM'S LEAKAGE, AND IT IS PER-BANK.
+     *
+     * This block used to read NVSim's figure as a WHOLE-CHIP number: chip =
+     * getLeakagePower(), bank = getLeakagePower() / banks_per_chip. main.cpp's
+     * device-power path reads the SAME call the other way round -- it asks
+     * NVSim for one 64 KB bank and then multiplies by config.num_banks -- so
+     * one run's stdout carried two leakage numbers for the same array that
+     * differed by the bank count, with nothing saying which was which.
+     *
+     * The per-bank reading is the correct one, and NVSim says so itself:
+     * getNumBanks() returns 1 with the comment "NVSim models a single bank",
+     * and every live caller hands NVSim the PER-BANK capacity (main.cpp sets
+     * setArrayCapacityBytes(PER_BANK_BYTES) = 64 KB before the plugin models
+     * characterize anything). NVSim reports the leakage of the array it was
+     * asked to model; that array is one bank. So the bank tier IS the tool's
+     * figure, undivided, and the chip tier is banks_per_chip of them.
+     *
+     * Numerically this is inert while banks_per_chip comes from getNumBanks()
+     * (it is 1, so chip == bank either way). It is fixed anyway because the
+     * previous form was a division by a count that could only ever be right by
+     * accident, and because the two sides of the report now state the same
+     * basis. */
+    arch->energy.bank_leakage_mw = nvsim_wrapper.getLeakagePower();
+    arch->energy.chip_leakage_mw = nvsim_wrapper.getLeakagePower() * num_banks;
 
     arch->energy.energy_source = "NVSim extraction, " + arch->process_node + " ReRAM";
 
@@ -993,7 +1083,7 @@ inline std::unique_ptr<DRAMArchitectureV2> extractDRAMArchitecture(
     arch->datapath.rank_databus_bits = {
         rank_bits,
         VerificationStatus::VERIFIED,
-        "Calculated from chips_per_rank × chip_io_bits",
+        "Calculated from chips_per_rank x chip_io_bits",
         "First wide interface in DDR hierarchy"
     };
 

@@ -21,8 +21,8 @@ void example_vn_vs_vc_explanation() {
     auto ddr4 = createInternalDRAMNetwork("DDR4", 16, 4, 4, 8);
     ddr4->enableGarnetSimulation(true);
 
-    std::cout << "\n🔴 IMPORTANT CORRECTION:\n";
-    std::cout << "Virtual Networks (VN) ≠ Virtual Channels (VC)\n\n";
+    std::cout << "\n[*] IMPORTANT CORRECTION:\n";
+    std::cout << "Virtual Networks (VN) != Virtual Channels (VC)\n\n";
 
     std::cout << "Default DRAM configuration:\n";
     std::cout << "  Virtual Networks (VN): 2\n";
@@ -32,17 +32,17 @@ void example_vn_vs_vc_explanation() {
     std::cout << "  Virtual Channels per VN: 1\n";
     std::cout << "    - 1 VC per VN (no deadlock in tree topology)\n\n";
 
-    std::cout << "  Total VCs: 2 (2 VNs × 1 VC/VN)\n\n";
+    std::cout << "  Total VCs: 2 (2 VNs x 1 VC/VN)\n\n";
 
     std::cout << "Why 2 VNs (not 2 VCs):\n";
-    std::cout << "  ✅ Separates read/write message classes\n";
-    std::cout << "  ✅ Models separate DRAM datapaths\n";
-    std::cout << "  ✅ Prevents protocol-level deadlock\n\n";
+    std::cout << "  [OK] Separates read/write message classes\n";
+    std::cout << "  [OK] Models separate DRAM datapaths\n";
+    std::cout << "  [OK] Prevents protocol-level deadlock\n\n";
 
     std::cout << "Why 1 VC per VN:\n";
-    std::cout << "  ✅ H-trees are acyclic (deadlock-free)\n";
-    std::cout << "  ✅ No need for escape VCs\n";
-    std::cout << "  ✅ Minimal complexity for DRAM\n";
+    std::cout << "  [OK] H-trees are acyclic (deadlock-free)\n";
+    std::cout << "  [OK] No need for escape VCs\n";
+    std::cout << "  [OK] Minimal complexity for DRAM\n";
 }
 
 /**
@@ -63,7 +63,7 @@ void example_multiclass_vns() {
     std::cout << "  VN 3: Low-priority writes (background)\n\n";
 
     std::cout << "  VCs per VN: 1 (still deadlock-free in tree)\n";
-    std::cout << "  Total VCs: 4 (4 VNs × 1 VC/VN)\n\n";
+    std::cout << "  Total VCs: 4 (4 VNs x 1 VC/VN)\n\n";
 
     std::cout << "Use case: QoS-aware PIM with priority classes\n";
     std::cout << "- VNs 0-1: Real-time traffic (guaranteed BW)\n";
@@ -86,7 +86,7 @@ void example_graphics_vcs() {
     // VC 1: Frame buffer writes (latency-sensitive)
     // (Future: Could add more VCs for compute, Z-buffer, etc.)
 
-    std::cout << "✅ GDDR6 with texture/framebuffer VC separation\n";
+    std::cout << "[OK] GDDR6 with texture/framebuffer VC separation\n";
 }
 
 /**
@@ -144,7 +144,7 @@ void example_vc_contention_benefit() {
     hbm2->sendPacket(read_packet);
     hbm2->sendPacket(write_packet);
 
-    std::cout << "✅ VCs prevent head-of-line blocking\n";
+    std::cout << "[OK] VCs prevent head-of-line blocking\n";
     std::cout << "   Read and write packets proceed independently\n";
 }
 
@@ -155,12 +155,12 @@ void explain_vc_mechanism() {
     std::cout << "\n=== How VCs Work in GARNET H-Tree ===\n\n";
 
     std::cout << "1. Packet Injection:\n";
-    std::cout << "   - Packet assigned to VC based on type (read→VC0, write→VC1)\n";
+    std::cout << "   - Packet assigned to VC based on type (read->VC0, write->VC1)\n";
     std::cout << "   - Each VC has independent input buffer\n\n";
 
     std::cout << "2. Router Pipeline:\n";
     std::cout << "   RC (Route Computation):  Determine output port\n";
-    std::cout << "   VA (VC Allocation):      Allocate output VC ← VCs assigned here!\n";
+    std::cout << "   VA (VC Allocation):      Allocate output VC <- VCs assigned here!\n";
     std::cout << "   SA (Switch Allocation):  Compete for crossbar\n";
     std::cout << "   ST (Switch Traversal):   Transfer flit\n\n";
 
@@ -170,10 +170,10 @@ void explain_vc_mechanism() {
     std::cout << "   - Prevents buffer overflow\n\n";
 
     std::cout << "4. Benefits:\n";
-    std::cout << "   ✅ No head-of-line blocking between VCs\n";
-    std::cout << "   ✅ QoS support (priority VCs)\n";
-    std::cout << "   ✅ Deadlock avoidance (escape VCs)\n";
-    std::cout << "   ✅ Traffic isolation (separate classes)\n";
+    std::cout << "   [OK] No head-of-line blocking between VCs\n";
+    std::cout << "   [OK] QoS support (priority VCs)\n";
+    std::cout << "   [OK] Deadlock avoidance (escape VCs)\n";
+    std::cout << "   [OK] Traffic isolation (separate classes)\n";
 }
 
 int main() {
@@ -193,10 +193,10 @@ int main() {
     std::cout << "\n============================================\n";
     std::cout << "Key Takeaways:\n";
     std::cout << "============================================\n";
-    std::cout << "1. VN ≠ VC!\n";
+    std::cout << "1. VN != VC!\n";
     std::cout << "   - VN = Message classes (read vs write)\n";
     std::cout << "   - VC = Deadlock avoidance within VN\n\n";
-    std::cout << "2. DRAM default: 2 VNs × 1 VC/VN = 2 total VCs\n";
+    std::cout << "2. DRAM default: 2 VNs x 1 VC/VN = 2 total VCs\n";
     std::cout << "   - VN0: Read traffic\n";
     std::cout << "   - VN1: Write traffic\n\n";
     std::cout << "3. Router pipeline: MINIMAL (1-stage mux)\n";

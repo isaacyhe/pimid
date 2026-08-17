@@ -76,8 +76,15 @@ private:
         uint32_t banks;
         uint32_t read_write_ports;
         uint32_t tech_node_nm;
-        Cycle read_latency;
-        Cycle write_latency;  // Fast writes (5-20ns)
+        /* 1.11.56 (audit D054): NANOSECONDS, and named so. These were `Cycle`,
+         * filled from NVSim under a comment reading "assumes 1 GHz: 1 ns = 1
+         * cycle" -- but NVSim returns SECONDS and this model has no clock to
+         * convert them with (nothing here ever reads a frequency). The 1 GHz
+         * was the absence of a clock, not an estimate of one, and initialize()
+         * then printed the result as "cycles", wrong by the clock ratio at the
+         * sweep's 1-2 GHz PE clocks. Carry the time the tool reported. */
+        double read_latency_ns;
+        double write_latency_ns;  // Fast writes (5-20 ns)
         Cycle analog_compute_latency;  // Matrix-vector multiply
         uint64_t endurance;
         bool analog_capable;

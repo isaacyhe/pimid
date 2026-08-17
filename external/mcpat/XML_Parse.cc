@@ -93,7 +93,15 @@ void ParseXML::parse(char* filepath)
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_pitch")==0) {sys.dram_periph_pitch=atof(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_dyn")==0) {sys.dram_periph_dyn=atof(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_leak")==0) {sys.dram_periph_leak=atof(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
-		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"dram_periph_scope")==0) {sys.dram_periph_scope=atoi(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
+		/* PIMID 1.11.56 (audit C010): the dram_periph_scope parse hook is
+		 * GONE. Nothing emitted the parameter (the wrapper stopped writing
+		 * it) and nothing read the field (processor.cc records that the
+		 * mask was removed), so this line parsed an attribute no XML
+		 * carried into a field no code consulted. A dead parse hook with a
+		 * default of 0 is worse than nothing: if anything ever read it as
+		 * the bitmask its declaration described, 0 means "transform
+		 * nothing", the exact opposite of the literal 15 the wrapper used
+		 * to emit. */
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"opt_dynamic_power")==0) {sys.opt_dynamic_power=(bool)atoi(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"opt_lakage_power")==0) {sys.opt_lakage_power=(bool)atoi(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
 		if (strcmp(xNode2.getChildNode("param",i).getAttribute("name"),"opt_clockrate")==0) {sys.opt_clockrate=(bool)atoi(xNode2.getChildNode("param",i).getAttribute("value"));continue;}
@@ -1856,7 +1864,8 @@ void ParseXML::initialize() //Initialize all
 	sys.core_pitch_factor=1.0;   /* PIMID 1.11.51 (N1) */
 	sys.dram_periph_gate_leak=1.0;   /* PIMID 1.11.54 (E004) */
 	sys.dram_periph_dyn=1.0;  sys.dram_periph_leak=1.0;
-	sys.dram_periph_scope=0;
+	/* PIMID 1.11.56 (audit C010): dram_periph_scope's default is gone with
+	 * the field itself -- see the parse loop above. */
 	sys.pcie.link_pj_per_bit=0;
 	//system_flash_controller
 	sys.flashc.mc_clock =1;

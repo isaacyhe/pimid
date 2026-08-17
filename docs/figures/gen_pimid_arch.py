@@ -42,16 +42,16 @@ def arrow(x1,y1,x2,y2,color=EDGE,lw=2.0,ls="-",style="-|>",mut=16,z=7):
 # ===== TOP INPUT BAND =====
 box(4,91.2,42,5.4,fc=C_IN,lw=1.4)
 txt(25,94.6,"Configuration File (YAML)",fs=12,bold=True)
-txt(25,92.3,"engines · PE placement · memory technology · network · power",fs=8.8)
+txt(25,92.3,"engines . PE placement . memory technology . network . power",fs=8.8)
 box(54,91.2,42,5.4,fc=C_IN,lw=1.4)
 txt(75,94.6,"Workloads  (Shared Memory / Message Passing)",fs=11,bold=True)
-txt(75,92.3,"µkernels · BabelStream · Rodinia · NPB · SPLASH-3 · PARSEC",fs=8.8)
+txt(75,92.3,"ukernels . BabelStream . Rodinia . NPB . SPLASH-3 . PARSEC",fs=8.8)
 arrow(25,90.9,25,89.5,color=ORG,lw=1.8,mut=9); arrow(75,90.9,75,89.5,color=ORG,lw=1.8,mut=9)
 
 # ===== SINGLE-PROCESS WRAPPER =====
 ax.add_patch(FancyBboxPatch((3.5,64.5),93,24.7,boxstyle="round,pad=0.02,rounding_size=0.6",
              fc="#fbfbfb",ec=BLU,lw=1.7,ls=(0,(6,3)),zorder=1))
-txt(50,88.3,"Single simulation process — host & device accounting domains  (QEMU user-mode + ZSim)",
+txt(50,88.3,"Single simulation process -- host & device accounting domains  (QEMU user-mode + ZSim)",
     fs=11.5,bold=True,color=BLU,va="top")
 
 # ---------- HOST ENGINE ----------
@@ -71,7 +71,7 @@ txt(76.5,84.30,"Device Simulation Engine",fs=13.5,bold=True,color=GRN)
 cxd=[62.6,71.9,81.2,90.5]
 for cx in cxd: box(cx-3.8,79.64,7.6,3.0,"PE",fc=C_PE,fs=10.5,bold=True)
 txt(76.5,77.74,"pe_type:  ooo / in-order / simple / alu / null",fs=9.0,it=True,color=GRN)
-txt(76.5,76.04,"placement:  subarray ▸ bank ▸ bank-group ▸ chip ▸ rank ▸ channel ▸ logic-die",fs=7.6,bold=True,color=GRN)
+txt(76.5,76.04,"placement:  subarray > bank > bank-group > chip > rank > channel > logic-die",fs=7.6,bold=True,color=GRN)
 box(59.5,66.84,17,7.5,fc=C_SUBD,lw=1.4)
 txt(68.0,72.39,"Address Translation",fs=9.4,bold=True); txt(68.0,70.59,"TLB + page table",fs=8.0,it=True,color=GRN); txt(68.0,68.79,"unified / discrete",fs=8.0,it=True,color=GRN)
 box(77.5,66.84,16.5,7.5,fc=C_SUBD,lw=1.4)
@@ -85,10 +85,10 @@ arrow(45.9,82.9,42.6,82.9,color=MUTE,lw=1.6,style="<|-|>",mut=11)
 arrow(54.1,82.9,57.4,82.9,color=MUTE,lw=1.6,style="<|-|>",mut=11)
 txt(gx,78.66,"offload region (ROI)",fs=9.6,bold=True,color=BLU)
 arrow(43.0,75.16,57.0,75.16,color=BLU,lw=2.4,mut=15)
-txt(gx,76.56,"host → device",fs=8.0,it=True,color=BLU)
+txt(gx,76.56,"host -> device",fs=8.0,it=True,color=BLU)
 arrow(57.0,71.46,43.0,71.46,color=BLU,lw=2.4,mut=15)
-txt(gx,72.86,"device → host",fs=8.0,it=True,color=BLU)
-txt(gx,67.9,"H/D transfers are charged on\nlink + memory models\n(PCIe · CXL ·\nNVLink-class · interposer)",fs=6.4,color=ORG,bold=True)
+txt(gx,72.86,"device -> host",fs=8.0,it=True,color=BLU)
+txt(gx,67.9,"H/D transfers are charged on\nlink + memory models\n(PCIe . CXL .\nNVLink-class . interposer)",fs=6.4,color=ORG,bold=True)
 
 # arrows to modeling infrastructure
 arrow(23.5,64.2,23.5,62.8,color=EDGE,lw=1.8,mut=9)

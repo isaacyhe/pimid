@@ -436,10 +436,45 @@ double CACTIWrapper::vendorArrayFraction(const std::string& tech) {
     return -1.0;   // not sourced yet; see docs/power.md
 }
 
+/* 1.11.56 (audit D037): SAY THAT THE CLASSES COLLAPSE ONTO ONE TABLE.
+ *
+ * These two functions are read together (main.cpp's getDRAMGenClass) and the
+ * pair was printed as though it described two independent facts: a per-
+ * technology generation class -- 1x, 1y, 1y/1z, 1a, 1a/1b -- next to a CACTI
+ * table nm. It does not. CACTI carries DRAM columns at 32 nm and 22 nm and
+ * nothing between, so every generation from DDR4's 1x through HBM3's 1a/1b is
+ * characterized from the SAME 22 nm table; only DDR3 lands anywhere else. A
+ * log line reading "class 1a ... factors from CACTI 22nm hp/comm-dram columns"
+ * therefore asserts a distinct process that the run does not have: DDR5 "1a"
+ * and HBM2 "1y" are the same silicon as far as anything computed here is
+ * concerned.
+ *
+ * The class string stays -- it is a real vendor label, and main.cpp uses it to
+ * report the generation's own 2F array pitch, which IS generation-specific --
+ * but the collapse is now announced once, where the table is chosen, so the
+ * reader of a log is not left to infer that six labels mean six characterized
+ * nodes. The absolute scale is divided out by the JEDEC k-calibration
+ * (1.11.1); what the table choice supplies is the structure response, which is
+ * why one table across five classes is workable and not merely tolerated. */
 int CACTIWrapper::generationTableNm(const std::string& tech) {
-    return (tech == "DDR3") ? 32 : 22;
+    const int table_nm = (tech == "DDR3") ? 32 : 22;
+    static bool announced = false;
+    if (!announced) {
+        announced = true;
+        std::cerr << "[dram] NOTE: CACTI's DRAM columns exist at 32 nm and "
+                     "22 nm only. Every generation class from 1x to 1a/1b is "
+                     "characterized from the SAME 22 nm table (DDR3's 3x/2x "
+                     "from the 32 nm one), so a printed generation class names "
+                     "the die generation the vendor sells, NOT a node this run "
+                     "simulated separately. '" << tech << "' -> CACTI "
+                  << table_nm << " nm." << std::endl;
+    }
+    return table_nm;
 }
 
+/* The vendor generation label. Distinct per technology, and used for the
+ * generation's own feature size (2F array pitch); NOT a distinct simulated
+ * node -- see generationTableNm() above. */
 const char* CACTIWrapper::generationClass(const std::string& tech) {
     if (tech == "DDR3")   return "3x/2x";
     if (tech == "DDR4")   return "1x";

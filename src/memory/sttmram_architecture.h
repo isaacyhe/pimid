@@ -6,7 +6,7 @@
  * parameters based on NVSim models and research papers.
  *
  * HIERARCHY:
- * Chip → Bank → Subarray → MTJ Cell Array
+ * Chip -> Bank -> Subarray -> MTJ Cell Array
  *
  * KEY CHARACTERISTICS:
  * - Non-volatile (retains data without power)

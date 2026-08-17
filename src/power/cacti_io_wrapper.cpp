@@ -151,11 +151,16 @@ LinkIOResult CactiIOWrapper::computeLink(const std::string& link_type,
      * of single value that is legitimately a constant. */
     g_ip->ron_value    = 50.0;   // TX output impedance, single-ended
     g_ip->rtt_value    = 50.0;   // RX termination, single-ended -> 100 ohm diff
-    /* Time of flight depends on CHANNEL LENGTH, which no link type fixes. The
-     * Serial parameter set carries its own default; only override it when the
-     * caller knows the geometry. Left at whatever CACTI-IO's table holds so a
-     * length is never silently invented here. */
-    if (g_ip->tflight_value <= 0.0) g_ip->tflight_value = 1.0;  // ns, stated
+    /* Time of flight depends on CHANNEL LENGTH, which no link type fixes.
+     * 1.11.56 (audit C023): the same false guard as the DRAM path had, and
+     * for the same reason -- s_io_ip is reset to a default-constructed
+     * InputParameter a few lines up and io.cc zeroes tflight_value there, so
+     * the `if (<= 0.0)` was always true. The old comment said the value was
+     * "left at whatever CACTI-IO's table holds so a length is never silently
+     * invented here", and then invented one. There is no caller-supplied
+     * geometry on this entry point, so 1.0 ns is simply what every serial
+     * evaluation uses; it is stated rather than dressed as a fallback. */
+    g_ip->tflight_value = 1.0;  // ns, unconditional and unsourced
     g_ip->activity_dq  = duty_cycle;
     g_ip->activity_ca  = 0.0;
     /* CACTI-IO takes frequency in MHz; a serial lane's signalling rate is its
@@ -432,12 +437,27 @@ LinkIOResult CactiIOWrapper::computeDramIO(const std::string& tech,
     g_ip->num_channels_per_bob = 1;
     if (g_ip->capacity <= 0) g_ip->capacity = 8;
     /* Driver and termination impedances: CACTI-IO reads these from g_ip and
-     * upstream marks them //FIXME. JEDEC ODT settings for a DDR4 UDIMM are
-     * 34 ohm driver / 60 ohm termination; used only when the caller left them
-     * unset, and stated so the value is never silently in force. */
-    if (g_ip->ron_value <= 0.0)     g_ip->ron_value = 34.0;
-    if (g_ip->rtt_value <= 0.0)     g_ip->rtt_value = 60.0;
-    if (g_ip->tflight_value <= 0.0) g_ip->tflight_value = 0.5;
+     * upstream marks them //FIXME. These are the JEDEC ODT settings for a
+     * DDR4 UDIMM: 34 ohm driver, 60 ohm termination, 0.5 ns flight time.
+     *
+     * 1.11.56 (audit C023): the guards are GONE and the comment no longer
+     * claims they are conditional. It said "used only when the caller left
+     * them unset", which was true of nothing: computeDramIO()'s signature has
+     * no path for a caller to set them, and s_dram_ip is reset to a
+     * default-constructed InputParameter at the top of this function (io.cc's
+     * constructor zeroes all three), so `if (<= 0.0)` was always true and the
+     * three assignments always fired. Writing them plainly is the same
+     * behaviour with an honest description.
+     *
+     * WHERE THEY ACTUALLY LAND, which the old wording also obscured: only
+     * the DDR3/DDR4 parameter sets read g_ip for these, so DDR3, DDR4, DDR5
+     * and GDDR6 are priced with a 34 ohm driver, a 60 ohm second termination
+     * and a 0.5 ns flight time in every run. The LPDDR2 and WideIO branches
+     * (extio_technology.cc) hardcode their own and never look at g_ip, so
+     * for LPDDR5 and HBM2/HBM3 these three lines do nothing at all. */
+    g_ip->ron_value     = 34.0;
+    g_ip->rtt_value     = 60.0;
+    g_ip->tflight_value = 0.5;
 
     double freq_mhz = g_ip->bus_freq;
     const double kFitMaxMHz = 8000.0;

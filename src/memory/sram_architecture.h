@@ -6,7 +6,7 @@
  * SRAM is typically used for on-chip caches (L1/L2/L3/LLC).
  *
  * HIERARCHY:
- * Chip → Bank → Mat → Subarray → 6T Cell Array
+ * Chip -> Bank -> Mat -> Subarray -> 6T Cell Array
  *
  * KEY DIFFERENCES from DRAM:
  * - No memory controller / rank levels (on-chip)
