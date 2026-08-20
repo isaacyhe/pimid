@@ -1333,20 +1333,35 @@ void InternalDRAMNetwork::tick() {
 uint64_t InternalDRAMNetwork::getTransferLatency(NetworkLevel level,
                                                  int source_id, int dest_id,
                                                  uint64_t data_bytes) {
+    /* 1.11.60 (audit round 4, B017): ONE implementation, ONE answer.
+     *
+     * This used to be a second, independent copy of the crossing cost --
+     * hops x (router + fixed) + serialisation -- and 1.11.59's B014 change
+     * landed on the ns twin only. From that release the two functions gave
+     * different answers to the same question: at a zero-hop tier (bus,
+     * crossbar or a single node, which for a DDR part is six of the seven
+     * levels) the ns form charges the fixed term once and this one charged it
+     * not at all, so they differed by the WHOLE fixed term -- DDR4 L0 would
+     * return 2 cycles here against the ns form's equivalent of 8.
+     *
+     * It was invisible, and is LATENT rather than live, because every consumer
+     * of the cycles form is currently unreachable: calculateNetworkRequirements
+     * and executeScatter have no callers outside this file, and the
+     * PIMControllerPlugin path is constructed only from enablePIMSupport(),
+     * which ramulator_wrapper.cpp records as having no callers either. Nothing
+     * measures the disagreement, so nothing could report it. Rather than
+     * re-apply the change twice and leave a third divergence available, the
+     * cycles form is now the ns form divided by the clock those cycles belong
+     * to -- the level's own frequency, which is the clock the per-hop and
+     * serialisation terms were counted in. At a level with no stated frequency
+     * the ns form's own 1.0 GHz fallback makes the two numerically identical,
+     * which is what this function always assumed. */
     int idx = levelToIndex(level);
     const InternalNetworkLink& link = network_configs_[idx];
+    double f_ghz = link.frequency_GHz > 0.0 ? link.frequency_GHz : 1.0;
 
-    // Topology-aware static latency estimate
-    double hops = avgHops(link.topology, link.num_nodes);
-
-    int per_hop_router = link.router_latency;
-    if (hops <= 1.0 && link.router_bypass && per_hop_router > 1)
-        per_hop_router = std::max(1, per_hop_router - 1);
-
-    double per_hop = static_cast<double>(per_hop_router + link.latency_cycles);
-    double serialization = std::ceil(static_cast<double>(data_bytes) * 8.0 /
-                                     link.link_width_bits);
-    uint64_t base = static_cast<uint64_t>(std::ceil(hops * per_hop + serialization));
+    double ns = getTransferLatencyNs(level, source_id, dest_id, data_bytes);
+    uint64_t base = static_cast<uint64_t>(std::ceil(ns * f_ghz));
     if (base == 0) base = 1;
     return base;
 }

@@ -90,7 +90,13 @@ static inline HierPos unitToHierPos(uint32_t unit_id, uint32_t placement,
             break;
         }
         case 5: pos.channel = unit_id; break;  // CHANNEL
-        case 6: pos.system = unit_id; break;    // SYSTEM
+        /* 1.11.60 (audit round 4, D005): level 6 is the emitter's LOGIC_DIE
+         * ("SYSTEM" here is this file's older name for the same tier, the top
+         * of the in-stack tree). Recorded because the naming difference read
+         * as a level this file knew about and pe_memory_interface.h did not,
+         * which is exactly how LOGIC_DIE ended up with no case in the row
+         * model's switch. Decoding is unchanged. */
+        case 6: pos.system = unit_id; break;    // SYSTEM == LOGIC_DIE
         default: pos.bank = unit_id; break;
     }
     return pos;

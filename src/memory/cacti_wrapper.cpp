@@ -135,7 +135,15 @@ void CACTIWrapper::validateConfiguration() {
      * rule is 300-400 K in steps of 10 and it EXITS the process when broken,
      * so an out-of-window value is not a bad number, it is a dead run with no
      * message from us. Refuse it here, where the caller can be told which
-     * field and which unit. Cannot fire today: nothing sets the field. */
+     * field and which unit.
+     * 1.11.60 (audit round 4, C012): the sentence that stood here -- "Cannot
+     * fire today: nothing sets the field" -- was false when written. Five
+     * sites set it (main.cpp's four CACTI query paths and SRAMModel::
+     * initialize()), all from 1.11.52's D055 work. What holds is narrower:
+     * every path THROUGH main.cpp is safe, because power.temperature_k is
+     * range-validated to 300-400 in steps of 10 upstream. SRAMModel::
+     * setTemperatureK() is not -- it accepts any k > 0 and forwards it -- so
+     * this guard is reachable from a direct user of the model class. */
     if (config_.temperature < 300 || config_.temperature > 400 ||
         (config_.temperature % 10) != 0) {
         valid_ = false;

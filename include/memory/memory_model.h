@@ -63,7 +63,24 @@ public:
      * term to a picojoule or nanojoule dynamic sum, then returned the result
      * under this header's nanojoule contract. Members are normalised to
      * nJ/access at assignment and getTotalEnergy() returns nanojoules.
-     * A polymorphic consumer is now safe. */
+     * A polymorphic consumer is now safe.
+     *
+     * 1.11.60 (audit round 4, C003): THAT LAST SENTENCE WAS PREMATURE, and it
+     * is true now. 1.11.58 changed two of the three quantities this paragraph
+     * lists -- the NVM density and the leakage unit -- and declared the third,
+     * DRAMModel's accumulating total, closed along with them. It was not:
+     * DRAMModel::getReadEnergy() still returned the wrapper's cumulative
+     * total_reads_ x per-access, copied in on every tick(), and its
+     * resetStats() zeroed it, which is accumulating-total behaviour and not
+     * per-access behaviour. So the contract paragraph asserted a property of
+     * an implementation that did not hold it, which is worse than the original
+     * silence: a reader who trusted this text would have had DRAM's read
+     * energy grow without bound while the three NVM models returned a
+     * constant. DRAMModel now takes the wrapper's INTENSIVE
+     * getArrayReadEnergyNJ()/getArrayWriteEnergyNJ() and does its own
+     * accumulation inside getTotalEnergy(). All four obey; the claim is
+     * checked against each of the four rather than inferred from the release
+     * that changed two of them. */
     virtual double getReadEnergy() const = 0;
     virtual double getWriteEnergy() const = 0;
     virtual double getLeakagePower() const = 0;

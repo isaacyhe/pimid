@@ -37,7 +37,14 @@ public:
     bool canAccept(const MemoryRequest& req) override;
     void tick() override;
 
-    // Energy modeling
+    /* Energy modeling.
+     * 1.11.60 (audit round 4, C003): NANOJOULES PER ACCESS, as
+     * memory_model.h's contract requires. These two returned a cumulative
+     * running total until 1.11.60 -- the wrapper's total_reads_ x per-access,
+     * copied in on every tick() -- while the contract paragraph, updated at
+     * 1.11.58, stated that all four implementations obeyed the per-access
+     * rule. Three did. It was invisible because the only polymorphic consumer
+     * (CompositePowerModel) is never constructed. */
     double getReadEnergy() const override { return read_energy_; }
     double getWriteEnergy() const override { return write_energy_; }
     double getLeakagePower() const override { return leakage_power_; }

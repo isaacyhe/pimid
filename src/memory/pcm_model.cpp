@@ -146,8 +146,36 @@ void PCMModel::initialize() {
      * getTotalEnergy() no longer has to guess. */
     read_energy_ = pcm_arch_->energy.read_energy_per_byte
                    * bytesPerAccess(access_width_bits_) / 1000.0;   // pJ/B -> nJ/access
-    write_energy_ = pcm_arch_->energy.write_energy_per_byte
-                    * bytesPerAccess(access_width_bits_) / 1000.0;  // Average of SET/RESET
+    /* 1.11.60 (audit round 4, C015): THE SET ENERGY, because every write this
+     * model sees is charged as a SET everywhere else.
+     *
+     * This used to read energy.write_energy_per_byte, which the extractor
+     * builds as 0.5 x SET + 0.5 x RESET (architecture_extractor.h) with RESET
+     * itself asserted at 0.55 x SET -- so the field held 0.775 x SET. It was
+     * then multiplied by total_set_writes_ under a comment saying "every write
+     * counted as SET", and the latency side charges set_write_latency_ns for
+     * every write, and the counter D056 left is the SET counter. Three of the
+     * four statements about a PCM write said SET; the energy said mean, and
+     * nothing reconciled them. On the technology whose whole point is that SET
+     * and RESET differ, that is not a rounding difference: it was 22.5% low
+     * per write against the basis its own comment claimed.
+     *
+     * Resolved toward SET rather than toward the mean, for two reasons. The
+     * counters cannot tell the two apart -- MemoryRequestType has no RESET,
+     * which is exactly why D056 deleted the RESET counter -- so a mean has no
+     * measured mix behind it; and bank_set_energy_pJ is NVSim's own
+     * getWriteDynamicEnergy(), whereas the mean reaches its value only through
+     * the unsourced 0.55 RESET ratio. Taking the bank figure directly also
+     * skips the per-byte round trip: this model is what hands NVSim its
+     * word_width_bits (initializeNVSim()), so the bank write energy IS the
+     * per-access energy at this width, and dividing by 1000 is the whole
+     * conversion. The read line above reconstructs the same identity the long
+     * way round and is left alone so its arithmetic stays visible.
+     *
+     * It was invisible because getTotalEnergy() has no reachable caller and
+     * access() -- the only thing that increments the counter -- is never
+     * called, so the term was 0 x wrong. */
+    write_energy_ = pcm_arch_->energy.bank_set_energy_pJ / 1000.0;   // pJ/access -> nJ/access
     leakage_power_ = pcm_arch_->energy.chip_leakage_mw / 1000.0;
 
     std::cout << "[PCMModel] Configuration:" << std::endl;
@@ -167,13 +195,20 @@ void PCMModel::initialize() {
               << std::endl;
     std::cout << "  Endurance: " << pcm_config_.endurance << " writes (limited)" << std::endl;
     std::cout << "  WARNING: PCM only suitable for read-heavy PIM workloads!" << std::endl;
-    std::cout << "  Read Energy: " << read_energy_ << " pJ/byte" << std::endl;
+    /* 1.11.60 (audit round 4, C001): nJ PER ACCESS. 1.11.58 re-based the
+     * member and left this label on the retired pJ/byte basis, so the printed
+     * number was 15.6x below what it claimed at the 512-bit configured line
+     * (125x at the 64-bit model default). Invisible because the value was
+     * already correct and because the block comment further down cited this
+     * very print as the evidence for the old unit. The "(Nx read)" ratio on
+     * the write line is unit-invariant and is unaffected. */
+    std::cout << "  Read Energy: " << read_energy_ << " nJ/access" << std::endl;
     /* 1.11.56 (audit D046): the "(30x read!)" tag was a constant printed over
      * a computed number. Nothing ever compared the two -- on the shipped
      * characterization the real ratio is nowhere near 30 -- so the log asserted
      * a headline figure that the run itself contradicted. Compute the ratio
      * from the two numbers being printed, or print no ratio at all. */
-    std::cout << "  Write Energy: " << write_energy_ << " pJ/byte";
+    std::cout << "  SET Write Energy: " << write_energy_ << " nJ/access";   // 1.11.60 (C001, C015)
     if (read_energy_ > 0.0)
         std::cout << " (" << (write_energy_ / read_energy_) << "x read)";
     std::cout << std::endl;
@@ -201,10 +236,21 @@ static inline Cycle legacyNsAsCycles(double ns) {
     return static_cast<Cycle>(std::ceil(ns));   // 1 GHz: no clock is supplied
 }
 
+/* 1.11.60 (audit round 4, C001): READ THE PARAGRAPH BELOW AS HISTORY, NOT AS
+ * A STATEMENT OF THE PRESENT UNIT. It was written at 1.11.57 and it was true
+ * then; 1.11.58 re-based read_energy_/write_energy_ to NANOJOULES PER ACCESS
+ * at assignment (see the note beside the assignments in initialize()), and
+ * this paragraph was not moved with them. Worse, it cited initialize()'s
+ * "pJ/byte" printout as its evidence -- and that print had not been moved
+ * either, so the source and the log agreed with each other and both disagreed
+ * with the arithmetic between them. Both are corrected at 1.11.60. What the
+ * members hold today: nJ per access, one unit on every path.
+ */
 /* 1.11.57 (latent D044): THE MISSING ACCESS SIZE.
  *
- * read_energy_/write_energy_ hold pJ PER BYTE -- initialize() prints them as
- * "pJ/byte", and they come from PCMArchitecture::energy.read_energy_per_byte /
+ * read_energy_/write_energy_ HELD pJ PER BYTE when this was written --
+ * initialize() printed them as "pJ/byte", and they came from
+ * PCMArchitecture::energy.read_energy_per_byte /
  * write_energy_per_byte, which the extractor computes as a bank energy divided
  * by (word_width_bits / 8) (architecture_extractor.h). getTotalEnergy() and
  * printStats() multiplied that energy DENSITY by an ACCESS COUNT and printed
@@ -320,8 +366,15 @@ double PCMModel::getTotalEnergy() const {
      * That is not an estimate of a clock -- these models carry none; it is
      * the same convention legacyNsAsCycles() states, and it is why leakage
      * in nJ is simply watts x cycles. */
+    /* 1.11.60 (audit round 4, C015): the comment on this line used to be the
+     * only place that said what the write term was, and it said "every write
+     * counted as SET" while write_energy_ held the SET/RESET mean. The counter
+     * and the latency were SET; the energy was not. write_energy_ is now the
+     * SET energy at assignment (see initialize()), so the line means what it
+     * says: every write is priced as a SET, in time and in energy, because the
+     * request interface carries no way to tell a SET from a RESET. */
     double dynamic_nj = (total_reads_ * read_energy_) +
-                        (total_set_writes_ * write_energy_);   // every write counted as SET (D056)
+                        (total_set_writes_ * write_energy_);   // every write is a SET (D056, C015)
     double leakage_nj = leakage_power_ * static_cast<double>(current_cycle_);
     return dynamic_nj + leakage_nj;
 }
@@ -363,21 +416,38 @@ void PCMModel::printStats() const {
     std::cout << "  Chip SET Write: " << getChipSetWriteLatency() << " ns" << std::endl;
 
     std::cout << "\nEnergy Consumption:" << std::endl;
-    // 1.11.57 (latent D044): the totals below are per-byte energy x the access
-    // size x the access count. They used to omit the access size entirely.
+    /* 1.11.60 (audit round 4, C002): THE SECOND MULTIPLY IS GONE.
+     *
+     * These lines multiplied read_energy_/write_energy_ by bytes-per-access.
+     * That was right at 1.11.57, when the members were an energy DENSITY;
+     * 1.11.58 re-based them to nJ per access at assignment and moved
+     * getTotalEnergy() (three lines above) onto the new basis without moving
+     * this block, so the same file held both conventions and the "per access"
+     * and "Total" lines below came out 64x high at the 512-bit configured line
+     * -- printed as "pJ" while carrying nJ, and disagreeing with the "Total
+     * Energy" line immediately beneath them by that factor times 1000.
+     *
+     * It was invisible because printStats() has no caller anywhere in the tree
+     * (CompositePowerModel is the only route to it and is never constructed)
+     * and because the counters it multiplies are never incremented, so the
+     * product was 0 x wrong.
+     *
+     * The per-access figures are now the members themselves, and the per-byte
+     * line is DERIVED from them rather than being the stored quantity, so the
+     * two can no longer drift apart again. */
     const double bpa = bytesPerAccess(access_width_bits_);
-    std::cout << "  Read Energy (per byte): " << read_energy_ << " pJ" << std::endl;
+    std::cout << "  Access Width: " << (bpa * 8.0) << " bits (" << bpa << " B)" << std::endl;
+    std::cout << "  Read Energy (per access): " << read_energy_ << " nJ" << std::endl;
     // 1.11.56 (audit D046): the ratio is measured here, not asserted.
-    std::cout << "  Write Energy (per byte): " << write_energy_ << " pJ";
+    std::cout << "  SET Write Energy (per access): " << write_energy_ << " nJ";   // 1.11.60 (C015)
     if (read_energy_ > 0.0)
         std::cout << " (" << (write_energy_ / read_energy_) << "x read)";
     std::cout << std::endl;
-    std::cout << "  Access Width: " << (bpa * 8.0) << " bits (" << bpa << " B)" << std::endl;
-    std::cout << "  Read Energy (per access): " << (read_energy_ * bpa) << " pJ" << std::endl;
-    std::cout << "  Write Energy (per access): " << (write_energy_ * bpa) << " pJ" << std::endl;
-    std::cout << "  Total Read Energy: " << (total_reads_ * read_energy_ * bpa) << " pJ" << std::endl;
+    std::cout << "  Read Energy (per byte): " << (read_energy_ * 1000.0 / bpa) << " pJ" << std::endl;
+    std::cout << "  SET Write Energy (per byte): " << (write_energy_ * 1000.0 / bpa) << " pJ" << std::endl;
+    std::cout << "  Total Read Energy: " << (total_reads_ * read_energy_) << " nJ" << std::endl;
     std::cout << "  Total Write Energy: "
-              << (total_set_writes_ * write_energy_ * bpa) << " pJ" << std::endl;
+              << (total_set_writes_ * write_energy_) << " nJ" << std::endl;
     std::cout << "  Leakage Power: " << leakage_power_ << " W" << std::endl;
     // 1.11.58: nJ, matching the MemoryModel contract getTotalEnergy() now obeys.
     std::cout << "  Total Energy: " << getTotalEnergy() << " nJ" << std::endl;

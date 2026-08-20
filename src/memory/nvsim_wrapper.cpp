@@ -540,6 +540,43 @@ namespace {
             out = xml.substr(a, b - a);
             return true;
         };
+        /* 1.11.60 (audit round 4, C013): THE PRODUCING VERSION IS READ, so the
+         * stamp stops being a line of manifest text nobody consults.
+         *
+         * 1.11.57 bumped cache::kToolVersion to close its own C014, whose note
+         * names the real trap precisely: "the semantic change that does NOT
+         * move the filename". But the string reached exactly one place -- the
+         * manifest JSON in cache_warehouse.cpp -- and no load path anywhere
+         * read it, so bumping it changed nothing about which entry gets
+         * served. This loader verified eleven key fields and the cell file and
+         * not the version that produced them, which is the one check the trap
+         * requires: a release that changes what a characterization MEANS,
+         * without changing any keyed input, produces a file whose name and
+         * whose eleven fields all still match.
+         *
+         * Absence is trusted, deliberately. Every entry in the shipped warm
+         * set predates this field, and refusing them would recharacterize the
+         * whole store -- minutes per cell, for entries that are not known to
+         * be wrong. So the check binds forward: files written from 1.11.60
+         * onwards carry their version and a mismatch refuses them. Entries
+         * older than that still ride on their filename, and the legacy
+         * copy-forward above still imports them on a name match, exactly as
+         * the finding says. That half is closed by regeneration, not by code.
+         */
+        {
+            std::string ver;
+            if (getStr("tool_version", ver) && ver != pimid::cache::toolVersion()) {
+                std::cerr << "[NVSimWrapper] REFUSING cached characterization "
+                          << path << ": it was produced by PIMID " << ver
+                          << " and this build's characterization semantics are "
+                          << pimid::cache::toolVersion()
+                          << ". The keyed inputs all match -- what changed is "
+                             "what the stored numbers MEAN, which no filename "
+                             "or key field can express. Recharacterizing."
+                          << std::endl;
+                return false;
+            }
+        }
         if (!agrees("nvm_type", k.nvm_type)) return false;
         if (!agrees("capacity_bytes", static_cast<double>(k.capacity_bytes))) return false;
         if (!agrees("process_node_nm", k.process_node_nm)) return false;
@@ -601,7 +638,13 @@ namespace {
          * says. Adding fields is backward-compatible in both directions: an
          * older reader ignores what it does not look for, and the newer reader
          * treats an absent field as "not stated" rather than as a mismatch. */
+        /* 1.11.60 (audit round 4, C013): the producing version is part of the
+         * record now. cache::kToolVersion existed since 1.11.52 and moved at
+         * 1.11.57 to close a finding about staleness, but it was written only
+         * into the manifest and read by nothing, so it could not refuse a
+         * single entry. Written here, it is checked by nvsimDiskLoad(). */
         f << "<nvsim_characterization>\n"
+          << "  <tool_version>" << pimid::cache::toolVersion() << "</tool_version>\n"
           << "  <nvm_type>" << k.nvm_type << "</nvm_type>\n"
           << "  <capacity_bytes>" << k.capacity_bytes << "</capacity_bytes>\n"
           << "  <process_node_nm>" << k.process_node_nm << "</process_node_nm>\n"

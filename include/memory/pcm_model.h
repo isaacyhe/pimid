@@ -133,7 +133,12 @@ private:
 
     // Energy and area from NVSim
     double read_energy_;
-    double write_energy_;  // Average of SET/RESET
+    /* 1.11.60 (audit round 4, C015): nJ per access, and it is the SET energy,
+     * not the SET/RESET average this comment used to claim. Every write is
+     * charged as a SET -- the counter above, the latency in access(), and now
+     * the energy -- because MemoryRequestType has no RESET to separate them
+     * on. See the assignment in initialize(). */
+    double write_energy_;
     double leakage_power_;
     double area_mm2_;
 

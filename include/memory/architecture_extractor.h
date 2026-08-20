@@ -726,7 +726,17 @@ inline std::unique_ptr<PCMArchitecture> extractPCMArchitecture(
     double bytes_per_access = config.word_width_bits / 8.0;
     if (bytes_per_access <= 0) bytes_per_access = 8.0;
     arch->energy.read_energy_per_byte = arch->energy.bank_read_energy_pJ / bytes_per_access;
-    // Average of SET and RESET for write energy
+    /* Average of SET and RESET for write energy -- an EQUAL-WEIGHT mean over a
+     * mix nothing in this tree measures, and it inherits the asserted 0.55
+     * RESET/SET ratio set fourteen lines above.
+     * 1.11.60 (audit round 4, C015): PCMModel no longer reads this field. It
+     * was multiplying this mean by a SET counter, under a comment claiming the
+     * SET basis, while its latency side charged the SET path -- so the one
+     * number that dissented from "every write is a SET" was this one, and it
+     * dissented silently by 0.775x. The model takes bank_set_energy_pJ
+     * directly now. The field stays because it is part of the PCMArchitecture
+     * description; anyone who picks it up should know it is a mean over an
+     * unmeasured mix, not a characterization. */
     arch->energy.write_energy_per_byte = (arch->energy.bank_set_energy_pJ * 0.5 +
                                            arch->energy.bank_reset_energy_pJ * 0.5) / bytes_per_access;
 
@@ -1181,10 +1191,19 @@ inline std::unique_ptr<DRAMArchitectureV2> extractDRAMArchitecture(
     arch->datapath.rank_databus_bits = {
         rank_bits,
         VerificationStatus::VERIFIED,
+        /* 1.11.60 (audit round 4, C011): "one 128-bit channel for HBM" was
+         * right for HBM2 and wrong for HBM3, whose rank_databus_bits is 64 --
+         * one 64-bit pseudo-channel, per JESD238 and per the object at
+         * dram_architecture_v2.h. The 1.11.59 note directly above corrected
+         * this string precisely because the old one "was false for HBM by two
+         * orders of magnitude", and replaced it with a family statement that
+         * is still a single constant across a family whose two members differ.
+         * It reads as a per-technology fact now, which is what it is. */
         "DRAM architecture object's rank data bus: the JEDEC 64-bit rank for "
         "DDR-class parts (= chips_per_rank x chip_io_bits at every device "
-        "width), and one 128-bit channel for HBM, where a rank is not built "
-        "from devices on a shared bus",
+        "width), and one channel's data bus for HBM, where a rank is not built "
+        "from devices on a shared bus -- 128 bits on HBM2 (JESD235C, 128-bit "
+        "channels) and 64 on HBM3 (JESD238, 64-bit pseudo-channels)",
         "First wide interface in DDR hierarchy"
     };
 

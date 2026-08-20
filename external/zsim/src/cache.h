@@ -96,8 +96,18 @@ class Cache : public BaseCache {
          *
          * Returns the number of lines THIS cache transitioned M -> E, which
          * is the per-level sum and is legitimately larger than the distinct
-         * count -- the flush log prints both, labelled. */
-        uint64_t flushDirtyLines(std::unordered_set<Address>& distinctDirty);
+         * count -- the flush log prints both, labelled.
+         *
+         * 1.11.60 (audit round 4, D004): VIRTUAL, because cleaning the tag
+         * array is not the whole job on a cache that also owns an L0 filter.
+         * FilterCache::store() can return a hit without ever calling
+         * Cache::access, so an M -> E clean that touches only the array
+         * leaves the filter advertising write permission the line no longer
+         * has, and the next store never re-establishes M. The registry the
+         * flush walks holds Cache*, so the override only runs if the call
+         * dispatches -- it did not, and nothing said so. See
+         * FilterCache::flushDirtyLines for the mechanism and the bound. */
+        virtual uint64_t flushDirtyLines(std::unordered_set<Address>& distinctDirty);
 
         //NOTE: reqWriteback is pulled up to true, but not pulled down to false.
         virtual uint64_t invalidate(const InvReq& req) {

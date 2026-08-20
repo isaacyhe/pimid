@@ -2618,21 +2618,94 @@ static bool dramHTreeBuilder(const std::string& tech,
      * technology did not reconcile with its preset, so its ladder is not
      * tool-sourced -- the table stands, and that is a real fallback. */
     if (config.sourced_ladder_valid) {
-        const int rung[4] = {0, 1, 2, 5};
-        for (int li = 0; li < 4; ++li) {
-            const int    wb = config.sourced_ladder_w[rung[li]];
-            const double bw = config.sourced_ladder_bw[rung[li]];
+        /* 1.11.60 (ONE FABRIC, user-approved design; corrects round-4 B001).
+         *
+         * The four topology layers are ANCHORED AT THE CHANNEL and measured
+         * inward -- that is their defined meaning (sparse_htree.h, 1.10.3):
+         * L3 is the channel link itself, L2 one tier inward, L1 two, L0
+         * everything deeper, folded. The 1.11.59 map {0,1,2,5} was
+         * LEAF-anchored -- read from the wrong end of the ladder -- so on
+         * every DDR part the rank-tier Garnet link took the bank-group rung
+         * and the chip-tier link the bank rung.
+         *
+         * The projection, derived from that anchor rather than chosen:
+         *   L3 <- rung[channel]          (5)
+         *   L2 <- one tier inward        (rank=4 for DDR; BG=2 for folded HBM)
+         *   L1 <- two tiers inward       (chip=3 for DDR; bank=1 folded)
+         *   L0 <- the remaining inner rungs, folded at their MINIMUM
+         *         bandwidth -- the bottleneck governs a multi-tier path.
+         * channelBearingLevel() already says whether the technology folds its
+         * channels into the chip slot (HBM), so the fold follows it. */
+        const int chanL = pimid_htree::channelBearingLevel(
+            std::max(1, config.hierarchy_dram_channels),
+            config.hierarchy_chips_per_rank);
+        auto rungOfTreeTier = [&](int t) -> int {
+            // folded HBM: the tree's chip-slot tier carries the CHANNEL link
+            if (chanL == 3) return (t < 3) ? t : 5;
+            return t;                     // unfolded DDR: tree tier == rung
+        };
+        for (int li = 3; li >= 1; --li) {
+            const int tier = chanL - (3 - li);
+            if (tier < 0) break;
+            const int r = rungOfTreeTier(tier);
+            const int    wb = config.sourced_ladder_w[r];
+            const double bw = config.sourced_ladder_bw[r];
             if (wb > 0 && bw > 0.0) {
                 L[li].width_bits = wb;
                 L[li].freq_ghz   = bw * 8.0 / static_cast<double>(wb);
             }
         }
+        {   // L0: fold the inner rungs at the bottleneck
+            double best_bw = -1.0; int best_w = 0;
+            for (int tier = 0; tier <= chanL - 3; ++tier) {
+                const int r = rungOfTreeTier(tier);
+                const int    wb = config.sourced_ladder_w[r];
+                const double bw = config.sourced_ladder_bw[r];
+                if (wb > 0 && bw > 0.0 && (best_bw < 0.0 || bw < best_bw)) {
+                    best_bw = bw; best_w = wb;
+                }
+            }
+            if (best_w > 0) {
+                L[0].width_bits = best_w;
+                L[0].freq_ghz   = best_bw * 8.0 / static_cast<double>(best_w);
+            }
+        }
         N = std::max(1, config.hierarchy_dram_channels);
-        std::cout << "  [htree] Garnet topology drawn from the SOURCED ladder"
-                     " (bits/layer " << L[0].width_bits << "/" << L[1].width_bits
+
+        /* Test hook, gate-only: PIMID_FABRIC_BREAK corrupts one layer so the
+         * gate can prove the invariant FIRES. Five vacuous passes this cycle
+         * came from checks whose firing was never demonstrated. */
+        if (getenv("PIMID_FABRIC_BREAK")) L[3].width_bits *= 2;
+
+        /* THE INVARIANT (design section 5): each 1:1 layer must carry exactly
+         * its source rung's bandwidth; L0 the stated fold. Violation is FATAL
+         * -- this is the check that turns "the two fabrics drifted" from a
+         * four-round audit finding into an immediate failure. */
+        for (int li = 3; li >= 1; --li) {
+            const int tier = chanL - (3 - li);
+            if (tier < 0) continue;
+            const int r = rungOfTreeTier(tier);
+            const double rung_bw = config.sourced_ladder_bw[r];
+            if (rung_bw <= 0.0) continue;
+            const double layer_bw = L[li].width_bits / 8.0 * L[li].freq_ghz;
+            if (std::fabs(layer_bw - rung_bw) > 0.01 * rung_bw) {
+                std::cerr << "[fabric] FATAL: topology layer L" << li
+                          << " carries " << layer_bw << " GB/s but its source"
+                             " rung " << r << " carries " << rung_bw
+                          << " GB/s. One fabric description, two consumers --"
+                             " the projection must preserve each tier's"
+                             " bandwidth, and this divergence is exactly the"
+                             " drift the invariant exists to refuse."
+                          << std::endl;
+                std::exit(2);
+            }
+        }
+        std::cout << "  [htree] Garnet topology PROJECTED from the sourced"
+                     " ladder, channel-anchored (bits/layer "
+                  << L[0].width_bits << "/" << L[1].width_bits
                   << "/" << L[2].width_bits << "/" << L[3].width_bits
-                  << ", " << N << " channel(s)) -- the same fabric the latency"
-                     " model prices\n";
+                  << ", " << N << " channel(s); L0 = bottleneck fold of the"
+                     " inner rungs) -- invariant checked\n";
     } else {
         std::cout << "  [htree] Garnet topology from the per-technology TABLE:"
                      " no sourced ladder was adopted for " << tech
@@ -2695,19 +2768,37 @@ static bool dramHTreeBuilder(const std::string& tech,
     //     HBM2 8x > single-channel DDR).
     // This is the physical basis for the two-part DRAM sweep (1-PE internal vs
     // multi-PE aggregate) for the same workload.
-    int concurrency = (num_pes < N) ? num_pes : N;   // channels actually utilized
-    if (concurrency < 1) concurrency = 1;
+    /* 1.11.60 (ONE FABRIC, user-approved; corrects round-4 B002).
+     *
+     * The width written into the topology file is RAW BITS -- the same number
+     * the analytical ladder prices -- because the file's field is documented
+     * and consumed as bits. The old code wrote a REF-normalised SCORE
+     * (128 x bw x concurrency / REF_BW; DDR4's 256-bit subarray rung went in
+     * as "24") into that bits field, so Garnet flit-ised messages against a
+     * dimensionless number. One description, two consumers, same units.
+     *
+     * Garnet's flit engine caps a link at 128 bits; a wider rung is clamped
+     * AT THE CONSUMER BOUNDARY and the clamp is printed -- the description
+     * itself keeps the true width, and the invariant above was checked
+     * against the description, not the clamp. The concurrency weighting is
+     * gone with the score: channel parallelism is carried by the N
+     * materialised channel subtrees of the tree itself, and weighting the
+     * width too counted it twice. */
     int layer_w[4], layer_lat[4];
+    bool any_clamped = false;
     for (int i = 0; i < 4; ++i) {
-        double bw = L[i].width_bits / 8.0 * L[i].freq_ghz;                  // GB/s per channel
-        long w = std::lround(128.0 * bw * (double)concurrency / REF_BW);    // x channels-utilized
-        if (w < 1)   w = 1;
-        if (w > 128) w = 128;
-        layer_w[i] = (int)w;
+        int w = L[i].width_bits;
+        if (w < 1) w = 1;
+        if (w > 128) { w = 128; any_clamped = true; }
+        layer_w[i] = w;
         long lat = std::lround(REF_FREQ / L[i].freq_ghz);
         if (lat < 1) lat = 1;
         layer_lat[i] = (int)lat;
     }
+    if (any_clamped)
+        std::cout << "  [htree] one or more layer widths exceed Garnet's"
+                     " 128-bit flit bound and are clamped IN THE CONSUMER;"
+                     " the fabric description keeps the true widths\n";
 
     // -- SPARSE, PLACEMENT-DRIVEN H-TREE (regenerated per sim) ----------------
     // Built by the SHARED builder (external/zsim/src/sparse_htree.h) that the
@@ -2946,6 +3037,31 @@ static double deviceCycleClockMHz(const UnifiedConfig& config) {
         }
     }
     return config.frequency_mhz > 0.0 ? config.frequency_mhz : 1000.0;
+}
+
+/* 1.11.60 (audit round 4, A012): ONE answer to "how many memory interfaces
+ * does this run have?".
+ *
+ * num_pes / pes_per_mc is INTEGER division, and pes_per_mc is a user knob the
+ * derivation at the end of computeHierarchyLatencies only ever RAISES -- it is
+ * never capped at num_pes -- so one PE with pim.mc.pes_per_mc: 2 makes the
+ * quotient 0. 1.11.57 (A004) fixed that where it deleted a component from
+ * McPAT's power total, and the ZSim emitter has clamped since it was written,
+ * but the three PRINT sites were left on the raw quotient. The result is worse
+ * than the defect it half-fixed: the provenance table a reader uses to audit
+ * the run now says "PE-MIs (x0)" and "endpoints: 4 PEs + 0 MCs" while McPAT
+ * prices one controller and ZSim instantiates one. It was invisible because
+ * nothing cross-checks a printed count against a priced one, and 0 is a legal
+ * value to print.
+ *
+ * The AUTHORITY is what the run instantiates: the emitted ZSim configuration
+ * (pesPerMC / the PE-MI block), which is this clamped count, and which McPAT
+ * follows wherever no H-tree endpoint count supersedes it. Every reporting
+ * site asks here now, so a fourth cannot invent a fourth answer. */
+static int peMemoryInterfaceCount(const UnifiedConfig& config) {
+    if (!(config.pe_mc_enabled && config.pes_per_mc > 0))
+        return 1;                       // HOST_MC mode: the single host controller
+    return std::max(1, config.num_pes / config.pes_per_mc);
 }
 
 static bool reportBandwidthScopes(const std::string& tech, int ranks_per_channel) {
@@ -3489,7 +3605,19 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
             std::cout << "  Hierarchy link ladder from the " << tech
                       << " architecture object (bits/level): "
                       << w[0] << "/" << w[1] << "/" << w[2] << "/" << w[3] << "/"
-                      << w[4] << "/" << w[5] << "/" << w[6] << "\n"
+                      << w[4] << "/" << w[5] << "/" << w[6] << "\n";
+            /* 1.11.60 (ONE FABRIC, user requirement): the table prints WITH
+             * its upstream references -- each rung's VerifiedValue status and
+             * citation from the architecture object itself, so "sourced"
+             * is checkable line by line rather than asserted once. */
+            static const char* kRungName[7] = {
+                "subarray (GSA)", "bank", "bank group", "chip DQ",
+                "rank bus", "channel", "system root" };
+            for (int li = 0; li < 7; ++li)
+                std::cout << "    rung " << li << " " << kRungName[li] << ": "
+                          << w[li] << " b, " << bw[li] << " GB/s  ["
+                          << lad.getLadderRungProvenance(li) << "]\n";
+            std::cout << ""
                       << "    (this REPLACES the per-level table printed above,"
                          " which is the technology placeholder the network is"
                          " constructed with)\n"
@@ -3623,18 +3751,6 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
         int cyc = static_cast<int>(std::ceil(ns * pe_ghz));
         config.hierarchy_level_latency[i] = cyc > 0 ? cyc : 1;
     }
-    /* 1.11.59: PRINT them. These seven numbers govern every hierarchy
-     * traversal the timing model charges, and until now they existed only
-     * inside the generated ZSim config -- which is written to a temporary
-     * directory and discarded, so no run's own output showed what it charged.
-     * Gate 1169A could not test the B014 fix for exactly this reason: there
-     * was no observable. A quantity this load-bearing should be visible in
-     * the run that used it. */
-    std::cout << "  Hierarchy level latency (PE cycles, 64 B): ";
-    for (int i = 0; i < 7; ++i)
-        std::cout << config.hierarchy_level_latency[i] << (i < 6 ? "/" : "");
-    std::cout << " at " << hier_clk_mhz << " MHz\n";
-
     // Query per-bridge crossing latency (64B)
     // Bridge latency now computed by the bridge model (SIMPLE/MD1/DETAILED/AUTO)
     const auto& bridges = hierarchy->getBridges();
@@ -3674,6 +3790,41 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
         }
         config.hierarchy_bridge_model[i] = resolved_model;
     }
+
+    /* 1.11.59: PRINT them. These numbers govern every hierarchy traversal the
+     * timing model charges, and until then they existed only inside the
+     * generated ZSim config -- which is written to a temporary directory and
+     * discarded, so no run's own output showed what it charged. Gate 1169A
+     * could not test the B014 fix for exactly this reason: there was no
+     * observable. A quantity this load-bearing should be visible in the run
+     * that used it.
+     *
+     * 1.11.60 (audit round 4, B011): print the BRIDGES too, and move the print
+     * below the loop that computes them.
+     *
+     * 1.11.59 printed the seven level latencies under a comment saying those
+     * seven "govern every hierarchy traversal". They govern half of it.
+     * computeHierTraversal() sums the levels it crosses AND the bridge at every
+     * tier boundary between them, and both arrays are emitted side by side as
+     * levelLatency0..6 and bridgeLatency0..5. The bridges are the same order of
+     * magnitude -- on the measured DDR4 ladder they are ~110/109/57/58/9/12 PE
+     * cycles against levels 14/112/59/59/15/12/10 -- so the print closed the
+     * smaller half of the gap it was added for while its own comment claimed
+     * the whole of it. It was invisible because the only bridge numbers any
+     * config-load run emits are the PRE-ladder placeholders inside the
+     * construction banner, which applySourcedLadder then overwrites; the
+     * post-ladder values appear only in the run summary, which the config-load
+     * path never reaches. */
+    std::cout << "  Hierarchy level latency (PE cycles, 64 B): ";
+    for (int i = 0; i < 7; ++i)
+        std::cout << config.hierarchy_level_latency[i] << (i < 6 ? "/" : "");
+    std::cout << " at " << hier_clk_mhz << " MHz\n";
+    std::cout << "  Hierarchy bridge latency (PE cycles, 64 B): ";
+    for (int i = 0; i < 6; ++i)
+        std::cout << config.hierarchy_bridge_latency[i] << (i < 5 ? "/" : "");
+    std::cout << " at " << hier_clk_mhz << " MHz"
+                 " (one per tier boundary; a traversal charges the levels it"
+                 " crosses AND the bridges between them)\n";
 
     config.hierarchy_enabled = true;
 
@@ -4116,15 +4267,23 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
                     //    agg_mbs/REF). Flits move one-per-cycle and never pin a VC,
                     //    so no deadlock. Detailed DRAM only -- simple/calibrated/
                     //    curve/approximate keep their own dataMsgBits untouched.
-                    if (per_chan_mbs > 0.0) {
-                        const double REF_PERCHAN = referencePerChannelMBs();  // 1.11.56 (B012)
-                        int Fbw = (int)std::lround(REF_PERCHAN / per_chan_mbs);
-                        if (Fbw < 1)  Fbw = 1;
-                        if (Fbw > 32) Fbw = 32;             // tractability bound
-                        int base_bits = config.noc_data_msg_bits > 0
-                                        ? config.noc_data_msg_bits : 576;
-                        config.noc_data_msg_bits = base_bits * Fbw;
-                    }
+                    /* 1.11.60 (ONE FABRIC, user-approved; corrects round-4
+                     * B003): the Fbw message inflation is REMOVED.
+                     *
+                     * The cross-technology bandwidth penalty is applied
+                     * EXACTLY ONCE, in the port width: the topology file now
+                     * carries each layer's RAW bits, so a narrow tier
+                     * flit-ises a message into more flits by itself -- DDR4's
+                     * 8-bit chip rung turns a 576-bit access into 72 flits
+                     * where HBM3's 64-bit channel takes 9. Multiplying the
+                     * message size by REF/per_chan ON TOP of that applied the
+                     * same penalty twice, so the cross-technology flit ratio
+                     * was the PRODUCT of two bandwidth ratios (round-4 B003:
+                     * 14.4x where the model wants 2.67x). The NI flit-count
+                     * transport itself (one flit per cycle, no VC pinning, no
+                     * deadlock) is unchanged -- only the inflation is gone.
+                     * dataMsgBits stays the user's value or the 576-bit
+                     * cacheline default. */
                 } else {
                     std::cerr << "WARNING: failed to emit DRAM CUSTOM topology "
                               << "for tech " << tech << " at " << topo_path
@@ -4221,10 +4380,32 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
                      * two compared two hierarchy models, not two network
                      * models. The scalar noc_link_latency above still applies
                      * to the flat fabric either way. */
-                    if (!config.hierarchy_enabled) {
-                        for (int i = 0; i < 7; ++i) config.hierarchy_level_latency[i] = ll;
-                        for (int i = 0; i < 6; ++i) config.hierarchy_bridge_latency[i] = 0;
-                    }
+                    /* 1.11.60 (audit round 4, B016): the guard is DEAD and is
+                     * deleted, and the record is corrected with it.
+                     *
+                     * The flattening the note above describes stood HERE,
+                     * under `if (!config.hierarchy_enabled)`. Establishing
+                     * which of the two -- guard or ledger -- was true: the only
+                     * path in computeHierarchyLatencies() that leaves the flag
+                     * false is the createInternalDRAMNetwork() failure, which
+                     * RETURNS several hundred lines above this point; the flag
+                     * is then set true unconditionally before the ladder work,
+                     * and nothing between there and here clears it. So the
+                     * condition could not hold and the body could not run.
+                     *
+                     * 1.11.59's notes record this as closed under B013 -- "the
+                     * condition read as though the other case existed" -- and
+                     * nothing in the file was edited, in a release whose own
+                     * preamble confesses the same verification gap for B005,
+                     * B014 and C018. The behaviour was and is right: a run that
+                     * reaches this line always has a tiered ladder, and
+                     * flattening all seven tiers to one number is exactly what
+                     * 1.11.56's B041 fix existed to stop. Deleting the branch
+                     * removes the claim that the other case exists without
+                     * changing a single emitted value. The scalar
+                     * noc_link_latency set above still applies to the flat
+                     * fabric, which is the only thing this branch was reached
+                     * for. */
                 }
             }
 
@@ -4675,8 +4856,7 @@ static void emitZSimHierarchyBlock(std::ostream& out, const UnifiedConfig& confi
 
     // PE-MI distributed memory interface config
     if (config.pe_mc_enabled && config.placement_level != "HOST_MC") {
-        int mc_count = config.num_pes / config.pes_per_mc;
-        if (mc_count < 1) mc_count = 1;
+        int mc_count = peMemoryInterfaceCount(config);   // 1.11.60 (A012)
 
         // Compute total units at the placement level. This MUST equal the org
         // count the PE coverage/mapping uses (config.total_mem_orgs); otherwise
@@ -4980,7 +5160,31 @@ static int resolveMemoryTopology(UnifiedConfig& config) {
                          "memory per role -- measured counters exist as a "
                          "single host/device pair -- and silently dropping '"
                       << n.name << "' from the energy total is not acceptable. "
-                         "Multi-memory topologies are v2 scope." << std::endl;
+                         "Multi-memory topologies are v2 scope.\n"
+                      /* 1.11.60 (audit round 4, A013): say what this actually
+                       * refuses, and what to do about it.
+                       *
+                       * The guard is correct and stays -- the shipped example
+                       * examples/cosim/multi_device.yaml was the wrong one,
+                       * and is corrected there. But the message was misleading
+                       * in a way that mattered: memory_tech is a SystemNode
+                       * field defaulting to "DDR4", overwritten only where a
+                       * memory: block is parsed, so every DEVICE node carries
+                       * a technology whether or not it declares one and this
+                       * refuses the SECOND DEVICE NODE, not the second
+                       * memory: block. Deleting a memory: block does not
+                       * satisfy it -- the node is then named as DDR4, a
+                       * technology the config never mentioned, which is what
+                       * made the real predicate invisible. Nothing loads the
+                       * shipped examples on the config-load path, so the one
+                       * file this refuses was never seen to be refused. */
+                      << "  Note this refuses the second DEVICE NODE, not the "
+                         "second memory: block: an undeclared node.memory_tech "
+                         "defaults to DDR4 rather than to nothing, so deleting "
+                         "a memory: block does not satisfy it. Declare ONE "
+                         "device node per system until v2's per-node memory "
+                         "counters exist."
+                      << std::endl;
             return 1;
         }
     }
@@ -5919,8 +6123,25 @@ static std::vector<pimid::McPATWrapper::NoCLevelConfig> buildNoCLevelsForMcPAT(
              * not the network's. */
             nc.flit_bits = (garnet.flit_size_bits > 0)
                          ? static_cast<int>(garnet.flit_size_bits) : 128;
+            /* 1.11.60 (audit round 4, B014): ONE clock authority, numerator
+             * and denominator alike.
+             *
+             * The duty-cycle conversion five lines below asks
+             * deviceCycleClockMHz() -- 1.11.57's A007 fix, which exists
+             * because in system scope config.frequency_mhz is the top-level
+             * system.frequency_mhz and not the device's. A007 converted the
+             * DENOMINATOR and left this fallback on the raw field, so the two
+             * halves of one ratio came from two different clocks. The fallback
+             * is live whenever no Garnet stats were parsed, i.e. on every
+             * analytical run -- half the shipped model lineup -- and on the
+             * shipped co-sim example that is 2000 MHz against a 500 MHz
+             * device: net_cycles scaled by 4 instead of 1, so every NoC
+             * level's duty_cycle handed to McPAT is 4x too small and the
+             * fabric's dynamic power with it. Invisible because in device
+             * scope the two fields are the same number, which is the scope the
+             * A007 gate exercised. */
             nc.clock_mhz = (garnet.clock_mhz > 0.0)
-                         ? garnet.clock_mhz : config.frequency_mhz;
+                         ? garnet.clock_mhz : deviceCycleClockMHz(config);
 
             /* Distribute Garnet traversals: lower levels see more traffic;
              * level i gets a share proportional to 1/(i+1-pe_level).
@@ -5991,8 +6212,10 @@ static std::vector<pimid::McPATWrapper::NoCLevelConfig> buildNoCLevelsForMcPAT(
          * placement level is out of range. */
         nc.flit_bits = (garnet.flit_size_bits > 0)
                      ? static_cast<int>(garnet.flit_size_bits) : 128;
+        // 1.11.60 (audit round 4, B014): same authority as the hierarchical
+        // branch, and the same one the duty-cycle denominator below uses.
         nc.clock_mhz = (garnet.clock_mhz > 0.0) ? garnet.clock_mhz
-                                                : config.frequency_mhz;
+                                                : deviceCycleClockMHz(config);
         nc.chip_coverage = 1.0;
 
         uint64_t accesses = (garnet.total_hops > 0) ? garnet.total_hops
@@ -7323,9 +7546,26 @@ static void runPowerAnalysis(const UnifiedConfig& config,
              * roughly two orders of magnitude. Both halves are charged now,
              * and reported separately so the split is visible rather than
              * folded into one number. */
+            /* 1.11.60 (audit round 4, A009/A010 -- REVERT of 1.11.58's energy
+             * wiring, user-approved).
+             *
+             * 1.11.58 added CACTI-IO's driver+PHY term to the charged
+             * interface energy, believing it closed an omission. Round 4
+             * showed it is a DOUBLE-COUNT: the term is charged only where
+             * crosses_dq is true (RANK placement and above), and those are
+             * exactly the placements where McPAT is already told withPHY=1 --
+             * the controller-side PHY is already priced in device silicon.
+             * One bit crossing, billed twice; the 4.2x rise the 1168 gates
+             * measured was the overlap, not a correction. And A010: the PHY
+             * static power inside that term is amortized at 100% bus
+             * utilization and charged as per-access DYNAMIC energy, so it was
+             * also the wrong kind of number. The charged interface is
+             * termination-only again -- the pre-1.11.58 basis the corpus was
+             * built on -- and CACTI-IO's figure prints as an INFORMATIONAL
+             * line below, summed into nothing. */
             const double iface_term_nj = crosses_dq ? ram_oracle.getTerminationEnergyNJ() : 0.0;
             const double iface_drv_nj  = crosses_dq ? ram_oracle.getInterfaceDynamicEnergyNJ() : 0.0;
-            double iface_energy = iface_term_nj + iface_drv_nj;
+            double iface_energy = iface_term_nj;
             /* 1.11.8, corrected 1.11.56 (audit A028): with memory.power_down
              * the idle controller descends the DRAM into precharge power-down
              * (IDD2P) during measured no-traffic residency; refresh always
@@ -7420,10 +7660,13 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                       << ")" << std::endl;
             if (crosses_dq) {
                 std::cout << "    termination:   " << iface_term_nj
-                          << " nJ  driver+PHY: " << iface_drv_nj
-                          << " nJ  (1.11.58: driver and PHY are charged now;"
-                             " before this release the interface was"
-                             " termination only)" << std::endl;
+                          << " nJ (the charged term)  CACTI-IO driver+PHY: "
+                          << iface_drv_nj
+                          << " nJ [INFORMATIONAL, NOT charged -- 1.11.60: the"
+                             " controller-side PHY is already priced by McPAT"
+                             " (withPHY=1 at these placements), so charging"
+                             " this too double-counts one crossing]"
+                          << std::endl;
                 /* 1.11.59: where the termination rests on an unsourced Rtt,
                  * report the BAND rather than the point. The doctrine is that
                  * a quantity the tools cannot produce is stated as an interval
@@ -7436,10 +7679,9 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                     }
                 }
                 if (iface_drv_nj <= 0.0)
-                    std::cout << "    NOTE: no driver/PHY figure for this"
-                                 " technology -- CACTI-IO has no exact"
-                                 " parameter map for it, so the interface is"
-                                 " still termination only here." << std::endl;
+                    std::cout << "    NOTE: CACTI-IO has no exact parameter map"
+                                 " for this technology, so no informational"
+                                 " driver/PHY figure is available." << std::endl;
             }
             std::cout << "  Array incl act+col in read/write terms above" << std::endl;
             /* 1.11.56 (audit A029): these three lines are one quantity seen
@@ -7465,10 +7707,23 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                       << " mW (the same standby current, named the way the "
                          "logic-side report names it -- not a further term)"
                       << std::endl;
+            /* 1.11.60 (audit round 4, A011): the aggregate names the WHOLE
+             * interface, not its smaller half.
+             *
+             * 1.11.58 folded driver switching and PHY into total_iface_nj and
+             * printed the split two lines above, then left this breakdown
+             * labelled "term=" -- the name the quantity carried when
+             * termination was all of it. On DDR4 the number under that label
+             * is 12.959 nJ/access where termination is 3.070, so a reader, or
+             * a log parser reconciling this corpus against the pre-1.11.58
+             * "term=" column, attributes the entire 4.2x interface correction
+             * to termination. It was invisible because the label kept working:
+             * the column still parses, it just means something else now. */
             std::cout << "  Total dynamic:   " << std::setprecision(1)
                       << (total_rd_nj + total_wr_nj + total_act_nj + total_iface_nj) / 1e6
                       << " mJ (rd=" << total_rd_nj / 1e6 << " + wr=" << total_wr_nj / 1e6
-                      << " + act=" << total_act_nj / 1e6 << " + term=" << total_iface_nj / 1e6 << ")"
+                      << " + act=" << total_act_nj / 1e6 << " + iface=" << total_iface_nj / 1e6
+                      << " [termination + driver/PHY])"
                       << std::defaultfloat << std::endl;
 
             // DRAM die area via CACTI 7 (commercial DRAM cell model)
@@ -7597,13 +7852,72 @@ static void runPowerAnalysis(const UnifiedConfig& config,
                 if (die_area_reported > 0.0) {
                     const double io_area = ram_oracle.getInterfaceAreaMM2();
                     if (io_area > 0.0) {
-                        std::cout << "    + IO area:     " << std::fixed
+                        std::cout << "    CACTI-IO channel IO area: " << std::fixed
                                   << std::setprecision(3) << io_area
-                                  << " mm^2/die (DQ interface silicon, charged"
-                                     " from 1.11.58; it was absent from every"
-                                     " earlier total)" << std::defaultfloat
+                                  << " mm^2/CHANNEL [INFORMATIONAL, NOT in any"
+                                     " total -- 1.11.60: the full-die JEDEC"
+                                     " calibration above already contains the"
+                                     " DRAM's IO ring, and McPAT prices the"
+                                     " controller PHY]" << std::defaultfloat
                                   << std::endl;
-                        die_area_reported += io_area;
+                        /* 1.11.60 (audit round 4, A001/A002/A009 -- REVERT,
+                         * user-approved): NOT added. Three reasons, each
+                         * sufficient. (1) io_area is a WHOLE-CHANNEL figure --
+                         * extio.cc sums (num_dq + num_dqs + num_ca + num_clk)
+                         * IO circuits, ~107 of them for a 64-bit channel --
+                         * and this block labelled it per-die and multiplied
+                         * by the die count: the 1168 gate's own numbers prove
+                         * the 8x (47.91 - 28.36 = 19.55 = 2.444 x 8 exactly).
+                         * (2) The memory die area above is a FULL-DIE JEDEC
+                         * calibration, which already contains the DRAM's IO
+                         * ring. (3) McPAT already prices the controller-side
+                         * PHY. Both ends of the wire were counted before
+                         * 1.11.58 added a third copy. The figure prints so
+                         * the two estimates stay comparable; it enters no
+                         * total. */
+                    } else {
+                        /* 1.11.60 (audit round 4, A003): STATE the absence, in
+                         * the same voice the energy line beside it already
+                         * uses.
+                         *
+                         * getInterfaceAreaMM2() returns 0 for four of the
+                         * seven DRAM technologies, and the disclosure above
+                         * was gated on the VALUE -- so the whole line, and
+                         * with it the fact that the total below carries no DQ
+                         * interface silicon at all, simply vanished. The
+                         * driver/PHY energy path 150 lines up announces its
+                         * own zero for exactly this reason; the area path did
+                         * not, so a technology with no IO area and a
+                         * technology whose IO area happens to be zero printed
+                         * identically. That is the term this simulator's
+                         * cross-technology area sweep compares.
+                         *
+                         * The two causes are different and are named
+                         * separately. LPDDR5 and HBM2/HBM3 have no exact
+                         * CACTI-IO parameter map, so nothing is computed --
+                         * the same condition the energy note reports. GDDR6
+                         * DOES have an exact map and receives the driver+PHY
+                         * energy, but its area is withheld by CACTI-IO's own
+                         * validity ceiling: the area polynomial's cubic term
+                         * equals its linear term at 3162 MHz and GDDR6's bus
+                         * clock is 7000 MHz, so above the crossover the figure
+                         * is an extrapolation and cacti_io_wrapper.cpp returns
+                         * zero rather than report it. No value changes here;
+                         * what changes is that a missing term stops looking
+                         * like a zero one. */
+                        const bool iface_exact_map =
+                            ram_oracle.getInterfaceDynamicEnergyNJ() > 0.0;
+                        std::cout << "    + IO area:     none for this"
+                                     " technology -- "
+                                  << (iface_exact_map
+                                      ? "CACTI-IO's area polynomial is an"
+                                        " extrapolation above 3162 MHz and is"
+                                        " withheld at this bus clock"
+                                      : "CACTI-IO has no exact parameter map"
+                                        " for it")
+                                  << ", so the total below carries no DQ"
+                                     " interface silicon (DDR3/DDR4/DDR5 do)."
+                                  << std::endl;
                     }
                     int dies = memorySystemDieCount(config.memory_tech,
                                                     config.dram_device_width,
@@ -7959,7 +8273,7 @@ static void runPowerAnalysis(const UnifiedConfig& config,
 
     // PE-MIs
     if (config.pe_mc_enabled && config.pes_per_mc > 0) {
-        int mi_count = config.num_pes / config.pes_per_mc;
+        int mi_count = peMemoryInterfaceCount(config);   // 1.11.60 (A012)
         std::string mi_label = "PE-MIs (x" + std::to_string(mi_count) + ")";
         std::cout << "  " << std::left << std::setw(24) << mi_label
                   << std::setw(14) << "Simple" << "McPAT         McPAT" << std::endl;
@@ -7999,14 +8313,17 @@ static void runPowerAnalysis(const UnifiedConfig& config,
     if (config.num_pes > 1) {
         int active_levels = 0;
         for (int i = 0; i < 7; ++i) {
-            if (config.hierarchy_level_latency[i] > 0 || config.hierarchy_bridge_latency[i] > 0)
+            /* 1.11.60 (audit round 4, B013): hierarchy_bridge_latency is a
+             * std::array<int,6> -- there are six BOUNDARIES between seven
+             * levels -- and this was the one of three read sites without the
+             * i < 6 guard, so i == 6 was an out-of-bounds read on every run
+             * with more than one element. Undefined behaviour that happened
+             * to return whatever sits after the array. */
+            const bool bridge_active = (i < 6) && (config.hierarchy_bridge_latency[i] > 0);
+            if (config.hierarchy_level_latency[i] > 0 || bridge_active)
                 active_levels++;
         }
-        int mc_endpoints = 0;
-        if (config.pe_mc_enabled && config.pes_per_mc > 0)
-            mc_endpoints = config.num_pes / config.pes_per_mc;
-        else
-            mc_endpoints = 1;  // host MC
+        int mc_endpoints = peMemoryInterfaceCount(config);   // 1.11.60 (A012)
 
         std::string noc_label = "NoC";
         if (active_levels > 0)
@@ -8023,6 +8340,17 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         std::cout << "  " << std::left << std::setw(24) << noc_label
                   << std::setw(14) << timing_model << "McPAT         McPAT" << std::endl;
         std::cout << "    endpoints: " << noc_detail << std::endl;
+        /* 1.11.60 (audit round 4, A012): when the clamp is what produced the
+         * printed count, say so and name the authority -- otherwise the table
+         * differs from the raw quotient a reader would compute from the two
+         * keys in front of them, with nothing to explain the difference. */
+        if (config.pe_mc_enabled && config.pes_per_mc > 0 &&
+            config.num_pes / config.pes_per_mc < 1)
+            std::cout << "      (pim.mc.pes_per_mc=" << config.pes_per_mc
+                      << " exceeds pim.pe.count=" << config.num_pes
+                      << "; the run instantiates and prices ONE interface --"
+                         " the emitted ZSim configuration is the authority and"
+                         " McPAT follows it)" << std::endl;
     }
 
     // Host (system scope with host nodes)
@@ -8464,13 +8792,19 @@ static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
             ranks_per_channel, channels);
         /* 1.11.20 (D6): DQ termination, placement-aware like 1.11.5. */
         // 1.11.58: driver switching + PHY + termination, as device scope.
+        // 1.11.60 (A009/A010 revert, user-approved): termination-only, as
+        // device scope. CACTI-IO's driver+PHY prints informational below.
         const double iface_term_nj = crosses_dq ? ram_oracle.getTerminationEnergyNJ() : 0.0;
         const double iface_drv_nj  = crosses_dq ? ram_oracle.getInterfaceDynamicEnergyNJ() : 0.0;
-        const double iface_nj = iface_term_nj + iface_drv_nj;
+        const double iface_nj = iface_term_nj;
 
         const double total_rd_mj = rd_nj * static_cast<double>(mem_rd) / 1e6;
         const double total_wr_mj = wr_nj * static_cast<double>(mem_wr) / 1e6;
-        const double total_term_mj =
+        /* 1.11.60 (audit round 4, A011): named for what it holds. Since
+         * 1.11.58 this is termination PLUS driver PLUS PHY; its previous name
+         * described only the first of the three, and the printed label below
+         * inherited that name. */
+        const double total_iface_mj =
             iface_nj * static_cast<double>(mem_rd + mem_wr) / 1e6;
 
         std::cout << "\n--- Memory Array Energy (system) ---" << std::endl;
@@ -8505,18 +8839,23 @@ static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
                   << ")" << std::endl;
         if (crosses_dq) {
             std::cout << "    termination: " << iface_term_nj
-                      << " nJ  driver+PHY: " << iface_drv_nj
-                      << " nJ  (1.11.58)" << std::endl;
+                      << " nJ (charged)  CACTI-IO driver+PHY: " << iface_drv_nj
+                      << " nJ [INFORMATIONAL, NOT charged -- 1.11.60 revert:"
+                         " McPAT already prices the PHY here]" << std::endl;
             double t_lo = 0.0, t_hi = 0.0; std::string t_prov;   // 1.11.59
             if (ram_oracle.getTerminationEnergyBandNJ(t_lo, t_hi, t_prov))
                 std::cout << "    termination BAND " << t_lo << "-" << t_hi
                           << " nJ [" << t_prov << "]" << std::endl;
         }
+        /* 1.11.60 (audit round 4, A011): same mislabel as device scope, same
+         * correction -- what is printed here is the whole DQ interface since
+         * 1.11.58, not the termination component of it. */
         std::cout << "  Array dynamic: " << std::setprecision(3)
-                  << (total_rd_mj + total_wr_mj + total_term_mj)
+                  << (total_rd_mj + total_wr_mj + total_iface_mj)
                   << " mJ (rd=" << total_rd_mj
                   << " + wr=" << total_wr_mj
-                  << " + term=" << total_term_mj << ")"
+                  << " + iface=" << total_iface_mj
+                  << " [termination + driver/PHY])"
                   << std::defaultfloat << std::endl;
         computeDramDieAreaMM2(memory_tech, /*print=*/true,
                               effective_banks);   // 1.11.9; 1.11.52 A008: same org as the total
@@ -8524,7 +8863,7 @@ static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
          * clock. Energy terms divide by the same seconds node power uses;
          * background is already a rate. */
         if (wall_seconds > 0.0) {
-            return (total_rd_mj + total_wr_mj + total_term_mj) / 1000.0 / wall_seconds
+            return (total_rd_mj + total_wr_mj + total_iface_mj) / 1000.0 / wall_seconds
                    + bg_mw / 1000.0;
         }
         return 0.0;
@@ -12218,21 +12557,57 @@ int main(int argc, char** argv) {
      *                      (non-volatile cells hold state unpowered); on SRAM
      *                      the periphery gates but the volatile cell array
      *                      keeps full leakage. Illegal on DRAM, whose array
-     *                      cannot be gated at all -- refused below. */
-    if (yaml_cfg["memory"]) {
-        if (yaml_cfg["memory"]["power_down"])
-            config.mem_power_down = yaml_cfg["memory"]["power_down"].as<bool>(config.mem_power_down);
-        if (yaml_cfg["memory"]["power_down_threshold_ns"])   // 1.11.51 (E17)
-            config.power_down_threshold_ns =
-                yaml_cfg["memory"]["power_down_threshold_ns"].as<double>(-1.0);
-        /* 1.11.52: temperature knob; K wins if both given. */
-        if (yaml_cfg["power"] && yaml_cfg["power"]["temperature_c"])
-            config.temperature_k =
-                yaml_cfg["power"]["temperature_c"].as<int>(77) + 273;
-        if (yaml_cfg["power"] && yaml_cfg["power"]["temperature_k"])
-            config.temperature_k =
-                yaml_cfg["power"]["temperature_k"].as<int>(350);
-        /* 1.11.52 (user ruling: "the temp accepted range should follow the
+     *                      cannot be gated at all.
+     *
+     * 1.11.60 (audit round 4, A007): the DRAM refusal this comment has
+     * promised since 1.11.41 now EXISTS. It did not: grep found the field, this
+     * parse and four consumers -- two in the SRAM branch and two in the NVM
+     * branch -- and no DRAM branch reads the flag at all, so `array_pg: true`
+     * on a DDR4 cell was accepted in silence, gated nothing, and left the only
+     * place that documents the key asserting the run would have refused it.
+     * That is the "guard described in a comment that no configuration reaches"
+     * shape at its purest: the described refusal had no code. It stayed
+     * invisible because the failure mode is silence -- no warning, no changed
+     * number, nothing for a gate to assert on.
+     *
+     * The comment is what is true to the physics, so the refusal is what is
+     * implemented rather than the comment being softened: a DRAM cell is a
+     * capacitor that must be refreshed, and refresh needs the array powered,
+     * so there is no state in which the array is gated. The check needs the
+     * RESOLVED technology -- which in system scope arrives from the device
+     * node hundreds of lines below this parse -- so it lives beside
+     * resolveMemoryTopology() rather than here. */
+    /* 1.11.60 (audit round 4, A005): the POWER keys are not gated on a
+     * memory: block.
+     *
+     * 1.11.57 (A001) moved this whole block out of `if (noc.model)`, which was
+     * the reported defect, and left it inside `if (yaml_cfg["memory"])` --
+     * which is the SAME defect one level down. power.temperature_k and
+     * power.temperature_c are power: keys; requiring an unrelated top-level
+     * memory: block for them to be read is exactly as arbitrary as requiring
+     * a noc: block was. And it is not hypothetical: NONE of the six shipped
+     * co-sim examples has a top-level memory: block, so the temperature knob
+     * stayed inert in co-simulation -- the precise scope A001 was raised
+     * about, and which I reported as fixed.
+     *
+     * The gate arm did not catch it because it used a DEVICE-scope config,
+     * and device configs do carry a top-level memory: block. Verified before
+     * this fix: system scope with temperature_k: 999 and no memory: block
+     * exits 0; the same value with a memory: block exits 2.
+     *
+     * The memory.* keys keep their memory: guard, which is correct for them. */
+    if (yaml_cfg["power"] && yaml_cfg["power"]["temperature_c"])
+        config.temperature_k =
+            yaml_cfg["power"]["temperature_c"].as<int>(77) + 273;
+    if (yaml_cfg["power"] && yaml_cfg["power"]["temperature_k"])
+        config.temperature_k =
+            yaml_cfg["power"]["temperature_k"].as<int>(350);
+
+    /* 1.11.60 (A005): the RANGE VALIDATOR moves with the parse. Leaving
+     * it inside the memory: guard would accept an unevaluable temperature
+     * on exactly the configs whose knob had just been made reachable.
+     *
+     * 1.11.52 (user ruling: "the temp accepted range should follow the
          * upstream tools"): the range is the INTERSECTION of what the linked
          * tools actually accept, each read from its own source rather than
          * restated here as a preference:
@@ -12278,6 +12653,22 @@ int main(int argc, char** argv) {
                       << std::endl;
             std::exit(2);
         }
+
+    if (yaml_cfg["memory"]) {
+        if (yaml_cfg["memory"]["power_down"])
+            config.mem_power_down = yaml_cfg["memory"]["power_down"].as<bool>(config.mem_power_down);
+        if (yaml_cfg["memory"]["power_down_threshold_ns"])   // 1.11.51 (E17)
+            config.power_down_threshold_ns =
+                yaml_cfg["memory"]["power_down_threshold_ns"].as<double>(-1.0);
+        /* 1.11.52: temperature knob; K wins if both given. Parsed ABOVE now
+         * (1.11.60 A005); these two lines are kept so a config that does have
+         * a memory: block behaves identically, and are harmless duplicates. */
+        if (yaml_cfg["power"] && yaml_cfg["power"]["temperature_c"])
+            config.temperature_k =
+                yaml_cfg["power"]["temperature_c"].as<int>(77) + 273;
+        if (yaml_cfg["power"] && yaml_cfg["power"]["temperature_k"])
+            config.temperature_k =
+                yaml_cfg["power"]["temperature_k"].as<int>(350);
         if (yaml_cfg["memory"]["array_pg"])
             config.mem_array_pg = yaml_cfg["memory"]["array_pg"].as<bool>(config.mem_array_pg);
     }
@@ -13241,6 +13632,30 @@ int main(int argc, char** argv) {
     // FALSE -> host.mem.technology drives host memory (required; else rc=1).
     if (resolveMemoryTopology(config) != 0) return 1;
 
+    /* 1.11.60 (audit round 4, A007): the promised DRAM refusal, at the first
+     * point where the memory technology is RESOLVED for both scopes (device
+     * scope sets it at parse; system scope adopts the compute device's a few
+     * hundred lines above). See the memory.array_pg note in the parse block
+     * for why the comment's claim, not the code's silence, is the correct
+     * behaviour. */
+    if (config.mem_array_pg &&
+        pimid::isDRAM(pimid::parseMemoryTechnology(config.memory_tech))) {
+        std::cerr << "[config] FATAL: memory.array_pg is not applicable to "
+                  << config.memory_tech
+                  << ". Array power gating gates the array PERIPHERY while the "
+                     "cells hold their state -- which a DRAM cell cannot do: it "
+                     "is a capacitor, it must be refreshed, and refresh needs "
+                     "the array powered. There is no DRAM state in which this "
+                     "key means anything, and PIMID models none.\n"
+                     "  The key applies to SRAM (periphery gates, the volatile "
+                     "array keeps leaking) and to NVM (retention-free). For "
+                     "DRAM the corresponding knob is memory.power_down, which "
+                     "descends the idle controller to the JEDEC precharge "
+                     "power-down state (IDD2P) and keeps refreshing."
+                  << std::endl;
+        return 1;
+    }
+
     // Configure the characterization-cache warehouse ONCE, after CLI + YAML are
     // both parsed and before any backend (NVSim/CACTI/Ramulator) characterization.
     // Precedence (CLI > env > YAML > default) is resolved inside configure().
@@ -13994,7 +14409,7 @@ int main(int argc, char** argv) {
 
                     // PE-MI info (always present for non-HOST_MC due to validation)
                     if (config.pe_mc_enabled) {
-                        int mi_count = config.num_pes / config.pes_per_mc;
+                        int mi_count = peMemoryInterfaceCount(config);  // 1.11.60 (A012)
                         std::cout << "    PE-MIs: " << mi_count
                                   << " (" << config.pes_per_mc << " PEs/MI";
                         if (config.ports_per_bank > 1)
@@ -14603,7 +15018,7 @@ int main(int argc, char** argv) {
 
                     // PE-MI info (always present for non-HOST_MC due to validation)
                     if (config.pe_mc_enabled) {
-                        int mi_count = config.num_pes / config.pes_per_mc;
+                        int mi_count = peMemoryInterfaceCount(config);  // 1.11.60 (A012)
                         std::cout << "    PE-MIs: " << mi_count
                                   << " (" << config.pes_per_mc << " PEs/MI";
                         if (config.ports_per_bank > 1)

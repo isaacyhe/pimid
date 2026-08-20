@@ -415,14 +415,20 @@ Cycle DRAMModel::access(const MemoryRequest& req) {
      * only when ramulator_instance_ is null, and the constructor always makes
      * one). Nothing could observe the difference because access() has no
      * caller in this tree. */
+    /* 1.11.60 (audit round 4, C003): ASSIGNED, not accumulated. read_energy_
+     * and write_energy_ are the MemoryModel interface's PER-ACCESS fields --
+     * see the contract paragraph in memory_model.h -- and this was the second
+     * of the two places that made them a running total instead. Per-access
+     * energy does not depend on how many accesses have happened, so the
+     * assignment is the whole of it; the counters beside it are what scale. */
     if (req.type == MemoryRequestType::READ) {
         total_reads_++;
-        read_energy_ += dramPerAccessNJ(ramulator_instance_.get(),
-                                        dram_arch_.get(), false);
+        read_energy_ = dramPerAccessNJ(ramulator_instance_.get(),
+                                       dram_arch_.get(), false);
     } else if (req.type == MemoryRequestType::WRITE) {
         total_writes_++;
-        write_energy_ += dramPerAccessNJ(ramulator_instance_.get(),
-                                         dram_arch_.get(), true);
+        write_energy_ = dramPerAccessNJ(ramulator_instance_.get(),
+                                        dram_arch_.get(), true);
     }
 
     // Update row buffer state
@@ -464,9 +470,37 @@ void DRAMModel::tick() {
          * wrapper's counters and their getters are deleted in 1.11.57; this
          * model keeps its own, which at least count something. */
 
-        // Update energy metrics
-        read_energy_ = ramulator_instance_->getReadEnergy();
-        write_energy_ = ramulator_instance_->getWriteEnergy();
+        /* Update energy metrics.
+         * 1.11.60 (audit round 4, C003): THE PER-ACCESS FIGURE, not the
+         * wrapper's running total.
+         *
+         * RamulatorWrapper::getReadEnergy() is total_reads_ x per-access (see
+         * updateEnergyMetrics(): cached_read_energy_ = total_reads_ *
+         * read_energy_per_access), and copying it into read_energy_ made
+         * DRAMModel::getReadEnergy() a CUMULATIVE total under a base-class
+         * signature that memory_model.h documents as nanojoules PER ACCESS.
+         * 1.11.58 normalised the other three implementations and recorded in
+         * that paragraph that all four now obeyed the contract; this one did
+         * not, and the paragraph said it did -- so the one line a future
+         * polymorphic consumer would rely on was the line that was wrong. Made
+         * to obey rather than documented as an exception, because an interface
+         * with one exception is an interface nobody can call: a consumer
+         * reading these four through MemoryModel* would have seen DRAM's read
+         * energy grow without bound over the run while the three NVM models
+         * returned a constant, which is exactly the failure the contract
+         * exists to prevent.
+         *
+         * getArrayReadEnergyNJ()/getArrayWriteEnergyNJ() -- reached through
+         * dramPerAccessNJ() above -- are the wrapper's own INTENSIVE
+         * accessors, documented in ramulator_wrapper.h as the per-64 B figure
+         * that does not depend on how many accesses the wrapper has seen. The
+         * cumulative total this used to hold is not lost: getTotalEnergy()
+         * reconstructs it by multiplying by the counters, which is what a
+         * cumulative total is. */
+        read_energy_ = dramPerAccessNJ(ramulator_instance_.get(),
+                                       dram_arch_.get(), false);
+        write_energy_ = dramPerAccessNJ(ramulator_instance_.get(),
+                                        dram_arch_.get(), true);
         /* 1.11.57 (latent D021): MILLIWATTS INTO A WATTS FIELD.
          * RamulatorWrapper::getLeakagePower() returns mW (it is derived from
          * the IDD background power, which is a mW quantity, and its own
@@ -540,8 +574,17 @@ double DRAMModel::getTotalEnergy() const {
     const double elapsed_s =
         static_cast<double>(current_cycle_) * clock_period_ns * 1e-9;
     const double leakage_energy_nJ = leakage_power_ * elapsed_s * 1e9;  // J -> nJ
-    return read_energy_ + write_energy_ + activation_energy_ +
-           precharge_energy_ + leakage_energy_nJ;
+    /* 1.11.60 (audit round 4, C003): the dynamic terms are now a per-access
+     * energy times an access count. read_energy_/write_energy_ became the
+     * intensive per-access figures the MemoryModel contract asks for, so this
+     * function -- which is the ACCUMULATED total, the one member of the four
+     * that is meant to grow -- does the accumulating itself. activation_ and
+     * precharge_ stay as the wrapper reports them: they are cumulative there,
+     * they are not part of the base-class contract, and no counter in this
+     * model corresponds to them. */
+    return (static_cast<double>(total_reads_) * read_energy_) +
+           (static_cast<double>(total_writes_) * write_energy_) +
+           activation_energy_ + precharge_energy_ + leakage_energy_nJ;
 }
 
 void DRAMModel::printStats() const {
@@ -574,10 +617,17 @@ void DRAMModel::printStats() const {
     }
 
     std::cout << "\nEnergy Consumption:" << std::endl;
-    std::cout << "  Read Energy: " << read_energy_ << " nJ" << std::endl;
-    std::cout << "  Write Energy: " << write_energy_ << " nJ" << std::endl;
-    std::cout << "  Activation Energy: " << activation_energy_ << " nJ" << std::endl;
-    std::cout << "  Precharge Energy: " << precharge_energy_ << " nJ" << std::endl;
+    /* 1.11.60 (audit round 4, C003): these two are per-access now and the
+     * labels say so; the running totals they used to hold are printed beside
+     * them, derived from the counters. */
+    std::cout << "  Read Energy (per access): " << read_energy_ << " nJ" << std::endl;
+    std::cout << "  Write Energy (per access): " << write_energy_ << " nJ" << std::endl;
+    std::cout << "  Total Read Energy: "
+              << (static_cast<double>(total_reads_) * read_energy_) << " nJ" << std::endl;
+    std::cout << "  Total Write Energy: "
+              << (static_cast<double>(total_writes_) * write_energy_) << " nJ" << std::endl;
+    std::cout << "  Activation Energy: " << activation_energy_ << " nJ (cumulative)" << std::endl;
+    std::cout << "  Precharge Energy: " << precharge_energy_ << " nJ (cumulative)" << std::endl;
     std::cout << "  Leakage Power: " << leakage_power_ << " W" << std::endl;
     std::cout << "  Total Energy: " << getTotalEnergy() << " nJ" << std::endl;
     std::cout << "================================\n" << std::endl;
@@ -589,8 +639,12 @@ void DRAMModel::resetStats() {
     row_hits_ = 0;
     row_misses_ = 0;
     row_conflicts_ = 0;
-    read_energy_ = 0.0;
-    write_energy_ = 0.0;
+    /* 1.11.60 (audit round 4, C003): read_energy_/write_energy_ are NOT
+     * zeroed any more. They are the per-access figures the contract asks for,
+     * i.e. a property of the part, not a statistic -- zeroing them was the
+     * accumulating-total behaviour the finding named, and it is what the three
+     * NVM models' resetStats() already declines to do. The cumulative terms
+     * (activation, precharge) are statistics and are still cleared. */
     activation_energy_ = 0.0;
     precharge_energy_ = 0.0;
     current_cycle_ = 0;

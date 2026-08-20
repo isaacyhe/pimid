@@ -118,6 +118,15 @@ public:
                                     std::string& provenance) const;
     double getInterfaceDynamicEnergyNJ() const;
     double getInterfaceAreaMM2() const;
+    /* 1.11.60 (audit round 4, C009): true when the last getInterfaceAreaMM2()
+     * returned 0.0 because CACTI-IO REFUSED to extrapolate its area
+     * polynomial above 3162 MHz -- as distinct from returning 0.0 because the
+     * technology has no exact parameter set. GDDR6 is the only live case (its
+     * bus runs at 7000 MHz while its electricals ARE sourced), and the caller
+     * that consumes the area gates on `> 0.0`, so without this the run said
+     * nothing at all about a missing term. The accessor is meaningful only
+     * after a getInterfaceAreaMM2() call. */
+    bool interfaceAreaWithheld() const { return io_area_withheld_; }
     // Override termination energy (pJ/bit; <0 = model default, 0 = force no termination).
     void setTerminationOverridePJPerBit(double v) { energy_term_override_pJ_per_bit_ = v; }
     double getBackgroundPowerMW() const;     // per-unit active standby + refresh
@@ -176,6 +185,9 @@ public:
     uint64_t getChipSizeMB() const;
 
     // Internal port bitwidths (critical for PIM bandwidth!)
+    // 1.11.60 (one fabric): the rung's upstream reference, verbatim from the
+    // architecture object's VerifiedValue -- status + citation.
+    std::string getLadderRungProvenance(int rung) const;
     int getSubarrayPortBits() const;
     int getBankPortBits() const;
     int getBankGroupPortBits() const;
@@ -260,6 +272,10 @@ private:
     // never incremented, and unincrementable without a Ramulator2 instance.
 
     // Energy tracking
+    /* 1.11.60 (audit round 4, C009): the withheld-area record and its
+     * say-it-once latch. See getInterfaceAreaMM2(). */
+    mutable bool io_area_withheld_ = false;
+    mutable bool warned_io_area_withheld_ = false;
     mutable double cached_read_energy_;
     mutable double cached_write_energy_;
     mutable double cached_leakage_power_;

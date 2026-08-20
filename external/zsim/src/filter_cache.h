@@ -169,6 +169,53 @@ class FilterCache : public Cache {
             for (uint32_t i = 0; i < numSets; i++) filterArray[i].clear();
             futex_unlock(&filterLock);
         }
+
+        /* 1.11.60 (audit round 4, D004): THE M -> E CLEAN HAS TO DROP THE L0
+         * WRITE FILTER, or a store after the flush never re-dirties the line.
+         *
+         * store() above returns at the fGETXHit line WITHOUT calling
+         * Cache::access whenever the line is the filter's current wrAddr, so
+         * it never reaches MESIBottomCC::processAccess and never puts the line
+         * back in M. Cache::flushDirtyLines drives the line M -> E in the tag
+         * array and, until now, left wrAddr pointing straight at it: from that
+         * instant the line was dirty in the guest and clean in the model. The
+         * next flush did not count it, and when it was finally evicted
+         * processEviction sent PUTS instead of PUTX, so its bytes were neither
+         * written back nor charged. Only invalidate() and contextSwitch()
+         * cleared the filter, and the flush called neither.
+         *
+         * Why it was invisible: the loss is bounded by the filter, numSets
+         * lines per host L1D per flush -- 64 lines, 4 KB, at the shipped
+         * 32 KB / 8-way / 64 B host L1D -- and no counter contradicts it. The
+         * flush footprint is the only place it surfaces, and it surfaces as a
+         * slightly SMALLER number, which is the direction a reader already
+         * expects a repeated flush to trend. It grows with numSets and with
+         * the number of flushes, and the 1.11.57 redesign reasoned explicitly
+         * about zsim's silent E -> M upgrade inside the cache while never
+         * mentioning the level above it.
+         *
+         * Only wrAddr is dropped, with invalidate()'s own -1L idiom. The line
+         * is still VALID (E) after the clean, so read hits stay correct; a
+         * store now misses the filter, goes through replace() -> GETX, and
+         * that is the path that re-establishes M. Cost is at most one extra
+         * GETX per set per flush, and replace() leaves availCycle alone when
+         * the address is unchanged (oldAddr == vLineAddr), so the re-dirtying
+         * store keeps exactly the timing a filtered store hit had.
+         *
+         * Lock discipline: nothing is added to load() or store(); the fast
+         * path is untouched. Cache::flushDirtyLines takes and RELEASES the cc
+         * lock before we reach filterLock, so we never hold both and cannot
+         * invert replace()'s filterLock -> cc-lock order. Holding filterLock
+         * across the clear is what closes the remaining race -- a replace()
+         * that has already upgraded the line to M but has not yet published
+         * wrAddr would otherwise re-open the identical hole behind us. */
+        uint64_t flushDirtyLines(std::unordered_set<Address>& distinctDirty) override {
+            uint64_t cleaned = Cache::flushDirtyLines(distinctDirty);
+            futex_lock(&filterLock);
+            for (uint32_t i = 0; i < numSets; i++) filterArray[i].wrAddr = -1L;
+            futex_unlock(&filterLock);
+            return cleaned;
+        }
 };
 
 #endif  // FILTER_CACHE_H_

@@ -54,12 +54,30 @@ public:
          * CACTI checks as "Temperature must be between 300 and 400 Kelvin and
          * multiple of 10" (external/cacti/io.cc) and EXITS on failure. So a
          * caller who obeyed the declaration and passed 85 would not get a
-         * wrong number, it would kill the process mid-run. It was invisible
-         * because no caller anywhere sets SRAMConfig::temperature -- every
-         * query in the tree takes the 350 K default. The declaration is
-         * corrected and validateConfiguration() now enforces CACTI's own
-         * window, so a wrong unit is refused by this wrapper with a readable
-         * message instead of by CACTI with an exit. */
+         * wrong number, it would kill the process mid-run.
+         *
+         * 1.11.60 (audit round 4, C012): THE REACHABILITY CLAIM THAT FOLLOWED
+         * WAS ALREADY FALSE WHEN IT WAS WRITTEN. It read "no caller anywhere
+         * sets SRAMConfig::temperature -- every query in the tree takes the
+         * 350 K default". Five sites set it, all of them predating 1.11.57:
+         * main.cpp (four query paths) and SRAMModel::initialize(), which
+         * forwards sram_config_.temperature_k. They are 1.11.52's own D055
+         * work -- the release that made the temperature configurable -- so the
+         * note was contradicted by the change one release earlier, and it was
+         * repeated as the justification for treating a documented-unit error
+         * as harmless.
+         *
+         * What IS true, and is the honest form of the same argument: no path
+         * from main.cpp can produce an illegal value, because power.temperature_k
+         * is range-validated to 300-400 in steps of 10 before it reaches any of
+         * them. But SRAMModel::setTemperatureK() accepts any k > 0 and forwards
+         * it unchecked, so a direct user of the model class can trip the guard
+         * -- which is precisely the case the old note said did not exist. The
+         * guard is load-bearing, not decorative.
+         *
+         * The declaration is corrected and validateConfiguration() enforces
+         * CACTI's own window, so a wrong unit is refused by this wrapper with a
+         * readable message instead of by CACTI with an exit. */
         uint32_t temperature;        // Operating temperature in KELVIN
                                      // (300-400, multiple of 10 -- CACTI's rule)
 

@@ -619,6 +619,44 @@ private:
     uint64_t meas_int_ = 0, meas_mul_ = 0, meas_fp_ = 0,
              meas_ld_ = 0, meas_st_ = 0, meas_mix_br_ = 0;   // 1.11.10/.15
     uint64_t meas_mispred_ = 0;
+    /* 1.11.60 (audit round 4, C006): THE GATE THAT DECIDES WHETHER A LATCHED
+     * DIAGNOSTIC MAY FIRE, and the reason every one of them used to state the
+     * opposite of the truth.
+     *
+     * Every latched note below lives inside generateXMLConfig(). That function
+     * ran twice: once from initialize() -> createMcPATInput(), and once inside
+     * the forked child. initialize() runs BEFORE any setter -- main.cpp calls
+     * initialize(), then setTotalCycles(), setMeasuredMix(), setNoCLevels() --
+     * so the first pass saw an all-zero wrapper: no measured mix, no NoC
+     * levels, no counters. It latched every "nothing was measured" note on
+     * that empty state and printed it. The second pass, the one over the real
+     * post-setter state, runs in the child, whose stdout is /dev/null and
+     * whose latches are already true, so it said nothing. The log therefore
+     * carried the negative of what the run did: a run with a fully measured
+     * instruction mix printed "no measured load/store mix in this run".
+     *
+     * It was invisible because both passes are called "generating the McPAT
+     * input" and nobody had reason to think the first one was over a wrapper
+     * that had not been told anything yet; 1.11.56's C014 removed the only
+     * OTHER parent-side pass, which had been the one visible evaluation of
+     * the real state, and the remaining first pass looked like its
+     * replacement.
+     *
+     * The gate is false everywhere except during one deliberate pass that
+     * computePower() runs in the PARENT, after every setter and after the
+     * tech-node clamp, immediately before fork(). See diagOnce(). */
+    bool diagnostics_live_ = false;
+    /* 1.11.60 (audit round 4, C006): the one place a latched diagnostic is
+     * allowed to claim its turn. Returns true only when diagnostics are live
+     * AND this latch has not fired; sets the latch in that case and only in
+     * that case, so a suppressed pass does not consume the message the live
+     * pass exists to print. */
+    bool diagOnce(bool& latch) const {
+        if (!diagnostics_live_) return false;
+        if (latch) return false;
+        latch = true;
+        return true;
+    }
     /* 1.9.29: the measured counters are used only when self-consistent against
      * the instruction count (see the mix construction in the XML writer). This
      * latches the one-time warning when they are not, so a sweep does not emit

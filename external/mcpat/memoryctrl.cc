@@ -263,8 +263,27 @@ void MCPHY::compute()
 		  power_per_gb_per_s = 0.01;
 		  //This is power not energy, 10mw/Gb/s @90nm for each channel and scaling down
 		  power_t.readOp.dynamic = power_per_gb_per_s*(l_ip.F_sz_um/0.09)*g_tp.peri_global.Vdd/1.2*g_tp.peri_global.Vdd/1.2;
-		  power_t.readOp.leakage = (mcp.withPHY? phy_gates:0)*cmos_Isub_leakage(NMOS_sizing, PMOS_sizing, 2, nand)*g_tp.peri_global.Vdd;//unit W
-		  power_t.readOp.gate_leakage = (mcp.withPHY? phy_gates:0)*cmos_Ig_leakage(NMOS_sizing, PMOS_sizing, 2, nand)*g_tp.peri_global.Vdd;//unit W
+		  /* PIMID 1.11.60 (audit round 4, D008): THE withPHY TERNARY HERE WAS A
+		   * GUARD THAT COULD NOT FIRE, and it has been deleted.
+		   *
+		   * Both lines used to read (mcp.withPHY? phy_gates:0). Since 1.11.19
+		   * (D3) made withPHY the sole allocation gate, an MCPHY object exists
+		   * ONLY inside `if (mcp.withPHY)` -- grep 'new MCPHY' over this fork
+		   * returns exactly the one site in MemoryController's constructor --
+		   * so mcp.withPHY is true for every MCPHY that ever runs compute(),
+		   * and the false arm was unreachable. It is doubly dead for PIMID:
+		   * the wrapper emits sys.mc.type = 0, so the branch this line sits in
+		   * (type != 0, the low-power PHY) is not entered at all.
+		   *
+		   * Invisible because a redundant guard reads as caution rather than
+		   * as a claim, while what it actually asserted to a reader was that a
+		   * PHY can be BUILT and then priced as having no gates -- leaking
+		   * nothing while occupying area. 1.11.59 removed an unsatisfiable
+		   * guard of exactly this shape from Ramulator (F035) and left this
+		   * one standing. No number moves: on every path that reaches here the
+		   * ternary already selected phy_gates. */
+		  power_t.readOp.leakage = phy_gates*cmos_Isub_leakage(NMOS_sizing, PMOS_sizing, 2, nand)*g_tp.peri_global.Vdd;//unit W
+		  power_t.readOp.gate_leakage = phy_gates*cmos_Ig_leakage(NMOS_sizing, PMOS_sizing, 2, nand)*g_tp.peri_global.Vdd;//unit W
 	  }
 
   }

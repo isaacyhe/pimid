@@ -151,8 +151,17 @@ void STTMRAMModel::initialize() {
     std::cout << "  Write Latency: " << mram_config_.write_latency_ns << " ns" << std::endl;
     std::cout << "  Endurance: " << mram_config_.endurance << " writes" << std::endl;
     std::cout << "  PIM Enabled: " << (mram_config_.is_pim_enabled ? "Yes" : "No") << std::endl;
-    std::cout << "  Read Energy: " << read_energy_ << " pJ/byte" << std::endl;
-    std::cout << "  Write Energy: " << write_energy_ << " pJ/byte" << std::endl;
+    /* 1.11.60 (audit round 4, C001): nJ PER ACCESS, which is what the two
+     * assignments seventeen lines above this actually produce. 1.11.58 re-based
+     * the members from pJ/byte to nJ/access and did not move the labels here,
+     * so the printed number was 15.6x below the pJ/byte it claimed at the
+     * 512-bit line main.cpp configures (125x at the 64-bit model default). It
+     * was invisible because the value itself was already correct -- only its
+     * name was left on the retired basis -- and because the block comment
+     * further down cited THIS print as the evidence for the old unit, so a
+     * reader who checked the source was told the same wrong thing twice. */
+    std::cout << "  Read Energy: " << read_energy_ << " nJ/access" << std::endl;
+    std::cout << "  Write Energy: " << write_energy_ << " nJ/access" << std::endl;
     std::cout << "  Leakage Power: " << leakage_power_ << " W" << std::endl;
     std::cout << "[STTMRAMModel] Initialization complete" << std::endl;
 }
@@ -230,10 +239,21 @@ static inline Cycle legacyNsAsCycles(double ns) {
     return static_cast<Cycle>(std::ceil(ns));   // 1 GHz: no clock is supplied
 }
 
+/* 1.11.60 (audit round 4, C001): READ THE PARAGRAPH BELOW AS HISTORY, NOT AS
+ * A STATEMENT OF THE PRESENT UNIT. It was written at 1.11.57 and it was true
+ * then; 1.11.58 re-based read_energy_/write_energy_ to NANOJOULES PER ACCESS
+ * at assignment (see the note beside the assignments in initialize()), and
+ * this paragraph was not moved with them. Worse, it cited initialize()'s
+ * "pJ/byte" printout as its evidence -- and that print had not been moved
+ * either, so the source and the log agreed with each other and both disagreed
+ * with the arithmetic between them. Both are corrected at 1.11.60. What the
+ * members hold today: nJ per access, one unit on every path.
+ */
 /* 1.11.57 (latent D044): THE MISSING ACCESS SIZE.
  *
- * read_energy_/write_energy_ hold pJ PER BYTE -- the model's own printout says
- * so ("pJ/byte", initialize()), and the value comes from
+ * read_energy_/write_energy_ HELD pJ PER BYTE when this was written -- the
+ * model's own printout said so ("pJ/byte", initialize()), and the value came
+ * from
  * STTMRAMArchitecture::energy.read_energy_per_byte, which the extractor
  * computes as bank_read_energy_pJ / (word_width_bits / 8)
  * (architecture_extractor.h). getTotalEnergy() and printStats() multiplied
@@ -385,16 +405,33 @@ void STTMRAMModel::printStats() const {
     std::cout << "  Chip Write: " << getChipWriteLatency() << " ns" << std::endl;
 
     std::cout << "\nEnergy Consumption:" << std::endl;
-    // 1.11.57 (latent D044): the totals below are per-byte energy x the access
-    // size x the access count. They used to omit the access size entirely.
+    /* 1.11.60 (audit round 4, C002): THE SECOND MULTIPLY IS GONE.
+     *
+     * These lines multiplied read_energy_/write_energy_ by bytes-per-access.
+     * That was right at 1.11.57, when the members were an energy DENSITY;
+     * 1.11.58 re-based them to nJ per access at assignment and moved
+     * getTotalEnergy() (three lines above) onto the new basis without moving
+     * this block, so the same file held both conventions and the "per access"
+     * and "Total" lines below came out 64x high at the 512-bit configured line
+     * -- printed as "pJ" while carrying nJ, and disagreeing with the "Total
+     * Energy" line immediately beneath them by that factor times 1000.
+     *
+     * It was invisible because printStats() has no caller anywhere in the tree
+     * (CompositePowerModel is the only route to it and is never constructed)
+     * and because the counters it multiplies are never incremented, so the
+     * product was 0 x wrong.
+     *
+     * The per-access figures are now the members themselves, and the per-byte
+     * line is DERIVED from them rather than being the stored quantity, so the
+     * two can no longer drift apart again. */
     const double bpa = bytesPerAccess(access_width_bits_);
-    std::cout << "  Read Energy (per byte): " << read_energy_ << " pJ" << std::endl;
-    std::cout << "  Write Energy (per byte): " << write_energy_ << " pJ" << std::endl;
     std::cout << "  Access Width: " << (bpa * 8.0) << " bits (" << bpa << " B)" << std::endl;
-    std::cout << "  Read Energy (per access): " << (read_energy_ * bpa) << " pJ" << std::endl;
-    std::cout << "  Write Energy (per access): " << (write_energy_ * bpa) << " pJ" << std::endl;
-    std::cout << "  Total Read Energy: " << (total_reads_ * read_energy_ * bpa) << " pJ" << std::endl;
-    std::cout << "  Total Write Energy: " << (total_writes_ * write_energy_ * bpa) << " pJ" << std::endl;
+    std::cout << "  Read Energy (per access): " << read_energy_ << " nJ" << std::endl;
+    std::cout << "  Write Energy (per access): " << write_energy_ << " nJ" << std::endl;
+    std::cout << "  Read Energy (per byte): " << (read_energy_ * 1000.0 / bpa) << " pJ" << std::endl;
+    std::cout << "  Write Energy (per byte): " << (write_energy_ * 1000.0 / bpa) << " pJ" << std::endl;
+    std::cout << "  Total Read Energy: " << (total_reads_ * read_energy_) << " nJ" << std::endl;
+    std::cout << "  Total Write Energy: " << (total_writes_ * write_energy_) << " nJ" << std::endl;
     std::cout << "  Leakage Power: " << leakage_power_ << " W" << std::endl;
     // 1.11.58: nJ, matching the MemoryModel contract getTotalEnergy() now obeys.
     std::cout << "  Total Energy: " << getTotalEnergy() << " nJ" << std::endl;

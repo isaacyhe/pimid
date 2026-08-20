@@ -639,7 +639,21 @@ void McPATWrapper::createMcPATInput() {
      * With the dead call gone the only remaining caller is the child, whose
      * STDOUT is /dev/null, so on std::cout the diagnostic would have
      * disappeared along with the dead work. Stderr survives the redirect. */
-    std::cerr << "[McPATWrapper] Creating McPAT configuration" << std::endl;
+    /* 1.11.60 (audit round 4, C006): SAY WHICH PASS THIS IS. There are two,
+     * and until now both announced themselves with the same two lines, so the
+     * log showed "Generated XML configuration:" twice -- once for
+     * /tmp/mcpat_input_0.xml, which initialize() writes from a wrapper no
+     * setter has touched and which nothing ever reads, and once for the file
+     * the run was really priced from. A reader had no way to tell them apart
+     * and would naturally take the first. initialize() is the only caller that
+     * reaches here with initialized_ still false, so that flag names the pass
+     * exactly. */
+    const bool priced_pass = initialized_;
+    std::cerr << (priced_pass
+                    ? "[McPATWrapper] Creating McPAT configuration"
+                    : "[McPATWrapper] Validating McPAT configuration "
+                      "(pre-setter probe; not the priced input)")
+              << std::endl;
 
     if (!config_.xml_file.empty() && user_provided_xml_) {
         std::cerr << "  Using XML file: " << config_.xml_file << std::endl;
@@ -683,7 +697,14 @@ void McPATWrapper::createMcPATInput() {
     config_.xml_file = temp_xml;
     valid_ = true;
 
-    std::cerr << "  Generated XML configuration: " << temp_xml << std::endl;  // 1.11.56 (C014)
+    /* 1.11.60 (audit round 4, C006): the probe's file is labelled as a probe.
+     * It is left on disk rather than removed: config_.xml_file points at it,
+     * and a direct caller of runMcPAT() (no fork, no pending path) still
+     * relies on that. What changes is that the log no longer presents it as
+     * the priced input. */
+    std::cerr << (priced_pass ? "  Generated XML configuration: "
+                              : "  Wrote configuration probe (unpriced, unread): ")
+              << temp_xml << std::endl;  // 1.11.56 (C014), 1.11.60 (C006)
 }
 
 /* 1.11.57 (latent C015): the CACTI tech-node clamp, LIFTED OUT of runMcPAT()
@@ -1094,6 +1115,39 @@ void McPATWrapper::computePower() {
      * are the same field. Must precede inputFingerprint() so the parent and
      * the child hash the same node. */
     clampTechNodeForCacti();
+
+    /* 1.11.60 (audit round 4, C006): THE ONE PASS THAT MAY SPEAK.
+     *
+     * Every latched diagnostic in generateXMLConfig() describes the state the
+     * wrapper was handed -- whether a mix was measured, whether NoC levels
+     * were supplied, whether the link controller was given a clock. Until now
+     * the only pass that could print ran from initialize(), i.e. BEFORE any of
+     * those setters, so it described an empty wrapper and latched itself shut;
+     * the pass over the real state ran in the forked child with stdout on
+     * /dev/null. The result was a log that reported the negative of the run:
+     * "no measured load/store mix in this run" on a run with 132014 measured
+     * loads, and "(0 reads + 0 writes = 0)" for a substitution that never
+     * happened because setNoCLevels() had taken the per-level branch.
+     *
+     * So the evaluation happens HERE: in the parent, after every setter, after
+     * the tech-node clamp, before fork(). The XML string is discarded -- the
+     * child regenerates the file it parses, exactly as 1.11.56's C014 arranged
+     * -- so this re-adds no orphan file and no second authority over the
+     * inputs; it re-adds only the DISCLOSURE that C014 removed along with the
+     * dead work. It is a string build over the current configuration, and it
+     * happens once per computePower().
+     *
+     * The alternative -- emitting from the child on stderr, which survives the
+     * /dev/null redirect -- was rejected: the child's evaluation happens after
+     * the clamp mutation and inside a process whose failure mode is _Exit(),
+     * so a message from there cannot be relied on to appear at all when McPAT
+     * aborts, and the diagnostics are about the INPUTS, which the parent owns
+     * and can state before it risks the fork. */
+    {
+        diagnostics_live_ = true;
+        (void)generateXMLConfig();
+        diagnostics_live_ = false;
+    }
 
     /* 1.11.57 (latent C012): the blob key carries the INPUTS now -- a
      * fingerprint over every configuration field and every setter's state --
@@ -1857,8 +1911,12 @@ void McPATWrapper::printDetailedResults() const {
  * on invented activity looked exactly like a measured one in the log.
  * Latched: say it once, naming what was missing and what stood in. */
 void McPATWrapper::warnUnsourcedMix(const char* which, const char* frac) const {
-    if (warned_unsourced_mix_) return;
-    warned_unsourced_mix_ = true;
+    /* 1.11.60 (audit round 4, C006): through diagOnce(), so the pass that
+     * consumes this latch is the one over the post-setter state. It used to be
+     * consumed by initialize()'s pass, where meas_ld_/meas_st_ are necessarily
+     * 0 because setMeasuredMix() has not been called yet -- which is why a run
+     * with 132014 measured loads printed "no measured load/store mix". */
+    if (!diagOnce(warned_unsourced_mix_)) return;
     std::cout << "  [Activity] WARNING: no measured " << which
               << " in this run; McPAT is driven by UNSOURCED fractions of the "
                  "retired instruction count (" << frac
@@ -2036,8 +2094,11 @@ std::string McPATWrapper::generateXMLConfig() const {
      * sizes to 0), and it is a legitimate machine, so it is described rather
      * than refused -- but it is stated, once, so nobody reads the resulting
      * XML as an ALU element's. */
-    if (!warned_profile_split_ && (no_icache != is_alu)) {
-        warned_profile_split_ = true;
+    /* 1.11.60 (audit round 4, C006): diagOnce() -- see the gate's declaration.
+     * This one described a real configuration either way (both switches are
+     * set before initialize()), but it shared the latch discipline that made
+     * its neighbours lie, so it is moved onto the same gate. */
+    if ((no_icache != is_alu) && diagOnce(warned_profile_split_)) {
         std::cerr << "[McPATWrapper] NOTE: instruction supply and datapath are "
                      "described from different switches in this configuration -- "
                      "l1i_size_bytes=" << config_.l1i_size_bytes
@@ -2301,8 +2362,9 @@ std::string McPATWrapper::generateXMLConfig() const {
      * model already supports via operand_width -- is priced as 32-bit. Say so
      * once rather than let the two halves quietly disagree about how wide the
      * element is; refusing would remove a capability the timing side has. */
-    if (config_.device_scope && machine_bits < 32 && !warned_narrow_datapath_) {
-        warned_narrow_datapath_ = true;
+    /* 1.11.60 (audit round 4, C006): diagOnce(). */
+    if (config_.device_scope && machine_bits < 32 &&
+        diagOnce(warned_narrow_datapath_)) {
         std::cerr << "[power] WARNING: operand_width=" << machine_bits
                   << " is narrower than the power model's 32-bit granularity; "
                   << "the datapath is priced as 32-bit while the timing model "
@@ -2353,8 +2415,13 @@ std::string McPATWrapper::generateXMLConfig() const {
     uint64_t idle_cycles = 0;
     if (total_cycles_ >= busy_cycles_) {
         idle_cycles = total_cycles_ - busy_cycles_;
-    } else if (!warned_busy_exceeds_total_) {
-        warned_busy_exceeds_total_ = true;
+    /* 1.11.60 (audit round 4, C006): diagOnce(). This one could NEVER have
+     * fired on real counters: at initialize() both busy_cycles_ and
+     * total_cycles_ are 0, so the comparison took the equal branch and latched
+     * nothing, and by the time setTotalCycles()/setBusyCycles() had run the
+     * only remaining evaluation was the child's silent one. The guard is a
+     * guard again. */
+    } else if (diagOnce(warned_busy_exceeds_total_)) {
         std::cerr << "[power] WARNING: busy_cycles (" << busy_cycles_
                   << ") exceeds total_cycles (" << total_cycles_
                   << "). idle_cycles is emitted as 0; the unclamped unsigned "
@@ -2484,8 +2551,11 @@ std::string McPATWrapper::generateXMLConfig() const {
         uint64_t br_per_core = meas_self_consistent
             ? meas_branches_ / std::max(1, config_.num_cores)
             : inst_per_core * 10 / 100;   // UNSOURCED stand-in (see E22 note)
-        if (!meas_self_consistent && meas_branches_ > 0 && !warned_mix_) {
-            warned_mix_ = true;
+        /* 1.11.60 (audit round 4, C006): diagOnce(). meas_branches_ is 0 at
+         * initialize(), so this condition was false on the only pass that
+         * could speak. */
+        if (!meas_self_consistent && meas_branches_ > 0 &&
+            diagOnce(warned_mix_)) {
             std::cout << "  [Activity] WARNING: measured instruction mix rejected as "
                          "inconsistent (instrs/core=" << inst_per_core
                       << " branches/core=" << (meas_branches_ / std::max(1, config_.num_cores))
@@ -2541,8 +2611,7 @@ std::string McPATWrapper::generateXMLConfig() const {
                 uint64_t deficit = inst_per_core - classified;
                 if (deficit * 20 > inst_per_core) {   // >5%: reject the census
                     census_ok = false;
-                    if (!warned_mix_) {
-                        warned_mix_ = true;
+                    if (diagOnce(warned_mix_)) {   // 1.11.60 (C006)
                         std::cout << "  [Activity] measured mix rejected: "
                                   << deficit << "/" << inst_per_core
                                   << " retired instructions per core are in NO "
@@ -2552,8 +2621,7 @@ std::string McPATWrapper::generateXMLConfig() const {
                     }
                 } else if (deficit > 0) {
                     mi += deficit;    // conservative: residual as int-class
-                    if (!warned_mix_) {
-                        warned_mix_ = true;
+                    if (diagOnce(warned_mix_)) {   // 1.11.60 (C006)
                         std::cout << "  [Activity] mix census covers "
                                   << classified << "/" << inst_per_core
                                   << " per core (deficit " << deficit
@@ -2575,8 +2643,7 @@ std::string McPATWrapper::generateXMLConfig() const {
                  * counters are on different bases -- the 1.9.28/1.11.9 defect
                  * class. Say so and keep the fractions (recomputed above on
                  * the census-branch base, so int+fp+branch still sums). */
-                if (!warned_mix_) {
-                    warned_mix_ = true;
+                if (diagOnce(warned_mix_)) {   // 1.11.60 (C006)
                     std::cout << "  [Activity] measured mix (" << mi << " int+mul, "
                               << mf << " fp per core) exceeds retired non-branch "
                               << nonbr << " -- bases disagree, using fractions"
@@ -2585,8 +2652,7 @@ std::string McPATWrapper::generateXMLConfig() const {
             } else {
                 int_per_core = mi;
                 fp_per_core  = mf;
-                if (!warned_mix_) {
-                    warned_mix_ = true;
+                if (diagOnce(warned_mix_)) {   // 1.11.60 (C006)
                     std::cout << "  [Activity] instruction mix COUNTED: "
                               << int_per_core << " int+mul, " << fp_per_core
                               << " fp, " << br_per_core << " branch per core "
@@ -2935,8 +3001,12 @@ std::string McPATWrapper::generateXMLConfig() const {
         uint64_t noc_accesses = noc_activity_.total_packets;
         if (noc_accesses == 0) {
             noc_accesses = mc_reads_ + mc_writes_;
-            if (!warned_noc_substitution_) {
-                warned_noc_substitution_ = true;
+            /* 1.11.60 (audit round 4, C006): diagOnce(). This is the second
+             * message the audit caught stating the negative of the truth: at
+             * initialize() mc_reads_/mc_writes_ are 0, so it reported the
+             * substitution as "(0 reads + 0 writes = 0)" and then went silent
+             * for the pass that had the real transaction counts. */
+            if (diagOnce(warned_noc_substitution_)) {
                 std::cerr << "[power] WARNING: legacy single-NoC path has NO "
                              "measured NoC activity; SUBSTITUTING "
                              "memory-controller transactions ("
@@ -3030,8 +3100,8 @@ std::string McPATWrapper::generateXMLConfig() const {
      * different transaction granularity has somewhere to be described, and
      * that the run SAYS the description is unsourced (see the warning below)
      * instead of presenting single-channel/32/32/64/51 as facts. */
-    if (!warned_mc_structure_) {
-        warned_mc_structure_ = true;
+    /* 1.11.60 (audit round 4, C006): diagOnce(). */
+    if (diagOnce(warned_mc_structure_)) {
         std::cerr << "[McPATWrapper] WARNING: the memory controller's structure is "
                      "UNSOURCED and in force in every run: "
                   << mc_tech_.memory_channels_per_mc << " channel(s) per MC, "
@@ -3105,8 +3175,10 @@ std::string McPATWrapper::generateXMLConfig() const {
         int link_clk = pcie_stats_.link_clock_mhz;
         if (link_clk <= 0) {
             link_clk = 350;
-            if (!warned_link_clock_ && pcie_stats_.number_units > 0) {
-                warned_link_clock_ = true;
+            /* 1.11.60 (audit round 4, C006): diagOnce(). pcie_stats_ is set
+             * by setPCIeStats() after initialize(), so number_units was 0 on
+             * the pass that held the latch and this note could not fire. */
+            if (pcie_stats_.number_units > 0 && diagOnce(warned_link_clock_)) {
                 std::cerr << "[McPATWrapper] WARNING: no link controller clock was "
                              "supplied for link type '" << pcie_stats_.link_type_name
                           << "'; the UNSOURCED 350 MHz literal is in force. The "
@@ -3125,8 +3197,9 @@ std::string McPATWrapper::generateXMLConfig() const {
         if (lane_gbps > 0.0) {
             xml << "      <param name=\"serdes_lane_gbps\" value=\"" << lane_gbps
                 << "\"/>\n";
-        } else if (pcie_stats_.number_units > 0 && !warned_link_class_) {
-            warned_link_class_ = true;
+        } else if (pcie_stats_.number_units > 0 && diagOnce(warned_link_class_)) {
+            /* 1.11.60 (audit round 4, C006): diagOnce(); same reason as the
+             * link clock note above. */
             /* 1.11.56 (audit C017): a link type this table cannot name gets
              * McPAT's historical 4 Gb/s (PCIe 2.0) SerDes rate, silently. The
              * bare name "pcie" -- which is PCIeStats' own default, and what

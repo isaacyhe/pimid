@@ -156,15 +156,36 @@ void RamulatorWrapper::initialize() {
         if (bandwidth_ > 0 && implied_mbs > 0.0 &&
             std::fabs(implied_mbs - static_cast<double>(bandwidth_)) >
                 0.02 * static_cast<double>(bandwidth_)) {
+            /* 1.11.60 (audit round 4, C008): NAME THE SOURCE THE NUMBER
+             * ACTUALLY CAME FROM. This message said "the simulated preset
+             * implies <bandwidth_>", and bandwidth_ is not the preset's: for
+             * DDR3/DDR5/LPDDR5/GDDR6 it is derivedBwMBs(), i.e.
+             * CactiIOWrapper::dramRateMTs() x dramChannelWidthBits() x
+             * channels -- PIMID's own rate table, the one the ENERGY path
+             * prices from -- and for DDR4/HBM2/HBM3 it is a literal in the
+             * branch above. The preset is the one authority of the three that
+             * this comparison never consults. It was invisible on DDR3 and
+             * LPDDR5, where the rate table and the preset happen to agree
+             * (1600 and 6400); GDDR6 is where they differ, and there the line
+             * quoted 112000 MB/s as the preset's implication twelve lines
+             * after the wrapper had announced that same preset at a different
+             * rate entirely. The comparison itself is unchanged and still
+             * correct -- it is the rate table against the architecture object
+             * -- so only the attribution moves. */
             std::cerr << "[ramulator] WARNING: " << dt
-                      << " speed-bin mismatch. The simulated preset implies "
-                      << bandwidth_ << " MB/s aggregate, but the architecture "
-                         "object's channel databus x data rate x channels "
-                         "gives " << implied_mbs
+                      << " speed-bin mismatch. This run's configured aggregate "
+                         "bandwidth is " << bandwidth_
+                      << " MB/s (from PIMID's rate table via "
+                         "CactiIOWrapper::dramRateMTs x channel width x "
+                         "channels, or a literal where that table has no row "
+                         "-- NOT from the Ramulator timing preset), but the "
+                         "architecture object's channel databus x data rate x "
+                         "channels gives " << implied_mbs
                       << " MB/s (" << dram_arch_->timing.data_rate_mtps
-                      << " MT/s). Cycles come from the preset and reported "
-                         "bandwidths come from the architecture object, so "
-                         "this run counts one part and prices another."
+                      << " MT/s). Cycles come from the preset, reported "
+                         "bandwidths come from the architecture object, and "
+                         "energy comes from the rate table, so this run counts "
+                         "one part and prices another."
                       << std::endl;
         }
     }
@@ -416,7 +437,19 @@ void RamulatorWrapper::parseConfiguration() {
             bandwidth_ = derivedBwMBs("LPDDR5", channels_);  // 1.11.52 (D016)
             sayPresetRate("LPDDR5", "LPDDR5_6400", 6400);
         } else if (dt == "GDDR6") {
-            config_yaml_ = makeConfig("GDDR6", "GDDR6_8Gb_x16", "GDDR6_2000_1.35V_x16");
+            /* 1.11.60 (audit round 4, C007): the preset named here did not
+             * exist. `grep GDDR6_2000_1.35V_x16 external/ramulator/` returns
+             * nothing; the four GDDR6 timing presets this fork ships are
+             * GDDR6_2000_{1350mV,1250mV}_{double,quad} (GDDR6.cpp:34-37), and
+             * Ramulator2 throws ConfigurationError on an unrecognised name.
+             * It survived because this generated YAML is never handed to
+             * Ramulator on this path -- initialize() builds an instance only
+             * when config_path_ is non-empty, and then config_yaml_ holds the
+             * FILE's contents -- so the string reached nothing but the note
+             * below. Named to match what the run really writes for the timing
+             * model (main.cpp's GDDR6 emission), so that if this path is ever
+             * made live it selects a preset that exists. */
+            config_yaml_ = makeConfig("GDDR6", "GDDR6_8Gb_x16", "GDDR6_2000_1350mV_double");
             // GDDR6 is a dual-channel part (2 x 16-bit channels per device,
             // JESD250; see docs/dram_specs.md: 32 GB/s/channel x 2 = 64 GB/s).
             // channels_ = 1 here used to contradict that spec and made the
@@ -424,7 +457,19 @@ void RamulatorWrapper::parseConfiguration() {
             channels_ = 2; ranks_per_channel_ = 1; banks_per_rank_ = 16;
             capacity_ = 8ULL * 1024 * 1024 * 1024;
             bandwidth_ = derivedBwMBs("GDDR6", channels_);   // 1.11.52 (D016)
-            sayPresetRate("GDDR6", "GDDR6_2000_1.35V_x16", 16000);
+            /* 1.11.60 (audit round 4, C007): both facts in this note were
+             * wrong. The preset named did not exist in the tree, and the
+             * 16000 MT/s attributed to it is not a rate any GDDR6 preset
+             * carries -- all four ship rate = 2000 in Ramulator2's timing
+             * table, the column GDDR6.cpp:33 documents as "rate (in MT/s)"
+             * and from which GDDR6.cpp:259 derives tCK as 1e6/(rate/2) ps. So
+             * a reader reconciling PIMID's 14000 MT/s energy basis against the
+             * timing model was handed a third number under a name that
+             * matched nothing. The note now carries the preset the run writes
+             * and the rate that preset holds; the claim it exists to make --
+             * upstream ships no GDDR6 timing bin at the modelled rate -- is
+             * unchanged and still true, since 2000 is the only rate on offer. */
+            sayPresetRate("GDDR6", "GDDR6_2000_1350mV_double", 2000);
         } else if (dt == "HBM2") {
             config_yaml_ = makeConfig("HBM2", "HBM2_4Gb", "HBM2_2.4Gbps");
             channels_ = 8; ranks_per_channel_ = 1; banks_per_rank_ = 16;
@@ -1048,14 +1093,58 @@ double RamulatorWrapper::getInterfaceDynamicEnergyNJ() const {
 }
 
 double RamulatorWrapper::getInterfaceAreaMM2() const {
-    /* 1.11.40: IO area, which PIMID reported as unmodelled.
-     * UNUSED AND UNVALIDATED as of 1.11.57 -- see the D011 note above. */
+    /* 1.11.40: IO area, wired in at 1.11.58 (see the D011 note above).
+     *
+     * 1.11.60 (audit round 4, C009): TWO ZEROS, ONE RETURN VALUE, AND ONE OF
+     * THEM HAD TO BE SAID OUT LOUD.
+     *
+     * This returned 0.0 for "CACTI-IO has no exact parameter map for this
+     * technology" and 0.0 for "CACTI-IO computed the area and then WITHHELD
+     * it because the run is above the polynomial's validity crossover". They
+     * are not the same fact. The second is GDDR6's case and only GDDR6's:
+     * its bus_freq is rate/2 = 7000 MHz against the 3162 MHz crossover, while
+     * its exact_map IS true (POD135 electricals, sourced), so it receives the
+     * driver+PHY ENERGY term from this very call and loses the AREA from it.
+     * The consumer's gate is `if (io_area > 0.0)`, so it printed nothing at
+     * all -- and a GDDR6 RANK or HOST_MC cell's system-comparable area total
+     * omitted the DQ interface silicon with no line saying so, beside a DDR4
+     * cell that adds 2.444 mm^2/die and prints one. The correction 1.11.58
+     * landed to stop the interface being invisible was invisible again for
+     * one technology.
+     *
+     * It cannot be repaired by returning a number: the polynomial genuinely
+     * has nothing credible to say at 7000 MHz, and substituting the
+     * extrapolation is what the withholding exists to prevent. So the zero
+     * stands and the run STATES which zero it is, once per wrapper, from
+     * here -- the consumer's gate cannot say it, because the consumer never
+     * enters the branch. interfaceAreaWithheld() exposes the same distinction
+     * to a caller that wants to test rather than read. */
     const double rate = PIMID::CactiIOWrapper::dramRateMTs(dram_type_);
     const int    ndq  = PIMID::CactiIOWrapper::dramChannelWidthBits(dram_type_);
     if (rate <= 0.0 || ndq <= 0) return 0.0;
     PIMID::LinkIOResult io =
         PIMID::CactiIOWrapper::computeDramIO(dram_type_, ndq, rate, 1.0);
-    return (io.valid && io.exact_map) ? io.io_area_mm2 : 0.0;
+    if (!io.valid || !io.exact_map) return 0.0;
+    if (io.io_area_withheld) {
+        io_area_withheld_ = true;
+        if (!warned_io_area_withheld_) {
+            warned_io_area_withheld_ = true;
+            std::cerr << "[power] WARNING: " << dram_type_
+                      << " DQ-interface AREA is WITHHELD, not zero. CACTI-IO's "
+                         "area polynomial is valid to 3162 MHz and this "
+                         "interface runs at " << (rate / 2.0)
+                      << " MHz, where the cubic term dominates and the value "
+                         "is an extrapolation. The interface ENERGY from the "
+                         "same evaluation is reported normally (the power path "
+                         "does not use that polynomial); only the area is "
+                         "missing. Any area total for this technology omits "
+                         "the DQ interface silicon -- it is incomplete, not "
+                         "small. " << io.not_modelled << std::endl;
+        }
+        return 0.0;
+    }
+    io_area_withheld_ = false;
+    return io.io_area_mm2;
 }
 double RamulatorWrapper::getRefreshPowerMW() const {
     return Ramulator::pimid_energy::refreshMW(dram_type_);
@@ -1586,6 +1675,36 @@ uint64_t RamulatorWrapper::getChipSizeMB() const {
         return dram_arch_->organization.chip_size_mb;
     }
     return 128;  // 128 MB (1 Gb chip) typical
+}
+
+/* 1.11.60 (ONE FABRIC, user requirement: "the table is legit with accurate
+ * references to the upstream tools/models"): per-rung provenance, taken from
+ * the architecture object's OWN VerifiedValue source strings -- the same
+ * struct that carries each width -- never restated here. Rung 2 (bank group)
+ * has no upstream field and is the declared x2 interleaving assumption from
+ * 1.11.58; rung 6 is derived arithmetic and says so. */
+std::string RamulatorWrapper::getLadderRungProvenance(int rung) const {
+    auto fmt = [](const memory::VerifiedValue& v) -> std::string {
+        const char* st =
+            v.status == memory::VerificationStatus::VERIFIED  ? "VERIFIED"  :
+            v.status == memory::VerificationStatus::INFERRED  ? "INFERRED"  :
+            v.status == memory::VerificationStatus::ESTIMATED ? "ESTIMATED" : "UNKNOWN";
+        return std::string(st) + ": " + v.source;
+    };
+    if (!dram_arch_) return "NO ARCHITECTURE OBJECT: per-technology placeholder table";
+    switch (rung) {
+        case 0: return fmt(dram_arch_->datapath.gsa_datapath_bits);
+        case 1: return fmt(dram_arch_->datapath.bank_serialization_bits);
+        case 2: return "ASSERTED: bank serialization x 2, an interleaving "
+                       "assumption -- no upstream field exists (declared since "
+                       "1.11.58; also in the stated-constant register)";
+        case 3: return fmt(dram_arch_->datapath.chip_io_bits);
+        case 4: return fmt(dram_arch_->datapath.rank_databus_bits);
+        case 5: return fmt(dram_arch_->datapath.channel_databus_bits);
+        case 6: return "DERIVED: channel_databus_bits x the technology's "
+                       "channel count (arithmetic, not a sourced field)";
+    }
+    return "unknown rung";
 }
 
 int RamulatorWrapper::getSubarrayPortBits() const {

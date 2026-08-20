@@ -549,6 +549,12 @@ LinkIOResult CactiIOWrapper::computeDramIO(const std::string& tech,
         const double kAreaValidMaxMHz = 3162.0;   // cubic == linear
         const bool area_credible = (freq_mhz <= kAreaValidMaxMHz);
         r.io_area_mm2          = area_credible ? io.getIOAreaMM2() : 0.0;
+        /* 1.11.60 (audit round 4, C009): record the REFUSAL, not just its
+         * consequence. The zero above is a decision; without this flag it is
+         * indistinguishable from the zero a technology with no parameter set
+         * returns, and the one consumer of the area could not tell them
+         * apart. */
+        r.io_area_withheld     = !area_credible;
         r.io_power_term_mw     = io.getIOPowerTermMW();
         r.io_power_dynamic_mw  = io.getIOPowerDynamicMW();
         r.phy_power_mw         = io.getPHYPowerMW();

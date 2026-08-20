@@ -7,6 +7,108 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.60 -- one fabric, two consumers; and the interface revert
+
+Audit round 4 (47 REAL, 9 latent, records in _1164audit/) audited the newest
+code hardest and found the newest code wanting: the 1.11.58 interface wiring
+was a double-count, the 1.11.59 ladder unification was wired from the wrong
+end, and the A001 fix of 1.11.57 had moved the temperature keys one nesting
+level instead of out. This release lands the 26 small fixes, REVERTS the
+interface charging (user-approved), and replaces the ladder patching with the
+user-approved ONE FABRIC design.
+
+### The interface revert (A001/A002/A009/A010)
+
+1.11.58 added CACTI-IO's driver+PHY energy and IO area to the charged totals,
+presented as closing an omission. Round 4 showed both ends of the wire were
+already counted: McPAT is told withPHY=1 at exactly the placements where
+crosses_dq charges the new term (the controller-side PHY was already priced),
+and the memory die area is a FULL-DIE JEDEC calibration that already contains
+the DRAM's IO ring. The 4.2x energy rise and the 69% area rise the 1168 gates
+measured were the overlap, not a correction -- and the area figure was a
+WHOLE-CHANNEL count (extio.cc sums DQ+DQS+CA+CLK circuits) labelled per-die
+and multiplied by the die population: 47.91 - 28.36 = 19.55 = 2.444 x 8,
+exactly. Charged interface is termination-only again -- the corpus basis --
+and CACTI-IO's figures print as INFORMATIONAL lines that enter no total.
+Measured at the gate: interface 12.959 -> 3.070 nJ, with-memory 28.36 mm^2.
+No published number was ever affected; the re-sim had not run on 1.11.58/59.
+
+### One fabric, two consumers (the design, user-approved)
+
+Two models -- the analytical ladder and Garnet -- are the product. Two private
+FABRIC DESCRIPTIONS were the bug: each model read its own widths and clocks,
+and they disagreed (DDR4 chip link: 8 bits in one, 192 in the other). Four
+reconciliation attempts (1.11.56-59) each failed because no design stated what
+each description means. Now:
+
+- ONE description: the 7-rung sourced ladder, each rung printed WITH its
+  upstream reference -- the architecture object's own VerifiedValue status and
+  citation, never restated. The honest rungs say so: DDR4's bank rung prints
+  "ESTIMATED: NOT DOCUMENTED!", the bank-group rung "ASSERTED: bank
+  serialization x 2".
+- Consumer A (analytical): unchanged. Gate-proven bit-identical.
+- Consumer B (Garnet): the topology is a NAMED PROJECTION of the description,
+  CHANNEL-ANCHORED per sparse_htree.h's own 1.10.3 definition: L3 = the
+  channel link, L2/L1 one and two tiers inward, L0 = the remaining inner
+  rungs folded at their MINIMUM bandwidth (the bottleneck). 1.11.59's map
+  {0,1,2,5} was leaf-anchored -- read from the wrong end -- so every DDR
+  part had its rank-tier link drawn at the bank-group rung (round-4 B001).
+  DDR4 now projects to 8/8/64/64; HBM3 folds with L3 = one 64-bit
+  pseudo-channel.
+- Units declared: the topology file carries RAW BITS (round-4 B002: a
+  REF-normalised score had been written into a field Garnet reads as bits;
+  DDR4's 256-bit rung went in as "24"). Garnet's 128-bit flit bound is a
+  stated clamp at the consumer; the description keeps true widths.
+- One penalty (round-4 B003): the Fbw message inflation is REMOVED. Width
+  alone carries the bandwidth difference -- DDR4's 8-bit chip rung turns a
+  576-bit access into 72 flits where HBM3's 64-bit channel takes 9. The old
+  code applied REF/per_chan twice (port AND message), so the cross-technology
+  flit ratio was the product of two bandwidth ratios.
+- THE INVARIANT: each 1:1 layer must carry exactly its source rung's
+  bandwidth; violation is FATAL. Proven able to fire at the gate via a fault
+  hook (PIMID_FABRIC_BREAK) -- five vacuous passes this cycle came from
+  checks whose firing was never demonstrated, so firing is now part of the
+  gate contract.
+
+### The small fixes (26)
+
+A005: the temperature keys and their range validator moved to the TOP level of
+the config load -- 1.11.57 had moved them from inside noc.model to inside
+memory:, the same defect one level down; none of the six shipped co-sim
+examples has a top-level memory: block, so the knob stayed inert in exactly
+the scope A001 was raised about. Verified: 999 K now refused (rc=2) with no
+memory: block; the released binary accepts it. B013: an out-of-bounds read of
+hierarchy_bridge_latency[6] on a six-element array, at the one site of three
+without the guard. C006: every latched McPAT diagnostic evaluated in the
+parent BEFORE the setters ran, so a fully measured run printed "no measured
+load/store mix ... UNSOURCED fractions" -- diagnostics now run once, in the
+parent, after the setters, before the fork. A007: memory.array_pg on DRAM is
+refused as its own comment always claimed (a DRAM array cannot be gated; it
+must refresh). B014 moves a number: the McPAT NoC duty cycle was scaled by
+top-level/device clock -- 4x on the shipped co-sim. D004: the flush's M->E
+clean now clears the L1 filter array, so post-flush stores re-dirty their
+lines instead of evicting silently clean. D005: LOGIC_DIE placement gets its
+own row-model case (HBM3: 32 -> 512 open-row registers). Plus: A003 A011 A012
+A013 B011 B016 B017 C001 C002 C003 C007 C008 C009 C011 C012 C013 C015 D008
+D009, each tagged in place.
+
+### Known-open, awaiting rulings (density investigation, _1164audit/DENSITY_INVESTIGATION.md)
+
+The DRAM architecture objects describe devices 4x-32x less dense than the
+presets the wrapper simulates; blast radius is exactly two consumed numbers
+(pages_per_unit, die area). "Density follows preset" is strongly evidenced
+for the DDR family and needs a user ruling for HBM (whose chip_size_mb is
+already the correct CORE-DIE capacity -- die area lands on the Sohn
+ISSCC-2016 measurement exactly). Also found and open: GDDR6's
+dramChannelWidthBits returns the 32-bit DEVICE width where JESD250D defines a
+16-DQ channel, so its M/D/1 service rate is 2x high -- a first-order GDDR6
+result error; and main.cpp's bank_rows table is 2x off against the simulated
+preset for DDR3/HBM2/HBM3. These land after the rulings, not silently here.
+
+Gate 1170A, seven arms, all green: projection correct both families, invariant
+FIRES on demand, analytical arm bit-identical, revert exact, 7/7 rungs print
+their references.
+
 ## 1.11.59 -- the eight that were left, and one ladder per run
 
 The items still open after 1.11.58, closed. Three came out of round 3 and were
@@ -111,6 +213,13 @@ x4 and x16 move, and they were wrong.
   DRAM; two dead preset columns and an unsatisfiable guard removed.
 - **B013**: the 1.11.56 flattening guard was structurally unsatisfiable. The
   behaviour was right; the condition read as though the other case existed.
+  CORRECTION (1.11.60, audit round 4 B016): this was recorded as closed and no
+  edit was made -- the guard was still in `src/main.cpp` unchanged. Audit round
+  4 re-established that it is genuinely dead (`hierarchy_enabled` is set true
+  unconditionally hundreds of lines earlier, and the only path that leaves it
+  false returns before this point) and DELETED it in 1.11.60. No emitted value
+  changes; the ledger entry above was wrong about the release, not about the
+  finding.
 - **B016**: the host array's latency was characterized at a literal 350 K while
   its bandwidth, in the same function for the same array, used the configured
   temperature.

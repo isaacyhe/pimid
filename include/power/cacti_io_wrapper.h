@@ -133,6 +133,19 @@ struct LinkIOResult {
      * different interface and its absolute values are not trustworthy. */
     bool exact_map = false;
 
+    /* 1.11.60 (audit round 4, C009): DID THE MODEL REFUSE TO EXTRAPOLATE THE
+     * AREA? io_area_mm2 is deliberately set to 0.0 above the 3162 MHz
+     * validity crossover (see computeDramIO), and until now the only record of
+     * that decision was a sentence at the front of `not_modelled`. A consumer
+     * holding the struct saw the same 0.0 for "the polynomial is out of range
+     * here" and for "this technology has no parameter set at all", and
+     * RamulatorWrapper::getInterfaceAreaMM2() flattened both into one return
+     * value -- so GDDR6, whose bus runs at 7000 MHz, lost its DQ-interface
+     * area silently while DDR4 printed a 2.444 mm^2 line for the same term.
+     * A withheld quantity is a different thing from an absent one and now
+     * says so in a field a caller can test. */
+    bool io_area_withheld = false;
+
     std::string source;                // which parameter set was used
     std::string not_modelled;          // what this result does NOT include
 };

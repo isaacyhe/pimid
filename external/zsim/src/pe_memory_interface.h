@@ -1239,11 +1239,34 @@ protected:
      *
      * rowSlotsPerUnit_ -- how many independent open rows a placement unit
      * holds, i.e. the banks below the placement level. Level codes follow the
-     * emitter: 0 subarray, 1 bank, 2 bank group, 3 chip, 4 rank, 5 channel.
+     * emitter: 0 subarray, 1 bank, 2 bank group, 3 chip, 4 rank, 5 channel,
+     * 6 logic die.
      * At and below BANK a unit is one row buffer. Above it, the banks
      * multiply; the chip level does NOT multiply on a striped rank, because
      * the chips of a rank operate in lock step and their same-numbered banks
-     * are one logical bank as far as the address stream is concerned. */
+     * are one logical bank as far as the address stream is concerned.
+     *
+     * 1.11.60 (audit round 4, D005): THE ENUMERATION ABOVE USED TO STOP AT 5,
+     * and so did the switch. The emitter has SEVEN levels -- src/main.cpp maps
+     * "LOGIC_DIE" to pe_hierarchy_level = 6 -- so LOGIC_DIE fell into the
+     * `default` arm and was handed the CHANNEL tier's register count, i.e. the
+     * channel dimension was dropped. That is the same defect D008 removed from
+     * CHIP/RANK/CHANNEL one release ago, surviving at the one tier D008 did
+     * not enumerate. A logic-die unit fronts every channel of the stack, so it
+     * is the channel tier times dramChannels; hierarchy.dramChannels was
+     * parsed all along (init.cpp) and this function simply never read it.
+     * Invisible because `default` is a legal-looking arm: nothing warns, the
+     * count it produces is a plausible number, and the only symptom is that
+     * ROW_MISS_FRAC -- reported as MEASURED -- is driven toward 1.0 at exactly
+     * this placement, which reads as "the logic die has poor locality" rather
+     * than as a missing switch case. On HBM3 the table held bpg*bgc*rpc = 32
+     * registers for a die with 16 channels x 32 banks = 512, so 16 physically
+     * independent banks shared one register and every alternation between them
+     * was recorded as a row miss.
+     *
+     * Note that hierarchy_util.h's decodeUnitPosition() calls level 6 SYSTEM
+     * while the emitter calls it LOGIC_DIE; they are the same code and the
+     * same tier (the top of the in-stack tree), and only the name differs. */
     void initRowModel_() {
         const uint32_t rowBytes = zinfo ? zinfo->hierarchy.dramRowBytes : 0;
         if (rowBytes == 0) { rowStrideBytes_ = 0; return; }
@@ -1258,13 +1281,18 @@ protected:
                              ? zinfo->hierarchy.bgPerChip : 1u;
         const uint32_t rpc = (zinfo->hierarchy.ranksPerChannel > 0)
                              ? zinfo->hierarchy.ranksPerChannel : 1u;
+        /* 1.11.60 (audit round 4, D005): the channel count, for level 6. */
+        const uint32_t chn = (zinfo->hierarchy.dramChannels > 0)
+                             ? zinfo->hierarchy.dramChannels : 1u;
         uint32_t slots = 1;
         switch (zinfo->hierarchy.placementLevel) {
             case 0: case 1: slots = 1; break;              // subarray, bank
             case 2: slots = bpg; break;                    // bank group
             case 3: slots = bpg * bgc; break;              // chip
             case 4: slots = bpg * bgc; break;              // rank (chips lock-step)
-            default: slots = bpg * bgc * rpc; break;       // channel and above
+            case 5: slots = bpg * bgc * rpc; break;        // channel
+            case 6: slots = bpg * bgc * rpc * chn; break;  // logic die: all channels (D005)
+            default: slots = bpg * bgc * rpc; break;       // unknown: channel tier
         }
         if (slots == 0) slots = 1;
         /* Bound the table: the product is the number of row buffers the whole

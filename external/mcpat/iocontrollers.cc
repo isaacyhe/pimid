@@ -278,7 +278,43 @@ PCIeController::PCIeController(ParseXML *XML_interface,InputParameter* interface
 		  //Cadence ChipEstimate using 65nm
 		  ctrl_gates       = 900000/8*pciep.num_channels;
 		  //	  frontend_gates   = 120000/8;
-		  //	  SerDer_gates     = 200000/8;
+		  /* PIMID 1.11.60 (audit round 4, D009): THE HIGH-PERFORMANCE ARM GAVE
+		   * THE SerDes AREA AND DYNAMIC AND ZERO LEAKAGE.
+		   *
+		   * SerDer_gates is declared `= 0.` at the top of this constructor and
+		   * was assigned ONLY in the low-power arm below; upstream left the
+		   * assignment here commented out (the line that stood immediately
+		   * below this block). The two totals at the bottom of the constructor
+		   * then read (ctrl_gates + (withPHY? SerDer_gates:0)), so on a type=0
+		   * link with withPHY=1 the SerDes was charged for area and for
+		   * switching and credited with EXACTLY ZERO leakage and zero gate
+		   * leakage. That is the arm E008's "AREA and LEAKAGE keep it" rests
+		   * on, and the corrected wording of that note is below.
+		   *
+		   * Invisible for two compounding reasons: `SerDer_gates=0.` at the
+		   * declaration makes the unassigned path look initialised rather than
+		   * missing, and the withPHY ternary makes a zero contribution look
+		   * like a deliberate configuration choice instead of a dropped
+		   * assignment. Nothing warns, and the arm is dead for PIMID's own
+		   * numbers (the wrapper emits sys.pcie.type = 1, and CMakeLists
+		   * excludes main.cc so nothing consumes the reference XMLs) -- but
+		   * 1.11.59's withPHY pass set withPHY=1 on the eight type=0 reference
+		   * inputs (Alpha21364, Niagara1, the three Niagara1_sharing_*,
+		   * Niagara2, Penryn, Xeon), which is precisely the configuration that
+		   * exercises it.
+		   *
+		   * The figure is NOT invented: 200000/8 is McPAT's own count, written
+		   * into this arm and commented out here, and it is the same count the
+		   * low-power arm uses live. The *pciep.num_channels factor is added
+		   * to match the convention of every other gate count that reaches the
+		   * leakage sum (ctrl_gates carries it on both arms, and so does the
+		   * low-power SerDer_gates); the commented line predates that factor.
+		   * Be clear about what this does and does not claim: the type=0
+		   * SerDes has ~9x the area of the low-power one here (3.39 vs 0.36
+		   * scaled mm^2), so reusing the low-power gate count is if anything
+		   * an UNDER-estimate of its leakage. The alternative was to leave it
+		   * at exactly zero, which is the one value we know to be wrong. */
+		  SerDer_gates     = 200000/8*pciep.num_channels;
 		  NMOS_sizing 	  = 5*g_tp.min_w_nmos_;
 		  PMOS_sizing	  = 5*g_tp.min_w_nmos_*pmos_to_nmos_sizing_r;
 	  }
@@ -386,7 +422,26 @@ void PCIeController::computeEnergy(bool is_tdp)
     		 * its process and whether clocking is included), so it stands and
     		 * McPAT's SerDes DYNAMIC is removed from the runtime basis. AREA
     		 * and LEAKAGE keep it: the SerDes is real silicon that really
-    		 * leaks, and our pJ/bit figure prices switching only. */
+    		 * leaks, and our pJ/bit figure prices switching only.
+    		 *
+    		 * PIMID 1.11.60 (audit round 4, D009): "AREA AND LEAKAGE KEEP IT"
+    		 * WAS A CLAIM ABOUT THE ARGUMENT, NOT ABOUT THE CODE. Area kept
+    		 * it on both arms, but leakage kept it only on the LOW-POWER arm
+    		 * (pciep.type != 0): SerDer_gates was declared `= 0.` and assigned
+    		 * nowhere in the high-performance arm, so with withPHY=1 on a
+    		 * type=0 link the leakage term this justification leans on was
+    		 * identically zero -- the dynamic was removed on the stated ground
+    		 * that leakage still carried the SerDes, and it did not. The
+    		 * sentence was true of PIMID's own runs (the wrapper emits
+    		 * sys.pcie.type = 1, the low-power arm) and false of the eight
+    		 * type=0 reference inputs 1.11.59's withPHY pass had just made
+    		 * live, and nothing in either place printed a leakage number small
+    		 * enough to notice. The type=0 arm now assigns McPAT's own
+    		 * commented-out gate count (see the note at that assignment), so
+    		 * the sentence above and the stderr line below describe the code on
+    		 * BOTH arms. PIMID's numbers do not move: it never took the type=0
+    		 * arm, and nothing in this tree builds main.cc to run the reference
+    		 * XMLs. */
     		if (pciep.withPHY) {
     			double serdes_rt = SerDer_dyn_saved * pciep.num_channels
     			                 * pciep.perc_load;
