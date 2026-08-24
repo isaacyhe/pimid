@@ -10,8 +10,16 @@ class GDDR6 : public IDRAM, public Implementation {
   /* PIMID 1.9.10: datasheet IDD/VDD presets (Micron 8Gb GDDR6-14000 (no VPP)) -- relocated energy layer.
      Intensive per-access model lives in dram/pimid_energy.h (active source); these
      mirror it in upstream convention for Ramulator2's command-driven power path. */
+    /* 1.11.63 (calibration): VPP 0.0 -> 1.8 V. JESD250D Table 62 "DC Operating
+     * Conditions", clause 8.6, printed p.144 (PDF p.156): "Pump voltage VPP
+     * 1.746 / 1.8 / 1.908 V", identical in the POD135 and POD125 columns. The
+     * old 0.0 with its "no VPP" comment asserted GDDR6 has no pump rail; the
+     * standard tabulates one. INERT in this tree: nothing outside this file
+     * reads voltage_presets/current_presets (the intensive per-access model in
+     * dram/pimid_energy.h is the active source), so this moves no simulated
+     * number -- it removes a wrong number from the upstream-convention mirror. */
     inline static const std::map<std::string, std::vector<double>> voltage_presets = {
-      {"Default",     {1.35,  0.0}},
+      {"Default",     {1.35,  1.8}},
     };
     inline static const std::map<std::string, std::vector<double>> current_presets = {
       // name         IDD0 IDD2N IDD3N IDD4R IDD4W IDD5B  IPP0 IPP2N IPP3N IPP4R IPP4W IPP5B
@@ -29,12 +37,50 @@ class GDDR6 : public IDRAM, public Implementation {
     };
 
     
+    /* 1.11.63 (calibration): THREE fixes to this block, all in the trailing
+     * columns and the clock.
+     *
+     * (a) COLUMN-ORDER MISMATCH between this comment header and m_timings.
+     *     The header used to read "... nFAW nRFC nRFCpb nRREFD nREFI tCK_ps"
+     *     while m_timings (below) reads "... nFAW nRFC nREFI nRREFD nRFCpb
+     *     tCK_ps". The vector loads positionally against m_timings, so the run
+     *     got nREFI=105 and nRFCpb=3333 while the header claimed nRFCpb=105
+     *     and nREFI=3333. The header was the physically sensible reading, and
+     *     nRFCpb is LIVE (REFpb -> ACT, see populate_timingcons below), so the
+     *     model was blocking a bank for 3333 cycles after a per-bank refresh.
+     *     The header now matches m_timings verbatim and the values are
+     *     reordered to land under their own names.
+     *
+     * (b) nRFC and nREFI -> -1. Both are overwritten unconditionally from the
+     *     per-density tRFC table and tREFI_BASE in set_timing_vals() before
+     *     anything reads them, so the written 210/3333 were dead numbers that
+     *     read as authority. -1 is this file family's idiom for "supplied
+     *     elsewhere" (HBM2/HBM3, 1.11.59 F036) and the completeness check
+     *     still catches a column nothing fills.
+     *
+     * (c) tCK_ps 570 -> 1000 and nCCDS 4 -> 8 on the two _double rows.
+     *     tCK: set_timing_vals() derives tCK = 2e6/rate = 1000 ps at 2000 MT/s
+     *     and overwrites this column, so the written 570 never applied; the
+     *     column is now a checked mirror of the derivation (see the equality
+     *     check in set_timing_vals).
+     *     nCCDS: DERIVED-FROM-IDENTITY, not sourced. nCCDS 4 < nBL 8 -- a new
+     *     BL16 burst cannot start 4 cycles after one that occupies 8 cycles of
+     *     the same channel's DQ bus. JESD250D cl.1 (printed p.1 / PDF p.13)
+     *     states the GDDR6 AC timings "were not standardized" and publishes
+     *     Tables 71/73 with every MIN cell blank, and this tree holds no GDDR6
+     *     vendor datasheet, so no bin value is available: nCCDS is raised to
+     *     exactly nBL, the definitional floor, and no further. The _quad rows
+     *     carry nBL 4 with nCCDS 4 and already satisfy the identity.
+     *
+     *     Everything else in these rows (rate, nCL, nRCD*, nRP, nRAS, nRC,
+     *     nWR, nRTP, nCWL, nCCDL, nRRD*, nWTR*, nFAW, nRREFD, nRFCpb) stays as
+     *     it is: UNCHECKABLE against JESD250D by the standard's own design. */
     inline static const std::map<std::string, std::vector<int>> timing_presets = {
-      //       name                rate   nBL  nCL  nRCDRD nRCDWD  nRP   nRAS  nRC   nWR  nRTP nCWL nCCDS nCCDL nRRDS nRRDL nWTRS nWTRL nFAW  nRFC nRFCpb nRREFD nREFI  tCK_ps
-      {"GDDR6_2000_1350mV_double", {2000,  8,  24,    26,     16,  26,   53,   79,   26,   4,   6,   4,    6,    7,    7,   9,    11,   28,   210,  105,   14,   3333,   570}},
-      {"GDDR6_2000_1250mV_double", {2000,  8,  24,    30,     19,  30,   60,   89,   30,   4,   6,   4,    6,   11,   11,   9,    11,   42,   210,  105,   21,   3333,   570}},
-      {"GDDR6_2000_1350mV_quad",   {2000,  4,  24,    26,     16,  26,   53,   79,   26,   4,   6,   4,    6,    7,    7,   9,    11,   28,   210,  105,   14,   3333,   570}},
-      {"GDDR6_2000_1250mV_quad",   {2000,  4,  24,    30,     19,  30,   60,   89,   30,   4,   6,   4,    6,   11,   11,   9,    11,   42,   210,  105,   21,   3333,   570}},
+      //       name                rate   nBL  nCL  nRCDRD nRCDWD  nRP   nRAS  nRC   nWR  nRTP nCWL nCCDS nCCDL nRRDS nRRDL nWTRS nWTRL nFAW  nRFC nREFI nRREFD nRFCpb tCK_ps
+      {"GDDR6_2000_1350mV_double", {2000,  8,  24,    26,     16,  26,   53,   79,   26,   4,   6,   8,    6,    7,    7,   9,    11,   28,    -1,   -1,   14,   105,   1000}},
+      {"GDDR6_2000_1250mV_double", {2000,  8,  24,    30,     19,  30,   60,   89,   30,   4,   6,   8,    6,   11,   11,   9,    11,   42,    -1,   -1,   21,   105,   1000}},
+      {"GDDR6_2000_1350mV_quad",   {2000,  4,  24,    26,     16,  26,   53,   79,   26,   4,   6,   4,    6,    7,    7,   9,    11,   28,    -1,   -1,   14,   105,   1000}},
+      {"GDDR6_2000_1250mV_quad",   {2000,  4,  24,    30,     19,  30,   60,   89,   30,   4,   6,   4,    6,   11,   11,   9,    11,   42,    -1,   -1,   21,   105,   1000}},
     };
 
 
@@ -256,8 +302,28 @@ class GDDR6 : public IDRAM, public Implementation {
         }
         m_timing_vals("rate") = *dq;
       }
-      int tCK_ps = 1E6 / (m_timing_vals("rate") / 2);
+      /* 1.11.63 (calibration, cross-cutting fix -- same block in all 11 impl
+       * files): ONE AUTHORITY FOR tCK. This derivation is the authority; the
+       * tCK_ps column in the preset rows above is a MIRROR of it and is now
+       * checked against it, so the two cannot silently disagree again. The
+       * audit found the written column dead in every model and contradicting
+       * the derivation in two of them (LPDDR5 1250 vs 312, GDDR6 570 vs 1000).
+       * The divisor was `1E6 / (rate / 2)`, whose integer division threw away
+       * the half-MT/s of odd rates (DDR3-1333 came out 1501 ps instead of
+       * 1500, DDR3/DDR4-2133 938 instead of 937); it is now the exact
+       * 2e6/rate the column documents. GDDR6 is a DDR-clocked interface --
+       * one data beat per CK edge -- so 2 bits/pin per CK is the right
+       * relation here (LPDDR5 and HBM3 are not, and say so in their files). */
+      int preset_tCK_ps = m_timing_vals("tCK_ps");
+      int tCK_ps = 2E6 / m_timing_vals("rate");
       m_timing_vals("tCK_ps") = tCK_ps;
+      if (preset_provided && preset_tCK_ps != tCK_ps) {
+        throw ConfigurationError(
+          "In \"{}\", the timing preset's tCK_ps column says {} ps but the "
+          "rate of {} MT/s derives {} ps (tCK = 2e6/rate). The derivation "
+          "wins at run time, so the column must mirror it -- fix the preset!",
+          get_name(), preset_tCK_ps, m_timing_vals("rate"), tCK_ps);
+      }
 
       // Load the organization specific timings
       int dq_id = [](int dq) -> int {
@@ -311,8 +377,28 @@ class GDDR6 : public IDRAM, public Implementation {
       };
 
       // tREFI(base) table (unit is nanosecond!)
-      constexpr int tREFI_BASE = 7800;
-      int density_id = [](int density_Mb) -> int { 
+      /* 1.11.63 (calibration): tREFI_BASE 7800 -> 1900 ns.
+       * SOURCE, two independent places in the held standard:
+       *   JESD250D Table 73 "AC Timings", printed p.162 (PDF p.174):
+       *     "Average periodic refresh interval with REFab command | tREFI |
+       *      - | 1.9 | us".
+       *   JESD250D Table 19 "Addressing Scheme", printed p.18 (PDF p.30):
+       *     "Refresh 16K/32 ms", "Refresh period 1.9 us" -- stated identically
+       *     for all five densities (8/12/16/24/32 Gb).
+       *   JESD250D clause 7.15, printed p.116 (PDF p.128): "The device
+       *     requires REFab cycles at an average periodic interval of
+       *     tREFI(max). The values of tREFI for different densities are
+       *     listed in Table 19."
+       * 7800 ns is DDR3/DDR4's 7.8 us and was inherited with the rest of this
+       * file's DDR4-derived refresh block; GDDR6 refreshes 4.1x more often.
+       * This also RECONCILES the timing layer with the tree's own energy layer,
+       * which already carries trefi 1900.0 (dram/pimid_energy.h GDDR6 row) --
+       * the two disagreed by 4.1x and the timing side was the wrong one.
+       * FIRST-ORDER on simulated bandwidth: at the derived tCK of 1000 ps and
+       * the 8 Gb tRFC of 360 ns, refresh occupancy goes 360/7800 = 4.6% ->
+       * 360/1900 = 18.9% of the channel. */
+      constexpr int tREFI_BASE = 1900;
+      int density_id = [](int density_Mb) -> int {
         switch (density_Mb) {
           case 4096:  return 0;
           case 8192:  return 1;

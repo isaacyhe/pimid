@@ -29,7 +29,12 @@ class HBM3 : public IDRAM, public Implementation {
       //   name       rate   nBL  nCL  nRCDRD  nRCDWR  nRP  nRAS  nRC  nWR  nRTPS  nRTPL  nCWL  nCCDS  nCCDL  nRRDS  nRRDL  nWTRS  nWTRL  nRTW  nFAW  nRFC  nRFCSB  nREFI  nREFISB  nRREFD  tCK_ps
       // HBM3 @ 6.4 Gb/s (JESD238 launch rate) with JEDEC spec-minimum physical
       // timings (tRCD=tRP=16ns, tRAS=33ns, tRC=49ns, tCL=16ns, tWR=16ns,
-      // tFAW=16ns, tREFI=3.9us). Cycle counts at tCK=312ps.
+      // tFAW=16ns, tREFI=3.9us).
+      /* 1.11.63 (calibration): "Cycle counts at tCK=312ps" -- the line that
+       * used to close the sentence above -- is GONE. 312 ps is tWDQS, not tCK;
+       * the cycle counts are now at tCK = 625 ps, the CK period JESD238B.01
+       * Table 92 (printed p.160) gives for the 6.4 Gbps/pin bin. See the long
+       * note on the preset row below. */
       // Replaces the earlier placeholder "HBM3_2Gbps" preset, which used the
       // wrong data rate (2.0 vs 6.4 Gb/s) and impossible ~7ns row timings.
       /* PIMID 1.11.59 (audit F036): the nRFC/nRFCSB/nREFISB columns are -1,
@@ -42,7 +47,67 @@ class HBM3 : public IDRAM, public Implementation {
        * dead and the comment beside it read as the authority, which is the
        * worse half. -1 is this file's idiom for "supplied elsewhere" and the
        * completeness check below still catches a column nothing fills. */
-      {"HBM3_6.4Gbps", {6400, 4, 52, 52, 52, 52, 106, 158, 52, 13, 26, 26, 7, 13, 10, 13, 13, 26, 26, 52, -1, -1, 12500, -1, 8, 312}},
+      /* PIMID 1.11.63 (calibration): THE WHOLE ROW IS RE-DERIVED IN THE CK
+       * DOMAIN. This is a FIRST-ORDER change: it uncaps HBM3 bandwidth.
+       *
+       * THE ERROR. The row ran at tCK = 312 ps, which is tWDQS -- the write
+       * strobe period -- not the command clock.
+       * SOURCE: JESD238B.01 Table 92 "Timings Parameters (Part 1)", clause 10
+       * "AC Timings", printed p.160 (PDF p.174), the 6.4 Gbps/pin column,
+       * verbatim:
+       *     CK clock frequency   fCK     50 - 1600   MHz
+       *     CK clock period      tCK     0.625 - 20  ns
+       *     WDQS clock period    tWDQS   0.312 - 10  ns
+       * so at 6.4 Gb/s the command clock is at most 1600 MHz and its period at
+       * least 0.625 ns; 0.312 ns is the strobe. The model was running the CK
+       * domain at 2x the standard's maximum, and a cycle in the model was half
+       * a JESD238B cycle. The tCK derivation in set_timing_vals() is corrected
+       * to 4e6/rate (HBM3 moves 4 bits/pin per CK: 6.4 Gb/s / 1.6 GHz).
+       *
+       * WHAT MOVES, AND WHY IT IS FIRST-ORDER. Everything JESD238B states in
+       * CYCLES was being read at the wrong cycle length. The worst was nCCDS.
+       * Table 93, printed p.164 (PDF p.178), verbatim:
+       *     "RD/WR bank A to RD/WR bank B command delay different bank group |
+       *      tCCDS | 2 | - | nCK"
+       *     "RD/WR bank A to RD/WR bank B command delay same bank group |
+       *      tCCDL | Max (4, 2.5 ns/tCK) | - | nCK"
+       * At tCK 0.625 ns those are 1.25 ns and Max(4, 4) = 4 nCK = 2.5 ns. A
+       * BL8 burst at 6.4 Gb/s occupies 8 bits/pin / 6.4 Gb/s = 1.25 ns, so
+       * tCCDS = 2 nCK is exactly back-to-back at 100% DQ utilisation. The old
+       * row had nBL 4 and nCCDS 7, i.e. it left the bus idle 3 cycles in every
+       * 7 and CAPPED each pseudochannel at nBL/nCCDS = 4/7 = 57% of the DQ
+       * line rate. Peak modelled HBM3 bandwidth therefore rises by 1.75x, to
+       * the full line rate, before any workload effect.
+       *   nRREFD 8 -> 13. Table 93 printed p.166 (PDF p.180): "PER BANK
+       *     REFRESH command period (different bank) ... | tRREFD |
+       *     MAX(3 x tCK, 8) | - | ns". The standard states NANOSECONDS and the
+       *     preset was carrying the figure as CYCLES. MAX(1.875, 8) = 8 ns =
+       *     13 nCK at 0.625 ns.
+       *   nREFI 12500 -> 6240. Table 93 printed p.166: "Average periodic
+       *     refresh interval for REFRESH command | tREFI | - | 3.9 | us"
+       *     (and Table 4 printed p.6 "Refresh Period 3.9 us" at every
+       *     density). 3900 / 0.625 = 6240 nCK. Same 3.9 us, new cycle length.
+       *
+       * THE REST OF THE ROW: a pure unit conversion, ns preserved. Table 93
+       * publishes tRC, tRAS, tRCDRD, tRCDWR, tRRDL, tRRDS, tFAW, tRTP, tRP,
+       * tWR, tWTRL, tWTRS and tRTW with the MIN cell BLANK, and HBM3 has no
+       * "CL" at all (RL is MR2 OP[7:0], vendor-selected), so the standard
+       * cannot supply them and none is invented. They keep the NANOSECONDS
+       * this row was built from -- the header comment above names them:
+       * tRCD = tRP = tCL = tWR = tFAW = 16 ns, tRAS = 33 ns, tRC = 49 ns --
+       * re-expressed at 0.625 ns instead of 0.3125 ns:
+       *     nCL, nRCDRD, nRCDWR, nRP, nWR, nFAW  16 ns  -> ceil(16/0.625)  = 26
+       *     nRAS                                 33 ns  -> ceil(33/0.625)  = 53
+       *     nRC                                  49 ns  -> ceil(49/0.625)  = 79
+       *     nBL   BL8 at 6.4 Gb/s                1.25ns ->      1.25/0.625 = 2
+       *     nRTPS 13 x 0.3125 = 4.0625 ns               -> ceil(4.0625/.625)= 7
+       *     nRTPL, nCWL, nWTRL, nRTW  26 x 0.3125 = 8.125 ns        -> 13
+       *     nRRDS 10 x 0.3125 = 3.125 ns                            ->  5
+       *     nRRDL, nWTRS      13 x 0.3125 = 4.0625 ns               ->  7
+       * Identities hold afterwards: nRC 79 = nRAS 53 + nRP 26; nCCDS 2 >= nBL
+       * 2; nCCDL 4 > nCCDS 2; nWTRL 13 > nWTRS 7; nRRDL 7 > nRRDS 5.
+       * nRFC/nRFCSB/nREFISB stay -1 (supplied by the per-density tables). */
+      {"HBM3_6.4Gbps", {6400, 2, 26, 26, 26, 26, 53, 79, 26, 7, 13, 13, 2, 4, 5, 7, 7, 13, 13, 26, -1, -1, 6240, -1, 13, 625}},
     };
 
 
@@ -269,8 +334,44 @@ class HBM3 : public IDRAM, public Implementation {
         }
         m_timing_vals("rate") = *dq;
       }
-      int tCK_ps = 1E6 / (m_timing_vals("rate") / 2);
+      /* 1.11.63 (calibration): ONE AUTHORITY FOR tCK, and for HBM3 the divisor
+       * itself was wrong.
+       *
+       * The upstream form, `1E6 / (rate / 2)`, assumes a classic DDR bus whose
+       * data rate is twice the COMMAND clock. HBM3 is not that.
+       * SOURCE: JESD238B.01 Table 92, clause 10 "AC Timings", printed p.160
+       * (PDF p.174), 6.4 Gbps/pin column: fCK 50-1600 MHz, tCK 0.625-20 ns,
+       * tWDQS 0.312-10 ns. The data rate is FOUR times fCK (6.4 Gb/s at
+       * 1.6 GHz), so
+       *     tCK = 4e6 / rate = 625 ps at 6400 Mb/s
+       * and the old form's 312 ps was tWDQS, the strobe period -- half a
+       * JESD238B CK. Nine bins are tabulated (4.8 through 8.0 Gbps/pin) and
+       * fCK is rate/4 in every one of them, so the relation is the standard's,
+       * not a fit to one bin.
+       *
+       * LIVE EFFECT: tCK is the memory system's cycle length
+       * (generic_DRAM_system::get_tCK()) and the divisor that turns the
+       * per-density refresh tables (ns) into cycles. With the row re-derived
+       * in the CK domain above, the model now runs HBM3's command bus at its
+       * real 1.6 GHz and honours JESD238B's cycle-stated parameters -- tCCDS
+       * = 2 nCK above all, which is what uncaps DQ utilisation from 57% to
+       * 100%.
+       *
+       * The tCK_ps column in the preset row above is a MIRROR of this
+       * derivation and is checked against it below, so the two cannot silently
+       * disagree again. */
+      int preset_tCK_ps = m_timing_vals("tCK_ps");
+      int tCK_ps = 4E6 / m_timing_vals("rate");
       m_timing_vals("tCK_ps") = tCK_ps;
+      if (preset_provided && preset_tCK_ps != tCK_ps) {
+        throw ConfigurationError(
+          "In \"{}\", the timing preset's tCK_ps column says {} ps but the "
+          "rate of {} Mb/s derives {} ps (tCK = 4e6/rate: JESD238B.01 Table 92 "
+          "printed p.160 gives fCK = rate/4, e.g. 1600 MHz at 6.4 Gbps/pin). "
+          "The derivation wins at run time, so the column must mirror it -- "
+          "fix the preset!",
+          get_name(), preset_tCK_ps, m_timing_vals("rate"), tCK_ps);
+      }
 
       // Refresh timings
       // tRFC table (unit is nanosecond!)
@@ -278,14 +379,62 @@ class HBM3 : public IDRAM, public Implementation {
       //  2Gb   4Gb   8Gb  16Gb
         { 160,  260,  350,  450},
       };
+      /* 1.11.63 (calibration): tRFCpb table added. Same index (per-CHANNEL
+       * density) as tRFC_TABLE above; -1 means "the standard does not give a
+       * value here".
+       * SOURCE: JESD238B.01 Table 93, printed p.166 (PDF p.180), verbatim:
+       *     PER BANK REFRESH command period   8 Gb / die  tRFCpb  TBD  - ns 28
+       *     (same bank)                      16 Gb / die          200  -
+       *                                      24 Gb / die          240  -
+       *                                      32 Gb / die          TBD  -
+       * with NOTE 28 "Density is given per die" -- unlike tRFCab, which Table
+       * 93 printed p.165 keys on density PER CHANNEL. The two must therefore
+       * be bridged, and this model's org determines how: it carries no SID
+       * level and 16 banks per pseudochannel, which is JESD238B's 4-High
+       * realisation (the 8-High rows of Table 4 carry "SID, BA[3:0]"), so
+       *     die density = 4 x channel density.
+       * Only one column of the four lands on a tabulated value:
+       *      2 Gb/channel ->  8 Gb/die  -> TBD
+       *      4 Gb/channel -> 16 Gb/die  -> 200 ns   <- the density PIMID emits
+       *      8 Gb/channel -> 32 Gb/die  -> TBD
+       *     16 Gb/channel -> 64 Gb/die  -> not in Table 93 at all
+       * so the other three keep the documented UPPER BOUND that 1.11.51 (N9)
+       * put there -- tRFCab, since refreshing one bank cannot take longer than
+       * refreshing them all -- and say so at the point of use below. */
+      constexpr int tRFCPB_TABLE[1][4] = {
+      //  2Gb   4Gb   8Gb  16Gb      (per-CHANNEL density; -1 = TBD in Table 93)
+        {  -1,  200,   -1,   -1},
+      };
 
       /* PIMID 1.11.59 (audit F034, HBM2's twin): this header said "tRFC
        * table" over the same-bank refresh INTERVAL table. */
       // tREFIsb table (same-bank refresh INTERVAL, unit is nanosecond!)
-      constexpr int tREFISB_TABLE[1][4] = {
-      //  2Gb    4Gb    8Gb    16Gb
-        { 4875,  4875,  2438,  2438},
-      };
+      /* 1.11.63 (calibration): the four constants {4875, 4875, 2438, 2438} are
+       * GONE, replaced by the standard's own formula. They were 20x to 40x too
+       * long, i.e. per-bank refresh was being issued 20-40x too rarely.
+       * SOURCE: JESD238B.01 Table 93, printed p.166 (PDF p.180), verbatim:
+       *     Average periodic refresh interval for   4-High  tREFIpb  -
+       *     PER BANK REFRESH command                                 tREFI/16  us
+       *                                             8-High  -        tREFI/32
+       *                                            12-High  -        tREFI/48
+       *                                            16-High  -        tREFI/64
+       *     NOTE 24  tREFIPB = tREFI / N; N = no. of banks.
+       * NOTE 24 is the general rule and the stack-height rows are that rule
+       * evaluated for 16/32/48/64 banks. This model's org has no SID level and
+       * carries bankgroup x bank banks per pseudochannel (16 in all three
+       * shipped org presets), so N is read from the organization rather than
+       * hard-coded, and the 4-High row is what 16 banks reproduces:
+       *     tREFIpb = 3900 ns / 16 = 243.75 ns   (vs the old 4875)
+       * tREFI itself is Table 93 printed p.166, "tREFI | - | 3.9 | us", and
+       * Table 4 printed p.6 "Refresh Period 3.9 us" at every density -- it is
+       * density-independent, which is why one expression replaces four
+       * per-density constants.
+       * These values are INERT on the configuration PIMID emits (the refresh
+       * manager is AllBank, so REFsb is never issued), but they were wrong. */
+      constexpr float tREFI_ns = 3900.0f;
+      const int banks_per_pc = m_organization.count[m_levels["bankgroup"]] *
+                               m_organization.count[m_levels["bank"]];
+      const float tREFIsb_ns = tREFI_ns / (float) banks_per_pc;
 
       int density_id = [](int density_Mb) -> int {
         switch (density_Mb) {
@@ -327,8 +476,15 @@ class HBM3 : public IDRAM, public Implementation {
        *     refreshing one bank cannot take longer than refreshing them all.
        *     Our emitted configs use the AllBank refresh manager, which never
        *     consumes nRFCSB; a SameBank manager would over-price refresh
-       *     time by the bound's slack -- conservative, and stated here. */
-      m_timing_vals("nREFISB") = JEDEC_rounding(tREFISB_TABLE[0][density_id], tCK_ps);
+       *     time by the bound's slack -- conservative, and stated here.
+       * 1.11.63 (calibration) SUPERSEDES half of (2): "JESD238 tables are
+       *     paywalled" is no longer true of this tree -- misc/JESD238B.01.pdf
+       *     is held, and its Table 93 printed p.166 DOES publish tRFCpb, at
+       *     200 ns for a 16 Gb die (= the 4 Gb/channel org PIMID emits) and
+       *     240 ns for 24 Gb, with 8 Gb and 32 Gb marked TBD. That value is
+       *     now used where the standard supplies one; the tRFCab upper bound
+       *     survives only for the columns the standard marks TBD. */
+      m_timing_vals("nREFISB") = JEDEC_rounding(tREFIsb_ns, tCK_ps);
       /* PIMID 1.11.59 (audit F035): the `if (nRFCSB == -1)` this replaces was
        * unconditionally true -- the one shipped preset sets that column to -1
        * -- while nRFC and nREFISB immediately above were overwritten with no
@@ -336,7 +492,16 @@ class HBM3 : public IDRAM, public Implementation {
        * rule that the other two columns did not follow and that nothing ever
        * exercised. All three are unconditional now, and the preset carries -1
        * in all three columns to say so (F036). */
-      m_timing_vals("nRFCSB") = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
+      /* 1.11.63 (calibration): nRFCSB is tRFCpb where JESD238B.01 Table 93
+       * (printed p.166) gives one, and only falls back to the tRFCab upper
+       * bound where the standard says TBD. At the density PIMID emits
+       * (HBM3_4Gb = 4 Gb/channel = a 16 Gb die 4-High) that is 200 ns instead
+       * of the 260 ns tRFCab bound -- the bound was 30% loose. */
+      if (tRFCPB_TABLE[0][density_id] > 0) {
+        m_timing_vals("nRFCSB") = JEDEC_rounding(tRFCPB_TABLE[0][density_id], tCK_ps);
+      } else {
+        m_timing_vals("nRFCSB") = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
+      }
 
       // Overwrite timing parameters with any user-provided value
       // Rate and tCK should not be overwritten
@@ -369,7 +534,7 @@ class HBM3 : public IDRAM, public Implementation {
           /// 2-cycle ACT command (for row commands)
           {.level = "channel", .preceding = {"ACT"}, .following = {"ACT", "PRE", "PREA", "REFab", "REFsb", "RFMab", "RFMsb"}, .latency = 2},
 
-          /*** Pseudo Channel (Table 3 — Array Access Timings Counted Individually Per Pseudo Channel, JESD-235C) ***/ 
+          /*** Pseudo Channel (Table 3 -- Array Access Timings Counted Individually Per Pseudo Channel, JESD-235C) ***/ 
           // RAS <-> RAS
           {.level = "pseudochannel", .preceding = {"ACT"}, .following = {"ACT"}, .latency = V("nRRDS")},
           /// 4-activation window restriction

@@ -40,6 +40,12 @@ uint64_t JEDEC_rounding(float t_ns, int tCK_ps) {
   return nCK;
 }
 
+uint64_t JEDEC_rounding_RU(float t_ns, int tCK_ps) {
+  // Plain ceiling: RU(t/tCK). See utils.h for the JESD209-5C citation.
+  uint64_t t_ps = t_ns * 1000;
+  return (t_ps + tCK_ps - 1) / tCK_ps;
+}
+
 uint64_t JEDEC_rounding_DDR5(float t_ns, int tCK_ps) {
   // Turn timing in nanosecond to picosecond
   uint64_t t_ps = t_ns * 1000;

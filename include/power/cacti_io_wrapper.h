@@ -125,6 +125,13 @@ struct LinkIOResult {
      * the components separable is what lets the replacement be checked term by
      * term instead of as one aggregate that could hide a compensating error. */
     double energy_pj_per_bit_term = 0.0;
+    /* 1.11.63 (R7, read/write split): the field above is computed with
+     * CACTI-IO's iostate = WRITE (the wrapper's long-standing setting) and is
+     * therefore the WRITE-direction termination. This one is a second pass of
+     * extio_power_term() with iostate = READ over the same parameter set --
+     * CACTI-IO natively separates power_termination_read/write (extio.cc),
+     * and the split consumer charges each direction its own loop. */
+    double energy_pj_per_bit_term_rd = 0.0;
 
     /* Is the technology->Mem_IO_type map EXACT, or a nearest neighbour? Only
      * exact maps are allowed to replace an existing result. An approximate map

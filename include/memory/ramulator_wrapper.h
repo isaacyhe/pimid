@@ -69,6 +69,63 @@ struct PresetOrganization {
     uint64_t rowBytes() const { return cols_per_row * static_cast<uint64_t>(dq_bits) / 8; }
 };
 
+/* 1.11.63 (R6): THE SIMULATED TIMING PRESET'S OWN ROW, on the same terms.
+ *
+ * Companion of PresetOrganization above, and it exists for the same reason
+ * ruling R6 gives: PIMID provides no numbers of its own, so a PIMID-side ns
+ * literal that paraphrases a Ramulator timing preset must be DERIVED from that
+ * preset instead. The architecture objects carried four such literals per
+ * technology (tRCD/tCAS/tRP/tRAS) and two of them described a different SPEED
+ * BIN from the preset the run counts cycles against -- DDR5 the 4800 bin's ns
+ * against a DDR5_3200AN preset (11% high), DDR3 the 1600K bin's against a
+ * DDR3_1600H preset (22% high).
+ *
+ * Ramulator2's timing_presets tables are `inline static const std::map`
+ * members of classes defined in .cpp files, exactly like the org tables, so
+ * they cannot be read at runtime from here; this is a TRANSCRIPTION of the
+ * selected rows, each naming its source file.
+ *
+ * TWO THINGS ARE DERIVED RATHER THAN TRANSCRIBED, because upstream derives
+ * them too:
+ *   tCK_ps         every impl OVERWRITES the row's tCK_ps column before
+ *                  anything reads it, as `ck_divisor_e6 * 1E6 / rate`. The
+ *                  DIVISOR IS PER FAMILY and is not a free parameter: 2 for
+ *                  the classic DDR bus whose data rate is twice the command
+ *                  clock (DDR3/DDR4/DDR5/GDDR6/HBM2), 4 for HBM3 (JESD238B.01
+ *                  Table 92 printed p.160 gives fCK = rate/4 in all nine
+ *                  bins), 8 for LPDDR5. So the CLOCK THE MODEL RUNS AT comes
+ *                  from `rate` and the family, never from the column.
+ *   the ns values  n x tCK, which is what the timing model enforces.
+ *
+ * THE SELF-CHECK, and it is load-bearing: table_tCK_ps == the derived tCK_ps.
+ * Upstream now makes that a hard contract -- each impl THROWS a
+ * ConfigurationError if its preset's tCK_ps column does not mirror the
+ * derivation -- so the column is authoritative and a disagreement HERE means
+ * PIMID's transcription has gone stale against a preset that moved. That is a
+ * real failure mode: this transcription and the HBM3/GDDR6 CK-domain
+ * correction upstream were written the same afternoon. When the two disagree
+ * PIMID REFUSES to read the row's cycle counts as ns rather than picking a
+ * clock; see applyPresetTimingsToArchitecture(). */
+struct PresetTiming {
+    std::string preset_name;        // e.g. "DDR4_2400R"
+    std::string preset_source;      // e.g. "external/ramulator/src/dram/impl/DDR4.cpp"
+    int rate_mtps = 0;              // the row's `rate` column, MT/s on the DQ
+    int nCL = 0, nRCD = 0, nRP = 0, nRAS = 0, nBL = 0;
+    int table_tCK_ps = 0;           // the row's own tCK_ps column
+    int ck_divisor_e6 = 2;          // the impl's own tCK = ck_divisor_e6 * 1E6 / rate
+    int tCK_ps = 0;                 // DERIVED, exactly as the impl derives it
+    bool ck_consistent = false;     // table_tCK_ps == tCK_ps
+    bool valid = false;
+
+    double tCK_ns() const { return tCK_ps / 1000.0; }
+    // Usable as ns only when the row carries ONE clock.
+    bool derivable() const { return valid && ck_consistent && tCK_ps > 0; }
+    double tCAS_ns() const { return nCL  * tCK_ns(); }
+    double tRCD_ns() const { return nRCD * tCK_ns(); }
+    double tRP_ns()  const { return nRP  * tCK_ns(); }
+    double tRAS_ns() const { return nRAS * tCK_ns(); }
+};
+
 /**
  * Wrapper class that adapts Ramulator2 to PIMID's memory model interface
  * This provides a clean separation between PIMID and Ramulator code
@@ -156,7 +213,11 @@ public:
 
     double getArrayReadEnergyNJ() const;     // array rd (act+col, amortized) per 64B
     double getArrayWriteEnergyNJ() const;    // array wr per 64B
-    double getTerminationEnergyNJ() const;   // ODT/termination per 64B, from CACTI-IO
+    /* 1.11.63 (R7): direction-aware. Reads price the DRAM driver into the
+     * RX termination (RTT_NOM class); writes price the controller driver
+     * into the DRAM write termination (RTT_WR class). Both the CACTI-IO
+     * exact-map path and the scheme-table fallback carry the split. */
+    double getTerminationEnergyNJ(bool is_write) const;   // ODT/termination per 64B
     /* 1.11.40 (N8): interface terms PIMID never modelled -- driver switching
      * and PHY per 64 B, and the IO area. Previously the DQ interface was
      * termination-only, which understated LPDDR5 by ~71x (the 142x quoted here
@@ -247,6 +308,9 @@ public:
      * falls back to DDR4_8Gb_x8, the same substitution the architecture object
      * makes and announces). */
     const PresetOrganization& getPresetOrganization() const { return preset_org_; }
+    /* 1.11.63 (R6): the timing row of the same preset pair -- the speed bin
+     * whose cycles this run counts. See PresetTiming. */
+    const PresetTiming& getPresetTiming() const { return preset_timing_; }
     // Rows per bank of the simulated preset. 0 only if the preset is unknown.
     uint64_t getPresetRowsPerBank() const { return preset_org_.rows_per_bank; }
     /* The preset's DEVICE capacity in MB: the device itself for the DDR
@@ -385,6 +449,9 @@ private:
      * Resolved in initialize() (and by parseConfiguration on the default
      * path) before anything reads a density or a row count off it. */
     PresetOrganization preset_org_;
+    /* 1.11.63 (R6): the simulated TIMING preset's row. Resolved beside
+     * preset_org_ and on the same schedule. */
+    PresetTiming preset_timing_;
     std::shared_ptr<pimid::memory::DRAMArchitectureV2> dram_arch_;
     std::shared_ptr<PIMBandwidthTracker> bandwidth_tracker_;
     std::shared_ptr<InternalDRAMNetwork> internal_network_;
@@ -407,10 +474,25 @@ private:
      * configured device width. Idempotent; safe to call again after the width
      * changes. */
     void resolvePresetOrganization();
-    /* 1.11.61 (ruling R1): stamp the SIMULATED PRESET's density onto the
-     * architecture object -- chip_size_mb and bank_size_mb. DDR family only;
-     * HBM keeps the core-die semantics ruling R2 fixed. */
+    /* 1.11.61 (ruling R1) + 1.11.63 (R6-2): stamp the SIMULATED PRESET's
+     * density onto the architecture object -- chip_size_mb, bank_size_mb and
+     * the derived rank_size_gb. EVERY family now: the DDR family reads
+     * chip_size_mb as one DEVICE, HBM as one CORE DIE (the preset's per-channel
+     * density x the two channels a core die fronts), which is the reading
+     * ruling R2 fixed and R6 makes derived rather than transcribed. */
     void applyPresetDensityToArchitecture();
+    /* 1.11.63 (R6): resolve preset_timing_ from dram_type_. Idempotent. */
+    void resolvePresetTiming();
+    /* 1.11.63 (R6-5): stamp the simulated TIMING preset's bin onto the
+     * architecture object's four JEDEC ns timings. Only where the preset row
+     * carries ONE clock (see PresetTiming::derivable) and only for the
+     * technologies R6 rules on; refuses loudly rather than choosing a clock. */
+    void applyPresetTimingsToArchitecture();
+    /* 1.11.63 (R6-3): capacity_ and bandwidth_ DERIVED from the preset pair
+     * (org x timing) instead of the per-technology literals the else-if chain
+     * in parseConfiguration() used to carry. Called after that chain has set
+     * channels_/ranks_per_channel_, and again when the device width moves. */
+    void derivePresetCapacityAndBandwidth();
 };
 
 } // namespace pimid

@@ -7,6 +7,121 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.63 -- the standards arrive, and the presets answer to them
+
+The calibration release. R6 (2026-08-24, user): "we mainly rely on the
+ramulator models, but these models must be carefully calibrated to
+JEDEC/vendor spec/data we have. PIMID itself provides no such thing." A
+document campaign brought the full standards into misc/ -- JESD209-5C
+(LPDDR5/5X, 676 pp), JESD235D (HBM1/HBM2, 213 pp), the complete POD family
+(JESD8-19/20A/21C/24/25/30A = POD18/15/135/12/10/125), JESD305B.01, the
+Micron DDR3L/DDR4/DDR5 full datasheets, a Samsung and an SK hynix GDDR6
+part datasheet -- and every preset field they can check was checked. What
+remains uncheckable is now a named vendor-NDA list (HBM3 part spec; HBM2
+IDD), not a fog.
+
+Part A/B (calibration audit + R6 batch). The audit (75 calibrated / 42
+drifted / 233 uncheckable at the start) drove: GDDR6 tREFI 7800 -> 1900 ns
+(refresh occupancy 4.6% -> 18.9%) and nCCDS 4 -> 8 with the tREFI/nRFCpb
+column swap unwound; HBM3 re-derived into its CK domain (tCK = 625 ps,
+fCK = rate/4 per JESD238B Table 92; nCCDS 2 -> DQ utilisation 57% -> 100%,
+bandwidth uncap 1.75x); LPDDR5 IDD re-based on the Micron MT62F VDD2H
+column (~3x); DDR3_8Gb_x8 org corrected; DDR3/DDR5 ns rows re-keyed to the
+simulated bins (the DDR4 tRC bin-stamp, +1.1%, is the recorded judgment
+call -- gate 1173D measured its co-sim consequence at ~2%). R6 batch: the
+wrapper's capacity_/bandwidth_ literals are DERIVED from preset org x
+timing; HBM3 chip capacity follows the preset (core die 1024 MB, stack
+8 GiB -- the standing capacity-mismatch warning is gone, and gate 1173A
+proved it fired before); HBM bank_size -> pages_per_unit; HBM3 CACTI-IO
+channel width 128 -> 64; workload.mpi_ranks now implies type mpi (the
+1172-gate footgun); B018 masked.
+
+Part C/D (JESD209-5C). The RTT saga closes: Table 84 p.144 gives DQ ODT
+"000B: Disable (Default)" -- the JEDEC default operating point is
+UNTERMINATED, below the retired band's floor, and the 240-ohm assumption
+chain (1.11.52-1.11.59) dissolves. rtt = 0 is the sentinel; the LVSTL
+branch prices no DC loop for it (the gate against dividing into rpd+0 is
+load-bearing); getTerminationEnergyBandNJ is retired. The AC verdicts: 17
+of 22 fields exact (all four tRFCab/pb densities, tREFI 3906, nBL16 2);
+nCL 20 -> 17 and nCWL 11 -> 9 -- both were the NEXT frequency bin's row
+(1100B) where 6400 Mb/s belongs to 1011B; nCCD split into nCCDS 2 /
+nCCDL 4 (BG mode is mandatory above 3200 Mb/s, and same-bank-group
+columns were cycling 2x too fast); tPBR2ACT 7.5 ns at every density (8.0
+appears nowhere in the standard); nCS 3; four timing-constraint formulas
+corrected to the standard's own expressions; LPDDR5 rounding switched to
+plain RU() per the standard's notes (numerically identical at 1250 ps).
+
+Part E (R7, user ruling: read/write split termination). The old single
+loop (rtt 48 / rpd 40 for DDR4/DDR5) matched no JEDEC default and no IDD
+condition, and DDR5's citation named a standard that does not exist
+("POD11" -- the POD family has no 1.1 V member; JESD79-5 defines that
+point itself). The two directions are different circuits and are priced
+separately now: reads drive the DRAM's RON into the RX termination
+(RTT_NOM class), writes drive the controller's RON into the DRAM's
+RTT_WR. The anchors are the vendors' own IDD measurement conditions --
+identical across all three DDR-family datasheets (RON = RZQ/7 = 34,
+RTT_NOM = RZQ/6 = 40, RTT_WR = RZQ/2 = 120; MT41K p.32, MT40A p.315,
+DDR5 core p.453) -- so the interface and the IDD-sourced array energy
+describe the same register settings. GDDR6: rd 40+60 (Samsung K4Z80325BC
+p.166 characteristics), wr 40+120 (p.144: "All ODTs are enabled with
+ZQ/2"). CACTI-IO carries the split natively (rtt1/rtt2_dq_read/write; a
+second extio_power_term pass with iostate = READ); a sourced row with
+zero termination (LPDDR5) is NOT injected -- CACTI-IO would divide by it
+and the inf would have ridden the substitution gate into the report.
+Host-side write RON is a sourced RANGE with the applied value inside it
+(Intel 743844-015 Tbl 86/87: 30-50 ohm; 34 applied); GDDR6's host RON is
+the one remaining stated assumption. Reads now cost MORE than writes
+(smaller loop resistance; DDR4: 3.045 vs 2.276 nJ/64B at RANK) -- the
+one-number-for-both era ends. power.termination_pj_per_bit, advertised in
+three console messages since 1.11.59, turned out to be parsed by NOTHING;
+it is a real YAML key now, and gate 1173B-C proved both halves (the OLD
+binary demonstrably ignores it; the NEW binary prices both directions at
+the stated point).
+
+Part F (JESD235D). HBM2's row was annotated "JESD235C spec-minimum
+tRP=16ns, tRC=49ns" -- numbers that appear NOWHERE in the standard.
+Table 58 (the only tRC/tRAS/tRP figures JESD235D prints) gives 15/33/48
+ns: nRP 20 -> 18, nRC 60 -> 58, and the 63a identity fixes (nRC 59 -> 60,
+nCCDS 3 -> 4) turn out to have patched correct identities onto wrong
+anchors -- both re-corrected against the standard. nBL 4 -> 2 (PC mode
+BL4 = 4 UI = 2 CK; the old 4 described a 128-byte burst and the 64-byte
+access identity is restored); nCCDS 2, nCCDL 4; nRTW 17 (NOTE 23 closed
+form; inert); nRREFD 8 -> 10 (a units error: JEDEC's 8 ns carried as 8
+cycles); nREFI floor (tREFI is a MAX); nRFCSB gets its own published
+table (160 ns, was borrowing tRFC at 1.63x); tREFISB's table was shifted
+one density column and is re-anchored with the NOTE-29 identity as
+cross-check. IDD stays vendor-only -- JESD235D's IDD tables publish EMPTY
+value columns by construction. STAGED for 1.11.64 (R2 precedent): the
+HBM2 org rework -- JEDEC gives 16 banks/PC x 16384 rows at 4 Gb/channel
+where the org carries 8 x 32768 (density closes, layout does not), plus
+the dq-role/prefetch/column corrections that go with it.
+
+Gates (1173A-D). 1173A: its own five sim arms were vacuous (BANK
+placement = no DQ crossing; wrong cycles pattern) -- the FIRES discipline
+caught the gate, not the code. 1173B: E3 caught the override knob
+HALF-WIRED (parsed, never applied -- the setter calls were missing); D1
+exposed that device scope's M/D/1 never consumes the Ramulator preset
+rows. 1173C: the co-sim cells exposed the real finding -- LPDDR5's
+preset corrections were reaching NOTHING, because the wrapper's hardcoded
+per-tech ns literals (18/18/18/42) feed every LPDDR5 cycle consumer; the
+R6 cure derives the four getters from the transcribed preset
+(21.25/18.75/18.75/42.5 ns), and the co-sim moved +6.0% once they did.
+Also fixed there: every co-sim run printed a 3-line parse-failure scare
+for an empty OPTIONAL override path. 1173D: all arms pass; the LPDDR5
+and HBM2 co-sim cells are bit-deterministic across runs, the DDR4 co-sim
+cell shows ~0.4% run-to-run scheduling wobble (recorded; its bin-stamp
+movement is ~2%, above the wobble).
+
+Data impact: every LPDDR5 number (cycles via RL/WL/nCCD and the derived
+ns; array energy via the re-based IDD and the derived tRC; interface
+termination -> 0 by citation), every HBM2 number (nBL/nRP/nRC/nCCD
+column throughput; refresh tables), HBM3 bandwidth (1.75x uncap), GDDR6
+refresh occupancy (4x), DDR3/DDR5 bin re-keys, and all DDR/GDDR
+termination energies (the R7 split). The corpus re-sim on >= 1.11.63
+remains the gate before any CAL number is quoted. GDDR6's ns-literals
+vs preset tension (documented in-file) and the HBM2 org rework are the
+named 1.11.64/round-5 items.
+
 ## 1.11.62 -- the flush walks at every arrival
 
 Rulings R5a/R5b (2026-08-22, interactive). The 1.11.57 epoch design measured

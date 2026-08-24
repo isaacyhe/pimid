@@ -1,4 +1,4 @@
-# Sources — every external number's provenance
+# Sources -- every external number's provenance
 
 One row per externally sourced quantity: what it is, the value or band in
 use, the source, and where the code consumes it. Local copies of sources
@@ -13,14 +13,16 @@ sources disagree) a band.
 | Quantity | Value in use | Source | Consumed at |
 |---|---|---|---|
 | DDR3 timing preset (tRAS/tRP/tBurst overrides) | 35 / 13.75 / 5.0 ns (DDR3-1600K) | JESD79-3D (misc/JESD79-3D.pdf) | `ramulator_wrapper.cpp` per-tech overrides |
-| DDR3 termination scheme | SSTL-135, RON=RZQ/7 (34), RTT=RZQ/6 (40) | JESD79-3D Tables 38, 41 | `pimid_energy.h` termination rows; CACTI-IO injection |
-| DDR4 electricals | POD12 | JESD79-4 | CACTI-IO injection (`cacti_io_wrapper.cpp`) |
-| DDR5 electricals | POD11 | JESD79-5 | CACTI-IO injection |
-| GDDR6 electricals | POD135 | JESD250D (misc/JESD250D.pdf) | CACTI-IO injection |
-| LPDDR5 termination topology | LVSTL, VSS-referenced; RTT row UNSOURCED-flagged | Micron datasheets (misc/315b-441b-*.pdf, misc/743844-015.pdf, misc/MICT-S-A0025741931-1.pdf) | `pimid_energy.h` (sourcing residue open: N8) |
+| DDR3 termination scheme (R7 rd/wr split) | SSTL-135; read loop RON 34 + RTT_NOM 40, write loop 34 + RTT_WR 120 | JESD79-3D Tables 38, 41 (topology); Micron MT41K p.32 IDD conditions ("RON RZQ/7 (34); RTT,nom RZQ/6 (40); RTT(WR) RZQ/2 (120)") | `pimid_energy.h` termination rows; CACTI-IO injection (rtt1/rtt2 per direction) |
+| DDR4 electricals (R7 rd/wr split) | POD12; read 34+40, write 34+120 | JESD8-24 (topology, misc/); Micron MT40A p.315 IDD conditions | CACTI-IO injection (`cacti_io_wrapper.cpp`) |
+| DDR5 electricals (R7 rd/wr split) | POD at 1.1 V; read 34+40, write 34+120. NOTE: no "POD11" JESD8-* standard exists (family is POD18/15/135/125/12/10, all in misc/); the 1.1 V point is JESD79-5's own | Micron DDR5 core sheet p.453 IDD conditions (MR5 RZQ/7 drivers, MR35 RTT_NOM RZQ/6, MR34 RTT_WR RZQ/2) | CACTI-IO injection |
+| GDDR6 electricals (R7 rd/wr split) | POD135; read 40+60, write 40+120; MR1 default = termination DISABLED, IDD operating point priced | Samsung K4Z80325BC p.166 (driver 40 / termination 60 characteristics), p.144 IDD conditions ("All ODTs are enabled with ZQ/2", ZQ=240), p.49 MR1; JESD250D (topology) | CACTI-IO injection |
+| Controller-side write driver RON (DDR4/DDR5) | applied 34 ohm, inside the sourced host range 30-50 ohm | Intel 743844-015 (misc/) Table 87 p.208 (DDR5: RON_UP/DN(DQ) 30-50 ohm, RODT(DQ) 30-240) and Table 86 p.207 (DDR4: 30-50, RODT 40-200); range stated at the row, point chosen within it | `pimid_energy.h` (ron_wr) |
+| Controller-side write driver RON (GDDR6) | 40 ohm -- ASSUMED equal to the DRAM's pull-down class (same 240-ohm ZQ reference); no public GDDR6 host-silicon doc in misc/ | the one remaining stated assumption of the R7 split | `pimid_energy.h` (ron_wr) |
+| LPDDR5 termination topology | LVSTL, VSS-referenced; DQ ODT default = Disable | Micron datasheets (misc/315b-441b-*.pdf, misc/MICT-S-A0025741931-1.pdf); JESD209-5C Table 84 p.144 (misc/JESD209-5C.pdf) | `pimid_energy.h` (rtt=0 encodes the JEDEC default; sourcing residue N8 CLOSED 1.11.63) |
 | LPDDR5 VDDQ | 0.50 V TYP (0.30 V ODT-off; range 0.47-0.57 V) | Micron LPDDR5X y52p p.1 Features; Micron_LPDDR5_MT62F p.1 and Table 7 p.14 | CACTI-IO injection (`cacti_io_wrapper.cpp`), `pimid_energy.h` |
 | LPDDR5 driver RON | 40 ohm | Micron IDD-table Note 4 ("Output load = 5pF; RON = 40 ohms; TC = 25 C"): Micron_LPDDR5_MT62F p.15, y52p p.43, y52q p.33, MICT-S p.30, y4bm p.25 | CACTI-IO injection, `pimid_energy.h` |
-| LPDDR5 DQ ODT (Rtt) | 240 ohm ASSUMED, NOT SOURCED | No source in tree: Micron states only "Programmable VSS ODT" and defers the ohm table to General LPDDR5 Spec 2 (absent); JESD209-5 absent; no LVSTL document in the JESD8-* set (misc/ holds POD18/POD15/POD135/POD12/POD10 + JESD8-23 only). Only citable bound is host-side: Intel 743844-015 cl.13.2.2.4 Table 89 p.211, RODT(DQ) 30-240 ohm, no typical -- 240 is that range's MAX, i.e. the lowest-energy end | `cacti_io_wrapper.cpp` (gates `exact_map` false -> LPDDR5 stays termination-only), `pimid_energy.h` |
+| LPDDR5 DQ ODT (Rtt) | Disable (Default); ladder RZQ/1..RZQ/6 = 240/120/80/60/48/40 ohm (RZQ=240), 111B RFU; NT-ODT also defaults off | JESD209-5C Table 84 p.144 (misc/JESD209-5C.pdf, acquired 2026-08-24) -- supersedes the 1.11.52-1.11.59 assumption chain (240 ohm assumed from host-side Intel 743844-015 Tbl 89 RODT range) | `pimid_energy.h` (rtt=0, LVSTL branch returns 0 for it), `cacti_io_wrapper.cpp` (row sourced=true); ODT-on systems use power.termination_pj_per_bit |
 | HBM3 I/O rails | VDDQ 1.1 V TYP, VDDQL (TX driver output stage) 0.4 V TYP; unterminated (IOUT = 0 mA, Ctotal = 2.5 pF); driver strength specified in CURRENT (8/10/12/14 mA, MR6) not ohms | JESD238B.01 Table 70 p.152 (cl.7.2), cl.9.1 p.164/166, Table 17 p.34 | not injected -- the (vddq, rtt, ron) injection shape has no rtt/ron to give for HBM |
 | Power-down entry/exit threshold (E17) | DDR3/DDR4 6.0 ns; DDR5/LPDDR5 7.5 ns | JESD79-3D (tXP max(3nCK,6ns)); JESD79-4; JESD79-5; JESD209-5 | `gapPowerDownResidency()` in `main.cpp`; settable via `memory.power_down_threshold_ns` |
 | HBM3 refresh completeness (nRFCSB fill) | tRFC upper bound, stated; JESD238B locally available for the real per-density values (upgrade queued) | JESD238B (misc/JESD238B.01.pdf) | `external/ramulator/.../HBM3.cpp`, `HBM2.cpp` |

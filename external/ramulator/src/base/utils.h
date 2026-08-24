@@ -35,6 +35,13 @@ size_t parse_frequency_str(std::string size_str);
  * @return uint64_t Number of cycles
  */
 uint64_t JEDEC_rounding(float t_ns, int tCK_ps);
+/* 1.11.63: plain round-up, the rule LPDDR5 states at the point of use
+ * (JESD209-5C Table 225 NOTE 2 p.261, Table 230 NOTE 2 p.267: "determined
+ * by RU(t/tCK)") -- no DDR-style 974/1000 guardband exists anywhere in that
+ * standard. At tCK = 1250 ps the two rules agree for every shipped LPDDR5
+ * value; this exists so the model applies the family's own rule, not a
+ * coincidentally-equal one. */
+uint64_t JEDEC_rounding_RU(float t_ns, int tCK_ps);
 
 
 /**

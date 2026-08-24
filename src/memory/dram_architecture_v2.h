@@ -538,10 +538,28 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR4_2400_Verified() {
 
     arch->timing.clock_freq_mhz = 1200;  // VERIFIED
     arch->timing.data_rate_mtps = 2400;  // VERIFIED
-    arch->timing.tRCD_ns = 13.32;  // VERIFIED: CL17
-    arch->timing.tCAS_ns = 13.32;  // VERIFIED
-    arch->timing.tRP_ns = 13.32;  // VERIFIED
-    arch->timing.tRAS_ns = 32.0;  // VERIFIED
+    /* 1.11.63 (R6-5): THE ns TIMINGS FOLLOW THE PRESET'S BIN, and are written
+     * as the arithmetic that produces them so they cannot drift from it.
+     *
+     * DDR4_2400R is nCL/nRCD/nRP 16 and nRAS 39 at tCK = 1E6/(2400/2) = 833 ps
+     * (DDR4.cpp timing_presets; the impl overwrites the row's tCK column with
+     * that expression, DDR4.cpp:336). RamulatorWrapper::
+     * applyPresetTimingsToArchitecture() stamps exactly these four values at
+     * runtime; the literals here are the same arithmetic so the stamp is a
+     * check rather than a change.
+     *
+     * WHAT MOVED, stated because it is not zero: 13.32 -> 13.328 is a
+     * transcription rounding, and 32.0 -> 32.487 is JEDEC_rounding -- the
+     * preset holds ceil(32 ns / 833 ps) = 39 WHOLE CYCLES, so 32.487 ns is how
+     * long the model really keeps the row open and 32.0 was the un-quantised
+     * spec minimum. getTRC() = tRAS + tRP prices the array ACTIVATE energy, so
+     * DDR4's tRC rises 45.32 -> 45.815 ns (1.1%). The label "CL17" that used to
+     * sit on the first line was wrong as well: DDR4_2400R is nCL 16; 2400U is
+     * the CL17 bin and is not what this tree simulates. */
+    arch->timing.tRCD_ns = 16 * 0.833;  // DERIVED: DDR4_2400R nRCD 16 x tCK 833 ps
+    arch->timing.tCAS_ns = 16 * 0.833;  // DERIVED: nCL 16
+    arch->timing.tRP_ns = 16 * 0.833;   // DERIVED: nRP 16
+    arch->timing.tRAS_ns = 39 * 0.833;  // DERIVED: nRAS 39
     arch->timing.tBurst_ns = 3.33;  // VERIFIED: 8 beats @ 2400 MT/s
 
     // Inner-bank datapath timing (INFERRED from CACTI and academic papers)
@@ -725,7 +743,25 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified() {
     arch->organization.chips_per_rank = 8;  // 8 channels (not traditional "chips")
     arch->organization.ranks_per_channel = 1;  // Single stack
     arch->organization.subarray_size_kb = 1024;  // Larger than DDR4
-    arch->organization.bank_size_mb = 4;
+    /* 1.11.63 (R6-2): 32 MB, THE PRESET'S BANK -- not 4 MB, which described no
+     * part in this tree.
+     *
+     * Ruling R1 (1.11.61) re-based the DDR family's bank_size_mb on the preset
+     * and left HBM's 4 MB untouched, because R2 was about chip_size_mb and
+     * bank_size_mb rode along in the same exclusion. HBM2_4Gb spreads 4 Gb over
+     * 16 banks per channel, so one bank is 512/16 = 32 MB. R6 removes the
+     * exclusion: bank_size_mb means one bank of the simulated preset for EVERY
+     * family, which is what the struct field says it means.
+     *
+     * THIS MOVES A NUMBER. bank_size_mb is the single hottest density consumer
+     * -- main.cpp turns it into pages_per_unit and hence --pages-per-unit and
+     * the emitted pagesPerUnit -- so an HBM2 BANK-placement element's
+     * contiguous block goes from 4 MB to 32 MB, 8x, and the address-to-unit
+     * map, PE locality and hop distance move with it. HBM3's goes 4 -> 16 MB,
+     * 4x. Both need re-simulation. RamulatorWrapper::
+     * applyPresetDensityToArchitecture() stamps the same value at runtime, so
+     * this literal is a check on the derivation. */
+    arch->organization.bank_size_mb = 32;  // preset HBM2_4Gb: 4 Gb/channel / 16 banks
     /* 1.11.61 (ruling R2): HBM KEEPS CORE-DIE SEMANTICS, and says so.
      *
      * 1024 MB is ONE CORE DIE, not one channel and not the stack. The preset
@@ -748,11 +784,18 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified() {
      *
      * chips_per_rank above counts CHANNELS (8), not dies (4). The two fields
      * therefore count different units on purpose; see the note at the struct
-     * field. rank_size_gb is left as the 8 GB stack figure it has always been
-     * and is dead (no getter, no reader) -- the live stack capacity is
-     * capacity_ in the wrapper, 4 GiB, which is the preset's. */
+     * field.
+     *
+     * 1.11.63 (R6-1): the same VALUE, now DERIVED rather than transcribed.
+     * applyPresetDensityToArchitecture() computes it as the preset's
+     * per-channel density x the channels one core die fronts, and HBM2
+     * reproduces this literal exactly -- which is the check that the unit is
+     * the right one. rank_size_gb was the only figure left disagreeing: 8 GB
+     * against a stack of 8 channels x 512 MB = 4 GiB, which is also what
+     * capacity_ reports. It is a dead field (no getter, no reader) and is
+     * corrected only so the object does not hand a reader a fourth capacity. */
     arch->organization.chip_size_mb = 1024;  // ONE CORE DIE (2 channels x 4 Gb)
-    arch->organization.rank_size_gb = 8;
+    arch->organization.rank_size_gb = 4;     // DERIVED: 8 channels x 512 MB stack
 
     // ===== TIMING (JEDEC HBM2; rate = the simulated HBM2_2.4Gbps bin) =====
 
@@ -979,11 +1022,27 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR5_4800_Verified() {
      * DDR5_3200AN preset this tree simulates; the ns timings are absolute and
      * stayed, but this comment still named the 4800 MT/s bin they were
      * originally quoted at. The VALUE is unchanged and within JEDEC's range
-     * across bins -- only the label was wrong. */
-    arch->timing.tRCD_ns = 16.67;  // VERIFIED: JESD79-5 tRCD, absolute ns
-    arch->timing.tCAS_ns = 16.67;  // VERIFIED
-    arch->timing.tRP_ns = 16.67;  // VERIFIED
-    arch->timing.tRAS_ns = 32.0;  // VERIFIED
+     * across bins -- only the label was wrong.
+     *
+     * 1.11.63 (R6-5): AND THAT WAS THE DEFECT, NOT THE LABEL. "Absolute ns" is
+     * true of a JEDEC timing and says nothing about WHICH BIN's absolute ns
+     * these are: 16.67 is the 4800 bin's, and the preset this tree counts
+     * cycles against is DDR5_3200AN -- nCL/nRCD/nRP 24, nRAS 52, at
+     * tCK = 1E6/(3200/2) = 625 ps (DDR5.cpp timing_presets, tCK derived at
+     * DDR5.cpp:392). That is 15.00 ns, so the object was 11% high on the three
+     * timings a run reports and prices with, for every release since 1.11.56
+     * moved the rate and left them. RamulatorWrapper::
+     * applyPresetTimingsToArchitecture() stamps these four at runtime; the
+     * literals are the same arithmetic so the stamp is a check.
+     *
+     * MOVES: tRCD/tCAS/tRP 16.67 -> 15.00 (-10.0%), tRAS 32.0 -> 32.5
+     * (JEDEC_rounding: 52 whole cycles). tRC = tRAS + tRP falls 48.67 ->
+     * 47.50 ns, so DDR5's array activate energy falls with it, and
+     * bank_access_ns falls 50.01 -> 45.00. */
+    arch->timing.tRCD_ns = 24 * 0.625;  // DERIVED: DDR5_3200AN nRCD 24 x tCK 625 ps
+    arch->timing.tCAS_ns = 24 * 0.625;  // DERIVED: nCL 24
+    arch->timing.tRP_ns = 24 * 0.625;   // DERIVED: nRP 24
+    arch->timing.tRAS_ns = 52 * 0.625;  // DERIVED: nRAS 52
     arch->timing.tBurst_ns = 16.0 * 1000.0 / 3200.0;  // 16 beats @ 3200 MT/s = 5.0 ns
 
     // Inner-bank datapath timing (INFERRED - scaled from DDR4 with better process)
@@ -1143,30 +1202,46 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM3_Verified() {
     arch->organization.chips_per_rank = 16;  // 16 pseudo-channels
     arch->organization.ranks_per_channel = 1;  // Single stack
     arch->organization.subarray_size_kb = 1024;  // Same as HBM2
-    arch->organization.bank_size_mb = 4;
-    /* 1.11.61 (ruling R2): HBM3 STAYS AS IT IS, on the same CORE-DIE basis as
-     * HBM2 above, and the mismatch that reading leaves is CHECKED and REPORTED
-     * rather than quietly corrected here.
+    /* 1.11.63 (R6-2): 16 MB, the preset's bank -- HBM3_4Gb spreads 4 Gb per
+     * channel over 2 pseudo-channels x 4 BG x 4 banks = 32 banks, so
+     * 512/32 = 16 MB. See the HBM2 factory for the full note; HBM3's
+     * pages_per_unit moves 4x with this. */
+    arch->organization.bank_size_mb = 16;  // preset HBM3_4Gb: 4 Gb/channel / 32 banks
+    /* 1.11.61 (ruling R2) -> 1.11.63 (R6-1): RECONCILED. The three-authority
+     * disagreement this comment used to record is resolved, and this note
+     * records the resolution rather than the disagreement.
      *
-     * The three authorities for HBM3 capacity in this tree do not agree, and
-     * the ruling does not move this field to any of them:
+     * WHAT WAS OPEN. Three numbers in this tree claimed HBM3's capacity and no
+     * two agreed:
      *   this object   8 core dies x 2048 MB = 16 GiB
-     *   the preset    16 channels x 4 Gb    =  8 GiB  (HBM3_4Gb, HBM3.cpp:24)
+     *   the preset    16 channels x 4 Gb    =  8 GiB  (HBM3_4Gb, HBM3.cpp)
      *   the wrapper   capacity_             =  4 GiB  (ramulator_wrapper.cpp)
-     * A core die fronting two channels of the simulated HBM3_4Gb preset is
-     * 2 x 4 Gb = 8 Gb = 1024 MB, so 2048 is 2x the core-die figure this basis
-     * implies. Unlike HBM2 there is no measured anchor in this tree that
-     * selects one of the three: vendorDieDensity()'s HBM3 row is a density
-     * (0.16 Gb/mm^2, SemiAnalysis), not a die capacity, so it cannot arbitrate.
+     * Ruling R2 deliberately kept 2048 and made the capacity cross-check FIRE
+     * on every HBM3 run so the disagreement could not be missed, leaving the
+     * choice of which authority moves to a ruling of its own. Unlike HBM2
+     * there is no measured anchor here that could arbitrate:
+     * vendorDieDensity()'s HBM3 row is a density (0.16 Gb/mm^2, SemiAnalysis),
+     * not a die capacity.
      *
-     * The capacity cross-check added in RamulatorWrapper::initialize() by this
-     * same ruling therefore FIRES on HBM3 -- 2048 x 8 dies = 16384 MB against
-     * the preset's 8192 -- and every HBM3 run says so out loud. That is the
-     * intended outcome of ruling R2: keep the value, make the disagreement
-     * impossible to miss, and leave the choice of which authority moves to a
-     * ruling of its own. Nothing here is silently reconciled. */
-    arch->organization.chip_size_mb = 2048;  // core-die basis, UNRECONCILED (see above)
-    arch->organization.rank_size_gb = 16;  // 16GB stacks available
+     * THE RULING (R6, user, 2026-08-24): PIMID relies on the Ramulator models,
+     * those models are calibrated to JEDEC and the vendor data in misc/, and
+     * PIMID ITSELF PROVIDES NO NUMBERS -- so a PIMID-side literal that
+     * paraphrases a preset must be DERIVED from it. The wrapper literal has no
+     * standing; the object follows the preset. On the core-die unit R2 fixed,
+     * the preset implies 2 channels x 4 Gb = 8 Gb = 1024 MB per core die, and
+     * 1024 x 8 dies = 8 GiB per stack -- the preset's stack exactly.
+     *
+     * WHAT MOVES: the reported DRAM die area HALVES, 100.00 -> 50.00 mm^2/die,
+     * and the memory total 800 -> 400 mm^2 (the die-area path is linear in
+     * chip_size_mb because the JEDEC calibration cancels the raw CACTI run).
+     * capacity_ in the wrapper rises 4 -> 8 GiB, being derived from the same
+     * preset. The capacity cross-check now RECONCILES on HBM3, so a firing
+     * there is a real error again and not an expected note.
+     *
+     * The value is not written here as a literal either: applyPresetDensity-
+     * ToArchitecture() derives it, and this line is the check. */
+    arch->organization.chip_size_mb = 1024;  // DERIVED: ONE CORE DIE (2 channels x 4 Gb)
+    arch->organization.rank_size_gb = 8;     // DERIVED: 16 channels x 512 MB stack
 
     // ===== TIMING (JEDEC HBM3; rate = the simulated HBM3_6.4Gbps bin) =====
 

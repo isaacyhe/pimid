@@ -240,7 +240,15 @@ struct DramIOMap {
  * ELECTRICALS: the rail, the termination and the driver impedance. */
 struct PimidElectrical {
     double vddq;      // IO rail -> vdd_io
-    double rtt;       // termination -> rtt1_dq_*
+    /* 1.11.63 (R7, user ruling): the two directions are different circuits
+     * and CACTI-IO natively carries them (rtt1_dq_read / rtt1_dq_write).
+     * rtt_rd is the RX termination a READ drives into (RTT_NOM class);
+     * rtt_wr is the DRAM's write termination (RTT_WR class). A zero means
+     * "no DC termination path by citation" -- such a row is NOT injected
+     * into CACTI-IO (its resistive network would divide by it); the scheme
+     * table prices the zero instead. */
+    double rtt_rd;    // READ-direction termination -> rtt1/rtt2_dq_read
+    double rtt_wr;    // WRITE-direction termination -> rtt1/rtt2_dq_write
     double ron;       // driver on-resistance -> r_on
     bool   sourced;   // is every electrical value cited?
     const char* note;
@@ -258,14 +266,35 @@ bool pimidElectricalFor(const std::string& t, PimidElectrical& e) {
      * priced on two different silicon voltages, and the half that reached the
      * report was the retired one. The swing voltages recomputeSwing() derives
      * scale with this rail and the termination power with its square. */
-    if (t == "DDR3")   { e = {1.35, 40,  34, true,  "SSTL-135, JESD79-3-1 + T38/T41 (RZQ=240); DDR3L, the part the IDD row describes"}; return true; }
-    if (t == "DDR4")   { e = {1.2,  48,  40, true,  "POD12, JESD8-24"};                            return true; }
-    if (t == "DDR5")   { e = {1.1,  48,  40, true,  "POD11, same family as JESD8-24"};             return true; }
-    if (t == "GDDR6")  { e = {1.35, 60,  40, true,  "POD135, JESD8-21C Cl.D (RTT via MR1; JESD250D p.59)"};       return true; }
+    /* 1.11.63 (R7): rd/wr split, values = the vendors' own IDD measurement
+     * conditions so the interface and the IDD-sourced array energy describe
+     * the same register settings. DDR3L/DDR4/DDR5 state the same trio:
+     * RON=RZQ/7=34, RTT_NOM=RZQ/6=40, RTT_WR=RZQ/2=120 (MT41K p.32; MT40A
+     * p.315; DDR5 core sheet p.453). The old DDR5 tag "POD11" named a
+     * standard that does not exist -- the POD family is 18/15/135/125/12/10,
+     * all in misc/; DDR5's 1.1 V POD point is defined by JESD79-5 itself. */
+    if (t == "DDR3")   { e = {1.35, 40, 120, 34, true,  "SSTL-135 (JESD79-3-1 T38/T41, RZQ=240); trio 34/40/120 = MT41K p.32 IDD conditions; DDR3L, the part the IDD row describes"}; return true; }
+    if (t == "DDR4")   { e = {1.2,  40, 120, 34, true,  "POD12 (JESD8-24); trio 34/40/120 = MT40A p.315 IDD conditions"}; return true; }
+    if (t == "DDR5")   { e = {1.1,  40, 120, 34, true,  "POD at 1.1 V per JESD79-5 (no JESD8-* exists for 1.1 V); trio 34/40/120 = Micron DDR5 core sheet p.453 IDD conditions"}; return true; }
+    if (t == "GDDR6")  { e = {1.35, 60, 120, 40, true,  "POD135; rd 40+60 = Samsung K4Z80325BC p.166 driver/termination characteristics; wr 120 = p.144 IDD conditions (All ODTs at ZQ/2, ZQ=240); MR1 default is termination DISABLED (p.49) -- the IDD operating point is priced for layer-consistency"}; return true; }
     /* 1.11.59 (LPDDR5 IO sourcing): the note now carries the page-level
      * citations for the two values that ARE sourced and the bound that is all
      * misc/ yields for the third. sourced stays false -- see the block above. */
-    if (t == "LPDDR5") { e = {0.5,  240, 40, false, "LVSTL; VDDQ 0.50 V TYP (Micron LPDDR5X y52p p.1 Features) and RON 40 ohm (same sheet, IDD Note 4, p.43); RTT=240 UNSOURCED -- Micron defers the ODT ohm table to General LPDDR5 Spec 2, absent here, and 240 is only the MAX of host-side RODT(DQ) 30-240 ohm (Intel 743844-015 Tbl 89 p.211), i.e. the lowest-energy end of that range"}; return true; }
+    /* 1.11.63 (calibration, JESD209-5C acquired 2026-08-24): the RTT question
+     * is CLOSED, and the answer is neither 240 nor any rung of the ladder.
+     * JESD209-5C Table 84 (printed p.144, PDF p.182), verbatim:
+     *   "DQ ODT ... OP[2:0]  000B: Disable (Default)  001B: RZQ/1 ...
+     *    110B: RZQ/6  111B: RFU"
+     * The JEDEC DEFAULT operating point is ODT DISABLED -- unterminated, which
+     * is LVSTL working as designed. The ladder (RZQ = 240 ohm, so RZQ/1..6 =
+     * 240/120/80/60/48/40) exists for controllers that enable ODT at speed;
+     * which rung is a system choice with no JEDEC default other than OFF.
+     * rtt = 0 is this table's sentinel for "no DC termination path"; the
+     * scheme-table branch prices zero termination current for it and says so.
+     * Micron's own IDD conditions are ODT-off, so the IDD-based array energy
+     * already describes this same default configuration -- the two layers now
+     * agree by citation instead of colliding by assumption. */
+    if (t == "LPDDR5") { e = {0.5,  0, 0, 40, true, "LVSTL; VDDQ 0.50 V TYP (Micron LPDDR5X y52p p.1) and RON 40 ohm (IDD Note 4 p.43); DQ ODT = Disable (Default) per JESD209-5C Tbl 84 p.144 -- RZQ/1..6 ladder available but OFF is the JEDEC default; termination DC current = 0 both directions"}; return true; }
     /* HBM rides an interposer: JESD238B cl.9.1, unterminated, so there is no
      * termination network to inject. It keeps WideIO's low-swing electricals,
      * which is the physically right family for a wide unterminated bus. */
@@ -364,7 +393,45 @@ int CactiIOWrapper::dramChannelWidthBits(const std::string& t) {
      * computeDramIO() as one channel's DQ count. Correcting the width alone
      * therefore lands the aggregate on the device's real peak. */
     if (t == "GDDR6")  return 16;                               // 16-DQ channel, 2/device
-    if (t == "HBM2" || t == "HBM3") return 128;                 // 128-bit channel
+    /* 1.11.63 (R6-4): HBM2 AND HBM3 SPLIT. One line served two technologies
+     * whose channel widths differ by 2x, and 128 was right for only one of
+     * them.
+     *
+     * HBM2 = 128 DQ per channel: JESD235B's ballout (misc/
+     * JESD235B-HBM_Ballout.zip) names 1024 DQ signals across exactly 8 channel
+     * letters a..h -- DQa0..DQa127 -- so 1024 / 8 = 128.
+     *
+     * HBM3 = 64 DQ per channel, and JESD238B.01 (misc/JESD238B.01.pdf, April
+     * 2025) says so three times:
+     *   p.1 Scope:    "Each channel interface maintains a 64 bit data bus
+     *                  operating at double data rate (DDR)."
+     *   p.1 Features: "64 DQ width + ECC/SEV pins support / channel";
+     *                 "Pseudo Channel (PC) mode operation; 32 DQ width for PC
+     *                  mode".
+     *   p.3 Table 1 (Single Channel Signal Count): "Data | 64 | DQ[63:0]".
+     * The stack's 1024 is the product 16 x 64 and is not a printed figure in
+     * the standard. PIMID's own HBM3 architecture object already carried 64 in
+     * channel_databus_bits, so this table was the outlier -- and it is the
+     * same shape as the GDDR6 defect ruling R3 closed one line above: a wider
+     * unit under a per-channel name.
+     *
+     * REACHABILITY, audited the way the R3 fix was. Four call sites:
+     *   ramulator_wrapper.cpp getTerminationEnergyNJ / getInterfaceDynamicEnergyNJ
+     *   / getInterfaceAreaMM2 -- all three pass the width to computeDramIO()
+     *     and then discard the result unless io.exact_map, and HBM maps to
+     *     WideIO with exact_map = false (dramIOMapFor above). The width reaches
+     *     no reported number through them; it was and stays LATENT there.
+     *   ramulator_wrapper.cpp derivePresetCapacityAndBandwidth -- LIVE, and
+     *     newly so this release (R6-3 extended the derivation to HBM). The
+     *     correction is what makes that extension right: at 128 the derivation
+     *     would give 6400 x 16 B x 16 ch = 1,638,400 MB/s for HBM3, 2x the
+     *     819,200 the part actually has, and the speed-bin reconciliation
+     *     check would then fail on the one technology it passes. At 64 it
+     *     gives 819,200 and reconciles against the architecture object's own
+     *     64-bit channel exactly.
+     * No other consumer exists in src/, include/ or tools/. */
+    if (t == "HBM2")   return 128;   // JESD235B ballout: 1024 DQ over 8 channels
+    if (t == "HBM3")   return 64;    // JESD238B.01 p.1 Scope, p.1 Features, p.3 Tbl 1
     return -1;
 }
 
@@ -541,10 +608,29 @@ LinkIOResult CactiIOWrapper::computeDramIO(const std::string& tech,
          * termination network into every swing the power model reads. */
         PimidElectrical el;
         bool injected = pimidElectricalFor(tech, el);
+        /* 1.11.63 (R7): a sourced row whose termination is ZERO (LPDDR5:
+         * DQ ODT Disable (Default), JESD209-5C Tbl 84) cannot be injected --
+         * CACTI-IO's termination network divides by rtt, and 1/0 would ride
+         * the substitution gate into the reported energy as inf. The zero is
+         * the ANSWER, and the scheme table already prices it; this result
+         * stays a structural cross-check. */
+        if (injected && (el.rtt_rd <= 0.0 || el.rtt_wr <= 0.0)) {
+            injected = false;
+            static bool warned_unterm = false;
+            if (!warned_unterm) {
+                warned_unterm = true;
+                std::cerr << "[power] NOTE: " << tech
+                          << " is unterminated by citation (" << el.note
+                          << "); CACTI-IO's resistive termination model "
+                             "cannot represent that, so its figure is a "
+                             "structural cross-check and the scheme table's "
+                             "zero is the charged termination." << std::endl;
+            }
+        }
         if (injected) {
             iop.vdd_io        = el.vddq;
-            iop.rtt1_dq_read  = el.rtt;
-            iop.rtt1_dq_write = el.rtt;
+            iop.rtt1_dq_read  = el.rtt_rd;
+            iop.rtt1_dq_write = el.rtt_wr;
             iop.r_on          = el.ron;
             /* 1.11.52 (audit C022): the injection is PARTIAL, and the
              * uninjected legs are load-bearing -- extio.cc's read/write
@@ -557,8 +643,8 @@ LinkIOResult CactiIOWrapper::computeDramIO(const std::string& tech,
              * source for them. The `source` string below names the split so
              * a reader is not told "ELECTRICALS INJECTED" about a result
              * that is partly the neighbour's. */
-            iop.rtt2_dq_read  = el.rtt;
-            iop.rtt2_dq_write = el.rtt;
+            iop.rtt2_dq_read  = el.rtt_rd;
+            iop.rtt2_dq_write = el.rtt_wr;
             iop.recomputeSwing();
         }
         Extio io(&iop);
@@ -594,11 +680,28 @@ LinkIOResult CactiIOWrapper::computeDramIO(const std::string& tech,
         r.phy_dynamic_power_mw = io.getPHYDynamicPowerMW();
         r.timing_margin_ui     = io.getTimingMarginUI();
         r.voltage_margin_v     = io.getVoltageMarginV();
+        /* 1.11.63 (R7): second termination pass with iostate = READ.
+         * extio.cc computes power_termination_read and _write on every call
+         * and selects by g_ip->iostate at the end; everything else this
+         * wrapper consumes (area, PHY, dynamic) is iostate-independent, so
+         * only extio_power_term() needs re-running. iostate is restored so
+         * any later reader of g_ip sees the wrapper's documented WRITE
+         * setting. */
+        double term_rd_mw = 0.0;
+        {
+            StdoutSilencer quiet;
+            g_ip->iostate = READ;
+            io.extio_power_term();
+            term_rd_mw = io.getIOPowerTermMW();
+            g_ip->iostate = WRITE;
+            io.extio_power_term();   // recompute so io's stored term is WRITE again
+        }
         double payload_gbps = rate_mts * num_dq / 1000.0;
         double total_mw = r.io_power_term_mw + r.io_power_dynamic_mw + r.phy_power_mw;
         if (payload_gbps > 0.0) {
             r.energy_pj_per_bit = total_mw / payload_gbps;
             r.energy_pj_per_bit_term = r.io_power_term_mw / payload_gbps;
+            r.energy_pj_per_bit_term_rd = term_rd_mw / payload_gbps;
         }
         r.valid  = true;
         /* SUBSTITUTION GATE. An injected technology is no longer merely

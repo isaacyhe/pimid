@@ -27,9 +27,90 @@ class LPDDR5 : public IDRAM, public Implementation {
       {"LPDDR5_32Gb_x16", {32<<10,  16, {1, 1, 4, 4, 1<<17, 1<<10}}},
     };
 
+    /* 1.11.63 (calibration): THE LPDDR5 CLOCK DOMAIN, and three fields with it.
+     *
+     * This row had three different clock domains in it at once. The audit
+     * (misc/-sourced, JESD209-5 not held) established which one it is:
+     *
+     *   The row's own timings imply tCK = 1.25 ns: nRCD 15 -> 18.75 ns,
+     *   nRPpb 15 -> 18.75 ns, nRPab 17 -> 21.25 ns, nRAS 34 -> 42.5 ns,
+     *   nWR 28 -> 35 ns. Those are recognisable LPDDR5 minima and they are the
+     *   CK domain at WCK:CK = 4:1, i.e. CK = 6400/8 = 800 MHz.
+     *   nBL16 = 4 implied tCK = 0.625 ns (WCK:CK = 2:1) instead.
+     *   set_timing_vals() computed 1e6/(6400/2) = 312 ps and used THAT, a
+     *   domain in which nRCD would be 4.7 ns and nRAS 10.6 ns -- physically
+     *   impossible for any DRAM.
+     *
+     * The CK domain (1.25 ns) is the one adopted, because it is the one the
+     * thirteen UNCHECKABLE nXX fields were authored in and JEDEC states LPDDR5
+     * command timings in CK cycles. The derivation in set_timing_vals() is
+     * corrected to match (8 bits/pin per CK, not 2), so this column's written
+     * 1250 is now also the value actually used. `rate` stays 6400 -- a real
+     * Micron speed grade (the "6400 Mb/s" column heads Table 7 p.14 of
+     * misc/Micron_LPDDR5_MT62F_datasheet.pdf) -- and the thirteen CK-domain
+     * nXX fields keep their cycle counts, which RESTORES their intended
+     * nanoseconds instead of changing them.
+     *
+     * The two fields that were NOT in the CK domain are re-based, ns value
+     * preserved:
+     *   nBL16 4 -> 2. A BL16 burst on a x16 channel at 6400 Mb/s occupies
+     *     16 bits/pin / 6.4 Gb/s = 2.5 ns of the DQ bus = 2 CK at 1.25 ns.
+     *     DERIVED-FROM-IDENTITY (burst length vs data rate), not sourced.
+     *   nCCD 4 -> 2. Authored as the matched pair of nBL16 in the 0.625 ns
+     *     domain (both = one BL16 burst = 2.5 ns); re-based to CK it is 2, so
+     *     its NANOSECOND value is unchanged at 2.5 ns. At the time this was a
+     *     domain conversion with JESD209-5 not held. SUPERSEDED same release:
+     *     once the standard arrived, the single field was split into
+     *     nCCDS 2 / nCCDL 4 (see the 1.11.63 block below) -- the 2 survives
+     *     as the different-bank-group value, which is the one that carries
+     *     the 12.8 GB/s streaming-rate argument.
+     *
+     *   nRC 30 -> 49. DERIVED-FROM-IDENTITY. tRC >= tRAS + tRP is definitional
+     *     and provable without JESD209-5: nRAS 34 + nRPpb 15 = 49. The old 30
+     *     was 19 cycles short and shorter than nRAS alone. Set from the row's
+     *     own nRAS and nRPpb; no bin value invented.
+     *
+     * The header's first column name is also corrected: it read "nBL" where
+     * m_timings (below) says "nBL16". Position was already right.
+     *
+     * 1.11.63 (calibration, JESD209-5C acquired 2026-08-24 -- misc/): the
+     * previously-UNCHECKABLE AC fields were verified against the standard
+     * itself. Governing tables at 6400 Mb/s: the part is in BG MODE (cl.2.2.3
+     * p.4: 16B mode is legal only <= 3200 Mb/s), so core timings come from
+     * Table 381 (x16, BG mode, DVFSC off) p.519, latencies from the
+     * 6000 < rate <= 6400 row "1011B" of Tables 225 (RL) p.261 and 229 (WL)
+     * p.265, and burst occupancy from Table 339 p.482. Rounding is plain
+     * RU() (Tables 225/230 notes) -- at tCK = 1250 ps identical to
+     * JEDEC_rounding()'s DDR-style guardband for every value here.
+     * VERIFIED UNCHANGED (JEDEC min at tCK 1.25 ns): nRCD 15 (max(18ns,2nCK)),
+     * nRPab 17 (21ns), nRPpb 15 (18ns), nRAS 34 (42ns), nWR 28 (max(34ns,
+     * 3nCK); Table 230 row 1011B tabulates 28 exactly), nRTP 4 (tRBTP
+     * max(7.5ns,2nCK)-2nCK at 4:1; Table 225 row 1011B tabulates 4), nRRD 4
+     * (5ns), nWTRS 5 (6.25ns), nWTRL 10 (12ns), nFAW 16 (20ns), nPPD 2
+     * (given in nCK), nBL16 2 (Table 339 4:1 BL16: BL/n_min = 2*tCK).
+     * CORRECTED (all previously read one frequency bin too high -- the old
+     * values are exactly row "1100B"'s):
+     *   nCL  20 -> 17  (Table 225 row 1011B, RL Set 0 -- no Byte Mode/DBI);
+     *   nCWL 11 ->  9  (Table 229 row 1011B, WL Set A -- MR3 OP[5]=0 default);
+     *   nCS   2 ->  3  (Table 377 p.515: RD->RD different rank >=
+     *                   2*BL/n_min + 1 + RU((tRPST+tRPRE-0.5*tWCK)/tCK) >= 5
+     *                   CK; the model charges nBL16 + nCS, so nCS >= 3.
+     *                   Inert in shipped presets -- Ra = 1).
+     * SPLIT: nCCD -> nCCDS 2 / nCCDL 4. In BG mode Table 339 gives
+     * column-to-column BL/n = 2*tCK to a DIFFERENT bank group and 4*tCK
+     * (BL/n_max) within the SAME bank group (Tables 340-342 pp.483-484). The
+     * single nCCD = 2 let same-BG columns cycle at twice the JEDEC rate; the
+     * pre-63a nCCD = 4 had the mirror error (different-BG half speed). The
+     * peak-channel-rate argument in the note above holds for nCCDS:
+     * different-BG streaming sustains 12.8 GB/s, as the Micron front page
+     * states.
+     * nRC 49 stays: the standard gives only the formula tRAS + tRPpb
+     * (per-bank precharge, Table 381); summing the already-rounded CK values
+     * (34 + 15) gives 49 vs 48 if summed in ns first -- conservative by one
+     * CK, kept. */
     inline static const std::map<std::string, std::vector<int>> timing_presets = {
-      //   name         rate   nBL  nCL  nRCD  nRPab  nRPpb   nRAS  nRC   nWR  nRTP nCWL nCCD nRRD nWTRS nWTRL nFAW  nPPD  nRFCab nRFCpb nREFI nPBR2PBR nPBR2ACT nCS,  tCK_ps
-      {"LPDDR5_6400",  {6400,  4,   20,   15,    17,   15,     34,   30,   28,   4,  11,   4,   4,   5,    10,   16,  2,   -1,      -1,   -1,   -1,        -1,    2,   1250}},
+      //   name         rate  nBL16 nCL  nRCD  nRPab  nRPpb   nRAS  nRC   nWR  nRTP nCWL nCCDS nCCDL nRRD nWTRS nWTRL nFAW  nPPD  nRFCab nRFCpb nREFI nPBR2PBR nPBR2ACT nCS,  tCK_ps
+      {"LPDDR5_6400",  {6400,  2,   17,   15,    17,   15,     34,   49,   28,   4,   9,   2,    4,    4,   5,    10,   16,  2,   -1,      -1,   -1,   -1,        -1,    3,   1250}},
     };
 
 
@@ -105,7 +186,7 @@ class LPDDR5 : public IDRAM, public Implementation {
     inline static constexpr ImplDef m_timings = {
       "rate", 
       "nBL16", "nCL", "nRCD", "nRPab", "nRPpb", "nRAS", "nRC", "nWR", "nRTP", "nCWL",
-      "nCCD",
+      "nCCDS", "nCCDL",
       "nRRD",
       "nWTRS", "nWTRL",
       "nFAW",
@@ -266,8 +347,43 @@ class LPDDR5 : public IDRAM, public Implementation {
         }
         m_timing_vals("rate") = *dq;
       }
-      int tCK_ps = 1E6 / (m_timing_vals("rate") / 2);
+      /* 1.11.63 (calibration): ONE AUTHORITY FOR tCK, and for LPDDR5 the
+       * divisor itself was wrong.
+       *
+       * The upstream form, `1E6 / (rate / 2)`, assumes a classic DDR bus where
+       * the data rate is twice the COMMAND clock. LPDDR5 is not that: it has a
+       * separate WCK strobe running at WCK:CK = 4:1 (or 2:1), and every timing
+       * in the preset row above is stated in CK cycles. At 6400 Mb/s with
+       * WCK:CK = 4:1 the pin moves 8 bits per CK, so
+       *     CK  = 6400 / 8 = 800 MHz
+       *     tCK = 8e6 / rate = 1250 ps
+       * which is exactly the domain the row's nRCD/nRPpb/nRPab/nRAS/nWR were
+       * authored in (18.75 / 18.75 / 21.25 / 42.5 / 35 ns). The old form
+       * produced 312 ps -- the WCK/2 period -- and the model ran the command
+       * domain 4x fast.
+       *
+       * LIVE EFFECT: tCK is the divisor that turns the per-density refresh
+       * tables (in ns) into cycles, so refresh was being priced 4x long
+       * RELATIVE to every other timing in the same row: nRFCab was
+       * JEDEC_rounding(210 ns, 312 ps) = 674 cycles beside an ACT-to-ACT of
+       * 30, where the row's own 1.25 ns gives 168 beside 49. It is also the
+       * memory system's cycle length (generic_DRAM_system::get_tCK()), so the
+       * whole LPDDR5 channel now ticks at its real 800 MHz command rate.
+       *
+       * The tCK_ps column in the preset row above is a MIRROR of this
+       * derivation and is checked against it below, so the two cannot silently
+       * disagree again -- which is precisely how 1250 and 312 coexisted. */
+      int preset_tCK_ps = m_timing_vals("tCK_ps");
+      int tCK_ps = 8E6 / m_timing_vals("rate");
       m_timing_vals("tCK_ps") = tCK_ps;
+      if (preset_provided && preset_tCK_ps != tCK_ps) {
+        throw ConfigurationError(
+          "In \"{}\", the timing preset's tCK_ps column says {} ps but the "
+          "rate of {} Mb/s derives {} ps (tCK = 8e6/rate: LPDDR5 moves 8 "
+          "bits/pin per CK at WCK:CK = 4:1). The derivation wins at run time, "
+          "so the column must mirror it -- fix the preset!",
+          get_name(), preset_tCK_ps, m_timing_vals("rate"), tCK_ps);
+      }
 
       // Load the organization specific timings
       int dq_id = [](int dq) -> int {
@@ -302,9 +418,28 @@ class LPDDR5 : public IDRAM, public Implementation {
           60,   90,   90,  90, 
       };
 
-      constexpr int tPBR2ACT_TABLE[4] = {
-      //  2Gb   4Gb   8Gb  16Gb
-          8,    8,    8,   8, 
+      /* 1.11.63 (calibration): tPBR2ACT at 8 Gb and 16 Gb, 8 -> 7.5 ns.
+       * SOURCES (both held in misc/):
+       *   8 Gb die  -- Micron Automotive LPDDR5 MT62F512M32D2/MT62F1G32D4
+       *     (315b, Rev.D 4/2021), Table 4 "Refresh Requirement Parameters",
+       *     p.7, verbatim: "Per bank refresh to ACTIVATE command time
+       *     (different bank) | tPBR2ACT | 7.5 (BG and 16B Mode) | 10 (8B Mode)
+       *     | ns". The org this model uses is BG mode (4 bank groups x 4 banks
+       *     -- see org_presets and Micron Table 3 p.6), so 7.5 is the row that
+       *     applies. 8 was neither of the two tabulated values.
+       *   16 Gb die -- Micron LPDDR5X Y52P (Rev. H 03/2025), Table 6 "Refresh
+       *     Requirement Parameters", p.11: "tPBR2ACT | 7.5 | ns" (BG and 16B
+       *     Mode). The 12 Gb Y4BM part gives the same 7.5.
+       * The 2 Gb and 4 Gb columns were UNCHECKABLE while only Micron die
+       * datasheets (8/12/16 Gb) were held; JESD209-5C Table 240 p.287 settles
+       * them: tpbR2act = 7.5 ns in EVERY density column (2..32 Gb, BG/16B
+       * mode; 10 ns exists only in Table 241's 8-bank mode). 8.0 appears
+       * nowhere in the standard -- all four entries are now 7.5.
+       * The array is float because 7.5 is not an integer; JEDEC_rounding()
+       * already takes a float first argument. */
+      constexpr float tPBR2ACT_TABLE[4] = {
+      //  2Gb   4Gb   8Gb   16Gb
+          7.5f, 7.5f, 7.5f, 7.5f,
       };
 
       // tREFI(base) table (unit is nanosecond!)
@@ -351,11 +486,11 @@ class LPDDR5 : public IDRAM, public Implementation {
           get_name(), m_organization.density);
       }
 
-      m_timing_vals("nRFCab")    = JEDEC_rounding(tRFCab_TABLE[density_id], tCK_ps);
-      m_timing_vals("nRFCpb")    = JEDEC_rounding(tRFCpb_TABLE[density_id], tCK_ps);
-      m_timing_vals("nPBR2PBR")  = JEDEC_rounding(tPBR2PBR_TABLE[density_id], tCK_ps);
-      m_timing_vals("nPBR2ACT")  = JEDEC_rounding(tPBR2ACT_TABLE[density_id], tCK_ps);
-      m_timing_vals("nREFI") = JEDEC_rounding(tREFI_BASE, tCK_ps);
+      m_timing_vals("nRFCab")    = JEDEC_rounding_RU(tRFCab_TABLE[density_id], tCK_ps);
+      m_timing_vals("nRFCpb")    = JEDEC_rounding_RU(tRFCpb_TABLE[density_id], tCK_ps);
+      m_timing_vals("nPBR2PBR")  = JEDEC_rounding_RU(tPBR2PBR_TABLE[density_id], tCK_ps);
+      m_timing_vals("nPBR2ACT")  = JEDEC_rounding_RU(tPBR2ACT_TABLE[density_id], tCK_ps);
+      m_timing_vals("nREFI") = JEDEC_rounding_RU(tREFI_BASE, tCK_ps);   // 1.11.63: LPDDR5 rounds by plain RU() -- JESD209-5C Tbl 225/230 notes
 
       // Overwrite timing parameters with any user-provided value
       // Rate and tCK should not be overwritten
@@ -367,7 +502,7 @@ class LPDDR5 : public IDRAM, public Implementation {
           m_timing_vals(i) = *provided_timing;
         } else if (auto provided_timing = param_group("timing").param<float>(timing_name.replace(0, 1, "t")).optional()) {
           // Check if the user specifies in nanoseconds (e.g., tRCD)
-          m_timing_vals(i) = JEDEC_rounding(*provided_timing, tCK_ps);
+          m_timing_vals(i) = JEDEC_rounding_RU(*provided_timing, tCK_ps);   // 1.11.63: LPDDR5 rounds by plain RU()
         }
       }
 
@@ -392,8 +527,9 @@ class LPDDR5 : public IDRAM, public Implementation {
 
           /*** Rank (or different BankGroup) ***/ 
           // CAS <-> CAS
-          {.level = "rank", .preceding = {"RD16", "RD16A"}, .following = {"RD16", "RD16A"}, .latency = V("nCCD")},
-          {.level = "rank", .preceding = {"WR16", "WR16A"}, .following = {"WR16", "WR16A"}, .latency = V("nCCD")},
+          // 1.11.63: different bank group -> BL/n = 2*tCK (JESD209-5C Tbl 339 p.482, Tbl 342 p.484)
+          {.level = "rank", .preceding = {"RD16", "RD16A"}, .following = {"RD16", "RD16A"}, .latency = V("nCCDS")},
+          {.level = "rank", .preceding = {"WR16", "WR16A"}, .following = {"WR16", "WR16A"}, .latency = V("nCCDS")},
           /// RD <-> WR, Minimum Read to Write, Assuming tWPRE = 1 tCK                          
           {.level = "rank", .preceding = {"RD16", "RD16A"}, .following = {"WR16", "WR16A"}, .latency = V("nCL") + V("nBL16") + 2 - V("nCWL")},
           /// WR <-> RD, Minimum Read after Write
@@ -402,8 +538,9 @@ class LPDDR5 : public IDRAM, public Implementation {
           {.level = "rank", .preceding = {"RD16", "RD16A"}, .following = {"RD16", "RD16A", "WR16", "WR16A"}, .latency = V("nBL16") + V("nCS"), .is_sibling = true},
           {.level = "rank", .preceding = {"WR16", "WR16A"}, .following = {"RD16", "RD16A"}, .latency = V("nCL")  + V("nBL16") + V("nCS") - V("nCWL"), .is_sibling = true},
           /// CAS <-> PREab
-          {.level = "rank", .preceding = {"RD16"}, .following = {"PREA"}, .latency = V("nRTP")},
-          {.level = "rank", .preceding = {"WR16"}, .following = {"PREA"}, .latency = V("nCWL") + V("nBL16") + V("nWR")},          
+          // 1.11.63: RD->PRE = BL/n_min + RU(tRBTP/tCK); WR->PRE = WL + BL/n_min + 1 + RU(tWR/tCK) (JESD209-5C Tbl 340 p.483)
+          {.level = "rank", .preceding = {"RD16"}, .following = {"PREA"}, .latency = V("nBL16") + V("nRTP")},
+          {.level = "rank", .preceding = {"WR16"}, .following = {"PREA"}, .latency = V("nCWL") + V("nBL16") + 1 + V("nWR")},          
           /// RAS <-> RAS
           {.level = "rank", .preceding = {"ACT-1"}, .following = {"ACT-1", "REFpb"}, .latency = V("nRRD")},          
           {.level = "rank", .preceding = {"ACT-1"}, .following = {"ACT-1"}, .latency = V("nFAW"), .window = 4},          
@@ -413,17 +550,19 @@ class LPDDR5 : public IDRAM, public Implementation {
           {.level = "rank", .preceding = {"ACT-1"}, .following = {"REFab"}, .latency = V("nRC")},          
           {.level = "rank", .preceding = {"PRE"}, .following = {"REFab"}, .latency = V("nRPpb")},          
           {.level = "rank", .preceding = {"PREA"}, .following = {"REFab"}, .latency = V("nRPab")},          
-          {.level = "rank", .preceding = {"RD16A"}, .following = {"REFab"}, .latency = V("nRPpb") + V("nRTP")},          
-          {.level = "rank", .preceding = {"WR16A"}, .following = {"REFab"}, .latency = V("nCWL") + V("nBL16") + V("nWR") + V("nRPpb")},          
+          {.level = "rank", .preceding = {"RD16A"}, .following = {"REFab"}, .latency = V("nBL16") + V("nRTP") + V("nRPpb")},          
+          {.level = "rank", .preceding = {"WR16A"}, .following = {"REFab"}, .latency = V("nCWL") + V("nBL16") + 1 + V("nWR") + V("nRPpb")},          
           {.level = "rank", .preceding = {"REFab"}, .following = {"REFab", "ACT-1", "REFpb"}, .latency = V("nRFCab")},          
           {.level = "rank", .preceding = {"ACT-1"},   .following = {"REFpb"}, .latency = V("nPBR2ACT")},  
           {.level = "rank", .preceding = {"REFpb"}, .following = {"REFpb"}, .latency = V("nPBR2PBR")},  
 
           /*** Same Bank Group ***/ 
           /// CAS <-> CAS
-          {.level = "bankgroup", .preceding = {"RD16", "RD16A"}, .following = {"RD16", "RD16A"}, .latency = V("nCCD")},          
-          {.level = "bankgroup", .preceding = {"WR16", "WR16A"}, .following = {"WR16", "WR16A"}, .latency = V("nCCD")},          
-          {.level = "bankgroup", .preceding = {"WR16", "WR16A"}, .following = {"RD16", "RD16A"}, .latency = V("nCWL") + V("nBL16") + V("nWTRL")},
+          // 1.11.63: same bank group -> BL/n = 4*tCK = BL/n_max (JESD209-5C Tbl 339 p.482, Tbls 340/341 pp.483-484)
+          {.level = "bankgroup", .preceding = {"RD16", "RD16A"}, .following = {"RD16", "RD16A"}, .latency = V("nCCDL")},          
+          {.level = "bankgroup", .preceding = {"WR16", "WR16A"}, .following = {"WR16", "WR16A"}, .latency = V("nCCDL")},          
+          // 1.11.63: WL + BL/n_max + RU(tWTR_L/tCK) -- BL/n_max = 2*BL/n_min in BG mode (Tbl 340)
+          {.level = "bankgroup", .preceding = {"WR16", "WR16A"}, .following = {"RD16", "RD16A"}, .latency = V("nCWL") + 2 * V("nBL16") + V("nWTRL")},
           /// RAS <-> RAS
           {.level = "bankgroup", .preceding = {"ACT-1"}, .following = {"ACT-1"}, .latency = V("nRRD")},  
 
@@ -432,10 +571,11 @@ class LPDDR5 : public IDRAM, public Implementation {
           {.level = "bank", .preceding = {"ACT-1"}, .following = {"RD16", "RD16A", "WR16", "WR16A"}, .latency = V("nRCD")},  
           {.level = "bank", .preceding = {"ACT-1"}, .following = {"PRE"}, .latency = V("nRAS")},  
           {.level = "bank", .preceding = {"PRE"}, .following = {"ACT-1"}, .latency = V("nRPpb")},  
-          {.level = "bank", .preceding = {"RD16"},  .following = {"PRE"}, .latency = V("nRTP")},  
-          {.level = "bank", .preceding = {"WR16"},  .following = {"PRE"}, .latency = V("nCWL") + V("nBL16") + V("nWR")},  
-          {.level = "bank", .preceding = {"RD16A"}, .following = {"ACT-1"}, .latency = V("nRTP") + V("nRPpb")},  
-          {.level = "bank", .preceding = {"WR16A"}, .following = {"ACT-1"}, .latency = V("nCWL") + V("nBL16") + V("nWR") + V("nRPpb")},  
+          // 1.11.63: same two formulas as rank scope (JESD209-5C Tbl 340 p.483)
+          {.level = "bank", .preceding = {"RD16"},  .following = {"PRE"}, .latency = V("nBL16") + V("nRTP")},  
+          {.level = "bank", .preceding = {"WR16"},  .following = {"PRE"}, .latency = V("nCWL") + V("nBL16") + 1 + V("nWR")},  
+          {.level = "bank", .preceding = {"RD16A"}, .following = {"ACT-1"}, .latency = V("nBL16") + V("nRTP") + V("nRPpb")},  
+          {.level = "bank", .preceding = {"WR16A"}, .following = {"ACT-1"}, .latency = V("nCWL") + V("nBL16") + 1 + V("nWR") + V("nRPpb")},  
         }
       );
       #undef V

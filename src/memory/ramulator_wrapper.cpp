@@ -114,7 +114,129 @@ pimid::PresetOrganization makePresetOrg(const char* name, const char* src,
     return p;
 }
 
+/* 1.11.63 (R6): the timing-row transcription helper, with the same discipline
+ * makePresetOrg() has -- the row is CHECKED, not trusted. The check here mirrors
+ * the one each Ramulator impl now makes for itself: it derives tCK as
+ * `ck_divisor_e6 * 1E6 / rate` (2 for a classic DDR bus, 4 for HBM3 whose fCK
+ * is rate/4 per JESD238B.01 Table 92, 8 for LPDDR5) and THROWS if the preset's
+ * tCK_ps column does not mirror that. So the column is authoritative upstream,
+ * and a disagreement computed here means PIMID's transcription of the row has
+ * gone stale -- which is the failure this check exists to catch, the presets
+ * having moved under it during this very release. */
+pimid::PresetTiming makePresetTiming(const char* name, const char* src,
+                                     int rate, int nBL, int nCL, int nRCD,
+                                     int nRP, int nRAS, int table_tCK_ps,
+                                     int ck_divisor_e6) {
+    pimid::PresetTiming t;
+    t.preset_name = name;
+    t.preset_source = src;
+    t.rate_mtps = rate;
+    t.nBL = nBL;
+    t.nCL = nCL;
+    t.nRCD = nRCD;
+    t.nRP = nRP;
+    t.nRAS = nRAS;
+    t.table_tCK_ps = table_tCK_ps;
+    t.ck_divisor_e6 = ck_divisor_e6;
+    // The impl's own expression, integer-truncated the same way it is there.
+    t.tCK_ps = (rate > 0) ? static_cast<int>(ck_divisor_e6 * 1.0e6 / rate) : 0;
+    t.ck_consistent = (t.tCK_ps > 0 && t.tCK_ps == t.table_tCK_ps);
+    t.valid = (rate > 0 && nCL > 0 && nRCD > 0 && nRP > 0 && nRAS > 0);
+    if (!t.valid) {
+        std::cerr << "[mem] WARNING: the transcribed Ramulator timing preset '"
+                  << name << "' (" << src << ") is incomplete (rate " << rate
+                  << ", nCL " << nCL << ", nRCD " << nRCD << ", nRP " << nRP
+                  << ", nRAS " << nRAS << "). No ns timing will be derived from"
+                     " it." << std::endl;
+    }
+    return t;
+}
+
 }  // namespace
+
+/* 1.11.63 (R6): THE SIMULATED TIMING PRESET, transcribed once.
+ *
+ * Rows are verbatim from the timing_presets table of the impl named beside
+ * them, and the preset NAME is the one parseConfiguration() writes into the
+ * generated YAML and main.cpp's writeRamulatorConfigYaml() writes for the zsim
+ * path -- the two agree per technology, checked by reading both.
+ *
+ * Only the five columns PIMID consumes are carried (rate, nBL, nCL, nRCD, nRP,
+ * nRAS) plus the row's own tCK_ps for the consistency check. Transcribing the
+ * whole row would be transcribing the timing model, which is not PIMID's job. */
+void RamulatorWrapper::resolvePresetTiming() {
+    std::string dt = dram_type_;
+    std::transform(dt.begin(), dt.end(), dt.begin(), ::toupper);
+
+    if (dt == "DDR3") {
+        // DDR3.cpp timing_presets, row "DDR3_1600H": nBL 4, nCL/nRCD/nRP 9,
+        // nRAS 28, tCK 1250 ps, tCK = 2E6/rate. (The 1600K row -- nCL 11 -- is
+        // the bin PIMID's getTRCD()/getTCAS()/getTRP() used to transcribe; it
+        // is NOT this run's.)
+        preset_timing_ = makePresetTiming(
+            "DDR3_1600H", "external/ramulator/src/dram/impl/DDR3.cpp timing_presets",
+            1600, 4, 9, 9, 9, 28, 1250, 2);
+    } else if (dt == "DDR4") {
+        // DDR4.cpp, row "DDR4_2400R": nBL 4, nCL/nRCD/nRP 16, nRAS 39, tCK 833,
+        // tCK = 2E6/rate.
+        preset_timing_ = makePresetTiming(
+            "DDR4_2400R", "external/ramulator/src/dram/impl/DDR4.cpp timing_presets",
+            2400, 4, 16, 16, 16, 39, 833, 2);
+    } else if (dt == "DDR5") {
+        // DDR5.cpp, row "DDR5_3200AN": nBL 8, nCL/nRCD/nRP 24, nRAS 52, tCK 625,
+        // tCK = 2E6/rate.
+        preset_timing_ = makePresetTiming(
+            "DDR5_3200AN", "external/ramulator/src/dram/impl/DDR5.cpp timing_presets",
+            3200, 8, 24, 24, 24, 52, 625, 2);
+    } else if (dt == "LPDDR5") {
+        /* LPDDR5.cpp, row "LPDDR5_6400": nBL16 2, nCL 17, nRCD 15, nRPab 17,
+         * nRPpb 15, nRAS 34, tCK 1250 ps, tCK = 8E6/rate. nRP is taken from the
+         * PER-BANK column, which is the one PIMID's per-bank hierarchy means.
+         * 1.11.63 (calibration): nCL 20 -> 17 tracking the preset -- the old
+         * 20 was RL Set 0 of the NEXT frequency bin (JESD209-5C Table 225
+         * p.261, row 1011B covers 6000 < rate <= 6400 and gives RL = 17). */
+        preset_timing_ = makePresetTiming(
+            "LPDDR5_6400", "external/ramulator/src/dram/impl/LPDDR5.cpp timing_presets",
+            6400, 2, 17, 15, 15, 34, 1250, 8);
+    } else if (dt == "GDDR6") {
+        /* GDDR6.cpp, row "GDDR6_2000_1350mV_double": nBL 8, nCL 24, nRCDRD 26,
+         * nRP 26, nRAS 53, tCK 1000 ps, tCK = 2E6/rate. nRCD is the READ
+         * column; the write column (16) is a separate constraint PIMID does
+         * not carry. */
+        preset_timing_ = makePresetTiming(
+            "GDDR6_2000_1350mV_double",
+            "external/ramulator/src/dram/impl/GDDR6.cpp timing_presets",
+            2000, 8, 24, 26, 26, 53, 1000, 2);
+    } else if (dt == "HBM2") {
+        /* HBM2.cpp, row "HBM2_2.4Gbps": nBL 2, nCL/nRCDRD 20, nRP 18, nRAS
+         * 40, tCK 833 ps, tCK = 2E6/rate. 1.11.63 (JESD235D): nBL 4 -> 2 (PC
+         * mode BL4 = 4 UI = 2 CK; Tbl 68 p.109 tCCDS = 2 nCK proves the
+         * occupancy) and nRP 20 -> 18 (tRP 15 ns, Tbl 58 p.102 -- the old 20
+         * encoded a 16 ns claim that appears nowhere in the standard). */
+        preset_timing_ = makePresetTiming(
+            "HBM2_2.4Gbps", "external/ramulator/src/dram/impl/HBM2.cpp timing_presets",
+            2400, 2, 20, 20, 18, 40, 833, 2);
+    } else if (dt == "HBM3") {
+        /* HBM3.cpp, row "HBM3_6.4Gbps", AS RE-DERIVED INTO THE CK DOMAIN: nBL
+         * 2, nCL/nRCDRD/nRP 26, nRAS 53, tCK 625 ps, and tCK = 4E6/rate
+         * because JESD238B.01 Table 92 (printed p.160) gives fCK = rate/4 in
+         * all nine bins -- the old 2E6/rate form was returning tWDQS, half a
+         * CK. The ns values are unchanged by that correction (26 x 0.625 =
+         * 16.25 against the previous 52 x 0.312 = 16.22); what moved is the
+         * DOMAIN the cycle counts are expressed in, which is why nothing here
+         * may assume either the counts or the divisor and both are read from
+         * the row that is actually in the tree. */
+        preset_timing_ = makePresetTiming(
+            "HBM3_6.4Gbps", "external/ramulator/src/dram/impl/HBM3.cpp timing_presets",
+            6400, 2, 26, 26, 26, 53, 625, 4);
+    } else {
+        // Unknown technology: the DDR4 substitution, announced in initialize().
+        preset_timing_ = makePresetTiming(
+            "DDR4_2400R",
+            "external/ramulator/src/dram/impl/DDR4.cpp timing_presets (substituted)",
+            2400, 4, 16, 16, 16, 39, 833, 2);
+    }
+}
 
 void RamulatorWrapper::resolvePresetOrganization() {
     std::string dt = dram_type_;
@@ -219,33 +341,74 @@ int RamulatorWrapper::getPresetDiesPerStack() const {
  * FOR, after the object is built. At DDR4 and DDR5 this reproduces the factory
  * literals exactly, which is the check that the two agree.
  *
- * HBM is excluded by ruling R2: its chip_size_mb is a CORE-DIE capacity, not
- * the preset's per-channel density, and following the preset naively would
- * halve HBM2's die area away from the Sohn ISSCC-2016 measurement it currently
- * lands on. HBM densities stay exactly as the factories write them.
+ * 1.11.63 (R6-1, R6-2): HBM IS NO LONGER EXCLUDED -- it is DERIVED ON ITS OWN
+ * UNIT instead.
  *
- * Only chip_size_mb and bank_size_mb are stamped -- the two fields the ruling
- * names, and the only two that reach a consumed number (pages_per_unit and the
- * DRAM die area). subarrays_per_bank and subarray_size_kb are left alone: both
- * are dead on this object (the live subarray count is main.cpp's
- * bank_rows / subarray_height), and a 512 KB subarray is DDR4's row geometry,
- * not LPDDR5's or GDDR6's, so deriving them here would invent a number. */
+ * Ruling R2 (1.11.61) kept HBM's chip_size_mb out of this function because
+ * "follow the preset" read naively means "take the per-channel density", which
+ * would have halved HBM2's die away from the Sohn ISSCC-2016 core die it lands
+ * on exactly. That was the right call for the value and the wrong shape for the
+ * source: it left two HBM literals (HBM2 1024 MB, HBM3 2048 MB) paraphrasing a
+ * preset, which is what R6 forbids. The unit is the fix, not the exclusion:
+ *
+ *   chip_size_mb(HBM) = the preset's PER-CHANNEL density x the channels one
+ *                       CORE DIE fronts (getPresetDiesPerStack()'s own
+ *                       two-channels-per-die relation, so there is one
+ *                       authority for it and not two).
+ *
+ * HBM2 reproduces its factory literal exactly under that derivation
+ * (512 MB/channel x 2 = 1024 MB = the 8 Gb Sohn core die), which is the check
+ * that the unit is right. HBM3 does NOT reproduce its 2048: the derivation
+ * gives 1024 MB, and 1024 x 8 dies = 8 GiB = the preset's stack. That is R6
+ * resolving the three-authority disagreement 1.11.61 recorded and left open --
+ * the object follows the preset, and the capacity cross-check below is
+ * therefore expected to RECONCILE on HBM3 from this release on.
+ *
+ * R6-2: bank_size_mb is stamped for HBM too. Its 4 MB described nothing this
+ * tree simulates (the preset's bank is 512/16 = 32 MB on HBM2 and 512/32 =
+ * 16 MB on HBM3), and it is the single hottest density consumer -- HBM
+ * pages_per_unit moves 8x and 4x with it.
+ *
+ * rank_size_gb is stamped as well, since the struct declares it DERIVED from
+ * chip_size_mb: the DDR family multiplies by chips_per_rank (devices), HBM by
+ * the CHANNEL count against the per-channel density, which is the stack. It is
+ * a dead field (no getter, no reader) and is corrected only so that a reader of
+ * the object is not handed a fourth capacity.
+ *
+ * subarrays_per_bank and subarray_size_kb are still left alone: both are dead
+ * here (the live subarray count is main.cpp's bank_rows / subarray_height), and
+ * a 512 KB subarray is DDR4's row geometry, not LPDDR5's or GDDR6's, so
+ * deriving them here would invent a number. */
 void RamulatorWrapper::applyPresetDensityToArchitecture() {
     if (!dram_arch_ || !preset_org_.valid) return;
     std::string dt = dram_type_;
     std::transform(dt.begin(), dt.end(), dt.begin(), ::toupper);
-    if (dt.rfind("HBM", 0) == 0) return;   // ruling R2: core-die semantics stay
 
-    const uint64_t chip_mb = preset_org_.density_mb;
     const uint64_t bank_mb = preset_org_.bankSizeMB();
+    uint64_t chip_mb = 0;
+    uint64_t rank_gb = 0;
+    if (preset_org_.per_channel_density) {
+        const int nch  = (channels_ > 0) ? static_cast<int>(channels_) : 1;
+        const int dies = getPresetDiesPerStack();
+        const int ch_per_die = (dies > 0) ? (nch / dies) : 1;  // 2, by that relation
+        chip_mb = preset_org_.density_mb * static_cast<uint64_t>(ch_per_die > 0 ? ch_per_die : 1);
+        rank_gb = preset_org_.density_mb * static_cast<uint64_t>(nch) / 1024ULL;
+    } else {
+        chip_mb = preset_org_.density_mb;
+        const uint64_t cpr = dram_arch_->organization.chips_per_rank > 0
+                                 ? static_cast<uint64_t>(dram_arch_->organization.chips_per_rank)
+                                 : 1ULL;
+        rank_gb = chip_mb * cpr / 1024ULL;
+    }
     if (chip_mb == 0 || bank_mb == 0) return;
 
     const bool moved = (dram_arch_->organization.chip_size_mb != chip_mb) ||
                        (dram_arch_->organization.bank_size_mb != bank_mb);
     dram_arch_->organization.chip_size_mb = chip_mb;
     dram_arch_->organization.bank_size_mb = bank_mb;
+    if (rank_gb > 0) dram_arch_->organization.rank_size_gb = rank_gb;
 
-    if (moved && dt != "DDR4" && dt != "DDR5") {
+    if (moved && dt != "DDR4" && dt != "DDR5" && dt.rfind("HBM", 0) != 0) {
         static bool announced_density = false;
         if (!announced_density) {
             announced_density = true;
@@ -262,6 +425,190 @@ void RamulatorWrapper::applyPresetDensityToArchitecture() {
     }
 }
 
+/* 1.11.63 (R6-5): THE OBJECT'S ns TIMINGS FOLLOW THE PRESET'S BIN.
+ *
+ * 1.11.56 moved clock_freq_mhz, data_rate_mtps and tBurst_ns to the simulated
+ * preset and said "the ns timings are absolute and stay". Absolute they are --
+ * but they are absolute values OF A SPEED BIN, and two technologies were
+ * carrying a different bin's:
+ *
+ *   DDR5  object 16.67 ns tRCD/tCAS/tRP -- the 4800 bin -- against
+ *         DDR5_3200AN's nCL/nRCD/nRP 24 at tCK 625 ps = 15.00 ns. 11% high.
+ *   DDR3  the wrapper's own getTRCD()/getTCAS()/getTRP() returned 13.75 ns,
+ *         transcribed from DDR3-1600K (nCL 11), against the DDR3_1600H preset
+ *         this tree simulates (nCL 9 at tCK 1250 ps = 11.25 ns). 22% high, and
+ *         it is the same one-part-two-bins defect D002/1.11.56 closed
+ *         elsewhere.
+ *
+ * These are LIVE: tRP and tRAS compose getTRC(), which prices the array
+ * ACTIVATE energy, and tRP+tRCD+tCAS is bank_access_ns.
+ *
+ * WHAT IS DERIVED: n x tCK, from the transcribed preset row, for all four
+ * timings together -- the same quantity the timing model enforces. tCK is the
+ * clock Ramulator derives (1E6/(rate/2)), not the row's decorative column.
+ *
+ * DDR4 IS INCLUDED AND MOVES SLIGHTLY, which is stated rather than special-
+ * cased away: its literals 13.32/13.32/13.32/32.0 become 13.328 (16 x 833 ps,
+ * a transcription rounding) and 32.487 (39 x 833 ps). The tRAS step is
+ * JEDEC_rounding: the preset holds ceil(32 ns / 833 ps) = 39 whole cycles, so
+ * 32.487 ns is what the model actually keeps the row open for, and 32.0 was the
+ * un-quantised spec minimum. Exempting DDR4 because its literal was CLOSE would
+ * leave exactly the second authority R6 exists to remove.
+ *
+ * EXCLUDED -- FOUR TECHNOLOGIES, AND THE REASON IS SCOPE, NOT INABILITY. This
+ * is stated plainly because an earlier draft of this note gave a technical
+ * reason that stopped being true while it was being written: LPDDR5's and
+ * GDDR6's rows used to carry two different clocks (tCK column against the
+ * 1E6/(rate/2) the impls then enforced), which would have made "nCL in ns"
+ * unanswerable. The concurrent CK-domain correction in external/ramulator
+ * repaired exactly that -- every impl now derives tCK as its own per-family
+ * ck_divisor_e6 * 1E6 / rate AND throws if the column does not mirror it -- so
+ * all seven rows are now internally consistent and PresetTiming::derivable()
+ * is true for all seven. Nothing technical prevents stamping the other four.
+ *
+ * What prevents it is that ruling R6 item 5 names DDR3 and DDR5, and each of
+ * the four is a large, separate, re-simulation-forcing move that deserves its
+ * own decision. They are quantified here so they are not mistaken for closed
+ * (preset ns against the value getTRCD()/getTRP()/getTRAS() returns today):
+ *
+ *   LPDDR5  tCAS 25.00 vs 18.00 (+39%), tRCD/tRPpb 18.75 vs 18.00 (+4%),
+ *           tRAS 42.50 vs 42.00 (+1%)
+ *   GDDR6   tCAS 24.00 vs 14.80 (+62%), tRCDRD/tRP 26.00 vs 14.80 (+76%),
+ *           tRAS 53.00 vs 28.00 (+89%) -- but note the GDDR6 preset is a
+ *           2000 MT/s bin while PIMID models the part at 14000 MT/s, which
+ *           sayPresetRate() already announces every run; "follow the preset"
+ *           here means following a much slower part's timings, and that is a
+ *           judgement, not arithmetic.
+ *   HBM2    tRP 16.66 vs 12.50 (+33%), tRAS 33.32 vs 28.00 (+19%),
+ *           tCAS/tRCD 16.66 vs 16.00 (+4%)
+ *   HBM3    tRP 16.25 vs 10.00 (+63%), tRAS 33.13 vs 24.00 (+38%),
+ *           tCAS/tRCD 16.25 vs 16.00 (+2%)
+ * tRP and tRAS compose getTRC(), so the HBM rows price their array ACTIVATE
+ * energy on a tRC roughly a third below the preset's. These are the drifts the
+ * density investigation found (section 6.1) and they stay OPEN. */
+void RamulatorWrapper::applyPresetTimingsToArchitecture() {
+    if (!dram_arch_) return;
+    std::string dt = dram_type_;
+    std::transform(dt.begin(), dt.end(), dt.begin(), ::toupper);
+    const bool ruled = (dt == "DDR3" || dt == "DDR4" || dt == "DDR5");
+    if (!ruled) return;
+
+    /* THE STALENESS GUARD. Upstream now throws a ConfigurationError if a
+     * preset's tCK_ps column does not mirror its own derivation, so the column
+     * is authoritative and the two can only disagree HERE -- meaning PIMID's
+     * transcription of the row has fallen behind a preset that moved. That is
+     * a real failure mode and not a hypothetical: this transcription and the
+     * HBM3/GDDR6 CK-domain correction were written the same afternoon. Refuse
+     * to read the row as ns rather than stamping a stale bin silently. */
+    if (!preset_timing_.derivable()) {
+        static std::set<std::string> refused;
+        if (!anchor_quiet_ && refused.insert(dt).second) {
+            std::cerr << "[mem] WARNING: PIMID's transcription of timing preset "
+                      << preset_timing_.preset_name << " ("
+                      << preset_timing_.preset_source
+                      << ") is STALE or wrong: it records a tCK_ps column of "
+                      << preset_timing_.table_tCK_ps
+                      << " ps, but the impl's own derivation ("
+                      << preset_timing_.ck_divisor_e6
+                      << "E6 / rate) gives " << preset_timing_.tCK_ps
+                      << " ps at " << preset_timing_.rate_mtps
+                      << " MT/s. Upstream refuses a preset whose column does "
+                         "not mirror that derivation, so the disagreement is on "
+                         "PIMID's side. The " << dt
+                      << " architecture object keeps the ns timings it was "
+                         "written with, which may describe another speed bin -- "
+                         "re-transcribe resolvePresetTiming() against the row "
+                         "actually in the tree." << std::endl;
+        }
+        return;
+    }
+
+    dram_arch_->timing.tRCD_ns = preset_timing_.tRCD_ns();
+    dram_arch_->timing.tCAS_ns = preset_timing_.tCAS_ns();
+    dram_arch_->timing.tRP_ns  = preset_timing_.tRP_ns();
+    dram_arch_->timing.tRAS_ns = preset_timing_.tRAS_ns();
+    // The two hierarchical times declare themselves as sums of the four above.
+    dram_arch_->deriveHierarchicalAccessTimes();
+}
+
+/* 1.11.63 (R6-3): capacity_ AND bandwidth_ ARE DERIVED FROM THE PRESET PAIR.
+ *
+ * parseConfiguration()'s else-if chain carried a literal capacity and, for
+ * three technologies, a literal bandwidth beside each preset name:
+ *
+ *   capacity_   8 GiB for every DDR-family technology and 4 GiB for both HBM
+ *               stacks -- one number stated seven times, correct for the three
+ *               that happen to build a 64-bit rank out of eight 8 Gb devices
+ *               and wrong for the rest. An LPDDR5 run claimed 8 GiB from ONE
+ *               x16 die (the same run reports 21.99 mm^2 of DRAM silicon, one
+ *               8 Gb die's worth), a GDDR6 run 8 GiB from one two-channel
+ *               device, and HBM3 claimed 4 GiB against a preset whose 16
+ *               channels x 4 Gb is 8 GiB -- the third of the three disagreeing
+ *               HBM3 authorities 1.11.61 recorded, and the one R6 says has no
+ *               standing.
+ *   bandwidth_  DDR4 19200, HBM2 307000, HBM3 819000 -- rate x width x channels
+ *               written out by hand, with the arithmetic in a comment beside it.
+ *
+ * DERIVATIONS, both from primitives that already exist:
+ *
+ *   capacity_  = the preset's density x the POPULATION of the units that
+ *               density describes. The population is not invented here: it is
+ *               getBackgroundUnits(), the same devices-per-rank x ranks x
+ *               channels (HBM: channels) basis 1.11.52 (A015) made the memory
+ *               system's background power and its die AREA share, so Capacity,
+ *               Power and Area now describe one memory system. The GDDR6
+ *               correction is the preset's own channels_in_density: its density
+ *               product spans BOTH channels, so dividing by it keeps the channel
+ *               dimension from being booked twice -- the same trap ruling R3
+ *               closed on the bandwidth side.
+ *   bandwidth_ = dramRateMTs x dramChannelWidthBits x channels, for ALL seven,
+ *               which is what derivedBwMBs() already did for four of them.
+ *               DDR4's literal is reproduced EXACTLY (2400 x 64/8 = 19200),
+ *               which is the check on extending it; HBM2 and HBM3 move by
+ *               0.07% and 0.02%, being the rounding their literals carried.
+ *
+ * WHY THE RATE TABLE AND NOT THE TIMING PRESET'S OWN `rate` COLUMN: for six of
+ * the seven they are the same number, because 1.11.52 (D002) and 1.11.57 (C001)
+ * moved that table onto the simulated presets. GDDR6 is the exception -- the
+ * rate column is 2000 for all four GDDR6 bins Ramulator2 ships, so deriving
+ * from it would price a 14 Gb/s part's bus at 4 GB/s -- and that divergence is
+ * already announced once per run by sayPresetRate(). Using the rate table also
+ * keeps bandwidth_, the burst time and the termination energy on ONE rate,
+ * which is the invariant D002 exists to hold. */
+void RamulatorWrapper::derivePresetCapacityAndBandwidth() {
+    if (!preset_org_.valid) return;
+
+    const uint32_t nch = (channels_ > 0) ? channels_ : 1;
+
+    // ---- bandwidth_ -------------------------------------------------------
+    const double rate_mts = PIMID::CactiIOWrapper::dramRateMTs(dram_type_);
+    const int    ch_bits  = PIMID::CactiIOWrapper::dramChannelWidthBits(dram_type_);
+    if (rate_mts > 0.0 && ch_bits > 0) {
+        bandwidth_ = static_cast<uint64_t>(rate_mts * (ch_bits / 8.0) * nch);
+    } else if (!anchor_quiet_) {
+        static std::set<std::string> bw_refused;
+        if (bw_refused.insert(dram_type_).second) {
+            std::cerr << "[mem] WARNING: no rate/channel-width row for '"
+                      << dram_type_ << "', so its aggregate bandwidth cannot be "
+                         "derived. bandwidth_ keeps whatever the default path "
+                         "left it at." << std::endl;
+        }
+    }
+
+    // ---- capacity_ --------------------------------------------------------
+    const int units = getBackgroundUnits(device_width_,
+                                         static_cast<int>(ranks_per_channel_),
+                                         static_cast<int>(nch));
+    const int cid = preset_org_.channels_in_density > 0
+                        ? preset_org_.channels_in_density : 1;
+    if (units > 0) {
+        const uint64_t mb = preset_org_.density_mb *
+                            static_cast<uint64_t>(units) /
+                            static_cast<uint64_t>(cid);
+        if (mb > 0) capacity_ = mb * 1024ULL * 1024ULL;
+    }
+}
+
 void RamulatorWrapper::initialize() {
     parseConfiguration();
 
@@ -270,6 +617,10 @@ void RamulatorWrapper::initialize() {
      * capacity cross-check below both have it, and so main.cpp's bank_rows
      * derivation can read it off a wrapper that was only initialized. */
     resolvePresetOrganization();
+    /* 1.11.63 (R6): and its timing row, for the ns stamp below. Both are
+     * already resolved by parseConfiguration(); repeated here because this
+     * function must not depend on that ordering. */
+    resolvePresetTiming();
 
     // Only create a full Ramulator2 instance when a config file is provided
     // (for cycle-accurate simulation). Default configs (empty path) are used
@@ -337,6 +688,11 @@ void RamulatorWrapper::initialize() {
      * object. AFTER the width -- the width decides which preset row applies --
      * and BEFORE the two checks below, which read the density. */
     applyPresetDensityToArchitecture();
+
+    /* 1.11.63 (R6-5): and the simulated bin's ns timings, beside the density
+     * and for the same reason -- the object describes the part the preset
+     * simulates, timings included. */
+    applyPresetTimingsToArchitecture();
 
     /* 1.11.57 (audit round 3, C002): this check RUNS now.
      *
@@ -435,10 +791,21 @@ void RamulatorWrapper::initialize() {
      *               channels, so chip_size_mb x dies must reproduce the
      *               preset's stack capacity (per-channel density x channels).
      *
-     * HBM3 FAILS THIS CHECK TODAY AND IS MEANT TO. Ruling R2 keeps its 2048 MB
-     * on the core-die basis while the preset's stack is 8 GiB, so the run says
-     * so on every HBM3 configuration instead of the disagreement living in a
-     * comment. See the note at HBM3's chip_size_mb. */
+     * 1.11.61 -> 1.11.63: THIS CHECK USED TO FIRE ON HBM3 BY DESIGN. IT MUST
+     * NOT ANY MORE.
+     *
+     * Ruling R2 kept HBM3's chip_size_mb at 2048 MB against a preset stack of
+     * 8 GiB and made the disagreement audible on every HBM3 run rather than
+     * silent -- a deliberate, temporary firing, recorded in the 1.11.61 entry
+     * as awaiting a ruling. R6 gave it (item 1): the object follows the preset,
+     * the wrapper literal has no standing, and applyPresetDensityToArchitecture()
+     * now DERIVES the core die as the preset's per-channel density x the two
+     * channels a die fronts -- 1024 MB, and 1024 x 8 dies = 8192 MB = the
+     * preset's stack.
+     *
+     * So from this release a firing on ANY technology, HBM3 included, is a REAL
+     * ERROR again and not an expected note. Nothing here special-cases HBM3;
+     * the check is unchanged and its input moved onto the preset. */
     if (dram_arch_ && preset_org_.valid) {
         std::string dt = dram_type_;
         std::transform(dt.begin(), dt.end(), dt.begin(), ::toupper);
@@ -562,6 +929,13 @@ void RamulatorWrapper::setDeviceWidth(const std::string& w) {
      * is harmless: initialize() resolves and stamps again. */
     resolvePresetOrganization();
     applyPresetDensityToArchitecture();  // no-op until dram_arch_ exists
+    /* 1.11.63 (R6-3/R6-5): the width also selects the devices-per-rank the
+     * capacity derivation counts, so re-derive capacity_ (and, harmlessly,
+     * bandwidth_, which the width does not reach) and re-stamp the ns bin.
+     * Only on the DEFAULT path: with a config FILE the YAML is the authority
+     * for both, and parseConfiguration() has already applied it. */
+    if (config_path_.empty()) derivePresetCapacityAndBandwidth();
+    applyPresetTimingsToArchitecture();  // no-op until dram_arch_ exists
 }
 
 void RamulatorWrapper::applyDeviceWidthToArchitecture() {
@@ -668,6 +1042,14 @@ void RamulatorWrapper::loadConfig(const std::string& config_path) {
 }
 
 void RamulatorWrapper::parseConfiguration() {
+    /* 1.11.63 (R6-3): the preset pair is resolved FIRST, because the
+     * per-technology branch below no longer states a capacity or (for DDR4 and
+     * both HBM stacks) a bandwidth -- it derives both from that pair. Both
+     * resolvers depend only on dram_type_ and device_width_, so they are safe
+     * this early and idempotent when initialize() calls them again. */
+    resolvePresetOrganization();
+    resolvePresetTiming();
+
     // Try to load PIMID configuration and convert to Ramulator format
     if (config_path_.empty()) {
         // Generate correct Ramulator2 YAML config based on DRAM type
@@ -702,13 +1084,20 @@ void RamulatorWrapper::parseConfiguration() {
          * ships no DDR5 timing bin above 3200, so the timing model genuinely
          * cannot run at the modelled 4800. That is a modelling limitation,
          * and it is announced once here rather than hidden in two numbers
-         * that disagree. */
-        auto derivedBwMBs = [](const std::string& t, uint32_t chans) -> uint64_t {
-            double mts = PIMID::CactiIOWrapper::dramRateMTs(t);
-            int wbits  = PIMID::CactiIOWrapper::dramChannelWidthBits(t);
-            if (mts <= 0.0 || wbits <= 0) return 0;
-            return static_cast<uint64_t>(mts * (wbits / 8.0) * chans);
-        };
+         * that disagree.
+         *
+         * 1.11.63 (R6-3): the derivedBwMBs() lambda that used to sit here is
+         * GONE, and with it the last three bandwidth literals (DDR4 19200,
+         * HBM2 307000, HBM3 819000) and all seven capacity literals. D016
+         * derived the bandwidth for four technologies and left three stating
+         * it, which is the same split R6 removes everywhere else. Both
+         * quantities are now derived for all seven, once, in
+         * derivePresetCapacityAndBandwidth() below the chain -- so a branch
+         * here names a preset and a channel count and nothing else.
+         *
+         * The disclosure this block exists for is unchanged: sayPresetRate()
+         * still announces every technology whose modelled rate and timing
+         * preset differ. */
         auto sayPresetRate = [](const std::string& t, const char* preset,
                                 double preset_mts) {
             double mts = PIMID::CactiIOWrapper::dramRateMTs(t);
@@ -726,21 +1115,15 @@ void RamulatorWrapper::parseConfiguration() {
 
         if (dt == "DDR3") {
             config_yaml_ = makeConfig("DDR3", "DDR3_8Gb_x8", "DDR3_1600H");
-            channels_ = 1; ranks_per_channel_ = 1; banks_per_rank_ = 8;
-            capacity_ = 8ULL * 1024 * 1024 * 1024;
-            bandwidth_ = derivedBwMBs("DDR3", channels_);   // 1.11.52 (D016)
+            channels_ = 1; ranks_per_channel_ = 1;
             sayPresetRate("DDR3", "DDR3_1600H", 1600);
         } else if (dt == "DDR5") {
             config_yaml_ = makeConfig("DDR5", "DDR5_8Gb_x8", "DDR5_3200AN");
-            channels_ = 1; ranks_per_channel_ = 1; banks_per_rank_ = 16;
-            capacity_ = 8ULL * 1024 * 1024 * 1024;
-            bandwidth_ = derivedBwMBs("DDR5", channels_);   // 1.11.52 (D016)
+            channels_ = 1; ranks_per_channel_ = 1;
             sayPresetRate("DDR5", "DDR5_3200AN", 3200);
         } else if (dt == "LPDDR5") {
             config_yaml_ = makeConfig("LPDDR5", "LPDDR5_8Gb_x16", "LPDDR5_6400");
-            channels_ = 1; ranks_per_channel_ = 1; banks_per_rank_ = 16;
-            capacity_ = 8ULL * 1024 * 1024 * 1024;
-            bandwidth_ = derivedBwMBs("LPDDR5", channels_);  // 1.11.52 (D016)
+            channels_ = 1; ranks_per_channel_ = 1;
             sayPresetRate("LPDDR5", "LPDDR5_6400", 6400);
         } else if (dt == "GDDR6") {
             /* 1.11.60 (audit round 4, C007): the preset named here did not
@@ -770,9 +1153,7 @@ void RamulatorWrapper::parseConfiguration() {
              * this tree's own 14000 MT/s basis (CactiIOWrapper::dramRateMTs)
              * the arithmetic is 16 bits x 14000 MT/s / 8 = 28 GB/s per
              * channel, x 2 channels = 56 GB/s for the device. */
-            channels_ = 2; ranks_per_channel_ = 1; banks_per_rank_ = 16;
-            capacity_ = 8ULL * 1024 * 1024 * 1024;
-            bandwidth_ = derivedBwMBs("GDDR6", channels_);   // 1.11.52 (D016)
+            channels_ = 2; ranks_per_channel_ = 1;
             /* 1.11.60 (audit round 4, C007): both facts in this note were
              * wrong. The preset named did not exist in the tree, and the
              * 16000 MT/s attributed to it is not a rate any GDDR6 preset
@@ -788,21 +1169,36 @@ void RamulatorWrapper::parseConfiguration() {
             sayPresetRate("GDDR6", "GDDR6_2000_1350mV_double", 2000);
         } else if (dt == "HBM2") {
             config_yaml_ = makeConfig("HBM2", "HBM2_4Gb", "HBM2_2.4Gbps");
-            channels_ = 8; ranks_per_channel_ = 1; banks_per_rank_ = 16;
-            capacity_ = 4ULL * 1024 * 1024 * 1024;
-            bandwidth_ = 307000;  // 307 GB/s for HBM2 @ 2.4 Gb/s (1024b x 2.4 / 8)
+            channels_ = 8; ranks_per_channel_ = 1;
         } else if (dt == "HBM3") {
             config_yaml_ = makeConfig("HBM3", "HBM3_4Gb", "HBM3_6.4Gbps");
-            channels_ = 16; ranks_per_channel_ = 1; banks_per_rank_ = 16;
-            capacity_ = 4ULL * 1024 * 1024 * 1024;
-            bandwidth_ = 819000;  // 819 GB/s for HBM3 @ 6.4 Gb/s (1024b x 6.4 / 8)
+            channels_ = 16; ranks_per_channel_ = 1;
         } else {
             // Default: DDR4-2400
             config_yaml_ = makeConfig("DDR4", "DDR4_8Gb_x8", "DDR4_2400R");
-            channels_ = 1; ranks_per_channel_ = 1; banks_per_rank_ = 8;
-            capacity_ = 8ULL * 1024 * 1024 * 1024;
-            bandwidth_ = 19200;  // 19.2 GB/s for DDR4-2400
+            channels_ = 1; ranks_per_channel_ = 1;
+            sayPresetRate("DDR4", "DDR4_2400R", 2400);
         }
+
+        /* 1.11.63 (R6-3): banks per rank, from the preset instead of beside
+         * it. Two of the seven literals disagreed with the preset they were
+         * written next to -- DDR4 said 8 against DDR4_8Gb_x8's 16, HBM3 said
+         * 16 against HBM3_4Gb's 32 -- which is the third private copy of the
+         * organisation the 1.11.61 header note named and did not actually
+         * remove. channels_in_density divides out GDDR6's double count: its 32
+         * banks span both channels, and this field is multiplied by channels_
+         * at its one consumer (the refresh-energy bank population). */
+        if (preset_org_.valid && preset_org_.banks_in_density > 0) {
+            const int cid = preset_org_.channels_in_density > 0
+                                ? preset_org_.channels_in_density : 1;
+            banks_per_rank_ =
+                static_cast<uint32_t>(preset_org_.banks_in_density / cid);
+        }
+
+        /* 1.11.63 (R6-3): capacity and bandwidth, derived from the preset pair
+         * the branch above named. Must run AFTER the branch, which sets the
+         * channel and rank counts both derivations read. */
+        derivePresetCapacityAndBandwidth();
 
     } else {
         // Load configuration from file
@@ -1184,7 +1580,7 @@ double RamulatorWrapper::getArrayWriteEnergyNJ() const {
         device_width_,        // 1.11.46 (L181)
         row_miss_frac_);      // 1.11.52 (D003)
 }
-double RamulatorWrapper::getTerminationEnergyNJ() const {
+double RamulatorWrapper::getTerminationEnergyNJ(bool is_write) const {
     /* 1.11.40 (audit N8, user ruling: harness the model, do not table the
      * answer). The DQ termination energy now comes from CACTI-IO -- a real
      * off-chip IO model built from extracted parameters -- instead of the
@@ -1251,7 +1647,7 @@ double RamulatorWrapper::getTerminationEnergyNJ() const {
     const double rate = PIMID::CactiIOWrapper::dramRateMTs(dram_type_);
     if (energy_term_override_pJ_per_bit_ >= 0.0)
         return Ramulator::pimid_energy::terminationNJ(
-            dram_type_, energy_term_override_pJ_per_bit_, rate);
+            dram_type_, energy_term_override_pJ_per_bit_, rate, is_write);
 
     const int    ndq  = PIMID::CactiIOWrapper::dramChannelWidthBits(dram_type_);
     if (rate > 0.0 && ndq > 0) {
@@ -1269,8 +1665,13 @@ double RamulatorWrapper::getTerminationEnergyNJ() const {
          * with another and call it a model. Those technologies keep the
          * existing path; the model's figure is reported as a cross-check
          * elsewhere, not substituted here. */
-        if (io.valid && io.exact_map && io.energy_pj_per_bit_term > 0.0)
-            return io.energy_pj_per_bit_term * 512.0 / 1000.0;   // per 64 B
+        /* 1.11.63 (R7): the WRITE figure is the wrapper's long-standing
+         * iostate=WRITE computation; the READ figure is the second
+         * extio_power_term() pass. Direction-selected here. */
+        const double term_pj = is_write ? io.energy_pj_per_bit_term
+                                        : io.energy_pj_per_bit_term_rd;
+        if (io.valid && io.exact_map && term_pj > 0.0)
+            return term_pj * 512.0 / 1000.0;   // per 64 B
     }
     /* Fall back, and say so rather than reporting zero. */
     static bool warned = false;
@@ -1280,81 +1681,56 @@ double RamulatorWrapper::getTerminationEnergyNJ() const {
                   << dram_type_ << "'; DQ termination falls back to the "
                      "pimid_energy scheme table (termination term only)."
                   << std::endl;
-        /* 1.11.52 (audit D008): name the UNSOURCED input where it is used.
-         * LPDDR5's termination resistance is an assumption (Micron states
-         * programmable VSS ODT and gives VDDQ/RON, not Rtt), and it is the
-         * larger half of the 280-ohm loop, so the reported number swings
-         * ~1.75x for a 2x error in it. Disclosing this only in a comment in
-         * another file is not disclosure. */
+        /* 1.11.52 (audit D008) asked that the unsourced input be named where
+         * it is used; 1.11.63 retires the disclosure because the input is no
+         * longer unsourced. JESD209-5C (in misc/ since 2026-08-24), Table 84
+         * p.144: DQ ODT OP[2:0] "000B: Disable (Default)". The JEDEC default
+         * operating point is UNTERMINATED, so the model's default termination
+         * term is zero BY CITATION, and the old "which end of the 30-240 ohm
+         * host range" question dissolves -- the ladder RZQ/1..RZQ/6
+         * (240/120/80/60/48/40 ohm) is a controller option with no default
+         * rung. Users modelling an ODT-on system state their operating point
+         * via power.termination_pj_per_bit. */
         if (dram_type_ == "LPDDR5") {
-            /* 1.11.59 (LPDDR5 IO sourcing): the note now says WHICH END of the
-             * only citable range the assumption sits at, because that fixes
-             * the sign of the error rather than leaving it open. */
-            std::cerr << "[power] NOTE: the LPDDR5 termination number rests on "
-                         "an UNSOURCED Rtt = 240 ohm (of a 280-ohm loop); "
-                         "Micron's datasheets give VDDQ (0.50 V) and RON "
-                         "(40 ohm) but defer the ODT ohm table to a General "
-                         "LPDDR5 AC/DC specification this tree does not hold, "
-                         "and no LVSTL document exists in the JESD8-* set here. "
-                         "The only citable bound is host-side: Intel 743844-015 "
-                         "Table 89 gives RODT(DQ) = 30-240 ohm with no typical, "
-                         "so 240 is the MAXIMUM of that range -- the weakest "
-                         "termination, hence the LOWEST termination energy it "
-                         "allows; the 30 ohm end would raise this term about "
-                         "4x. Treat LPDDR5 termination as an optimistic "
-                         "assumption, not a sourced value." << std::endl;
+            std::cerr << "[power] NOTE: LPDDR5 DQ ODT is DISABLED by JEDEC "
+                         "default (JESD209-5C Tbl 84 p.144: 000B Disable "
+                         "(Default)); termination DC energy = 0. The RZQ/1..6 "
+                         "ladder (240..40 ohm, RZQ=240) is a controller option "
+                         "-- set power.termination_pj_per_bit to model an "
+                         "ODT-on operating point. Micron IDD conditions are "
+                         "ODT-off, so array energy describes this same "
+                         "default configuration." << std::endl;
         }
     }
     return Ramulator::pimid_energy::terminationNJ(
-        dram_type_, energy_term_override_pJ_per_bit_, rate);   // 1.11.57 (D017)
+        dram_type_, energy_term_override_pJ_per_bit_, rate, is_write);   // 1.11.57 (D017) + R7
 }
 
 bool RamulatorWrapper::getTerminationEnergyBandNJ(double& lo_nj, double& hi_nj,
                                                   std::string& provenance) const {
-    /* 1.11.59: report a BAND where the termination rests on an unsourced Rtt.
+    /* 1.11.59 introduced this accessor to report LPDDR5 termination as a BAND
+     * (0.036..0.143 nJ per 64 B), because the tree could not source Rtt: the
+     * only citable range was host-side RODT(DQ) 30..240 ohm (Intel 743844-015
+     * Tbl 89, typical column empty), a 4.0x spread in loop resistance.
      *
-     * The project rule is that a quantity the tools cannot produce is stated
-     * as a band with its provenance, never as a constant -- the pJ/bit link
-     * energies already work this way. LPDDR5 is the one technology whose Rtt
-     * this tree cannot source: Micron gives VDDQ and RON and defers the ODT
-     * ohm table to a General LPDDR5 AC/DC specification not held here, and
-     * there is no LVSTL document in the JESD8-* set. A web search of every
-     * freely available datasheet found the encoding MR11 OP[6:4] = 000B for
-     * "ODT disabled" (YM5XCBQ3B2-T16 64 Gb LPDDR5, IDD table note 2, p.10)
-     * and no ohm ladder and no stated default anywhere.
+     * 1.11.63 RETIRES the band, because the question is now answered by the
+     * standard itself. JESD209-5C (misc/, acquired 2026-08-24), Table 84
+     * p.144: DQ ODT OP[2:0] "000B: Disable (Default)"; the ladder is RZQ/1..
+     * RZQ/6 with RZQ = 240 ohm and 111B RFU, and NT-ODT likewise defaults
+     * off. The JEDEC default operating point is UNTERMINATED -- below the old
+     * band's floor, not inside it. The default termination term is therefore
+     * ZERO with a citation, not a range with a caveat; the scheme table
+     * (pimid_energy.h) encodes it as rtt = 0 and the LVSTL branch prices no
+     * DC loop. A user modelling an ODT-on system states the operating point
+     * via power.termination_pj_per_bit -- a stated configuration, and a band
+     * wrapped around a user-stated point would be noise, not provenance.
      *
-     * The only citable range is host-side: Intel 743844-015 Table 89 gives
-     * RODT(DQ) = 30..240 ohm with an EMPTY typical column. Termination
-     * current is V/(RON + Rtt), so the two ends of that range bracket the
-     * term by the ratio of their loop resistances -- with RON = 40 ohm
-     * (Micron, IDD note 4), (40+240)/(40+30) = 4.0. The applied value stays
-     * the 240 ohm end, which is the weakest termination and therefore the
-     * LOWEST energy the range permits; this returns the interval so a reader
-     * sees the assumption's width and its direction rather than a bare point.
-     *
-     * Returns false for technologies whose electricals ARE sourced (DDR3,
-     * DDR4, DDR5, GDDR6) -- there is no band to report, only a value. */
+     * Returns false always: no technology reports a termination band any
+     * more. Kept (rather than deleted) so the consumer sites in main.cpp
+     * document why no band line is printed. */
     lo_nj = hi_nj = 0.0;
     provenance.clear();
-    std::string dt = dram_type_;
-    std::transform(dt.begin(), dt.end(), dt.begin(), ::toupper);
-    if (dt != "LPDDR5") return false;
-
-    const double applied = getTerminationEnergyNJ();
-    if (!(applied > 0.0)) return false;
-
-    const double ron    = 40.0;    // Micron LPDDR5X IDD table note 4
-    const double rtt_hi = 240.0;   // Intel 743844-015 Tbl 89 max -- the value applied
-    const double rtt_lo = 30.0;    // same table, min
-    const double ratio  = (ron + rtt_hi) / (ron + rtt_lo);   // 4.0
-
-    lo_nj = applied;               // weakest termination = lowest energy
-    hi_nj = applied * ratio;       // strongest termination in the citable range
-    provenance = "Rtt UNSOURCED; band = RODT(DQ) 30-240 ohm "
-                 "(Intel 743844-015 Tbl 89 p.211, typical column empty) "
-                 "with RON 40 ohm (Micron LPDDR5X IDD note 4); "
-                 "applied value is the 240 ohm end, the lowest-energy bound";
-    return true;
+    return false;
 }
 
 /* 1.11.57 (latent D011), SUPERSEDED BY 1.11.58: both are wired in now.
@@ -1670,6 +2046,10 @@ void RamulatorWrapper::enablePIMSupport(const std::string& dram_type) {
      * technologies with no object of their own. */
     resolvePresetOrganization();
     applyPresetDensityToArchitecture();
+    /* 1.11.63 (R6-5): same for the ns bin -- a fresh factory object carries the
+     * factory literals here too. */
+    resolvePresetTiming();
+    applyPresetTimingsToArchitecture();
 
     // Initialize PIM components
     initializePIMComponents();
@@ -1845,27 +2225,65 @@ double RamulatorWrapper::getEffectiveBandwidthPerPE(PIMGranularity granularity,
 // Subarray-Level Characteristics
 // ============================================================================
 
+/* 1.11.63 (R6-5): THE DDR3 LINE IS GONE FROM ALL FOUR OF THESE.
+ *
+ * DDR3 borrows the DDR4 architecture object as an organization proxy, so its
+ * TIMINGS used to be intercepted here -- and the values intercepted with were
+ * DDR3-1600K's (nCL 11 -> 13.75 ns), while the preset this tree simulates is
+ * DDR3_1600H (nCL 9 at tCK 1250 ps -> 11.25 ns). One part, two bins, 22%
+ * apart, and the wrong one was the one that reached getTRC() and the array
+ * activate energy.
+ *
+ * applyPresetTimingsToArchitecture() now stamps the DDR3_1600H bin onto the
+ * borrowed object itself, so DDR3 reads its own preset's timings through the
+ * ordinary dram_arch_ path and there is no second table to drift. The
+ * interception had to go with it: an early return here would have made the
+ * stamp inert.
+ *
+ * GDDR6 and LPDDR5 KEEP theirs, and the reason is in
+ * applyPresetTimingsToArchitecture(): their Ramulator timing rows carry two
+ * different clocks, so their cycle counts cannot be read as ns at all. These
+ * values are cited to JEDEC/vendor sources instead, which is the honest
+ * substitute for a preset that cannot answer.
+ *
+ * The trailing DDR4-2400 fallbacks (reached only with no architecture object,
+ * which no path in this tree produces) now carry the derived bin figures --
+ * 16 x 833 ps and 39 x 833 ps -- so no literal in this file states a bin the
+ * preset already fixes. */
 double RamulatorWrapper::getTRCD() const {
     // Techs WITHOUT their own spec struct borrow the DDR4 struct as an
     // organization proxy (initialize()), so per-tech timing must take
     // precedence over dram_arch_ here.
     if (dram_type_ == "GDDR6") return 14.8;   // JESD250 16 Gb/s vendor spec
-    if (dram_type_ == "LPDDR5") return 18.0;  // JESD209-5 tRCDpb
-    if (dram_type_ == "DDR3") return 13.75;   // DDR3-1600K
+    /* 1.11.63 (R6, gate 1173C): the literal 18.0 froze this quantity against
+     * the preset -- the JESD209-5C corrections landed in the preset row and
+     * MOVED NOTHING because this hardcode, not the row, feeds every LPDDR5
+     * cycle and array-energy consumer (the arch object is a DDR4 stand-in
+     * for this technology). Derived now: nRCD x tCK from the transcribed,
+     * self-checked preset row (15 x 1.25 = 18.75 ns; JEDEC min 18 ns plus
+     * JEDEC rounding). Fallback keeps the old literal only if the
+     * transcription is somehow absent, and says nothing new then. */
+    if (dram_type_ == "LPDDR5")
+        return preset_timing_.valid ? preset_timing_.nRCD * preset_timing_.tCK_ns()
+                                    : 18.0;
     if (dram_arch_) {
         return dram_arch_->timing.tRCD_ns;
     }
-    return 13.32;  // DDR4-2400 default
+    return 16 * 0.833;  // DDR4_2400R nRCD 16 x tCK 833 ps
 }
 
 double RamulatorWrapper::getTCAS() const {
     if (dram_type_ == "GDDR6") return 14.8;   // JESD250
-    if (dram_type_ == "LPDDR5") return 18.0;  // JESD209-5
-    if (dram_type_ == "DDR3") return 13.75;   // DDR3-1600K CL11
+    /* 1.11.63 (R6, gate 1173C): same cure as getTRCD. nCL 17 x 1.25 =
+     * 21.25 ns (JESD209-5C Tbl 225 row 1011B RL Set 0) -- the old literal
+     * 18.0 predates the sourced RL and matched nothing. */
+    if (dram_type_ == "LPDDR5")
+        return preset_timing_.valid ? preset_timing_.nCL * preset_timing_.tCK_ns()
+                                    : 18.0;
     if (dram_arch_) {
         return dram_arch_->timing.tCAS_ns;
     }
-    return 13.32;  // DDR4-2400 default (CL16)
+    return 16 * 0.833;  // DDR4_2400R nCL 16 x tCK 833 ps
 }
 
 double RamulatorWrapper::getTRP() const {
@@ -1873,12 +2291,14 @@ double RamulatorWrapper::getTRP() const {
      * (= tRAS + tRP) feeds the array-energy activate term. Same sources as
      * getTRAS above. */
     if (dram_type_ == "GDDR6")  return 14.8;   // vendor spec class (single point)
-    if (dram_type_ == "LPDDR5") return 18.0;   // Micron LPDDR5-6400 tRPpb
-    if (dram_type_ == "DDR3")   return 13.75;  // JESD79-3D, DDR3-1600K
+    /* 1.11.63 (R6, gate 1173C): derived -- nRPpb x tCK (15 x 1.25 = 18.75). */
+    if (dram_type_ == "LPDDR5")
+        return preset_timing_.valid ? preset_timing_.nRP * preset_timing_.tCK_ns()
+                                    : 18.0;
     if (dram_arch_) {
         return dram_arch_->timing.tRP_ns;
     }
-    return 13.32;  // DDR4-2400 default
+    return 16 * 0.833;  // DDR4_2400R nRP 16 x tCK 833 ps
 }
 
 double RamulatorWrapper::getTRAS() const {
@@ -1891,12 +2311,15 @@ double RamulatorWrapper::getTRAS() const {
      * GDDR6 from the same 16 Gb/s vendor-spec class getTRCD already cites --
      * a single-point source, flagged as such. */
     if (dram_type_ == "GDDR6")  return 28.0;   // vendor spec class (single point)
-    if (dram_type_ == "LPDDR5") return 42.0;   // Micron LPDDR5-6400, tRAS min
-    if (dram_type_ == "DDR3")   return 35.0;   // JESD79-3D, DDR3-1600K
+    /* 1.11.63 (R6, gate 1173C): derived -- nRAS x tCK (34 x 1.25 = 42.5;
+     * the old 42.0 was the JEDEC ns min without the CK rounding). */
+    if (dram_type_ == "LPDDR5")
+        return preset_timing_.valid ? preset_timing_.nRAS * preset_timing_.tCK_ns()
+                                    : 42.0;
     if (dram_arch_) {
         return dram_arch_->timing.tRAS_ns;
     }
-    return 32.0;  // DDR4-2400 default
+    return 39 * 0.833;  // DDR4_2400R nRAS 39 x tCK 833 ps
 }
 
 /* 1.11.57 (latent D020): getTRRD() is DELETED. It returned tRAS/4 under the

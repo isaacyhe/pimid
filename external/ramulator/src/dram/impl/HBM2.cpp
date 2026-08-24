@@ -45,7 +45,62 @@ class HBM2 : public IDRAM, public Implementation {
        * dead and the comment beside it read as the authority, which is the
        * worse half. -1 is this file's idiom for "supplied elsewhere" and the
        * completeness check below still catches a column nothing fills. */
-      {"HBM2_2.4Gbps", {2400, 4, 20, 20, 20, 20, 40, 59, 20, 5, 10, 10, 3, 5, 4, 5, 5, 10, 10, 20, -1, -1, 4682, -1, 8, 833}},
+      /* 1.11.63 (calibration, JESD235D acquired 2026-08-24 -- misc/): the
+       * full HBM1/HBM2 standard replaced the earlier identity-only pass, and
+       * two of that pass's fixes turned out to have patched identities onto
+       * wrong anchors (details below). Sources are page-exact; printed page
+       * = PDF page - 8.
+       *
+       * ANCHOR: Table 58 p.102 ("Timings used for IDD Measurement-Loop
+       * Pattern") is the ONLY place JESD235D prints tRC/tRAS/tRP numbers --
+       * Table 68's row-timing MIN cells are deliberately blank (NOTE 2
+       * p.111: vendors define speed bins). Table 58 gives tRP 15 ns, tRAS
+       * 33 ns, tRC 48 ns, and Table 68's own NOTE makes nRAS + nRP = nRC
+       * normative; 33 + 15 = 48 closes exactly. This row's previous comment
+       * claimed tRP 16 / tRC 49 "JESD235C spec-minimum" -- neither number
+       * appears anywhere in 235D.
+       *
+       * CORRECTED against the standard:
+       *   nBL   4 -> 2. PC mode forces BL4 (Table 12 NOTE 2 p.17) and BL4 =
+       *     4 UI = 2 CK; Table 68 p.109 permits the next column command
+       *     tCCDS = 2 nCK later, which a 4-CK occupancy could not. (The
+       *     63a raise of nCCDS to "the identity floor nBL = 4" was patching
+       *     the identity onto a wrong nBL.)
+       *   nRP   20 -> 18 (tRP 15 ns, Table 58 p.102; JEDEC_rounding = 18).
+       *   nRC   60 -> 58 (tRC 48 ns, same table; = nRAS 40 + nRP 18).
+       *   nCCDS  4 -> 2 (Table 68 p.109: "different bank groups BL=4 tCCDS
+       *     2 nCK").
+       *   nCCDL  5 -> 4 (Table 68 p.109: "same bank group BL=4 tCCDL
+       *     MAX(4, 2.8ns/tCK)" = MAX(4, 3.36) = 4).
+       *   nRTW  10 -> 17 (Table 68 NOTE 23 p.112 closed form with this
+       *     row's RL 20 / WL 10 / BL4, tDQSS(min) -0.2 tCK, tDQSCK(max)
+       *     3.5 ns, tDQSQ(max) 71 ps at 2.4 Gbps = 13.82 ns -> 17 nCK.
+       *     INERT: populate_timingcons never reads nRTW -- its live RD->WR
+       *     rule is nCL + nBL + 2 - nCWL -- kept correct for the
+       *     completeness check's sake.)
+       *   nRREFD 8 -> 10. UNIT ERROR: Table 68 p.110 gives tRREFD = 8 ns;
+       *     the column carried the 8 as CYCLES (6.66 ns).
+       *     JEDEC_rounding(8 ns, 833 ps) = 10.
+       *   nREFI 4682 -> 4681. tREFI 3.9 us is a MAX (Table 68 p.110), so
+       *     the rounding is FLOOR: 3900/0.833 = 4681.87 -> 4681.
+       *
+       * CALIBRATED, unchanged: rate (2.4 Gbps/pin bin heads Table 67
+       * p.107), tCK 833 ps (same table), nRAS 40 (tRAS 33 ns, Table 58).
+       *
+       * VENDOR-ONLY, unchanged and stated (Table 68 MIN cells blank; RL/WL
+       * are MR2 ranges 3..48 / 1..16 nCK, Table 11 p.17): nCL, nCWL,
+       * nRCDRD, nRCDWR, nWR, nRTPS, nRTPL, nRRDS, nRRDL, nWTRS, nWTRL,
+       * nFAW. All IDD/IPP values likewise (Table 65 p.105 / Table 66 p.106
+       * publish EMPTY value columns by construction).
+       *
+       * KNOWN-DRIFTED, STAGED for the next release (R2 precedent: address-
+       * layout movers ship separately for attribution): the ORG presets.
+       * Table 4 p.6 at 4 Gb/channel gives BA[3:0] = 16 banks/PC (4 groups x
+       * 4) and RA[13:0] = 16384 rows; this org carries 8 banks/PC x 32768
+       * rows -- density closes, layout does not. Same table: PC unit is
+       * 64 DQ / 4n prefetch / 32 columns x 256 b; this org's 128 DQ x 64
+       * columns x 2n factors the same 1 KB page the legacy-mode way. */
+      {"HBM2_2.4Gbps", {2400, 2, 20, 20, 20, 18, 40, 58, 20, 5, 10, 10, 2, 4, 4, 5, 5, 10, 17, 20, -1, -1, 4681, -1, 10, 833}},
     };
 
 
@@ -267,8 +322,26 @@ class HBM2 : public IDRAM, public Implementation {
         }
         m_timing_vals("rate") = *dq;
       }
-      int tCK_ps = 1E6 / (m_timing_vals("rate") / 2);
+      /* 1.11.63 (calibration, cross-cutting fix -- same block in all 11 impl
+       * files): ONE AUTHORITY FOR tCK. This derivation is the authority; the
+       * tCK_ps column in the preset row above is a MIRROR of it and is now
+       * checked against it, so the two cannot silently disagree again. The
+       * divisor was `1E6 / (rate / 2)`, whose integer division threw away the
+       * half-MT/s of odd rates; it is now the exact 2e6/rate the column
+       * documents. At 2400 MT/s the two forms agree at 833 ps, so nothing
+       * moves here -- the check is what is new.
+       * HBM2 IS a 2 bits/pin/CK interface (CK 1.2 GHz at 2.4 Gb/s), unlike
+       * HBM3, whose CK runs at a quarter of the data rate -- see HBM3.cpp. */
+      int preset_tCK_ps = m_timing_vals("tCK_ps");
+      int tCK_ps = 2E6 / m_timing_vals("rate");
       m_timing_vals("tCK_ps") = tCK_ps;
+      if (preset_provided && preset_tCK_ps != tCK_ps) {
+        throw ConfigurationError(
+          "In \"{}\", the timing preset's tCK_ps column says {} ps but the "
+          "rate of {} MT/s derives {} ps (tCK = 2e6/rate). The derivation "
+          "wins at run time, so the column must mirror it -- fix the preset!",
+          get_name(), preset_tCK_ps, m_timing_vals("rate"), tCK_ps);
+      }
 
       // Refresh timings
       // tRFC table (unit is nanosecond!)
@@ -281,9 +354,17 @@ class HBM2 : public IDRAM, public Implementation {
        * same-bank refresh INTERVAL table -- the copy-paste that hid the wrong
        * read below for as long as it stood. */
       // tREFIsb table (same-bank refresh INTERVAL, unit is nanosecond!)
+      /* 1.11.63 (JESD235D): the row was SHIFTED ONE DENSITY COLUMN -- it
+       * encoded JEDEC's 1/2/4/8 Gb-per-channel sequence under 2/4/8/16 Gb
+       * labels. Table 68 p.111: 0.4875 us for 1-2 Gb/channel, 0.2438 us for
+       * 4-8 Gb/channel; no 16 Gb/channel cell exists, so that entry is
+       * DERIVED from NOTE 29 p.112 ("tREFISB = tREFI / N; N = no. of
+       * banks") with Table 4's SID+BA[3:0] = 32 banks: 3.9 us / 32 = 1219
+       * ns. The NOTE-29 identity reproduces every published cell (3.9/8,
+       * 3.9/16), which is the cross-check. Old 4 Gb value was 2x long. */
       constexpr int tREFISB_TABLE[1][4] = {
       //  2Gb    4Gb    8Gb    16Gb
-        { 4875,  4875,  2438,  2438},
+        { 4875,  2438,  2438,  1219},
       };
 
       int density_id = [](int density_Mb) -> int {
@@ -335,7 +416,16 @@ class HBM2 : public IDRAM, public Implementation {
        * that the other two columns did not follow and that nothing exercised.
        * All three are unconditional now, and the preset carries -1 in all
        * three columns to say so (F036). */
-      m_timing_vals("nRFCSB") = JEDEC_rounding(tRFC_TABLE[0][density_id], tCK_ps);
+      /* 1.11.63 (JESD235D): tRFCSB is a SEPARATE PUBLISHED TABLE, not an
+       * upper bound borrowed from tRFC. Table 68 p.110: "SINGLE BANK REFRESH
+       * command period (same bank) tRFCSB 160 ns" for 1/2/4/8 Gb PER DIE
+       * (NOTE 34 p.112: "Density is given per die"), 200 ns for 12/16 Gb per
+       * die. Every shipped org (2/4/8 Gb per CHANNEL, at 1-2 channels per
+       * die) lands in the 160 ns row; the 1.11.51 tRFC placeholder was 1.63x
+       * high (313 vs 193 cycles at 4 Gb). Still inert under the AllBank
+       * refresh manager -- corrected for the table's own integrity. */
+      constexpr int tRFCSB_NS = 160;   // JESD235D Tbl 68 p.110, 1-8 Gb/die
+      m_timing_vals("nRFCSB") = JEDEC_rounding(tRFCSB_NS, tCK_ps);
 
       // Overwrite timing parameters with any user-provided value
       // Rate and tCK should not be overwritten
@@ -368,7 +458,7 @@ class HBM2 : public IDRAM, public Implementation {
           /// 2-cycle ACT command (for row commands)
           {.level = "channel", .preceding = {"ACT"}, .following = {"ACT", "PRE", "PREA", "REFab", "REFsb"}, .latency = 2},
 
-          /*** Pseudo Channel (Table 3 — Array Access Timings Counted Individually Per Pseudo Channel, JESD-235C) ***/ 
+          /*** Pseudo Channel (Table 3 -- Array Access Timings Counted Individually Per Pseudo Channel, JESD-235C) ***/ 
           // RAS <-> RAS
           {.level = "pseudochannel", .preceding = {"ACT"}, .following = {"ACT"}, .latency = V("nRRDS")},
           /// 4-activation window restriction

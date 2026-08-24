@@ -26,11 +26,23 @@ class DDR5 : public IDRAM, public Implementation {
       // {"DDR5_64Gb_x16", {64<<10,  16, {1, 1, 4, 4, 1<<18, 1<<10}}},
     };
 
+    /* 1.11.63 (calibration): nRC 75/77/79 -> 76/78/80, DERIVED-FROM-IDENTITY.
+     * tRC is ACT-to-ACT on the SAME bank and cannot be shorter than ACT-to-PRE
+     * plus the precharge period: tRC >= tRAS + tRP is definitional and needs
+     * no speed-bin table. All three rows violated it by exactly one cycle:
+     *   3200AN  nRAS 52 + nRP 24 = 76, row said 75 (46.875 ns vs 47.5 ns)
+     *   3200BN  nRAS 52 + nRP 26 = 78, row said 77
+     *   3200C   nRAS 52 + nRP 28 = 80, row said 79
+     * JESD79-5 is NOT held by this tree, so nRC is set to the identity value
+     * computed from the row's OWN nRAS and nRP -- DERIVED-FROM-IDENTITY, not
+     * sourced, and no bin value is invented. Every other field in these rows
+     * (rate, nBL, nCL, nRCD, nRP, nRAS, nWR, nRTP, nCWL, nPPD, nCCD*, nRRDS,
+     * nFAW, the whole refresh block and nCS) stays as it is: UNCHECKABLE. */
     inline static const std::map<std::string, std::vector<int>> timing_presets = {
       //   name         rate   nBL  nCL nRCD   nRP  nRAS   nRC   nWR  nRTP nCWL nPPD nCCDS nCCDS_WR nCCDS_WTR nCCDL nCCDL_WR nCCDL_WTR nRRDS nRRDL nFAW nRFC1 nRFC2 nRFCsb nREFI nREFSBRD nRFM1 nRFM2 nRFMsb nDRFMab nDRFMsb nCS, tCK_ps
-      {"DDR5_3200AN",  {3200,   8,  24,  24,   24,   52,   75,   48,   12,  22,  2,    8,     8,     22+8+4,    8,     16,    22+8+16,   8,   -1,   -1,  -1,   -1,   -1,    -1,     30,    -1,   -1,   -1,     -1,     -1,    2,   625}},
-      {"DDR5_3200BN",  {3200,   8,  26,  26,   26,   52,   77,   48,   12,  24,  2,    8,     8,     24+8+4,    8,     16,    24+8+16,   8,   -1,   -1,  -1,   -1,   -1,    -1,     30,    -1,   -1,   -1,     -1,     -1,    2,   625}},
-      {"DDR5_3200C",   {3200,   8,  28,  28,   28,   52,   79,   48,   12,  26,  2,    8,     8,     26+8+4,    8,     16,    26+8+16,   8,   -1,   -1,  -1,   -1,   -1,    -1,     30,    -1,   -1,   -1,     -1,     -1,    2,   625}},
+      {"DDR5_3200AN",  {3200,   8,  24,  24,   24,   52,   76,   48,   12,  22,  2,    8,     8,     22+8+4,    8,     16,    22+8+16,   8,   -1,   -1,  -1,   -1,   -1,    -1,     30,    -1,   -1,   -1,     -1,     -1,    2,   625}},
+      {"DDR5_3200BN",  {3200,   8,  26,  26,   26,   52,   78,   48,   12,  24,  2,    8,     8,     24+8+4,    8,     16,    24+8+16,   8,   -1,   -1,  -1,   -1,   -1,    -1,     30,    -1,   -1,   -1,     -1,     -1,    2,   625}},
+      {"DDR5_3200C",   {3200,   8,  28,  28,   28,   52,   80,   48,   12,  26,  2,    8,     8,     26+8+4,    8,     16,    26+8+16,   8,   -1,   -1,  -1,   -1,   -1,    -1,     30,    -1,   -1,   -1,     -1,     -1,    2,   625}},
     };
 
     inline static const std::map<std::string, std::vector<double>> voltage_presets = {
@@ -389,8 +401,27 @@ class DDR5 : public IDRAM, public Implementation {
         }
         m_timing_vals("rate") = *dq;
       }
-      int tCK_ps = 1E6 / (m_timing_vals("rate") / 2);
+      /* 1.11.63 (calibration, cross-cutting fix -- same block in all 11 impl
+       * files): ONE AUTHORITY FOR tCK. This derivation is the authority; the
+       * tCK_ps column in the preset rows above is a MIRROR of it and is now
+       * checked against it, so the two cannot silently disagree again. The
+       * audit found the written column dead in every model and contradicting
+       * the derivation in two of them (LPDDR5 1250 vs 312, GDDR6 570 vs 1000).
+       * The divisor was `1E6 / (rate / 2)`, whose integer division threw away
+       * the half-MT/s of odd rates; it is now the exact 2e6/rate the column
+       * documents. Every shipped DDR5 preset is 3200 MT/s, where the two forms
+       * agree at 625 ps, so nothing moves here -- the check is what is new.
+       * DDR5 is a DDR-clocked interface: 2 bits/pin per CK. */
+      int preset_tCK_ps = m_timing_vals("tCK_ps");
+      int tCK_ps = 2E6 / m_timing_vals("rate");
       m_timing_vals("tCK_ps") = tCK_ps;
+      if (preset_provided && preset_tCK_ps != tCK_ps) {
+        throw ConfigurationError(
+          "In \"{}\", the timing preset's tCK_ps column says {} ps but the "
+          "rate of {} MT/s derives {} ps (tCK = 2e6/rate). The derivation "
+          "wins at run time, so the column must mirror it -- fix the preset!",
+          get_name(), preset_tCK_ps, m_timing_vals("rate"), tCK_ps);
+      }
 
       // Load the organization specific timings
       int dq_id = [](int dq) -> int {
@@ -409,11 +440,23 @@ class DDR5 : public IDRAM, public Implementation {
         }
       }(m_timing_vals("rate"));
 
+      /* 1.11.63 (calibration): nRRDL 5 -> 8, DERIVED-FROM-IDENTITY, not sourced.
+       * nRRDL is ACT-to-ACT within one bank group and nRRDS the same across
+       * bank groups; a same-bank-group activate cannot be issued sooner than a
+       * different-bank-group one, so tRRD_L >= tRRD_S is definitional. Every
+       * shipped DDR5 preset carries nRRDS = 8 while this table supplied
+       * nRRDL = 5 -- 3 cycles short, and the wrong way round.
+       * JESD79-5 is NOT held by this tree (no DDR5 standard and no DDR5 part
+       * datasheet exists anywhere in it), so no bin value is available and
+       * none is invented: nRRDL is raised to exactly nRRDS, the definitional
+       * floor, and no further. It is marked DERIVED-FROM-IDENTITY rather than
+       * sourced, and the real tRRD_L of a DDR5-3200 part is larger than this.
+       * Revisit when JESD79-5 or a Micron MT60B datasheet is held. */
       constexpr int nRRDL_TABLE[3][1] = {
-      // 3200  
-        { 5, },  // x4
-        { 5, },  // x8
-        { 5, },  // x16
+      // 3200
+        { 8, },  // x4  -- = nRRDS (identity floor)
+        { 8, },  // x8  -- = nRRDS (identity floor)
+        { 8, },  // x16 -- = nRRDS (identity floor)
       };
       constexpr int nFAW_TABLE[3][1] = {
       // 3200  

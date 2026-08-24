@@ -77,14 +77,14 @@ Core* cores[MAX_THREADS];
 static std::atomic<uint32_t> g_coreRoiState[MAX_THREADS];
 InstrFuncPtrs fPtrs[MAX_THREADS] ATTR_LINE_ALIGNED;
 
-/* tid→cid mapping */
+/* tid->cid mapping */
 #define INVALID_CID ((uint32_t)-1)
 #define UNINITIALIZED_CID ((uint32_t)-2)
 static uint32_t cids[MAX_THREADS];
 
 static volatile uint32_t perProcessEndFlag;
 
-/* BblInfo cache: translation block vaddr → BblInfo* */
+/* BblInfo cache: translation block vaddr -> BblInfo* */
 static std::unordered_map<uint64_t, BblInfo*> bblCache;
 static std::mutex bblCacheMutex;
 
@@ -153,7 +153,7 @@ static std::unordered_map<uint64_t, std::pair<uint16_t*, uint32_t>> g_tbApproxCa
  * OOO predictor (per-core mispredicts live in the OOO stats / zsim.out). */
 static std::atomic<uint64_t> g_brDynCount{0};
 
-/* Per-vcpu → ZSim THREADID mapping */
+/* Per-vcpu -> ZSim THREADID mapping */
 #define MAX_VCPUS 256
 static uint32_t vcpuToTid[MAX_VCPUS];
 /* 1.9.26: detect whether ANOTHER thread used this core during a comm window.
@@ -201,7 +201,7 @@ static char* outputDir = nullptr;
 static uint32_t shmId = 0;
 static bool useSharedMem = false;
 
-/* Internal thread filtering — vCPUs created during SimInit() are ZSim's
+/* Internal thread filtering -- vCPUs created during SimInit() are ZSim's
  * own threads (watchdog, contention sim) and must NOT be instrumented. */
 static std::atomic<bool> sim_initialized{false};
 static bool vcpu_is_internal[MAX_VCPUS];  // initialized to false in qemu_plugin_install
@@ -211,7 +211,7 @@ static bool vcpu_is_internal[MAX_VCPUS];  // initialized to false in qemu_plugin
  * if QEMU ever delivers a callback during ZSim function pointer dispatch. */
 static bool in_zsim[MAX_VCPUS];
 
-/* ROI state — set by mov $op, %rcx + xchg %rcx, %rcx (zsim_hooks.h magic ops) */
+/* ROI state -- set by mov $op, %rcx + xchg %rcx, %rcx (zsim_hooks.h magic ops) */
 static std::atomic<bool> in_roi{true};              /* true = record; default on for non-ROI workloads */
 // 1.6 thread-MPI: N rank-threads each bracket their own ROI in ONE process.
 // Baselines snapshot at the FIRST begin; termination fires at the LAST end.
@@ -481,7 +481,7 @@ static bool g_cosim_trace = false;
  * to device PEs rather than host cores. */
 static std::atomic<bool> g_in_device_region{false};
 
-/* Per-vCPU pending magic op from mov $imm, %rcx — persists across TB
+/* Per-vCPU pending magic op from mov $imm, %rcx -- persists across TB
  * boundaries.  This handles the rare case where mov and xchg are in different
  * TBs (e.g., page boundary between them).  Per-vCPU to avoid races when
  * multiple vCPUs translate TBs concurrently under MTTCG. */
@@ -577,7 +577,7 @@ static bool readRcx(uint64_t* out) {
     return readGuestReg(rcx_handle.load(std::memory_order_acquire), out);
 }
 
-/* Read %rdx — used to convey the MPI params-block address at MPI_REGISTER. */
+/* Read %rdx -- used to convey the MPI params-block address at MPI_REGISTER. */
 static bool readRdx(uint64_t* out) {
     return readGuestReg(rdx_handle.load(std::memory_order_acquire), out);
 }
@@ -593,7 +593,7 @@ static void NopPredStore(THREADID, ADDRINT, BOOL) {}
 static InstrFuncPtrs nopPtrs = {NopLoad, NopStore, NopBbl, NopBranch,
                                  NopPredLoad, NopPredStore, FPTR_NOP, {0}};
 
-/* Join function pointers — used when a thread is waiting to be scheduled */
+/* Join function pointers -- used when a thread is waiting to be scheduled */
 static void JoinLoad(THREADID tid, ADDRINT addr);
 static void JoinStore(THREADID tid, ADDRINT addr);
 static void JoinBbl(THREADID tid, ADDRINT addr, BblInfo* bbl);
@@ -991,7 +991,7 @@ static void SimThreadFini(uint32_t tid) {
 }
 
 /**
- * Deferred thread initialization — called on first execution callback.
+ * Deferred thread initialization -- called on first execution callback.
  * Uses the thread's domain to select the appropriate core-type mask.
  */
 /* 1.9.20: the device-side mask for this thread -- a single-PE home mask when
@@ -1146,7 +1146,7 @@ static BblInfo* getOrCreateBblInfo(uint64_t tbAddr, uint32_t numInsns, uint32_t 
     return bbl;
 }
 
-/* ---- QEMU vcpu → ZSim tid mapping ---- */
+/* ---- QEMU vcpu -> ZSim tid mapping ---- */
 
 static uint32_t getOrAssignTid(unsigned int vcpu_index) {
     if (vcpu_index < MAX_VCPUS && vcpuToTid[vcpu_index] != UNINITIALIZED_CID) {
@@ -1216,7 +1216,7 @@ static uint64_t g_ctrlRet[MAX_THREADS];
 /* ---- QEMU Callbacks ---- */
 
 /**
- * Memory access callback — dispatches to ZSim's load/store function pointers.
+ * Memory access callback -- dispatches to ZSim's load/store function pointers.
  */
 static void mem_cb(unsigned int vcpu_index,
                    qemu_plugin_meminfo_t info,
@@ -1292,7 +1292,7 @@ static void detachThreadForMigration(uint32_t tid, int domain) {
 }
 
 /**
- * Instruction execution callback — called on first instruction of each TB.
+ * Instruction execution callback -- called on first instruction of each TB.
  * Drives the BBL function pointer which triggers phase counting.
  */
 static void insn_exec_cb(unsigned int vcpu_index, void *userdata) {
@@ -1698,7 +1698,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         return;
     }
 
-    /* MPI_SEND or MPI_RECV — read params from registered address */
+    /* MPI_SEND or MPI_RECV -- read params from registered address */
     if (!zinfo || !zinfo->mpiParamsAddr[tid]) return;
 
     struct MpiParamsBlock {
@@ -1874,7 +1874,7 @@ static void handleMpiMagicOp(uint64_t op, uint32_t tid) {
         } else if (gn->isCycleAccurate()) {
             /* One shared cycle-accurate Garnet network for all PEs/ranks. */
             GarnetNetwork* anet = gn;
-            /* Direct Garnet injection — real traffic with real contention.
+            /* Direct Garnet injection -- real traffic with real contention.
              * Each packet represents a cache-line (64B) transfer.
              * Large messages inject multiple packets sequentially. */
             uint64_t issueTime = gem5::curTickRef();
@@ -2040,7 +2040,7 @@ static uint32_t getPCIeLatency(uint32_t transfer_bytes = 0) {
     // Protocol overhead: header bytes reduce effective throughput
     double total_bytes = data_bytes + zinfo->pcie.headerBytes;
 
-    // Serialization: ceil(total_bytes / bytesPerCycle) — including protocol overhead
+    // Serialization: ceil(total_bytes / bytesPerCycle) -- including protocol overhead
     uint32_t serCycles = 0;
     if (zinfo->pcie.bytesPerCycle > 0.0) {
         serCycles = static_cast<uint32_t>(
@@ -2051,7 +2051,7 @@ static uint32_t getPCIeLatency(uint32_t transfer_bytes = 0) {
     base += zinfo->pcie.coherenceExtraCycles;
 
     // SIMPLE model: hop count base + M/D/1 queuing contention
-    // At zero load: rho≈0, latMul≈1.0 → result ≈ base+serCycles
+    // At zero load: rho~0, latMul~1.0 -> result ~ base+serCycles
     futex_lock(&zinfo->pcie.updateLock);
 
     zinfo->pcie.curPhaseAccesses++;
@@ -2529,7 +2529,7 @@ static void cosimRoiBeginOffload(uint32_t tid) {
 }
 
 /**
- * Magic instruction callback — dispatches ZSim magic ops detected at
+ * Magic instruction callback -- dispatches ZSim magic ops detected at
  * translation time.  The opcode (from the preceding mov $imm, %rcx) is
  * passed as userdata.
  */
@@ -2799,7 +2799,7 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
                 clearCid(tid);
             }
             ensureThreadInit(tid);  // will use host_mask
-            /* PCIe/CXL return timing: device→host transfer latency,
+            /* PCIe/CXL return timing: device->host transfer latency,
              * charged on the host core (it pays for the return DMA wait) */
             uint32_t pcieLat = boundaryTransferCycles(payload_size);
             if (pcieLat > 0) {
@@ -2820,7 +2820,7 @@ static void magic_insn_exec_cb(unsigned int vcpu_index, void *userdata) {
 }
 
 /**
- * Execution callback for mov $imm, %rcx at end of a TB — stores the opcode
+ * Execution callback for mov $imm, %rcx at end of a TB -- stores the opcode
  * into the per-vCPU pending slot so the next TB's xchg can consume it.
  */
 static void mov_magic_exec_cb(unsigned int vcpu_index, void *userdata) {
@@ -3064,7 +3064,7 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
             clearCid(tid);
         }
         ensureThreadInit(tid);  // will use host_mask
-        /* PCIe/CXL return timing: device→host transfer latency */
+        /* PCIe/CXL return timing: device->host transfer latency */
         uint32_t pcieLat = boundaryTransferCycles(payload_size);
         if (pcieLat > 0) {
             BblInfo* bbl = createSimpleBblInfo(pcieLat, 0, true);  // 1.11.7: no phantom fetch; 1.11.16: injected charge
@@ -3083,7 +3083,7 @@ static void xchg_pending_exec_cb(unsigned int vcpu_index, void *userdata) {
 }
 
 /**
- * Translation block callback — instruments each TB with:
+ * Translation block callback -- instruments each TB with:
  *   1. A BBL callback on the first instruction
  *   2. Memory callbacks on each instruction
  */
@@ -3103,7 +3103,7 @@ static void tb_trans_cb(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
 
     /* Allocate persistent userdata for this TB's callbacks.
      * QEMU may re-translate TBs, so we use the cached BblInfo.
-     * The TbUserdata is leaked intentionally — it persists for the
+     * The TbUserdata is leaked intentionally -- it persists for the
      * lifetime of the process. */
     TbUserdata* tud = (TbUserdata*)malloc(sizeof(TbUserdata));
     tud->bblInfo = bblInfo;
@@ -3190,7 +3190,7 @@ static void tb_trans_cb(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
 
     bool bbl_registered = false;
 
-    /* Track in-TB mov $imm, %rcx → xchg %rcx, %rcx pairs.
+    /* Track in-TB mov $imm, %rcx -> xchg %rcx, %rcx pairs.
      * prev_magic_op is local (no cross-vCPU race).  Cross-TB communication
      * is deferred to execution time via per-vCPU pending_magic_op[]. */
     uint64_t prev_magic_op = 0;
@@ -3212,7 +3212,7 @@ static void tb_trans_cb(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
                     || prev_opcode == ZSIM_MAGIC_OP_WORK_BEGIN
                     || prev_opcode == ZSIM_MAGIC_OP_WORK_END
                     || isMpiMagicOp(prev_magic_op)) {
-                /* In-TB case: mov+xchg in same TB — opcode known at
+                /* In-TB case: mov+xchg in same TB -- opcode known at
                  * translation time, passed as fallback via userdata.  The
                  * callback reads the real %rcx at execution time (R_REGS) as
                  * the authoritative value so runtime-built sizes are captured. */
@@ -3220,7 +3220,7 @@ static void tb_trans_cb(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
                     insn, magic_insn_exec_cb, QEMU_PLUGIN_CB_R_REGS,
                     (void *)(uintptr_t)prev_magic_op);
             } else {
-                /* Cross-TB case: no preceding mov in this TB — read the real
+                /* Cross-TB case: no preceding mov in this TB -- read the real
                  * %rcx at execution time (R_REGS); the per-vCPU pending slot
                  * serves only as a fallback. */
                 qemu_plugin_register_vcpu_insn_exec_cb(
@@ -3234,9 +3234,9 @@ static void tb_trans_cb(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
 
         /* Check if this instruction is mov $imm, %rcx/%ecx (magic op setup).
          * Three possible encodings:
-         *   b9 xx xx xx xx          — mov $imm32, %ecx  (5 bytes)
-         *   48 c7 c1 xx xx xx xx   — mov $imm32, %rcx  (7 bytes)
-         *   48 b9 xx*8             — movabs $imm64, %rcx (10 bytes) */
+         *   b9 xx xx xx xx          -- mov $imm32, %ecx  (5 bytes)
+         *   48 c7 c1 xx xx xx xx   -- mov $imm32, %rcx  (7 bytes)
+         *   48 b9 xx*8             -- movabs $imm64, %rcx (10 bytes) */
         prev_magic_op = 0;
         last_magic_mov_insn = NULL;
         if (insn_sz == 5 && bytes[0] == 0xb9) {
@@ -3247,7 +3247,7 @@ static void tb_trans_cb(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
             prev_magic_op = (uint32_t)bytes[3] | ((uint32_t)bytes[4] << 8)
                           | ((uint32_t)bytes[5] << 16) | ((uint32_t)bytes[6] << 24);
         } else if (insn_sz == 10 && bytes[0] == 0x48 && bytes[1] == 0xb9) {
-            /* movabs $imm64,%rcx — read the FULL 8-byte immediate. The high 32
+            /* movabs $imm64,%rcx -- read the FULL 8-byte immediate. The high 32
              * bits carry the optional WORK_BEGIN payload size; reading only the
              * low 4 bytes (as before) silently dropped it, so sized transfers
              * were charged as 0 bytes. Cast each byte to uint64_t before shifting
@@ -3285,7 +3285,7 @@ static void tb_trans_cb(qemu_plugin_id_t id, struct qemu_plugin_tb *tb) {
 }
 
 /**
- * vCPU init callback — assigns tid but defers SimThreadStart until first
+ * vCPU init callback -- assigns tid but defers SimThreadStart until first
  * execution callback, so we know the thread's domain (HOST vs DEVICE).
  */
 static void vcpu_init_cb(qemu_plugin_id_t id, unsigned int vcpu_index) {
@@ -3309,7 +3309,7 @@ static void vcpu_init_cb(qemu_plugin_id_t id, unsigned int vcpu_index) {
 }
 
 /**
- * vCPU exit callback — thread finish.
+ * vCPU exit callback -- thread finish.
  */
 static void vcpu_exit_cb(qemu_plugin_id_t id, unsigned int vcpu_index) {
     if (vcpu_index < MAX_VCPUS && vcpu_is_internal[vcpu_index]) return;
@@ -3328,7 +3328,7 @@ static void vcpu_exit_cb(qemu_plugin_id_t id, unsigned int vcpu_index) {
 }
 
 /**
- * Syscall callback — scheduler leave/join around blocking syscalls.
+ * Syscall callback -- scheduler leave/join around blocking syscalls.
  * For thread-creating syscalls (clone/fork), we don't need special
  * handling since QEMU fires vcpu_init for new threads.
  */
@@ -3353,14 +3353,14 @@ static void syscall_cb(qemu_plugin_id_t id,
 
     /* For potentially blocking syscalls, use the scheduler's adaptive
      * syscallLeave mechanism (matching ZSim's Pin-mode behavior):
-     * - Short/non-blocking syscalls get a "fake leave" — the barrier
+     * - Short/non-blocking syscalls get a "fake leave" -- the barrier
      *   stays in RUNNING state, avoiding the expensive leave/join cycle.
      * - Truly blocking syscalls are detected by the watchdog thread,
      *   which forces a real leave after a timeout.
      * This prevents barrier state corruption from the real leave/join
      * cycle while still handling blocking syscalls correctly. */
     switch (num) {
-        case 60:  /* exit — single thread */
+        case 60:  /* exit -- single thread */
             /* A worker (non-main) thread finishing must NOT end the sim and
              * must NOT be torn down here: vcpu_exit_cb already does
              * leave()+SimThreadFini() when the vCPU exits. Ending here
@@ -3368,7 +3368,7 @@ static void syscall_cb(qemu_plugin_id_t id,
              * the scheduler gid (scheduler.h:234 assert). */
             if (tid != 0) return;
             /* main thread: fall through to terminate the whole simulation */
-        case 231: /* exit_group — whole process */
+        case 231: /* exit_group -- whole process */
             info("Caught exit syscall (%ld), terminating simulation", (long)num);
             zinfo->sched->leave(procIdx, tid, cid);
             SimEnd();
@@ -3382,14 +3382,14 @@ static void syscall_cb(qemu_plugin_id_t id,
         case 45:  /* recvfrom */
         case 47:  /* recvmsg */
         case 202: /* futex */
-        case 230: /* clock_nanosleep — glibc >= 2.31 implements ALL sleeps
+        case 230: /* clock_nanosleep -- glibc >= 2.31 implements ALL sleeps
                    * with this, never plain nanosleep(35) */
         case 232: /* epoll_wait */
         case 270: /* pselect6 */
-        case 271: /* ppoll — glibc poll() uses this on modern kernels */
+        case 271: /* ppoll -- glibc poll() uses this on modern kernels */
         case 281: /* epoll_pwait */
         case 288: /* accept4 */
-        case 449: /* futex_waitv — glibc >= 2.35 pthread waits use this on
+        case 449: /* futex_waitv -- glibc >= 2.35 pthread waits use this on
                    * kernels >= 5.16. Without a syscallLeave here a guest
                    * thread blocking in it kept its core slot and starved the
                    * phase barrier: cosim hung at device-thread startup with
@@ -3424,7 +3424,7 @@ static void syscall_cb(qemu_plugin_id_t id,
 }
 
 /**
- * Plugin exit — dump stats and clean up.
+ * Plugin exit -- dump stats and clean up.
  */
 static void plugin_exit(qemu_plugin_id_t id, void *userdata) {
     (void)userdata;
@@ -3512,7 +3512,7 @@ int qemu_plugin_install(qemu_plugin_id_t id,
     snprintf(mkdirCmd, sizeof(mkdirCmd), "mkdir -p %s", outputDir);
     (void)system(mkdirCmd);
 
-    /* Initialize vcpu→tid mapping and internal-vCPU tracking */
+    /* Initialize vcpu->tid mapping and internal-vCPU tracking */
     for (uint32_t i = 0; i < MAX_VCPUS; i++) {
         vcpuToTid[i] = UNINITIALIZED_CID;
         vcpu_is_internal[i] = false;
@@ -3576,7 +3576,7 @@ int qemu_plugin_install(qemu_plugin_id_t id,
         procIdx = argProcIdx;
     }
 
-    sim_initialized = true;  // mark init complete — subsequent vCPUs are application threads
+    sim_initialized = true;  // mark init complete -- subsequent vCPUs are application threads
 
     lineBits = __builtin_ctz(zinfo->lineSize);
     procMask = ((uint64_t)procIdx) << 32;
@@ -3652,7 +3652,7 @@ int qemu_plugin_install(qemu_plugin_id_t id,
         } else if (dynamic_cast<NullCore*>(zinfo->cores[i])) {
             device_mask[i] = true;
         } else {
-            /* OoO, Simple, Timing — valid host cores */
+            /* OoO, Simple, Timing -- valid host cores */
             host_mask[i] = true;
         }
     }
@@ -3683,7 +3683,7 @@ int qemu_plugin_install(qemu_plugin_id_t id,
     for (auto b : host_mask) if (b) { has_host = true; break; }
 
     if (!has_device) {
-        /* Non-cosim mode — no ALU/Null cores found.
+        /* Non-cosim mode -- no ALU/Null cores found.
          * Place all cores in host mask (unchanged behavior). */
         for (uint32_t i = 0; i < zinfo->numCores; i++) {
             host_mask[i] = true;

@@ -218,11 +218,11 @@ struct GlobSimInfo {
         // ROI's epoch boundaries run-to-run. Pre-ROI traffic is not recorded.
         volatile uint64_t mpiNocRoiBasePhase = 0;
         // Real datasheet AGGREGATE sustainable DRAM bandwidth (MB/s) =
-        // per-channel × channels (from Ramulator getBandwidth()). The detailed
+        // per-channel x channels (from Ramulator getBandwidth()). The detailed
         // NoC model uses this to cap effective DRAM bandwidth at the channel
         // bottleneck via a shared M/D/c queue across all bank-MIs, so detailed
         // is an accurate DRAM ground truth (without it, num_banks independent
-        // per-MI M/D/1 servers permit ~10× the real DDR4 channel BW). 0 = no
+        // per-MI M/D/1 servers permit ~10x the real DDR4 channel BW). 0 = no
         // cap (pre-fix behavior / non-DRAM).
         uint64_t nocAggBandwidthMBs = 0;
         // 1.10.6: time to reverse the shared channel DQ bus, ns x100 (0 = off)
@@ -273,7 +273,7 @@ struct GlobSimInfo {
 
         // M:N PE-to-memory-org mapping
         uint32_t connectionMode = 0;     // 0=SHARED_IO, 1=SEPARATE_ENDPOINTS
-        uint32_t localLinkLatency = 0;   // cycles for PE↔local-mem hop
+        uint32_t localLinkLatency = 0;   // cycles for PE<->local-mem hop
         // MC placement: false = with_core (MC co-located with core/cache cluster),
         // true = standalone (MC is its own NoC endpoint, one per memory org). When
         // true, even a local PE access incurs an extra NoC hop to reach the MC.
@@ -285,7 +285,7 @@ struct GlobSimInfo {
         // = ceil(avgHops * perHop) + (flitsPerPacket - 1)  [includes serialization]
         uint32_t nocAvgOneWayLatency = 0;
 
-        // NoC bisection bandwidth (in links) — kept for backward compat
+        // NoC bisection bandwidth (in links) -- kept for backward compat
         uint32_t nocBisectionLinks = 1;
 
         // NoC physical parameters for topology-aware simple model
@@ -293,7 +293,7 @@ struct GlobSimInfo {
         uint32_t nocPerHopCycles = 2;      // router_lat + link_lat
         uint32_t nocLinkWidthBits = 128;   // link width = flit size in bits
         uint32_t nocVcsPerVnet = 4;        // VCs per virtual network
-        uint32_t nocAvgHopsTimes100 = 100; // avgHops × 100 (fixed-point, avoids float in shm)
+        uint32_t nocAvgHopsTimes100 = 100; // avgHops x 100 (fixed-point, avoids float in shm)
         uint32_t nocNumNodes = 16;         // total network nodes
 
         // Topology-aware contention model parameters

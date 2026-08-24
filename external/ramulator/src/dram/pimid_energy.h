@@ -116,8 +116,14 @@ struct IDDSpec {
  * per-access source and does NOT mirror the upstream command-driven presets.
  */
 //   DDR5  Micron 16Gb DDR5-4800 (VDD 1.1);  DDR4 Micron 8Gb DDR4-2400 (1.2);
-//   DDR3  Micron 4Gb DDR3L-1600 (1.35);     LPDDR5 Micron 12Gb LPDDR5-6400 (1.05);
-//   GDDR6 Micron 8Gb GDDR6-14000 (1.35);    HBM2 JESD235 (1.2); HBM3 JESD238 (1.1).
+//   DDR3  Micron 4Gb DDR3L-1600 (1.35);     GDDR6 Micron 8Gb GDDR6-14000 (1.35);
+//   HBM2  JESD235 (1.2);                    HBM3 JESD238 (1.1);
+//   LPDDR5 Micron 8Gb Automotive LPDDR5-6400, MT62F512M32D2/MT62F1G32D4
+//          (315b Rev.D, VDD2H 1.05) -- 1.11.63; was "Micron 12Gb LPDDR5-6400",
+//          a part this tree does not hold at that speed grade (the held 12 Gb
+//          Y4BM is graded 7500/8533 Mb/s). This is the only row whose named
+//          part is HELD in misc/ and re-read cell by cell; the other six names
+//          remain unverifiable here (no such datasheet is in the tree).
 /* 1.11.57 (latent F041): THE DIE DENSITIES ABOVE ARE THE IDD PART CLASSES, NOT
  * THE SIMULATED ORGANISATION. src/main.cpp emits DDR5_8Gb_x8 and DDR3_8Gb_x8,
  * against the 16 Gb and 4 Gb classes named on those two rows, so a reader who
@@ -132,21 +138,107 @@ inline IDDSpec iddFor(const std::string& tech) {
     /* idd2p (last column). 1.11.56 (audit D006): this column is APPROXIMATE
      * and is the one column in the table that is not a datasheet read. The
      * DDR/LPDDR/GDDR entries are rounded IDD2P fast-exit figures for the part
-     * classes named above (DDR5-4800 ~20 mA, DDR4-2400 ~25, DDR3L ~18, LPDDR5
-     * ~4 -- the deep mobile power-down class, GDDR6 ~30); the HBM entries are
+     * classes named above (DDR5-4800 ~20 mA, DDR4-2400 ~25, DDR3L ~18,
+     * GDDR6 ~30); the HBM entries are
      * NOT read from a part at all, they were set as "~30-40% of IDD2N per JESD
      * precharge-standby-powerdown deltas", and HBM2's 17 -> 7 is 41.2%, i.e.
      * outside the band that sentence claims. The column is live: it is the
      * IDD2P baseline backgroundUnitMW() uses under pg_enabled, so it moves the
      * printed Background line whenever measured idle residency is non-zero.
      * Keep it, but do not quote it as sourced -- the consumer emits a note. */
-    if (tech == "DDR5")   return {1.1, 55,34,42,148,168,120, 295.0, 3900.0, 1, 20};
+    /* 1.11.63 (calibration): FOUR trfc_ns values and the whole LPDDR5 IDD
+     * column. Each is tagged in place below; the reasoning, once:
+     *
+     * trfc_ns is the numerator of the refresh duty in stateWithRefreshMW() and
+     * refreshMW(), so every one of these is live on the printed Background and
+     * Refresh lines. It must describe the SAME part the timing layer refreshes
+     * -- the org preset src/main.cpp emits -- not the part the IDD column came
+     * from. Four of the seven rows described a different die than their own
+     * technology's impl file did.
+     *
+     *   DDR3   260.0 -> 350.0  SOURCED. JESD79-3D Table 59 "Refresh parameters
+     *          by device density", clause 12.2, printed p.156 (PDF p.170):
+     *          tRFC = 90/110/160/300/350 ns at 512Mb/1/2/4/8 Gb. The simulated
+     *          org is DDR3_8Gb_x8, so 350 ns. 260 was the 4 Gb column of
+     *          Ramulator's own table -- and that column was itself wrong (300
+     *          in Table 59); it is fixed in DDR3.cpp in the same release.
+     *          DDR3 refresh was priced at 74% of the standard's occupancy.
+     *
+     *   HBM3   160.0 -> 260.0  SOURCED. JESD238B.01 Table 93, printed p.165
+     *          (PDF p.179): tRFCab = 260 ns at 4 Gb/channel (both of its
+     *          realisations, 8 Gb/die 8-High and 16 Gb/die 4-High). The
+     *          simulated org is HBM3_4Gb. 160 ns appears at NO HBM3 density --
+     *          the tabulated values are 260/310/350/410/450 and TBD -- and it
+     *          contradicted HBM3.cpp's own tRFC table, which already had 260.
+     *
+     *   DDR5   295.0 -> 195.0  DERIVED-FROM-IDENTITY, not sourced. JESD79-5 is
+     *          NOT held by this tree, so no external check is possible; but
+     *          the tree's own DDR5.cpp tRFC_TABLE gives tRFC1 = 195 ns at 8 Gb
+     *          and 295 ns at 16 Gb, and the emitted org is DDR5_8Gb_x8. The
+     *          energy layer was refreshing a 16 Gb die while the timing layer
+     *          refreshed an 8 Gb one; they cannot both be right, and the
+     *          identity that settles it -- both layers must describe the org
+     *          actually simulated -- needs no standard. The provenance line
+     *          below still names the 16 Gb DDR5-4800 part the IDD CURRENTS
+     *          were read from; that stays a stated mismatch (F041).
+     *
+     *   HBM2   160.0 -> 260.0  DERIVED-FROM-IDENTITY, not sourced. The JESD235
+     *          family text is NOT held (misc/ carries only the HBM ballout
+     *          spreadsheet), so no external check is possible; but HBM2.cpp's
+     *          own tRFC_TABLE gives 260 ns at the emitted HBM2_4Gb density.
+     *          The two layers of one technology disagreed by 1.6x.
+     *
+     * NOT touched, deliberately, and each for a stated reason:
+     *   DDR4 350.0. The audit marks the whole DDR4 energy row UNCHECKABLE
+     *     (JESD79-4 is not held) and does not flag this one, so it stays. For
+     *     the record it is NOT identical to DDR4.cpp's tRFC1 at 8 Gb, which is
+     *     360 ns -- a 2.8% gap, an order of magnitude smaller than the four
+     *     mismatches fixed above, and 350 ns is a real figure for the Micron
+     *     8 Gb DDR4-2400 class the IDD column came from. Flagged here so the
+     *     next pass with JESD79-4 in hand can settle it rather than rediscover
+     *     it.
+     *   GDDR6 220.0. JESD250D publishes no tRFC at all (Table 73 printed p.162
+     *     leaves tRFCab and tRFCpb blank) and no GDDR6 vendor sheet is held.
+     *   every trefi_ns. All are already correct or UNCHECKABLE. The
+     * LPDDR5 trefi 3904.0 disagrees with LPDDR5.cpp's tREFI_BASE 3906 by 2 ns;
+     * both are UNCHECKABLE (deferred to General LPDDR5 Spec 3 / JESD209-5,
+     * neither held) so neither is moved. */
+    if (tech == "DDR5")   return {1.1, 55,34,42,148,168,120, 195.0, 3900.0, 1, 20};
     if (tech == "DDR4")   return {1.2, 58,35,42,140,150,155, 350.0, 7800.0, 1, 25};
-    if (tech == "DDR3")   return {1.35,60,32,45,175,180,210, 260.0, 7800.0, 1, 18};
-    if (tech == "LPDDR5") return {1.05,32,18,24,110,120, 90, 210.0, 3904.0, 1,  4};
+    if (tech == "DDR3")   return {1.35,60,32,45,175,180,210, 350.0, 7800.0, 1, 18};
+    /* 1.11.63 (calibration): the LPDDR5 IDD column is re-based on a HELD part
+     * datasheet. Every one of the seven currents changed.
+     * SOURCE: misc/Micron_LPDDR5_MT62F_datasheet.pdf -- Micron Automotive
+     * LPDDR5 SDRAM, part numbers MT62F512M32D2 / MT62F1G32D4 (315b, Rev.D
+     * 4/2021), 8 Gb die -- Table 7 "IDD Parameters - Single Die", pp.14-15,
+     * the VDD2H supply column at 6400 Mb/s, AIT/AAT temperature grade:
+     *     IDD02H   45.0 mA   (was 32)     IDD4W2H  310 mA   (was 120)
+     *     IDD2N2H  30.0 mA   (was 18)     IDD52H   170 mA   (was  90)
+     *     IDD3N2H  39.0 mA   (was 24)     IDD2P2H    2.5 mA (was   4)
+     *     IDD4R2H  372  mA   (was 110)
+     * Table 7's own note 2 reads "BG mode. DVFSC and DVFSQ disabled", which is
+     * the organization LPDDR5.cpp models (4 bank groups x 4 banks), and note 1
+     * that the values are maxima over process/temperature/voltage.
+     * WHY THIS PART: it is the closest held document to what is simulated --
+     * same 8 Gb die density as the emitted LPDDR5_8Gb_x16 org, same 6400 Mb/s
+     * speed grade as the LPDDR5_6400 timing preset. The row's old provenance
+     * (12 Gb LPDDR5-6400) is not reachable: the held 12 Gb part, Y4BM
+     * (misc/Micron_05092023_...y4bm...pdf), is graded 7500/8533 Mb/s and has
+     * no 6400 column at all. No held datasheet produced the old row -- its
+     * standby trio sat within ~15% of the Y4BM part while its burst currents
+     * were 3-4x below BOTH held parts.
+     * MOVES NUMBERS: read/write burst power roughly triples (IDD4R 3.4x,
+     * IDD4W 2.6x), activate 1.4x, refresh 1.9x, and precharge power-down drops
+     * to 0.6x. The vdd 1.05 stays: it is VDD2H typ, printed on p.1 of every
+     * held Micron LPDDR5/5X datasheet. STILL UNMODELLED and stated: LPDDR5 is
+     * a three-rail part (VDD1 1.8 V, VDD2H 1.05 V, VDDQ 0.5 V) and only VDD2H
+     * is priced here -- the VDD1 draw (IDD01 2.9 mA, IDD4R1 7.2 mA, ...) and
+     * the VDDQ draw (IDD4RQ 106 mA) are not in this struct's shape. The
+     * provenance line above is updated to name the part actually used. */
+    if (tech == "LPDDR5") return {1.05,45,30,39,372,310,170, 210.0, 3904.0, 1,  2.5};
     if (tech == "GDDR6")  return {1.35,70,45,60,210,230,180, 220.0, 1900.0, 1, 30};
-    if (tech == "HBM3")   return {1.1, 30,18,22, 90,100, 70, 160.0, 3900.0, 16, 7};
-    if (tech == "HBM2")   return {1.2, 28,17,21, 80, 90, 65, 160.0, 3900.0, 8,  7};
+    if (tech == "HBM3")   return {1.1, 30,18,22, 90,100, 70, 260.0, 3900.0, 16, 7};
+    if (tech == "HBM2")   return {1.2, 28,17,21, 80, 90, 65, 260.0, 3900.0, 8,  7};
     /* 1.11.57 (latent D007): unknown -> DDR4 class, and it says so. This
      * governs the array activate/precharge and burst energy, the background
      * standby power and the refresh line for the whole run. */
@@ -342,11 +434,16 @@ inline double arrayWriteNJ(const std::string& tech, double tRC, double tRAS,
  *    HIGH -- the mirror of POD -- duty ~0.5 for unbiased data, loop = driver
  *    pull-up + terminator. The 0.5 V rail is what makes it cheap: against
  *    DDR5's 1.1 V that is 4.8x less V^2 before resistance divides.
- *    RESIDUAL, stated: Rtt = 240 ohm (RZQ, the LPDDR4/5 ODT reference) is the
- *    one UNSOURCED input. The part datasheet defers its ohm table to Micron's
- *    separate "General LPDDR5 Specifications 2: AC/DC and Interface", which we
- *    do not have. D12's IDD4R/IDD4W calibration can pin it -- the IDD tables
- *    ARE in hand (misc/MICT-S-A0025741931-1.pdf).
+ *    RESIDUAL CLOSED (1.11.63, JESD209-5C acquired): the standard's own MR11
+ *    definition (Table 84, printed p.144) gives "000B: Disable (Default)" for
+ *    DQ ODT -- the JEDEC default operating point is UNTERMINATED, and the
+ *    RZQ/1..6 ladder (RZQ = 240 ohm -> 240/120/80/60/48/40) is a controller
+ *    option with no default rung. So the pre-1.11.26 "returns 0" behaviour
+ *    was RIGHT for the default configuration, for a reason nobody had the
+ *    document to state: current flows only when a controller has enabled
+ *    ODT. rtt = 0 in the row above encodes the default; Micron's IDD
+ *    conditions are ODT-off, so the array-energy layer describes the same
+ *    configuration by construction.
  *  HBM: 0, and now with a normative citation rather than physics reasoning:
  *    JESD238B.01 cl.9.1 measures HBM3 read-burst current with "IOUT = 0mA;
  *    Ctotal = 2.5 pF" -- an unterminated capacitive load.
@@ -355,8 +452,46 @@ inline double arrayWriteNJ(const std::string& tech, double tRC, double tRAS,
  * stream. DBIac is enabled during JEDEC IDD measurement and deliberately
  * skews the LOW fraction, so the true duty is data-dependent; D12's IDD
  * cross-check is what pins that residual. */
+/* 1.11.63 (R7, user ruling 2026-08-24): READ/WRITE SPLIT LOOPS. The single
+ * (rtt, rpd) pair this function carried since 1.11.26 priced one loop for
+ * both directions, with values (48/40 for DDR4/DDR5) that match no JEDEC
+ * default and no vendor IDD condition -- and DDR5's citation ("POD11") named
+ * a standard that DOES NOT EXIST (the POD family is POD18/15/135/125/12/10;
+ * all six are in misc/). The two directions are different circuits:
+ *   READ : the DRAM drives (its calibrated RON) into the receiving side's
+ *          termination (RTT_NOM class).
+ *   WRITE: the controller drives into the DRAM's write termination (RTT_WR
+ *          class, a deliberately stronger setting in every DDR family).
+ * The values below are the vendors' own IDD MEASUREMENT CONDITIONS -- the
+ * register settings the array-energy IDD rows are measured under, so the
+ * two layers describe the same configuration by citation:
+ *   DDR3L : RON=RZQ/7=34, RTT_NOM=RZQ/6=40, RTT_WR=RZQ/2=120
+ *           (Micron MT41K p.32: "RON set to RZQ/7 (34); RTT,nom set to
+ *            RZQ/6 (40); RTT(WR) set to RZQ/2 (120)")
+ *   DDR4  : same trio (Micron MT40A p.315 IDD conditions)
+ *   DDR5  : same trio (Micron DDR5 core sheet p.453 IDD notes: MR5 RZQ/7
+ *           both drivers, MR35 RTT_NOM_WR=RTT_NOM_RD=RZQ/6, MR34
+ *           RTT_WR=RZQ/2; RTT_PARK/CA/CS/CK disabled)
+ *   GDDR6 : read loop = pull-down 40 + termination-characteristic 60
+ *           (Samsung K4Z80325BC p.166: "Pull-Down Characteristic at 40
+ *           ohms, Pull-Up/Termination Characteristic at 60 ohms"); write
+ *           loop = 40 + 120 (p.144 IDD conditions: "All ODTs are enabled
+ *           with ZQ/2", ZQ=240). MR1 default is termination DISABLED
+ *           (p.49) -- the IDD operating point is the one priced, for
+ *           layer-consistency with the IDD-sourced array energy.
+ *   LPDDR5: 0 both directions (JESD209-5C Tbl 84 p.144: DQ ODT Disable
+ *           (Default); Micron IDD conditions are ODT-off).
+ * CONTROLLER-SIDE WRITE DRIVER, now sourced as a RANGE with the applied
+ * value inside it: Intel 743844-015 (misc/, Vol.1 of the 13th/14th-gen
+ * datasheet) Table 87 p.208 gives host RON_UP(DQ) = RON_DN(DQ) = 30..50
+ * ohm for DDR5, and Table 86 p.207 the same 30..50 for DDR4 (host
+ * RODT(DQ): 30..240 / 40..200). The applied 34 ohm -- the DRAM-class
+ * RZQ/7 value -- lies inside that host range; per the band doctrine the
+ * range is stated here and the point chosen within it (its ends move the
+ * write loop (34+120=154) by only -3%/+10%).
+ * The override prices BOTH directions at the user's stated pJ/bit. */
 inline double terminationNJ(const std::string& tech, double term_override_pJ_per_bit,
-                            double rate_mts) {
+                            double rate_mts, bool is_write) {
     if (term_override_pJ_per_bit >= 0.0)
         return term_override_pJ_per_bit * 512.0 / 1000.0;
 
@@ -368,24 +503,32 @@ inline double terminationNJ(const std::string& tech, double term_override_pJ_per
      * VDDQ. So current flows while the driver holds the line HIGH, duty ~0.5
      * for random data, across a loop of driver pull-up plus terminator. */
     enum Scheme { POD, SSTL, LVSTL, NONE };
-    Scheme sch; double vddq, rtt, rpd;   // 1.11.57 (D017): mtps is the caller's
+    Scheme sch; double vddq, ron_rd, rtt_rd, ron_wr, rtt_wr;   // R7 split; rate is the caller's
     /* 1.11.46 (FIX-PRE-FLEET L164): ONE PART per technology. The IDD row
      * above is sourced from Micron 4Gb DDR3L-1600 -- a 1.35 V part -- while
      * this line priced a 1.5 V SSTL-15 DDR3. Array and termination now
      * describe the SAME silicon: DDR3L, SSTL-135 (JESD79-3-1, the DDR3L
      * addendum keeps RZQ=240 and the T38/T41 RTT/RON tables at 1.35 V). */
-    if      (tech=="DDR3")   {sch=SSTL; vddq=1.35; rtt=40;  rpd=34;}   // SSTL-135; JESD79-3-1 + T38/T41
-                                                                       // (RTT40=RZQ/6) + T38
-                                                                       // (RON34=RZQ/7), RZQ=240
+    if      (tech=="DDR3")   {sch=SSTL; vddq=1.35; ron_rd=34; rtt_rd=40; ron_wr=34; rtt_wr=120;}
+                                                                       // SSTL-135 (JESD79-3-1 T38/T41, RZQ=240);
+                                                                       // trio 34/40/120 = MT41K p.32 IDD conditions
     /* 1.11.52 (audit D002): the rate is the SIMULATED part's rate (DDR4-2400:
      * Ramulator preset DDR4_2400R and the architecture object), not a
      * different bin. POD12 (JESD8-24) is the interface standard and applies
      * at either rate, so vddq/rtt/rpd are untouched. 1.11.57 (D017): that rate
      * now arrives as an argument, from the one table that owns it. */
-    else if (tech=="DDR4")   {sch=POD;  vddq=1.2;  rtt=48;  rpd=40;}   // POD12  (JESD8-24)
-    else if (tech=="DDR5")   {sch=POD;  vddq=1.1;  rtt=48;  rpd=40;}   // POD11  (same family)
-    else if (tech=="GDDR6")  {sch=POD;  vddq=1.35; rtt=60;  rpd=40;}   // POD135 (JESD8-21C, Cl.D:
-                                                                       // RTT programmable 48/60 via MR1 (JESD250D p.59))
+    else if (tech=="DDR4")   {sch=POD;  vddq=1.2;  ron_rd=34; rtt_rd=40; ron_wr=34; rtt_wr=120;}
+                                                                       // POD12 (JESD8-24); trio = MT40A p.315 IDD conds
+    else if (tech=="DDR5")   {sch=POD;  vddq=1.1;  ron_rd=34; rtt_rd=40; ron_wr=34; rtt_wr=120;}
+                                                                       // POD topology per JESD79-5 at 1.1 V (no separate
+                                                                       // JESD8-* exists for 1.1 V -- the old "POD11" tag
+                                                                       // named a nonexistent standard); trio = Micron
+                                                                       // DDR5 core sheet p.453 IDD conditions
+    else if (tech=="GDDR6")  {sch=POD;  vddq=1.35; ron_rd=40; rtt_rd=60; ron_wr=40; rtt_wr=120;}
+                                                                       // POD135 (JESD8-30A.01 family is POD125; GDDR6
+                                                                       // at 1.35 V per JESD250D); rd 40+60 = Samsung
+                                                                       // K4Z80325BC p.166 driver/termination chars;
+                                                                       // wr 120 = p.144 IDD "All ODTs ... ZQ/2"
     /* 1.11.26: was NONE ("LVSTL, unterminated") -- wrong. LPDDR5 does
      * terminate; it terminates to VSS. VDDQ 0.5 V is the ODT-ON rail
      * (0.30 V is the ODT-off rail), RON 40 ohm from the same datasheets.
@@ -400,7 +543,13 @@ inline double terminationNJ(const std::string& tech, double term_override_pJ_per
      * 280-ohm loop (a 2x error in it moves LPDDR5 termination energy
      * ~1.75x). It was disclosed only in a comment 45 lines away; the
      * consumer now reports it at the point of use (see terminationNJ). */
-    else if (tech=="LPDDR5") {sch=LVSTL; vddq=0.5; rtt=240; rpd=40;}
+    /* 1.11.63 (calibration): JESD209-5C Table 84 p.144 -- DQ ODT default is
+     * DISABLE. rtt = 0 is the sentinel for "no DC termination path"; the
+     * LVSTL branch below prices zero termination current for it and states
+     * the citation. The RZQ/1..6 ladder (240..40 ohm) is a controller
+     * option, not a default; users modelling ODT-on systems override via
+     * power.termination_pj_per_bit. */
+    else if (tech=="LPDDR5") {sch=LVSTL; vddq=0.5; ron_rd=40; rtt_rd=0; ron_wr=40; rtt_wr=0;}
     else if (tech.substr(0,3)=="HBM") return 0.0;                      // interposer (JESD238B cl.9.1)
     else {
         /* 1.11.57 (latent D007): unknown -> POD12/DDR4 electricals, said out
@@ -410,7 +559,7 @@ inline double terminationNJ(const std::string& tech, double term_override_pJ_per
          * today. */
         announceUnknownTech("terminationNJ", tech,
                             "the DQ termination energy per 64 B access");
-        sch=POD;  vddq=1.2;  rtt=48;  rpd=40;
+        sch=POD;  vddq=1.2;  ron_rd=34; rtt_rd=40; ron_wr=34; rtt_wr=120;   // DDR4 electricals, said out loud
     }
     if (sch == NONE) return 0.0;
 
@@ -427,24 +576,35 @@ inline double terminationNJ(const std::string& tech, double term_override_pJ_per
         return 0.0;
     }
     const double t_bit_s = 1.0 / (rate_mts * 1e6);
+    const double r_drv = is_write ? ron_wr : ron_rd;
+    const double r_trm = is_write ? rtt_wr : rtt_rd;
     double e_per_bit_pJ;
     if (sch == LVSTL) {
         /* Ground-referenced: the loop conducts while the line is HIGH, so the
          * duty is the complement of POD's but numerically the same 0.5 for
          * unbiased data. Loop = driver pull-up + terminator to VSS.
          * The low rail is what makes this cheap: 0.5 V against DDR5's 1.1 V
-         * is a 4.8x reduction in V^2 before the resistance divides. */
+         * is a 4.8x reduction in V^2 before the resistance divides.
+         * 1.11.63: rtt = 0 means ODT DISABLED (JESD209-5C Tbl 84 p.144:
+         * "000B: Disable (Default)") -- the DC loop does not exist, so the
+         * termination term is zero, NOT a divide into (rpd + 0): that would
+         * price a 40-ohm dead short and be off by the full driver current.
+         * Switching energy on the unterminated line is capacitive and lives
+         * in the IDD4R/IDD4W rows, same as the HBM return below. */
+        if (r_trm <= 0.0) return 0.0;
         const double kHighDuty = 0.5;
-        e_per_bit_pJ = kHighDuty * (vddq * vddq) / (rpd + rtt) * t_bit_s * 1e12;
+        e_per_bit_pJ = kHighDuty * (vddq * vddq) / (r_drv + r_trm) * t_bit_s * 1e12;
     }
     else if (sch == POD) {
-        // current only while LOW; loop = driver pull-down + terminator
+        // current only while LOW; loop = driver + terminator (R7: the pair
+        // is direction-selected above -- read: DRAM RON + RX RTT_NOM class;
+        // write: controller RON + DRAM RTT_WR class)
         const double kLowDuty = 0.5;
-        e_per_bit_pJ = kLowDuty * (vddq * vddq) / (rpd + rtt) * t_bit_s * 1e12;
+        e_per_bit_pJ = kLowDuty * (vddq * vddq) / (r_drv + r_trm) * t_bit_s * 1e12;
     } else {
         // SSTL: VTT = VDDQ/2 across the loop, drawn in both states
         const double v_term = vddq * 0.5;
-        e_per_bit_pJ = (v_term * v_term) / (rpd + rtt) * t_bit_s * 1e12;
+        e_per_bit_pJ = (v_term * v_term) / (r_drv + r_trm) * t_bit_s * 1e12;
     }
     return e_per_bit_pJ * 512.0 / 1000.0;
 }

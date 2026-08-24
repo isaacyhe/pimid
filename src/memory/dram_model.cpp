@@ -199,12 +199,38 @@ void DRAMModel::initialize() {
         // getBandwidth() is MB/s, decimal. Store bytes/s on the same decimal
         // basis so the print below cannot re-introduce the 1024^3 confusion.
         dram_config_.bandwidth         = ramulator_instance_->getBandwidth() * 1000000ULL;
-        dram_config_.org               = std::to_string(ramulator_instance_->getChipSizeMB()) +
-                                         " MB/device x " +
-                                         std::to_string(ramulator_instance_->getChipsPerRank()) +
-                                         " devices/rank, " +
-                                         std::to_string(ramulator_instance_->getChipIOBits()) +
-                                         "-bit device";
+        /* 1.11.63 (R6-1): NAME THE UNIT chip_size_mb ACTUALLY COUNTS, which is
+         * not the same unit for both families.
+         *
+         * This line multiplied chip_size_mb by chips_per_rank and called the
+         * product an organisation. For the DDR family that is right -- both
+         * fields count DEVICES, and 1024 MB x 8 = 8 GiB is the capacity line
+         * three rows below. For HBM it multiplied a CORE-DIE capacity by a
+         * CHANNEL count (the two fields deliberately count different units;
+         * see the note on the struct), so an HBM3 run printed an implied
+         * capacity 2x its own capacity line, in both directions across the
+         * R6-1 correction: 2048 x 16 = 32 GiB beside 4 GiB before, 1024 x 16 =
+         * 16 GiB beside 8 GiB after. The arithmetic that DOES close for HBM is
+         * core dies, which getPresetDiesPerStack() already answers on the
+         * preset's own two-channels-per-die relation: 1024 MB x 8 dies = 8 GiB
+         * = the capacity line. Printed per family so neither is described in
+         * the other's words. */
+        const int hbm_dies = ramulator_instance_->getPresetDiesPerStack();
+        if (hbm_dies > 0) {
+            dram_config_.org = std::to_string(ramulator_instance_->getChipSizeMB()) +
+                               " MB/core die x " + std::to_string(hbm_dies) +
+                               " dies/stack, " +
+                               std::to_string(ramulator_instance_->getChannelDataBits()) +
+                               "-bit channel x " +
+                               std::to_string(ramulator_instance_->getNumChannels());
+        } else {
+            dram_config_.org = std::to_string(ramulator_instance_->getChipSizeMB()) +
+                               " MB/device x " +
+                               std::to_string(ramulator_instance_->getChipsPerRank()) +
+                               " devices/rank, " +
+                               std::to_string(ramulator_instance_->getChipIOBits()) +
+                               "-bit device";
+        }
     }
     if (dram_arch_) {
         const double core_ghz = dram_arch_->timing.clock_freq_mhz / 1000.0;
@@ -247,6 +273,21 @@ void DRAMModel::initialize() {
 }
 
 void DRAMModel::loadConfig(const std::string& config_path) {
+    /* 1.11.63 (gate 1173C): every co-sim run reached this with an EMPTY
+     * path -- no caller passes an override file -- and printed "Loading
+     * configuration from: " followed by a YAML parse error and "using
+     * defaults". Three alarming lines describing a non-event: this file is
+     * an OPTIONAL override layer, and with no file the configuration is
+     * what initialize() already extracted from the Ramulator presets and
+     * the architecture object. Say that, once, instead of failing to parse
+     * the empty string on every run. A NON-empty path that fails to parse
+     * is still a real warning. */
+    if (config_path.empty()) {
+        std::cout << "[DRAMModel] No override file; Ramulator presets + "
+                     "architecture object supply the configuration."
+                  << std::endl;
+        return;
+    }
     std::cout << "[DRAMModel] Loading configuration from: " << config_path << std::endl;
 
     // Parse YAML configuration file

@@ -23,6 +23,15 @@ class DDR4 : public IDRAM, public Implementation {
       {"DDR4_16Gb_x16", {16<<10,  16, {1, 1, 2, 4, 1<<17, 1<<10}}},
     };
 
+    /* 1.11.63 (calibration): tCK_ps column, DDR4-2933 rows only, 682 -> 681.
+     * set_timing_vals() derives tCK = 2e6/rate and overwrites this column;
+     * 2e6/2933 = 681.9 ps. The column is now a checked mirror of that
+     * derivation (see the equality check in set_timing_vals). The DDR4-2133
+     * rows already carried 937, which is the 2e6/rate value -- what changed
+     * under them is the derivation itself, which used to truncate rate/2 and
+     * produce 938. No other DDR4 field is touched: JESD79-4 is NOT held by
+     * this tree, so the org, the speed-bin rows, the refresh table and the
+     * IDD row are all UNCHECKABLE and stay exactly as they are. */
     inline static const std::map<std::string, std::vector<int>> timing_presets = {
       //   name       rate   nBL  nCL  nRCD  nRP   nRAS  nRC   nWR  nRTP nCWL nCCDS nCCDL nRRDS nRRDL nWTRS nWTRL nFAW  nRFC nREFI nCS,  tCK_ps
       {"DDR4_1600J",  {1600,   4,  10,  10,   10,   28,   38,   12,   6,   9,    4,    5,   -1,   -1,    2,    6,   -1,  -1,  -1,   2,    1250}},
@@ -42,10 +51,10 @@ class DDR4 : public IDRAM, public Implementation {
       {"DDR4_2666U",  {2666,   4,  18,  18,   18,   43,   61,   20,   10,  14,   4,    7,   -1,   -1,    4,    10,  -1,  -1,  -1,   2,    750} },
       {"DDR4_2666V",  {2666,   4,  19,  19,   19,   43,   62,   20,   10,  14,   4,    7,   -1,   -1,    4,    10,  -1,  -1,  -1,   2,    750} },
       {"DDR4_2666W",  {2666,   4,  20,  20,   20,   43,   63,   20,   10,  14,   4,    7,   -1,   -1,    4,    10,  -1,  -1,  -1,   2,    750} },
-      {"DDR4_2933V",  {2933,   4,  19,  19,   19,   47,   66,   22,   11,  16,   4,    8,   -1,   -1,    4,    11,  -1,  -1,  -1,   2,    682} },
-      {"DDR4_2933W",  {2933,   4,  20,  20,   20,   47,   67,   22,   11,  16,   4,    8,   -1,   -1,    4,    11,  -1,  -1,  -1,   2,    682} },
-      {"DDR4_2933Y",  {2933,   4,  21,  21,   21,   47,   68,   22,   11,  16,   4,    8,   -1,   -1,    4,    11,  -1,  -1,  -1,   2,    682} },
-      {"DDR4_2933AA", {2933,   4,  22,  22,   22,   47,   69,   22,   11,  16,   4,    8,   -1,   -1,    4,    11,  -1,  -1,  -1,   2,    682} },
+      {"DDR4_2933V",  {2933,   4,  19,  19,   19,   47,   66,   22,   11,  16,   4,    8,   -1,   -1,    4,    11,  -1,  -1,  -1,   2,    681} },
+      {"DDR4_2933W",  {2933,   4,  20,  20,   20,   47,   67,   22,   11,  16,   4,    8,   -1,   -1,    4,    11,  -1,  -1,  -1,   2,    681} },
+      {"DDR4_2933Y",  {2933,   4,  21,  21,   21,   47,   68,   22,   11,  16,   4,    8,   -1,   -1,    4,    11,  -1,  -1,  -1,   2,    681} },
+      {"DDR4_2933AA", {2933,   4,  22,  22,   22,   47,   69,   22,   11,  16,   4,    8,   -1,   -1,    4,    11,  -1,  -1,  -1,   2,    681} },
       {"DDR4_3200W",  {3200,   4,  20,  20,   20,   52,   72,   24,   12,  16,   4,    8,   -1,   -1,    4,    12,  -1,  -1,  -1,   2,    625} },
       {"DDR4_3200AA", {3200,   4,  22,  22,   22,   52,   74,   24,   12,  16,   4,    8,   -1,   -1,    4,    12,  -1,  -1,  -1,   2,    625} },
       {"DDR4_3200AC", {3200,   4,  24,  24,   24,   52,   76,   24,   12,  16,   4,    8,   -1,   -1,    4,    12,  -1,  -1,  -1,   2,    625} },
@@ -333,8 +342,27 @@ class DDR4 : public IDRAM, public Implementation {
         }
         m_timing_vals("rate") = *dq;
       }
-      int tCK_ps = 1E6 / (m_timing_vals("rate") / 2);
+      /* 1.11.63 (calibration, cross-cutting fix -- same block in all 11 impl
+       * files): ONE AUTHORITY FOR tCK. This derivation is the authority; the
+       * tCK_ps column in the preset rows above is a MIRROR of it and is now
+       * checked against it, so the two cannot silently disagree again. The
+       * audit found the written column dead in every model and contradicting
+       * the derivation in two of them (LPDDR5 1250 vs 312, GDDR6 570 vs 1000).
+       * The divisor was `1E6 / (rate / 2)`, whose integer division threw away
+       * the half-MT/s of odd rates (DDR4-2133 came out 938 ps instead of 937,
+       * DDR4-2933 682 instead of 681); it is now the exact 2e6/rate the column
+       * documents. DDR4 is a DDR-clocked interface -- one data beat per CK
+       * edge, 2 bits/pin per CK -- so 2e6/rate is the CK period. */
+      int preset_tCK_ps = m_timing_vals("tCK_ps");
+      int tCK_ps = 2E6 / m_timing_vals("rate");
       m_timing_vals("tCK_ps") = tCK_ps;
+      if (preset_provided && preset_tCK_ps != tCK_ps) {
+        throw ConfigurationError(
+          "In \"{}\", the timing preset's tCK_ps column says {} ps but the "
+          "rate of {} MT/s derives {} ps (tCK = 2e6/rate). The derivation "
+          "wins at run time, so the column must mirror it -- fix the preset!",
+          get_name(), preset_tCK_ps, m_timing_vals("rate"), tCK_ps);
+      }
 
       // Load the organization specific timings
       int dq_id = [](int dq) -> int {

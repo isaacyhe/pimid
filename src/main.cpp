@@ -1572,6 +1572,15 @@ struct UnifiedConfig {
     std::array<int, 7>    sourced_ladder_w  = {0,0,0,0,0,0,0};
     std::array<double, 7> sourced_ladder_bw = {0,0,0,0,0,0,0};
     bool sourced_ladder_valid = false;
+    /* 1.11.63 (R6-7, audit round 4 B018): which rungs of the adopted ladder
+     * are NOT sourced -- bit i set = rung i came back with a non-positive
+     * width or bandwidth, so applySourcedLadder() skipped it and that level
+     * kept the per-technology PLACEHOLDER table. 0 = every rung is sourced,
+     * which is the case for all four technologies whose ladder is adopted
+     * today. Carried so the announcement can name them and the stated-constant
+     * register can count them, instead of "sourced" being claimed for a
+     * mixture. */
+    int sourced_ladder_placeholder_mask = 0;
     // Real datasheet AGGREGATE sustainable bandwidth (MB/s) of the memory tech,
     // from Ramulator (getBandwidth() = per-channel x channels). Used by the
     // detailed NoC model to cap effective DRAM bandwidth at the channel
@@ -1765,6 +1774,13 @@ struct UnifiedConfig {
      * I_off tables carry 0..100 C rows, so anything outside 273..373 K is
      * refused rather than extrapolated. */
     int temperature_k = 350;     // power.temperature_k (or power.temperature_c)
+    /* 1.11.63 (R7): the termination override this tree has ADVERTISED in
+     * three console messages since 1.11.59 -- "set
+     * power.termination_pj_per_bit" -- had a setter with no caller: the key
+     * was never parsed, so following the advice silently did nothing. Wired
+     * now. <0 = model default (the R7 rd/wr split loops); >=0 prices BOTH
+     * directions at the stated pJ/bit (a user-stated operating point). */
+    double termination_pj_per_bit = -1.0;
     /* 1.11.51 (E17): power-down entry threshold override, ns. <=0 = use the
      * per-generation sourced tXP default; techs with no sourced tXP refuse
      * the gap-based descent rather than inventing a threshold. */
@@ -3166,6 +3182,36 @@ static void reportStatedConstants(const UnifiedConfig& config) {
                     "(none -- no architecture object carries this field)",
                     "the L2 rung of the hierarchy link ladder: its width, its "
                     "bandwidth, and every level-2 crossing derived from them"});
+    /* 1.11.63 (R6-7, audit round 4 B018): COUNT THE PLACEHOLDER RUNGS HERE
+     * TOO. The bank-group row above declares the ONE rung that is always an
+     * assertion. A rung the architecture object failed to supply is the same
+     * kind of thing -- a value in the timing model with no tool behind it --
+     * and it belongs in the register a reader uses to audit the run, not only
+     * in a line of the hierarchy block. Absent (mask 0) on every technology
+     * this tree adopts a ladder for today, which is why the row is
+     * conditional: an empty claim would be noise. */
+    if (config.sourced_ladder_valid && config.sourced_ladder_placeholder_mask != 0) {
+        static const char* kRungNameReg[7] = {
+            "subarray (GSA)", "bank", "bank group", "chip DQ",
+            "rank bus", "channel", "system root" };
+        int n_ph = 0;
+        std::string which;
+        for (int li = 0; li < 7; ++li) {
+            if (config.sourced_ladder_placeholder_mask & (1 << li)) {
+                ++n_ph;
+                if (!which.empty()) which += ", ";
+                which += "L" + std::to_string(li) + " " + kRungNameReg[li];
+            }
+        }
+        rows.push_back({"unsourced hierarchy ladder rungs",
+                        std::to_string(n_ph) + " of 7 (" + which +
+                            ") on the per-technology placeholder table",
+                        "network.levels[].link.width_bits / bandwidth",
+                        "those levels' widths, bandwidths and every crossing "
+                        "derived from them -- and the Garnet layers projected "
+                        "from the same rungs. The run's ladder is a MIXTURE of "
+                        "sourced and placeholder values"});
+    }
     rows.push_back({"bandwidth reference anchor",
                     "HBM3's per-channel and L0 bandwidth, read from its preset",
                     "(derived, not a constant -- listed so the normalisation is visible)",
@@ -3653,6 +3699,30 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
             const int nch = std::max(1, config.hierarchy_dram_channels);
             w[6]  = w[5] * nch;                   bw[6] = bw[5] * nch;
             hierarchy->applySourcedLadder(w, bw);
+            /* 1.11.63 (R6-7, audit round 4 B018): RECORD WHICH RUNGS THE
+             * LADDER DID NOT ACTUALLY SOURCE.
+             *
+             * applySourcedLadder() adopts a rung only `if (wb > 0 && bw > 0)`
+             * and leaves the rest at the per-technology placeholder table --
+             * but sourced_ladder_valid was set unconditionally as soon as it
+             * returned, and the block below announced "from the architecture
+             * object" for all seven. A partially valid ladder would therefore
+             * produce a silent MIXTURE of tool-sourced and placeholder levels
+             * (and, through sourced_ladder_w, of Garnet topology layers) under
+             * a provenance line claiming the whole thing. It is latent today:
+             * every accessor returns a positive pair for the four technologies
+             * whose ladder is adopted, so the mask below comes out 0 and
+             * nothing about the output changes. It goes live the moment a
+             * technology is added whose object lacks a datapath field.
+             *
+             * The same test as applySourcedLadder's, computed once here so the
+             * announcement, the register and the network cannot disagree about
+             * which rungs are real. */
+            config.sourced_ladder_placeholder_mask = 0;
+            for (int li = 0; li < 7; ++li) {
+                if (!(w[li] > 0 && bw[li] > 0.0))
+                    config.sourced_ladder_placeholder_mask |= (1 << li);
+            }
             // 1.11.59 (B005): remember it for the Garnet topology builder.
             for (int li = 0; li < 7; ++li) {
                 config.sourced_ladder_w[li]  = w[li];
@@ -3705,6 +3775,29 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
                       << "    L2 (bank group) is ASSERTED, not sourced: it is"
                          " L1 x 2, an interleaving assumption. The other six"
                          " rungs come from the architecture object.\n";
+            /* 1.11.63 (R6-7, B018): and if any rung came back empty, name it.
+             * The line above states the ONE rung known to be an assertion;
+             * without this, a rung the architecture object failed to supply
+             * would sit in the same table looking equally sourced while the
+             * network and the Garnet projection had both quietly kept the
+             * placeholder value for it. Says the count, the rung numbers and
+             * what replaced them. */
+            if (config.sourced_ladder_placeholder_mask != 0) {
+                int n_ph = 0;
+                for (int li = 0; li < 7; ++li)
+                    if (config.sourced_ladder_placeholder_mask & (1 << li)) ++n_ph;
+                std::cout << "    WARNING: " << n_ph << " of the 7 rungs above are"
+                             " NOT sourced -- the " << tech << " architecture object"
+                             " supplied no usable width/bandwidth for";
+                for (int li = 0; li < 7; ++li) {
+                    if (config.sourced_ladder_placeholder_mask & (1 << li))
+                        std::cout << " L" << li << " (" << kRungName[li] << ")";
+                }
+                std::cout << ". Those levels keep the per-technology PLACEHOLDER"
+                             " table the source labels design-specific, and the"
+                             " Garnet layers projected from them keep it too. This"
+                             " ladder is a MIXTURE, not a sourced fabric.\n";
+            }
         } catch (const std::exception& e) {
             std::cerr << "[hierarchy] WARNING: the " << tech << " architecture "
                          "object is unavailable (" << e.what() << "), so the "
@@ -7564,6 +7657,11 @@ static void runPowerAnalysis(const UnifiedConfig& config,
         try {
             pimid::RamulatorWrapper ram_oracle("", config.memory_tech);
             ram_oracle.setDeviceWidth(config.dram_device_width);   // 1.11.46 (L181)
+            /* 1.11.63 (R7): gate 1173B E3 caught this half-wired -- the key
+             * was parsed into config but the setter was never called, so the
+             * knob was still dead at the point of use. Both scopes apply it
+             * now, before initialize(). */
+            ram_oracle.setTerminationOverridePJPerBit(config.termination_pj_per_bit);
             /* 1.11.52 (audit D003): the array's activate/precharge share is
              * now weighted by the run's OWN measured row-buffer miss rate
              * (PE-MI rowHits/rowMisses) instead of a hardcoded 0.5. It is
@@ -7634,9 +7732,14 @@ static void runPowerAnalysis(const UnifiedConfig& config,
              * termination-only again -- the pre-1.11.58 basis the corpus was
              * built on -- and CACTI-IO's figure prints as an INFORMATIONAL
              * line below, summed into nothing. */
-            const double iface_term_nj = crosses_dq ? ram_oracle.getTerminationEnergyNJ() : 0.0;
+            /* 1.11.63 (R7, user ruling): READ/WRITE SPLIT. Reads price the
+             * DRAM driver into the RX termination (RTT_NOM class); writes
+             * price the controller driver into the DRAM's RTT_WR class --
+             * a deliberately stronger setting in every DDR family, so the
+             * write crossing costs more than the read crossing. */
+            const double iface_term_rd_nj = crosses_dq ? ram_oracle.getTerminationEnergyNJ(false) : 0.0;
+            const double iface_term_wr_nj = crosses_dq ? ram_oracle.getTerminationEnergyNJ(true)  : 0.0;
             const double iface_drv_nj  = crosses_dq ? ram_oracle.getInterfaceDynamicEnergyNJ() : 0.0;
-            double iface_energy = iface_term_nj;
             /* 1.11.8, corrected 1.11.56 (audit A028): with memory.power_down
              * the idle controller descends the DRAM into precharge power-down
              * (IDD2P) during measured no-traffic residency; refresh always
@@ -7720,28 +7823,34 @@ static void runPowerAnalysis(const UnifiedConfig& config,
             double total_rd_nj = rd_energy * zsim_stats.mem_rd;
             double total_wr_nj = wr_energy * zsim_stats.mem_wr;
             double total_act_nj = 0.0;  // folded into array rd/wr (no double-count)
-            double total_iface_nj = iface_energy * (zsim_stats.mem_rd + zsim_stats.mem_wr);
+            double total_iface_nj = iface_term_rd_nj * zsim_stats.mem_rd
+                                  + iface_term_wr_nj * zsim_stats.mem_wr;
 
             std::cout << "  Technology:      " << config.memory_tech << " (Ramulator2 energy model)" << std::endl;
             std::cout << "  Per-access:      read=" << std::fixed << std::setprecision(3)
                       << rd_energy << " nJ, write=" << wr_energy << " nJ" << std::endl;
-            std::cout << "  DQ interface:    " << iface_energy << " nJ/access ("
+            std::cout << "  DQ interface:    rd=" << iface_term_rd_nj
+                      << " nJ, wr=" << iface_term_wr_nj << " nJ per access ("
                       << (crosses_dq ? "accesses cross the DQ pins at this placement"
                                      : "on-die placement: no DQ crossing, no interface charge")
                       << ")" << std::endl;
             if (crosses_dq) {
-                std::cout << "    termination:   " << iface_term_nj
-                          << " nJ (the charged term)  CACTI-IO driver+PHY: "
+                std::cout << "    termination:   rd=" << iface_term_rd_nj
+                          << " nJ (DRAM RON -> RX RTT_NOM class), wr="
+                          << iface_term_wr_nj
+                          << " nJ (ctrl RON -> DRAM RTT_WR class)"
+                             " [R7 split]  CACTI-IO driver+PHY: "
                           << iface_drv_nj
                           << " nJ [INFORMATIONAL, NOT charged -- 1.11.60: the"
                              " controller-side PHY is already priced by McPAT"
                              " (withPHY=1 at these placements), so charging"
                              " this too double-counts one crossing]"
                           << std::endl;
-                /* 1.11.59: where the termination rests on an unsourced Rtt,
-                 * report the BAND rather than the point. The doctrine is that
-                 * a quantity the tools cannot produce is stated as an interval
-                 * with its provenance; the pJ/bit link energies already are. */
+                /* 1.11.59 printed a BAND here while LPDDR5's Rtt was
+                 * unsourced. 1.11.63: JESD209-5C Tbl 84 p.144 gives DQ ODT
+                 * default = Disable, so the default termination term is zero
+                 * by citation and the accessor now always returns false --
+                 * this block is kept as the documented consumer. */
                 {
                     double t_lo = 0.0, t_hi = 0.0; std::string t_prov;
                     if (ram_oracle.getTerminationEnergyBandNJ(t_lo, t_hi, t_prov)) {
@@ -8795,7 +8904,8 @@ static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
                                           double wall_seconds = 0.0,
                                           int effective_banks = 0,
                                           int ranks_per_channel = 1,   // 1.11.52 (A015)
-                                          int channels = 1)
+                                          int channels = 1,
+                                          double termination_pj_per_bit = -1.0)   // 1.11.63 (R7, gate 1173B E3)
 {
     if (memory_tech.empty()) return 0.0;
     /* 1.11.52 (audit A020): A MEMORY WITH NO ACCESSES IS NOT A MEMORY WITH NO
@@ -8835,6 +8945,9 @@ static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
     try {
         pimid::RamulatorWrapper ram_oracle("", memory_tech);
         ram_oracle.setDeviceWidth(device_width);   // 1.11.46 (L181)
+        /* 1.11.63 (R7): gate 1173B E3 caught the knob half-wired (parsed,
+         * never applied). Set before initialize(), both scopes. */
+        ram_oracle.setTerminationOverridePJPerBit(termination_pj_per_bit);
         ram_oracle.initialize();
         /* Intensive per-access accessors. getArrayReadEnergyNJ folds activation
          * and column access, so act/pre are NOT added separately -- adding them
@@ -8865,9 +8978,10 @@ static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
         // 1.11.58: driver switching + PHY + termination, as device scope.
         // 1.11.60 (A009/A010 revert, user-approved): termination-only, as
         // device scope. CACTI-IO's driver+PHY prints informational below.
-        const double iface_term_nj = crosses_dq ? ram_oracle.getTerminationEnergyNJ() : 0.0;
+        /* 1.11.63 (R7): read/write split, as device scope. */
+        const double iface_term_rd_nj = crosses_dq ? ram_oracle.getTerminationEnergyNJ(false) : 0.0;
+        const double iface_term_wr_nj = crosses_dq ? ram_oracle.getTerminationEnergyNJ(true)  : 0.0;
         const double iface_drv_nj  = crosses_dq ? ram_oracle.getInterfaceDynamicEnergyNJ() : 0.0;
-        const double iface_nj = iface_term_nj;
 
         const double total_rd_mj = rd_nj * static_cast<double>(mem_rd) / 1e6;
         const double total_wr_mj = wr_nj * static_cast<double>(mem_wr) / 1e6;
@@ -8876,7 +8990,8 @@ static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
          * described only the first of the three, and the printed label below
          * inherited that name. */
         const double total_iface_mj =
-            iface_nj * static_cast<double>(mem_rd + mem_wr) / 1e6;
+            (iface_term_rd_nj * static_cast<double>(mem_rd)
+             + iface_term_wr_nj * static_cast<double>(mem_wr)) / 1e6;
 
         std::cout << "\n--- Memory Array Energy (system) ---" << std::endl;
         std::cout << "  Technology:    " << memory_tech
@@ -8903,14 +9018,18 @@ static double reportSharedMemoryArrayEnergy(const std::string& memory_tech,
         std::cout << "    (this figure already includes refresh, and it IS the "
                      "array's leakage -- these are one quantity, not three)"
                   << std::endl;
-        std::cout << "  DQ interface:  " << std::setprecision(3) << iface_nj
-                  << " nJ/access ("
+        std::cout << "  DQ interface:  " << std::setprecision(3)
+                  << "rd=" << iface_term_rd_nj << " nJ, wr=" << iface_term_wr_nj
+                  << " nJ per access ("
                   << (crosses_dq ? "accesses cross the DQ pins at this placement"
                                  : "on-die placement: no DQ crossing, no interface charge")
                   << ")" << std::endl;
         if (crosses_dq) {
-            std::cout << "    termination: " << iface_term_nj
-                      << " nJ (charged)  CACTI-IO driver+PHY: " << iface_drv_nj
+            std::cout << "    termination: rd=" << iface_term_rd_nj
+                      << " nJ (DRAM RON -> RX RTT_NOM class), wr="
+                      << iface_term_wr_nj
+                      << " nJ (ctrl RON -> DRAM RTT_WR class) [R7 split]"
+                         "  CACTI-IO driver+PHY: " << iface_drv_nj
                       << " nJ [INFORMATIONAL, NOT charged -- 1.11.60 revert:"
                          " McPAT already prices the PHY here]" << std::endl;
             double t_lo = 0.0, t_hi = 0.0; std::string t_prov;   // 1.11.59
@@ -10135,7 +10254,8 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                                               wall_seconds,     // 1.11.20 D13
                                               effectiveDramBanks(tech, config),   // A008
                                               config.hierarchy_ranks_per_channel, // A015
-                                              config.hierarchy_dram_channels);
+                                              config.hierarchy_dram_channels,
+                                              config.termination_pj_per_bit);   // 1.11.63 (R7)
                 {
                 double die = computeDramDieAreaMM2(tech, false,
                                                    effectiveDramBanks(tech, config));
@@ -10194,7 +10314,8 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                                               wall_seconds,
                                               effectiveDramBanks(node.memory_tech, config),
                                               config.hierarchy_ranks_per_channel,  // A015
-                                              config.hierarchy_dram_channels);
+                                              config.hierarchy_dram_channels,
+                                              config.termination_pj_per_bit);   // 1.11.63 (R7)
                 host_done = true;
             } else if (node.role == UnifiedConfig::SystemNode::DEVICE && !dev_done &&
                        zsim_stats.dev.has_activity()) {
@@ -10212,7 +10333,8 @@ static void runPerNodePowerAnalysis(const UnifiedConfig& config,
                                               wall_seconds,
                                               effectiveDramBanks(node.memory_tech, config),
                                               config.hierarchy_ranks_per_channel,  // A015
-                                              config.hierarchy_dram_channels);
+                                              config.hierarchy_dram_channels,
+                                              config.termination_pj_per_bit);   // 1.11.63 (R7)
                 dev_done = true;
             }
         }
@@ -11959,6 +12081,59 @@ int main(int argc, char** argv) {
                 }
                 if (!cli_mpi_ranks_set && yaml_cfg["workload"]["mpi_ranks"]) {
                     config.mpi_ranks = yaml_cfg["workload"]["mpi_ranks"].as<int>();
+                    /* 1.11.63 (R6-6): THE YAML KEY IMPLIES THE TYPE, EXACTLY AS
+                     * THE CLI FLAG DOES.
+                     *
+                     * --mpi-ranks N sets workload_type = "mpi" on the spot (see
+                     * the argv loop above) and the usage text promises it does.
+                     * workload.mpi_ranks did not: every downstream consumer is
+                     * gated on `workload_type == "mpi" && mpi_ranks > 0`, so a
+                     * YAML that set the ranks and not the type ran SINGLE-RANK
+                     * in silence -- no warning, no line in the report, and a
+                     * plausible-looking rank count sitting in the config that
+                     * nothing read. Gate 1172B hit exactly this and spent a
+                     * full arm proving the simulator right and the gate wrong.
+                     *
+                     * CLI-CONSISTENT MEANS IMPLYING, NOT REFUSING. Refusing the
+                     * orphan key would leave the two paths disagreeing about
+                     * what the same quantity means -- one implies, one rejects
+                     * -- and would break every existing YAML that pairs the key
+                     * with its sibling correctly. Implying makes the two paths
+                     * one rule: naming a rank count asks for MPI.
+                     *
+                     * An EXPLICIT non-mpi type still wins and is warned about,
+                     * because that is a genuine contradiction in one file and
+                     * silently overriding the user's own words would be a
+                     * different footgun. Note that workload.type was read a few
+                     * lines above, so config.workload_type here is already the
+                     * file's own value if it set one -- and a --workload-type
+                     * on the command line has already won over that. The test
+                     * is therefore "did anyone STATE a type", not "is the type
+                     * still the constructor default". */
+                    const bool type_stated =
+                        cli_workload_type_set ||
+                        static_cast<bool>(yaml_cfg["workload"]["type"]);
+                    if (config.mpi_ranks > 0) {
+                        if (!type_stated) {
+                            config.workload_type = "mpi";
+                            std::cout << "[config] NOTE: workload.mpi_ranks = "
+                                      << config.mpi_ranks
+                                      << " implies workload.type: mpi (the same "
+                                         "implication --mpi-ranks carries on the "
+                                         "command line). Without it the key is "
+                                         "inert and the run would be single-rank."
+                                      << std::endl;
+                        } else if (config.workload_type != "mpi") {
+                            std::cerr << "[config] WARNING: workload.mpi_ranks = "
+                                      << config.mpi_ranks
+                                      << " is set, but workload.type is \""
+                                      << config.workload_type
+                                      << "\", not \"mpi\". The explicit type wins, "
+                                         "so the rank count is IGNORED and this run "
+                                         "is not multi-rank. Set workload.type: mpi "
+                                         "or remove workload.mpi_ranks." << std::endl;
+                        }
+                    }
                 }
                 if (yaml_cfg["workload"]["mpich_path"]) {
                     std::cerr << "Warning: workload.mpich_path in YAML is deprecated "
@@ -12673,6 +12848,12 @@ int main(int argc, char** argv) {
     if (yaml_cfg["power"] && yaml_cfg["power"]["temperature_k"])
         config.temperature_k =
             yaml_cfg["power"]["temperature_k"].as<int>(350);
+    /* 1.11.63 (R7): see the member's comment -- this key was advertised but
+     * unparsed. Top level of the power: block, same reachability rationale
+     * as the temperature keys above. */
+    if (yaml_cfg["power"] && yaml_cfg["power"]["termination_pj_per_bit"])
+        config.termination_pj_per_bit =
+            yaml_cfg["power"]["termination_pj_per_bit"].as<double>(-1.0);
 
     /* 1.11.60 (A005): the RANGE VALIDATOR moves with the parse. Leaving
      * it inside the memory: guard would accept an unevaluable temperature

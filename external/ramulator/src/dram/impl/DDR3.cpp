@@ -29,27 +29,81 @@ class DDR3 : public IDRAM, public Implementation {
       {"DDR3_4Gb_x4",   {4<<10,  4,  {1, 1, 8, 1<<16, 1<<11}}},
       {"DDR3_4Gb_x8",   {4<<10,  8,  {1, 1, 8, 1<<16, 1<<10}}},
       {"DDR3_4Gb_x16",  {4<<10,  16, {1, 1, 8, 1<<15, 1<<10}}},
-      {"DDR3_8Gb_x4",   {8<<10,  4,  {1, 1, 8, 1<<17, 1<<11}}},
-      {"DDR3_8Gb_x8",   {8<<10,  8,  {1, 1, 8, 1<<17, 1<<10}}},
+      /* 1.11.63 (calibration): the two 8 Gb narrow-DQ rows re-shaped to JEDEC.
+       * SOURCE: JESD79-3D section 2.11.5 "8Gb", printed p.16 (PDF p.30):
+       *     Configuration    2Gb x 4              1Gb x 8         512Mb x 16
+       *     # of Banks       8                    8               8
+       *     Row Address      A0 - A15             A0 - A15        A0 - A15
+       *     Column Address   A0 - A9, A11, A13    A0 - A9, A11    A0 - A9
+       *     Page size        2 KB                 2 KB            2 KB
+       * so at 8 Gb every configuration has 16 row-address bits (65536 rows)
+       * and a 2 KB page; JEDEC reaches 8 Gb from 4 Gb by DOUBLING THE PAGE,
+       * not the row count. The old rows reached it by doubling the 4 Gb part's
+       * rows (1<<17) and keeping the 4 Gb page, giving a bank with twice the
+       * rows and half the page of the standard's part -- directly wrong for a
+       * PIM row-buffer/subarray model. DDR3_4Gb_x8 in this same map is
+       * {1<<16, 1<<10} and matches sec 2.11.4 exactly, which is what shows the
+       * 8 Gb rows to be a per-density error rather than a units convention.
+       *   x4:  A0-A9,A11,A13 = 12 column bits = 4096 columns; 4096 x 4 / 8 = 2 KB.
+       *   x8:  A0-A9,A11     = 11 column bits = 2048 columns; 2048 x 8 / 8 = 2 KB.
+       * Density still closes: 8 x 65536 x 4096 x 4 = 8 x 65536 x 2048 x 8
+       * = 8,589,934,592 bits = 8192 Mb (the set_organization() assertion below
+       * re-checks it). DDR3_8Gb_x16 was already right (65536 rows, A0-A9 =
+       * 1024 columns x 16 = 2 KB) and is untouched.
+       * CONSEQUENTIAL: the 2 KB page changes which tRRD/tFAW row of Table 66
+       * this part takes -- see the page-size-keyed tables in set_timing_vals(). */
+      {"DDR3_8Gb_x4",   {8<<10,  4,  {1, 1, 8, 1<<16, 1<<12}}},
+      {"DDR3_8Gb_x8",   {8<<10,  8,  {1, 1, 8, 1<<16, 1<<11}}},
       {"DDR3_8Gb_x16",  {8<<10,  16, {1, 1, 8, 1<<16, 1<<10}}},
     };
 
+    /* 1.11.63 (calibration): nCWL is now per speed bin, and the tCK_ps column
+     * mirrors the derivation.
+     *
+     * nCWL: every one of the fourteen rows carried the blanket constant 9.
+     * SOURCE: JESD79-3D Figure 11 "MR2 Definition", clause 3.4.4, printed p.30
+     * (PDF p.44), the A5/A4/A3 CAS Write Latency field, verbatim:
+     *     000  5  (tCK(avg) >= 2.5 ns)
+     *     001  6  (2.5 ns  > tCK(avg) >= 1.875 ns)
+     *     010  7  (1.875 ns > tCK(avg) >= 1.5 ns)
+     *     011  8  (1.5 ns  > tCK(avg) >= 1.25 ns)
+     *     100  9  (1.25 ns > tCK(avg) >= 1.07 ns)
+     *     101  10 (1.07 ns > tCK(avg) >= 0.935 ns)
+     * CWL is a function of tCK alone, so each bin has exactly one legal value:
+     *     800  -> tCK 2.500 ns -> CWL 5     1600 -> tCK 1.250 ns -> CWL 8
+     *     1066 -> tCK 1.876 ns -> CWL 6     1866 -> tCK 1.071 ns -> CWL 9
+     *     1333 -> tCK 1.500 ns -> CWL 7     2133 -> tCK 0.937 ns -> CWL 10
+     * The audited row, DDR3_1600H, is corroborated a second time by JESD79-3D
+     * Table 63, printed p.161 (PDF p.175): DDR3-1600's "Supported CWL Settings"
+     * are "5, 6, 7, 8" -- 9 is not among them. The old 9 was a real one-cycle
+     * error in write latency at 1600 and a four-cycle one at 800.
+     *
+     * tCK_ps: 1066 1875 -> 1876. set_timing_vals() derives tCK = 2e6/rate and
+     * overwrites this column; 2e6/1066 = 1876.2 ps. The column is now a
+     * checked mirror of the derivation (see the equality check below). The
+     * 1333 (1500) and 2133 (937) columns were already the 2e6/rate values and
+     * are unchanged -- what changed under them is the derivation itself, which
+     * used to truncate rate/2 and produce 1501 and 938.
+     *
+     * Untouched, and stated so: nRRD/nFAW carry -1 here and are filled from
+     * the page-size-keyed tables below; nCS = 2 is a Ramulator controller
+     * constant with no JESD79-3D counterpart (UNCHECKABLE). */
     inline static const std::map<std::string, std::vector<int>> timing_presets = {
       //   name       rate    nBL  nCL  nRCD  nRP   nRAS  nRC   nWR  nRTP nCWL nCCD  nRRD  nWTR  nFAW  nRFC nREFI  nCS  tCK_ps
-      {"DDR3_800D",   {800,    4,   5,   5,    5,    15,  20,    6,   4,   9,    4,   -1,    4,   -1,  -1,   -1,    2,  2500}},
-      {"DDR3_800E",   {800,    4,   5,   5,    5,    15,  20,    6,   4,   9,    4,   -1,    4,   -1,  -1,   -1,    2,  2500}},
-      {"DDR3_1066E",  {1066,   4,   6,   6,    6,    20,  26,    8,   4,   9,    4,   -1,    4,   -1,  -1,   -1,    2,  1875}},
-      {"DDR3_1066F",  {1066,   4,   7,   7,    7,    20,  27,    8,   4,   9,    4,   -1,    4,   -1,  -1,   -1,    2,  1875}},
-      {"DDR3_1066G",  {1066,   4,   8,   8,    8,    20,  28,    8,   4,   9,    4,   -1,    4,   -1,  -1,   -1,    2,  1875}},
-      {"DDR3_1333G",  {1333,   4,   8,   8,    8,    24,  32,   10,   5,   9,    4,   -1,    5,   -1,  -1,   -1,    2,  1500}},
-      {"DDR3_1333H",  {1333,   4,   9,   9,    9,    24,  33,   10,   5,   9,    4,   -1,    5,   -1,  -1,   -1,    2,  1500}},
-      {"DDR3_1600H",  {1600,   4,   9,   9,    9,    28,  37,   12,   6,   9,    4,   -1,    6,   -1,  -1,   -1,    2,  1250}},
-      {"DDR3_1600J",  {1600,   4,  10,  10,   10,    28,  38,   12,   6,   9,    4,   -1,    6,   -1,  -1,   -1,    2,  1250}},
-      {"DDR3_1600K",  {1600,   4,  11,  11,   11,    28,  39,   12,   6,   9,    4,   -1,    6,   -1,  -1,   -1,    2,  1250}},
+      {"DDR3_800D",   {800,    4,   5,   5,    5,    15,  20,    6,   4,   5,    4,   -1,    4,   -1,  -1,   -1,    2,  2500}},
+      {"DDR3_800E",   {800,    4,   5,   5,    5,    15,  20,    6,   4,   5,    4,   -1,    4,   -1,  -1,   -1,    2,  2500}},
+      {"DDR3_1066E",  {1066,   4,   6,   6,    6,    20,  26,    8,   4,   6,    4,   -1,    4,   -1,  -1,   -1,    2,  1876}},
+      {"DDR3_1066F",  {1066,   4,   7,   7,    7,    20,  27,    8,   4,   6,    4,   -1,    4,   -1,  -1,   -1,    2,  1876}},
+      {"DDR3_1066G",  {1066,   4,   8,   8,    8,    20,  28,    8,   4,   6,    4,   -1,    4,   -1,  -1,   -1,    2,  1876}},
+      {"DDR3_1333G",  {1333,   4,   8,   8,    8,    24,  32,   10,   5,   7,    4,   -1,    5,   -1,  -1,   -1,    2,  1500}},
+      {"DDR3_1333H",  {1333,   4,   9,   9,    9,    24,  33,   10,   5,   7,    4,   -1,    5,   -1,  -1,   -1,    2,  1500}},
+      {"DDR3_1600H",  {1600,   4,   9,   9,    9,    28,  37,   12,   6,   8,    4,   -1,    6,   -1,  -1,   -1,    2,  1250}},
+      {"DDR3_1600J",  {1600,   4,  10,  10,   10,    28,  38,   12,   6,   8,    4,   -1,    6,   -1,  -1,   -1,    2,  1250}},
+      {"DDR3_1600K",  {1600,   4,  11,  11,   11,    28,  39,   12,   6,   8,    4,   -1,    6,   -1,  -1,   -1,    2,  1250}},
       {"DDR3_1866K",  {1866,   4,  11,  11,   11,    32,  43,   14,   7,   9,    4,   -1,    7,   -1,  -1,   -1,    2,  1071}},
       {"DDR3_1866L",  {1866,   4,  12,  12,   12,    32,  44,   14,   7,   9,    4,   -1,    7,   -1,  -1,   -1,    2,  1071}},
-      {"DDR3_2133L",  {2133,   4,  12,  12,   12,    36,  48,   16,   8,   9,    4,   -1,    8,   -1,  -1,   -1,    2,  937}},
-      {"DDR3_2133M",  {2133,   4,  13,  13,   13,    36,  49,   16,   8,   9,    4,   -1,    8,   -1,  -1,   -1,    2,  937}},
+      {"DDR3_2133L",  {2133,   4,  12,  12,   12,    36,  48,   16,   8,  10,    4,   -1,    8,   -1,  -1,   -1,    2,  937}},
+      {"DDR3_2133M",  {2133,   4,  13,  13,   13,    36,  49,   16,   8,  10,    4,   -1,    8,   -1,  -1,   -1,    2,  937}},
     };
 
   /************************************************
@@ -266,18 +320,65 @@ class DDR3 : public IDRAM, public Implementation {
         }
         m_timing_vals("rate") = *dq;
       }
-      int tCK_ps = 1E6 / (m_timing_vals("rate") / 2);
+      /* 1.11.63 (calibration, cross-cutting fix -- same block in all 11 impl
+       * files): ONE AUTHORITY FOR tCK. This derivation is the authority; the
+       * tCK_ps column in the preset rows above is a MIRROR of it and is now
+       * checked against it, so the two cannot silently disagree again. The
+       * audit found the written column dead in every model and contradicting
+       * the derivation in two of them (LPDDR5 1250 vs 312, GDDR6 570 vs 1000).
+       * The divisor was `1E6 / (rate / 2)`, whose integer division threw away
+       * the half-MT/s of odd rates (DDR3-1333 came out 1501 ps instead of
+       * 1500, DDR3-2133 938 instead of 937); it is now the exact 2e6/rate the
+       * column documents. DDR3 is a DDR-clocked interface -- one data beat per
+       * CK edge, 2 bits/pin per CK -- so 2e6/rate is the CK period. */
+      int preset_tCK_ps = m_timing_vals("tCK_ps");
+      int tCK_ps = 2E6 / m_timing_vals("rate");
       m_timing_vals("tCK_ps") = tCK_ps;
+      if (preset_provided && preset_tCK_ps != tCK_ps) {
+        throw ConfigurationError(
+          "In \"{}\", the timing preset's tCK_ps column says {} ps but the "
+          "rate of {} MT/s derives {} ps (tCK = 2e6/rate). The derivation "
+          "wins at run time, so the column must mirror it -- fix the preset!",
+          get_name(), preset_tCK_ps, m_timing_vals("rate"), tCK_ps);
+      }
 
-      // Load the organization specific timings
-      int dq_id = [](int dq) -> int {
-        switch (dq) {
-          case 4:  return 0;
-          case 8:  return 1;
-          case 16: return 2;
-          default: return -1;
+      /* 1.11.63 (calibration): tRRD/tFAW are keyed on PAGE SIZE, not DQ width.
+       * SOURCE: JESD79-3D Table 66 "Timing Parameters by Speed Bin", printed
+       * p.170 (PDF p.184), which tabulates each of the two parameters twice:
+       *   "ACTIVE to ACTIVE command period for 1KB page size  tRRD"
+       *   "ACTIVE to ACTIVE command period for 2KB page size  tRRD"
+       *   "Four activate window for 1KB page size  tFAW"
+       *   "Four activate window for 2KB page size  tFAW"
+       * The old tables were indexed by DQ width. That was a working PROXY only
+       * because, before the 8 Gb org fix above, every x4/x8 preset had a 1 KB
+       * page and every x16 preset a 2 KB page. The corrected DDR3_8Gb_x4 and
+       * DDR3_8Gb_x8 are 2 KB parts, so the proxy now selects the wrong row for
+       * exactly the org PIMID simulates: DDR3_8Gb_x8 would take tRRD 5 / tFAW
+       * 24 (the 1 KB figures) where JESD79-3D gives it the 2 KB figures.
+       * The two surviving rows are the file's own former x4/x8 row (= the 1 KB
+       * row of Table 66) and its former x16 row (= the 2 KB row), verified
+       * cell by cell against the standard for the four bins it covers:
+       *   1 KB: tRRD max(4nCK,10ns/7.5/6/6) -> 4,4,4,5 ; tFAW 40/37.5/30/30 ns
+       *         -> 16,20,20,24  at tCK 2.5/1.876/1.5/1.25 ns
+       *   2 KB: tRRD max(4nCK,10ns/10/7.5/7.5) -> 4,6,5,6 ; tFAW 50/50/45/40 ns
+       *         -> 20,27,30,32
+       * The 1866 and 2133 columns are outside Table 66 (JESD79-3D splits the
+       * upper bins into a separate table) and are carried over unchanged;
+       * they are not the audited bin. */
+      int page_id = [](int page_size_B) -> int {
+        switch (page_size_B) {
+          case 1024: return 0;   // 1 KB page row of Table 66
+          case 2048: return 1;   // 2 KB page row of Table 66
+          default:   return -1;
         }
-      }(m_organization.dq);
+      }(m_organization.count[m_levels["column"]] * m_organization.dq / 8);
+      if (page_id < 0) {
+        throw ConfigurationError(
+          "In \"{}\", the organization's page size of {} B is neither 1 KB nor "
+          "2 KB, and JESD79-3D Table 66 (printed p.170) tabulates tRRD/tFAW "
+          "for those two page sizes only!",
+          get_name(), m_organization.count[m_levels["column"]] * m_organization.dq / 8);
+      }
 
       int rate_id = [](int rate) -> int {
         switch (rate) {
@@ -291,29 +392,39 @@ class DDR3 : public IDRAM, public Implementation {
         }
       }(m_timing_vals("rate"));
 
-      constexpr int nRRD_TABLE[3][6] = {
-      // 800   1066  1333  1600  1866  2133 
-        { 4,    4,    4,    5,    5,    6},   // x4
-        { 4,    4,    4,    5,    5,    6},   // x8
-        { 4,    6,    5,    6,    6,    7},   // x16
+      constexpr int nRRD_TABLE[2][6] = {
+      // 800   1066  1333  1600  1866  2133
+        { 4,    4,    4,    5,    5,    6},   // 1 KB page (Table 66 p.170)
+        { 4,    6,    5,    6,    6,    7},   // 2 KB page (Table 66 p.170)
       };
-      constexpr int nFAW_TABLE[3][6] = {
-      // 800   1066  1333  1600  1866  2133 
-        { 16,   20,   20,   24,   26,   27},  // x4
-        { 16,   20,   20,   24,   26,   27},  // x8
-        { 20,   27,   30,   32,   33,   34},  // x16
+      constexpr int nFAW_TABLE[2][6] = {
+      // 800   1066  1333  1600  1866  2133
+        { 16,   20,   20,   24,   26,   27},  // 1 KB page (Table 66 p.170)
+        { 20,   27,   30,   32,   33,   34},  // 2 KB page (Table 66 p.170)
       };
 
-      if (dq_id != -1 && rate_id != -1) {
-        m_timing_vals("nRRD") = nRRD_TABLE[dq_id][rate_id];
-        m_timing_vals("nFAW") = nFAW_TABLE [dq_id][rate_id];
+      if (rate_id != -1) {
+        m_timing_vals("nRRD") = nRRD_TABLE[page_id][rate_id];
+        m_timing_vals("nFAW") = nFAW_TABLE [page_id][rate_id];
       }
 
       // Refresh timings
       // tRFC table (unit is nanosecond!)
+      /* 1.11.63 (calibration): tRFC[4Gb] 260 -> 300 ns.
+       * SOURCE: JESD79-3D Table 59 "Refresh parameters by device density",
+       * clause 12.2, printed p.156 (PDF p.170), verbatim:
+       *   Parameter                Symbol  512Mb  1Gb  2Gb  4Gb  8Gb  Units
+       *   REF command to ACT or
+       *   REF command time         tRFC    90     110  160  300  350  ns
+       *   Average periodic
+       *   refresh interval         tREFI   7.8    7.8  7.8  7.8  7.8  us
+       * The 1/2/8 Gb columns and tREFI_BASE below were already right; only the
+       * 4 Gb column was low, by 40 ns (13%). Not the density PIMID simulates
+       * (it emits DDR3_8Gb_x8) but wrong, and it is the number the tree's own
+       * energy layer had copied -- see the matching pimid_energy.h fix. */
       constexpr int tRFC_TABLE[4] = {
       // 1Gb   2Gb   4Gb   8Gb
-         110,  160,  260,  350,
+         110,  160,  300,  350,
       };
 
       // tREFI(base) table (unit is nanosecond!)
