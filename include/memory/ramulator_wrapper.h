@@ -21,6 +21,54 @@ namespace Ramulator {
 
 namespace pimid {
 
+/* 1.11.61 (rulings R2/R4): THE SIMULATED PRESET'S OWN ORGANISATION.
+ *
+ * The Ramulator2 org preset the wrapper names is the authority for what part
+ * this tree simulates -- it fixes the density, the bank count and the row
+ * count the timing model counts cycles against. Until this release PIMID
+ * carried three private copies of that organisation (the architecture object's
+ * capacity fields, main.cpp's bank_rows table, and the wrapper's own
+ * banks_per_rank_), each of which had drifted from it independently: the
+ * capacities by 4x-32x and bank_rows by 2x on DDR3, HBM2 and HBM3.
+ *
+ * Ramulator2's org_presets tables are `inline static const std::map` members
+ * of classes defined in .cpp files (external/ramulator/src/dram/impl/*.cpp),
+ * with no header exposing them, so they cannot be read at runtime from here.
+ * This struct is a TRANSCRIPTION of the exact preset rows PIMID selects, each
+ * row carrying the file it was transcribed from, so that there is ONE copy in
+ * PIMID instead of three and it names its upstream. `preset_source` is checked
+ * for self-consistency at construction (banks x rows x cols x DQ must
+ * reproduce the density), which is the guard against a transcription slip.
+ *
+ * UNITS, and they differ by family exactly as the preset files do:
+ *   density_mb        DDR family: the whole DEVICE (GDDR6 included -- its
+ *                     density product spans both channels). HBM: ONE CHANNEL
+ *                     (HBM2.cpp/HBM3.cpp call it "channel density").
+ *   banks_in_density  the banks that density_mb spans, on the same unit.
+ *   channels_in_density  the channel levels inside the density product
+ *                     (GDDR6 2, everything else 1) -- NOT the run's channel
+ *                     count, which is RamulatorWrapper::getNumChannels().
+ */
+struct PresetOrganization {
+    std::string preset_name;        // e.g. "DDR4_8Gb_x8"
+    std::string preset_source;      // e.g. "external/ramulator/src/dram/impl/DDR4.cpp"
+    uint64_t    density_mb = 0;     // per DEVICE (DDR family) / per CHANNEL (HBM)
+    int         dq_bits = 0;
+    int         channels_in_density = 1;
+    int         banks_in_density = 0;
+    uint64_t    rows_per_bank = 0;
+    uint64_t    cols_per_row = 0;
+    bool        per_channel_density = false;   // true for HBM2/HBM3
+    bool        valid = false;
+
+    // One bank of the simulated part, in MB. Same unit for every family.
+    uint64_t bankSizeMB() const {
+        return (banks_in_density > 0) ? density_mb / static_cast<uint64_t>(banks_in_density) : 0;
+    }
+    // Bytes in one row of one bank.
+    uint64_t rowBytes() const { return cols_per_row * static_cast<uint64_t>(dq_bits) / 8; }
+};
+
 /**
  * Wrapper class that adapts Ramulator2 to PIMID's memory model interface
  * This provides a clean separation between PIMID and Ramulator code
@@ -29,6 +77,14 @@ class RamulatorWrapper {
 public:
     explicit RamulatorWrapper(const std::string& config_path, const std::string& dram_type = "DDR4");
     ~RamulatorWrapper();
+
+    /* 1.11.61 (gate 1171A D4): mark this wrapper as a REFERENCE ANCHOR --
+     * constructed only to read one bandwidth number (the B012 REF anchors),
+     * never to size anything. Anchor wrappers suppress the capacity and
+     * speed-bin provenance WARNINGS, which would otherwise misattribute an
+     * HBM3 sizing disagreement into every DDR4/HBM2 run's log. The warnings
+     * still fire on every wrapper that is actually used for the run. */
+    void setAnchorQuiet(bool q) { anchor_quiet_ = q; }
 
     // Initialization
     void initialize();
@@ -184,6 +240,23 @@ public:
     uint64_t getBankSizeMB() const;
     uint64_t getChipSizeMB() const;
 
+    /* 1.11.61 (rulings R2/R4): the organisation of the Ramulator org preset
+     * this wrapper names -- the part whose cycles the timing model counts.
+     * Resolved from dram_type_ and the configured device width; always valid
+     * for the seven DRAM technologies PIMID supports (an unrecognised type
+     * falls back to DDR4_8Gb_x8, the same substitution the architecture object
+     * makes and announces). */
+    const PresetOrganization& getPresetOrganization() const { return preset_org_; }
+    // Rows per bank of the simulated preset. 0 only if the preset is unknown.
+    uint64_t getPresetRowsPerBank() const { return preset_org_.rows_per_bank; }
+    /* The preset's DEVICE capacity in MB: the device itself for the DDR
+     * family, the whole STACK (per-channel density x channels) for HBM. */
+    uint64_t getPresetDeviceCapacityMB() const;
+    /* HBM only: the CORE DIES the preset stacks, at two channels per die --
+     * the same 2-channels-per-die relation memorySystemDieCount() uses in
+     * main.cpp. 0 for the DDR family, which has no die stacking. */
+    int getPresetDiesPerStack() const;
+
     // Internal port bitwidths (critical for PIM bandwidth!)
     // 1.11.60 (one fabric): the rung's upstream reference, verbatim from the
     // architecture object's VerifiedValue -- status + citation.
@@ -298,6 +371,7 @@ private:
     // PIM Support Components
     bool pim_enabled_;
     std::string dram_type_;
+    bool anchor_quiet_ = false;   // 1.11.61 (D4): reference anchor, no provenance warnings
     double row_miss_frac_ = -1.0;   // 1.11.52 (D003): measured; <0 = unmeasured
     /* 1.11.46 (L181): device width for the whole-rank array-energy basis.
      * Empty = x8 default (the same convention backgroundUnits uses). */
@@ -307,6 +381,10 @@ private:
      * reset to 0 wherever a fresh architecture object is built, so applying a
      * width twice is a no-op and applying it to a rebuilt object is not. */
     int arch_device_width_bits_ = 0;
+    /* 1.11.61 (rulings R1/R2/R4): the simulated org preset's organisation.
+     * Resolved in initialize() (and by parseConfiguration on the default
+     * path) before anything reads a density or a row count off it. */
+    PresetOrganization preset_org_;
     std::shared_ptr<pimid::memory::DRAMArchitectureV2> dram_arch_;
     std::shared_ptr<PIMBandwidthTracker> bandwidth_tracker_;
     std::shared_ptr<InternalDRAMNetwork> internal_network_;
@@ -325,6 +403,14 @@ private:
     // architecture object (chip DQ pins, devices per rank, and the JEDEC
     // organization coupled to them). No-op when no width is configured.
     void applyDeviceWidthToArchitecture();
+    /* 1.11.61 (rulings R1/R2/R4): resolve preset_org_ from dram_type_ and the
+     * configured device width. Idempotent; safe to call again after the width
+     * changes. */
+    void resolvePresetOrganization();
+    /* 1.11.61 (ruling R1): stamp the SIMULATED PRESET's density onto the
+     * architecture object -- chip_size_mb and bank_size_mb. DDR family only;
+     * HBM keeps the core-die semantics ruling R2 fixed. */
+    void applyPresetDensityToArchitecture();
 };
 
 } // namespace pimid

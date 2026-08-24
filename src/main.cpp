@@ -2527,6 +2527,7 @@ static double referencePerChannelMBs() {
     if (cached > 0.0) return cached;
     try {
         pimid::RamulatorWrapper ref("", "HBM3");
+        ref.setAnchorQuiet(true);   // 1.11.61 (D4): anchor, not the run's part
         ref.initialize();
         double agg = static_cast<double>(ref.getBandwidth());   // MB/s, whole stack
         uint32_t nch = ref.getNumChannels();
@@ -2551,6 +2552,7 @@ static double referenceLayer0BandwidthGBs() {
     if (cached > 0.0) return cached;
     try {
         pimid::RamulatorWrapper ref("", "HBM3");
+        ref.setAnchorQuiet(true);   // 1.11.61 (D4): anchor, not the run's part
         ref.initialize();
         double bw = ref.getSubarrayBandwidth();    // GB/s at the GSA datapath
         if (bw > 0.0) { cached = bw; return cached; }
@@ -3410,27 +3412,96 @@ static void computeHierarchyLatencies(UnifiedConfig& config) {
     // and the rounded height stays >= measured (coarser than silicon, never finer):
     //   DDR4 measured subarray height ~= 576-640 rows  -> 512-row DDR/LPDDR/GDDR default
     //   HBM2 measured subarray height ~= 768-832 rows  -> 1024-row HBM default
-    // bank_rows is the JEDEC per-device bank row count at the representative
-    // density (DDR3/4 + HBM2 8Gb, DDR5 + GDDR6 16Gb, LPDDR5 + HBM3 8Gb).
-    // The user may override the height (memory.subarray_height) or the count
-    // (memory.subarrays_per_bank) directly in YAML.
+    /* 1.11.61 (ruling R4): bank_rows IS DERIVED FROM THE SIMULATED PRESET, not
+     * tabulated beside it.
+     *
+     * The literal table this replaces stated its own basis -- "the JEDEC
+     * per-device bank row count at the representative density (DDR3/4 + HBM2
+     * 8Gb, DDR5 + GDDR6 16Gb, LPDDR5 + HBM3 8Gb)" -- and that basis is not the
+     * part any run simulates. Against the org presets the wrapper names, three
+     * of the seven rows were 2x off (_1164audit/DENSITY_INVESTIGATION.md 6.3):
+     *
+     *   DDR3    preset DDR3_8Gb_x8  131072 rows   table  65536   2x LOW
+     *   HBM2    preset HBM2_4Gb      32768 rows   table  65536   2x HIGH
+     *   HBM3    preset HBM3_4Gb      16384 rows   table  32768   2x HIGH
+     *   DDR4/DDR5/LPDDR5/GDDR6                    table == preset, all four
+     *
+     * This is LIVE-NUM and structural: subarrays_per_bank = bank_rows /
+     * subarray_height feeds total_mem_orgs, the sparse H-tree's shape, the
+     * tree-coverage assertion, pages_per_unit and the NoC endpoint and router
+     * counts. The row count belongs to the device, so it comes from the device
+     * -- RamulatorWrapper::getPresetRowsPerBank(), which reads the org preset
+     * row this run's timing model parses, keyed by the configured device
+     * width.
+     *
+     * THE CHECK THAT THE DERIVATION IS RIGHT: the four technologies whose table
+     * entry already agreed with their preset must reproduce IDENTICALLY under
+     * it. They do -- DDR4 65536, DDR5 65536, LPDDR5 32768, GDDR6 16384 -- so
+     * only the three known-wrong rows move, and they move onto the preset.
+     *
+     * subarray_height does NOT come from the preset and stays a literal here:
+     * a subarray is a vertical group of wordlines BELOW the JEDEC row, absent
+     * from both the standard and Ramulator2, so the preset has nothing to say
+     * about it. The heights below are die measurements, rounded up to a power
+     * of two (coarser than silicon, never finer).
+     *
+     * The user may still override the height (memory.subarray_height) or the
+     * count (memory.subarrays_per_bank) directly in YAML. */
     {
         bool is_dram = !(tech == "SRAM" || tech == "STT_MRAM" ||
                          tech == "PCM"  || tech == "RERAM");
         if (is_dram) {
             int subarray_height = config.subarray_height;  // 0 = per-tech default
-            int bank_rows;
-            if (tech == "HBM2")        { bank_rows = 65536; if (subarray_height <= 0) subarray_height = 1024; } // measured ~768-832 -> 1024
-            else if (tech == "HBM3")   { bank_rows = 32768; if (subarray_height <= 0) subarray_height = 1024; } // HBM family -> 1024
-            else if (tech == "LPDDR5") { bank_rows = 32768; if (subarray_height <= 0) subarray_height = 512;  }
-            else if (tech == "GDDR6")  { bank_rows = 16384; if (subarray_height <= 0) subarray_height = 512;  }
-            else /* DDR3/DDR4/DDR5 */  { bank_rows = 65536; if (subarray_height <= 0) subarray_height = 512;  } // DDR4 measured ~576-640 -> 512
+            // Measured die geometry, not preset organisation -- see above.
+            if (subarray_height <= 0)
+                subarray_height = (tech == "HBM2" || tech == "HBM3")
+                                      ? 1024    // HBM2 measured ~768-832 -> 1024
+                                      : 512;    // DDR4 measured ~576-640 -> 512
             config.subarray_height = subarray_height;       // store the resolved height
-            if (!config.subarrays_per_bank_user_set) {
-                int sa = bank_rows / subarray_height;
-                if (sa < 1) sa = 1;
-                config.subarrays_per_bank = sa;             // per-tech default count
+
+            long long bank_rows = 0;
+            std::string preset_name;
+            try {
+                pimid::RamulatorWrapper geo("", tech);
+                geo.setDeviceWidth(config.dram_device_width);
+                geo.initialize();
+                bank_rows = static_cast<long long>(geo.getPresetRowsPerBank());
+                preset_name = geo.getPresetOrganization().preset_name;
+            } catch (const std::exception&) { bank_rows = 0; }
+
+            if (bank_rows <= 0) {
+                /* Refuse rather than substitute. The old table is gone on
+                 * purpose: reinstating a literal here would restore the second
+                 * authority this ruling removed, and every quantity that
+                 * depends on it (the tree shape, the coverage assertion,
+                 * pages_per_unit) would be built on a part nothing simulates. */
+                std::cerr << "[config] FATAL: could not read the bank row count "
+                             "for " << tech << " from the Ramulator org preset "
+                             "the run simulates. subarrays_per_bank, the "
+                             "in-memory tree shape, the tree-coverage assertion "
+                             "and pages_per_unit all derive from it, and this "
+                             "release removed the per-technology literal table "
+                             "that used to stand in for it (1.11.61 ruling R4), "
+                             "because that table described a different part."
+                          << std::endl;
+                std::exit(2);
             }
+
+            long long derived_sa = bank_rows / subarray_height;
+            if (derived_sa < 1) derived_sa = 1;
+            if (!config.subarrays_per_bank_user_set)
+                config.subarrays_per_bank = static_cast<int>(derived_sa);
+
+            /* The derivation is printed because it decides the tree. Before
+             * this release the count came from a table nothing showed. */
+            std::cout << "  Subarray geometry from preset " << preset_name
+                      << ": " << bank_rows << " rows/bank / " << subarray_height
+                      << " rows per subarray = " << derived_sa
+                      << " subarrays/bank";
+            if (config.subarrays_per_bank_user_set)
+                std::cout << " -- OVERRIDDEN by memory.subarrays_per_bank = "
+                          << config.subarrays_per_bank;
+            std::cout << std::endl;
         }
     }
 

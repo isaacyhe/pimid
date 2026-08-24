@@ -7,6 +7,65 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.61 -- the object describes the part the preset simulates
+
+The density batch: four rulings made interactively (2026-08-22) after the
+density investigation, plus the R6 principle stated 2026-08-24 that governs
+them all: PIMID relies on the Ramulator models, those models are calibrated to
+JEDEC and the vendor data in misc/, and PIMID ITSELF PROVIDES NO NUMBERS.
+
+R1 -- DDR-family density follows the preset. The architecture objects
+described devices 4x-32x less dense than the presets the wrapper simulates
+(an LPDDR5 run reported 2.75 mm^2 of DRAM silicon while claiming 8 GiB).
+DDR4/DDR5 factories re-based on their presets; DDR3/LPDDR5/GDDR6, which have
+no object of their own, get preset density stamped per-technology by a new
+applyPresetDensityToArchitecture() -- at DDR4/DDR5 it reproduces the factory
+literals exactly, which is the check. Measured die areas now land on the
+density rows' own source parts: DDR5 25.40 vs Micron D1a's 25.41; GDDR6 37.03
+vs Samsung K4Z80165BC's 37.03. bank_size_mb drives pages_per_unit, so the
+workload's contiguous block moves 16x-64x -- re-simulation required, which is
+why this release is STAGED alone.
+
+R2 -- HBM keeps CORE-DIE semantics (HBM2's 1024 MB die area lands on the Sohn
+ISSCC-2016 measurement exactly), and a capacity cross-check now sits beside
+the 1.11.56 speed-bin check: chip_size_mb (x stacked dies for HBM) must
+reproduce the preset capacity. It FIRES ON EVERY HBM3 RUN by design -- three
+authorities disagree there (object 16 GiB / preset 8 GiB / wrapper literal
+4 GiB) -- and the R6 principle resolves it for 1.11.63: the wrapper literal
+has no standing, the object follows the preset. The check needed a
+transcription of Ramulator's cpp-local org rows; the transcription self-checks
+(banks x rows x cols x DQ must reproduce the declared density, refuses loudly
+otherwise). Reference-anchor wrappers (the B012 HBM3 anchors constructed
+inside every detailed run) are anchor-quiet: gate 1171A caught them
+misattributing the HBM3 warning into DDR4 and HBM2 logs.
+
+R3 -- the GDDR6 channel is 16 DQ (JESD250D sec 2.2 p.3, Tbl 19 p.18, Tbl 80
+p.177), not the 32-bit device width. bandwidth_ -- the M/D/1 service rate,
+the NoC cap and the host MC cap -- halves from 112 to 56 GB/s: every GDDR6
+cell was simulated against a memory twice as fast as the part. First-order
+GDDR6 result change. The ladder verdict is unchanged (still not adopted;
+GDDR6 still has no object of its own to reconcile).
+
+R4 -- bank_rows is DERIVED from the preset (getPresetRowsPerBank, keyed by
+the configured device width), replacing a literal table that had drifted 2x
+for DDR3 (65536 vs 131072), HBM2 (65536 vs 32768) and HBM3 (32768 vs 16384).
+The four consistent technologies reproduce identically under the derivation
+-- the ruling's own acceptance test. An unreadable preset now REFUSES rather
+than reinstating a literal. subarrays_per_bank: DDR3 128->256, HBM2 64->32,
+HBM3 32->16; SUBARRAY placement verified rc=0 on all seven, so the
+tree-coverage assertion holds under the new counts.
+
+STILL OPEN, queued for 1.11.63 under R6: HBM3 chip capacity to the preset;
+HBM bank_size_mb (4 MB, unruled by R1/R2, describes nothing simulated) to the
+preset (32/16 MB -- moves HBM pages_per_unit 8x/4x); wrapper
+capacity_/bandwidth_ literals derived from preset org x timing; HBM3's
+128-vs-64 channel width in the CACTI-IO table; the DDR3/DDR5/HBM3 timing
+drifts the investigation found.
+
+Gate 1171A caught the anchor-warning misattribution; 1171B all five arms
+green: LPDDR5 die 2.75 -> 21.99 mm^2, GDDR6 112 -> 56 GB/s, derivations
+exact, capacity check fires on HBM3 and only there, SRAM bit-identical.
+
 ## 1.11.60 -- one fabric, two consumers; and the interface revert
 
 Audit round 4 (47 REAL, 9 latent, records in _1164audit/) audited the newest

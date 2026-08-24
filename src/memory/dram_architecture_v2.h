@@ -172,9 +172,41 @@ public:
         int ranks_per_channel;        // VERIFIED
 
         size_t subarray_size_kb;      // TYPICAL
-        size_t bank_size_mb;          // TYPICAL
-        size_t chip_size_mb;          // VERIFIED (from datasheet)
-        size_t rank_size_gb;          // VERIFIED
+
+        /* 1.11.61 (ruling R1/R2): THE DENSITY FIELDS AND WHAT THEY COUNT.
+         *
+         * Both fields describe the part the Ramulator ORG PRESET the wrapper
+         * names actually simulates -- not "a typical part", which is what they
+         * used to say and why they described devices 4x-32x less dense than
+         * every run's own timing model (audit round 4, C005; the evidence is in
+         * _1164audit/DENSITY_INVESTIGATION.md).
+         *
+         * bank_size_mb -- ONE BANK of the simulated preset, every family:
+         *   preset device density / the banks that density spans. It is the
+         *   single hottest density consumer: main.cpp turns it into
+         *   pages_per_unit, hence --pages-per-unit and the emitted
+         *   pagesPerUnit, hence the address-to-unit map and PE locality.
+         *
+         * chip_size_mb -- THE UNIT DIFFERS BY FAMILY, deliberately, because
+         * the two families do not have the same thing to count:
+         *   DDR3/DDR4/DDR5/LPDDR5/GDDR6: ONE DEVICE. Equal to the preset's
+         *     device density (GDDR6 included -- GDDR6.cpp puts the channel
+         *     level inside the density product, so 8 Gb is the whole two-
+         *     channel device). Ruling R1.
+         *   HBM2/HBM3: ONE CORE DIE, which fronts TWO channels. NOT the
+         *     preset's per-channel density (HBM2.cpp/HBM3.cpp call it "channel
+         *     density") and not the stack. This is the unit the die-area path
+         *     needs -- HBM2's 1024 MB is the 8 Gb Sohn ISSCC-2016 core die
+         *     exactly, which is why HBM2's 96.00 mm^2/die lands on its
+         *     published anchor -- and it is deliberately NOT the unit its
+         *     partner chips_per_rank counts (that is the CHANNEL count, 8/16).
+         *     Ruling R2.
+         * RamulatorWrapper::initialize() cross-checks both readings against the
+         * preset and warns loudly on a mismatch; see the capacity cross-check
+         * beside the 1.11.56 speed-bin check. */
+        size_t bank_size_mb;          // VERIFIED: the named Ramulator org preset
+        size_t chip_size_mb;          // VERIFIED: device (DDR family) / core die (HBM)
+        size_t rank_size_gb;          // DERIVED: chip_size_mb x chips_per_rank
     } organization;
 
     // Timing (JEDEC-verified)
@@ -465,15 +497,42 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR4_2400_Verified() {
 
     // ===== ORGANIZATION (VERIFIED) =====
 
-    arch->organization.subarrays_per_bank = 4;  // Typical
+    /* 1.11.61 (ruling R1): THE DENSITY FOLLOWS THE PRESET.
+     *
+     * The preset this tree simulates for DDR4 is DDR4_8Gb_x8
+     * (ramulator_wrapper.cpp / main.cpp writeRamulatorConfigYaml), i.e.
+     * {8<<10, 8, {1, 1, 4, 4, 1<<16, 1<<10}} at DDR4.cpp:19 -- an 8 Gb device,
+     * 16 banks, 65536 rows x 1024 columns x 8 bits = 1024 B per row.
+     *
+     * The four lines below used to read 4 / 2 MB / 128 MB / 1 GB, tagged
+     * "Typical 1Gb chip" and "VERIFIED (from datasheet)" on a value that
+     * matched no preset in this tree and no datasheet part the tree cites.
+     * Consequences, both measured (_1164audit/DENSITY_INVESTIGATION.md sec 3):
+     * a DDR4 BANK-placement element was given a 2 MB contiguous block where one
+     * bank of the simulated part is 64 MB, and the DRAM die area came out
+     * 3.38 mm^2 for a die claiming 8 GiB of capacity -- 8x less silicon than
+     * the memory it reported. At the preset's density the die lands at
+     * 27.03 mm^2, which is the 8 Gb-class part vendorDieDensity()'s DDR4 row
+     * was measured from.
+     *
+     * subarrays_per_bank and rank_size_gb move because the arithmetic forces
+     * them, not as separate claims: 64 MB / 512 KB = 128 subarrays, which is
+     * also what main.cpp's live count (bank_rows / subarray_height =
+     * 65536 / 512) has always been, and 1024 MB x 8 devices = 8 GB, which is
+     * the capacity_ the wrapper has always reported for DDR4. Both fields were
+     * previously the only ones describing the 1 Gb part.
+     *
+     * The rate, the timings and every ladder width are untouched: density
+     * reaches exactly two consumed numbers, pages_per_unit and the die area. */
+    arch->organization.subarrays_per_bank = 128;  // DERIVED: 64 MB bank / 512 KB subarray
     arch->organization.banks_per_bank_group = 4;  // JEDEC
     arch->organization.bank_groups_per_chip = 4;  // JEDEC (x8/x4 configs)
     arch->organization.chips_per_rank = 8;  // x8 organization
     arch->organization.ranks_per_channel = 2;  // Typical DIMM
     arch->organization.subarray_size_kb = 512;  // Typical
-    arch->organization.bank_size_mb = 2;  // 4 subarrays x 512KB
-    arch->organization.chip_size_mb = 128;  // Typical 1Gb chip
-    arch->organization.rank_size_gb = 1;  // 8 x 128MB
+    arch->organization.bank_size_mb = 64;   // preset DDR4_8Gb_x8: 8 Gb / 16 banks
+    arch->organization.chip_size_mb = 1024; // preset DDR4_8Gb_x8: 8 Gb device
+    arch->organization.rank_size_gb = 8;    // DERIVED: 8 x 1024 MB
 
     // ===== TIMING (JEDEC DDR4-2400 CL17) =====
 
@@ -667,7 +726,32 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM2_Verified() {
     arch->organization.ranks_per_channel = 1;  // Single stack
     arch->organization.subarray_size_kb = 1024;  // Larger than DDR4
     arch->organization.bank_size_mb = 4;
-    arch->organization.chip_size_mb = 1024;  // 1GB per stack (typical)
+    /* 1.11.61 (ruling R2): HBM KEEPS CORE-DIE SEMANTICS, and says so.
+     *
+     * 1024 MB is ONE CORE DIE, not one channel and not the stack. The preset
+     * this tree simulates is HBM2_4Gb (HBM2.cpp:27), whose 4 Gb is a
+     * PER-CHANNEL density -- HBM2.cpp's own error text calls it "channel
+     * density" -- and a core die fronts TWO channels, so the die is
+     * 2 x 4 Gb = 8 Gb = 1024 MB. That is exactly the part the die-area anchor
+     * was measured from: K. Sohn et al., ISSCC 2016 paper 18.2 / IEEE JSSC
+     * 52(1):250-260 Jan 2017, "each core die has 8 Gb DRAM cell array",
+     * "the chip size is 12x8mm2" -- the same paper vendorDieDensity()'s HBM2
+     * row cites, which is why HBM2 reports 96.00 mm^2/die exactly.
+     *
+     * So HBM is NOT re-based on the preset the way ruling R1 re-bases the DDR
+     * family: naively following the per-channel density would halve this to
+     * 512 MB and break the one HBM area figure that is currently right.
+     * The reading is CHECKED rather than trusted -- see the capacity
+     * cross-check in RamulatorWrapper::initialize(), which requires
+     * chip_size_mb x (dies the preset stacks) to equal the preset's stack
+     * capacity: 1024 x 4 = 4096 MB = 8 channels x 512 MB. It holds for HBM2.
+     *
+     * chips_per_rank above counts CHANNELS (8), not dies (4). The two fields
+     * therefore count different units on purpose; see the note at the struct
+     * field. rank_size_gb is left as the 8 GB stack figure it has always been
+     * and is dead (no getter, no reader) -- the live stack capacity is
+     * capacity_ in the wrapper, 4 GiB, which is the preset's. */
+    arch->organization.chip_size_mb = 1024;  // ONE CORE DIE (2 channels x 4 Gb)
     arch->organization.rank_size_gb = 8;
 
     // ===== TIMING (JEDEC HBM2; rate = the simulated HBM2_2.4Gbps bin) =====
@@ -850,15 +934,35 @@ inline std::unique_ptr<DRAMArchitectureV2> createDDR5_4800_Verified() {
 
     // ===== ORGANIZATION (VERIFIED) =====
 
-    arch->organization.subarrays_per_bank = 4;  // Typical
+    /* 1.11.61 (ruling R1): THE DENSITY FOLLOWS THE PRESET.
+     *
+     * DDR5's preset is DDR5_8Gb_x8, {8<<10, 8, {1, 1, 8, 2, 1<<16, 1<<10}} at
+     * DDR5.cpp:16 -- an 8 Gb device, 65536 rows x 1024 columns x 8 bits =
+     * 1024 B per row. The lines below read 4 / 2 MB / 256 MB / 2 GB, i.e. a
+     * 2 Gb part; the die came out at 6.35 mm^2 against a row whose own source
+     * is "Micron D1a, 8 Gb / 25.41 mm^2 (TechInsights)". At the preset's
+     * density it lands at 25.40 mm^2, on that measured part.
+     *
+     * ONE RESIDUAL, STATED RATHER THAN SILENTLY RESOLVED: the preset spans its
+     * 8 Gb over 8 BG x 2 Ba = 16 banks, while this object (and main.cpp's
+     * hierarchy table) carry JEDEC's 8 BG x 4 Ba = 32. On this one field the
+     * preset is the odd authority -- a JEDEC DDR5 x8 device really has 32
+     * banks. bank_size_mb follows the PRESET (8 Gb / 16 = 64 MB), because
+     * bank_size_mb exists to describe the part whose cycles are counted, and
+     * the bank COUNTS are left where JEDEC puts them. So 32 x 64 MB does not
+     * reproduce chip_size_mb here, and that is the two authorities disagreeing
+     * rather than an arithmetic slip. Ruling R1 names chip_size_mb and
+     * bank_size_mb only; moving the bank count is a separate change with a
+     * separate blast radius (the CACTI area query and effectiveDramBanks()). */
+    arch->organization.subarrays_per_bank = 128;  // DERIVED: 64 MB bank / 512 KB subarray
     arch->organization.banks_per_bank_group = 4;  // JEDEC: 4 banks per bank group
     arch->organization.bank_groups_per_chip = 8;  // JEDEC: 8 bank groups (2x DDR4!)
     arch->organization.chips_per_rank = 8;  // x8 organization
     arch->organization.ranks_per_channel = 2;  // Typical DIMM
     arch->organization.subarray_size_kb = 512;  // Typical
-    arch->organization.bank_size_mb = 2;
-    arch->organization.chip_size_mb = 256;  // Larger chips (2Gb+)
-    arch->organization.rank_size_gb = 2;
+    arch->organization.bank_size_mb = 64;   // preset DDR5_8Gb_x8: 8 Gb / 16 banks
+    arch->organization.chip_size_mb = 1024; // preset DDR5_8Gb_x8: 8 Gb device
+    arch->organization.rank_size_gb = 8;    // DERIVED: 8 x 1024 MB
 
     // ===== TIMING (JEDEC DDR5; rate = the simulated DDR5_3200AN bin) =====
 
@@ -1040,7 +1144,28 @@ inline std::unique_ptr<DRAMArchitectureV2> createHBM3_Verified() {
     arch->organization.ranks_per_channel = 1;  // Single stack
     arch->organization.subarray_size_kb = 1024;  // Same as HBM2
     arch->organization.bank_size_mb = 4;
-    arch->organization.chip_size_mb = 2048;  // 2GB per stack (typical)
+    /* 1.11.61 (ruling R2): HBM3 STAYS AS IT IS, on the same CORE-DIE basis as
+     * HBM2 above, and the mismatch that reading leaves is CHECKED and REPORTED
+     * rather than quietly corrected here.
+     *
+     * The three authorities for HBM3 capacity in this tree do not agree, and
+     * the ruling does not move this field to any of them:
+     *   this object   8 core dies x 2048 MB = 16 GiB
+     *   the preset    16 channels x 4 Gb    =  8 GiB  (HBM3_4Gb, HBM3.cpp:24)
+     *   the wrapper   capacity_             =  4 GiB  (ramulator_wrapper.cpp)
+     * A core die fronting two channels of the simulated HBM3_4Gb preset is
+     * 2 x 4 Gb = 8 Gb = 1024 MB, so 2048 is 2x the core-die figure this basis
+     * implies. Unlike HBM2 there is no measured anchor in this tree that
+     * selects one of the three: vendorDieDensity()'s HBM3 row is a density
+     * (0.16 Gb/mm^2, SemiAnalysis), not a die capacity, so it cannot arbitrate.
+     *
+     * The capacity cross-check added in RamulatorWrapper::initialize() by this
+     * same ruling therefore FIRES on HBM3 -- 2048 x 8 dies = 16384 MB against
+     * the preset's 8192 -- and every HBM3 run says so out loud. That is the
+     * intended outcome of ruling R2: keep the value, make the disagreement
+     * impossible to miss, and leave the choice of which authority moves to a
+     * ruling of its own. Nothing here is silently reconciled. */
+    arch->organization.chip_size_mb = 2048;  // core-die basis, UNRECONCILED (see above)
     arch->organization.rank_size_gb = 16;  // 16GB stacks available
 
     // ===== TIMING (JEDEC HBM3; rate = the simulated HBM3_6.4Gbps bin) =====

@@ -331,7 +331,39 @@ double CactiIOWrapper::dramRateMTs(const std::string& t) {
 int CactiIOWrapper::dramChannelWidthBits(const std::string& t) {
     if (t == "DDR3" || t == "DDR4" || t == "DDR5") return 64;   // 64-bit channel
     if (t == "LPDDR5") return 16;                               // 16-bit channel
-    if (t == "GDDR6")  return 32;                               // 32-bit, 2x16 pseudo
+    /* 1.11.61 (ruling R3): 16, THE CHANNEL -- not 32, the DEVICE.
+     *
+     * This function's contract, stated four lines above the table, is "the
+     * PER-CHANNEL data-bus width the standard defines". GDDR6's standard is
+     * explicit and says 16:
+     *   JESD250D sec 2.2 p.3: "The device's architecture consists of two 16
+     *     bit wide fully independent channels."
+     *   JESD250D Table 80 p.177: "DQ[15:0] | I/O | Data Input/Output: 16-bit
+     *     data bus"; NOTE 1: "Index '_A' or '_B' represents the channel
+     *     indicator."
+     *   JESD250D sec 9.8 p.183: "GDDR6 has been optimized for a 32B access
+     *     across a 16-bit channel."
+     *   JESD250D Table 19 p.18: "Number channels" = 2 at every density.
+     * The Ramulator preset agrees: GDDR6_8Gb_x16 is dq = 16 with channel = 2
+     * (external/ramulator/src/dram/impl/GDDR6.cpp org_presets).
+     *
+     * The 32 was the whole two-channel DEVICE under a per-channel name, and it
+     * was LIVE, not cosmetic: derivedBwMBs() in ramulator_wrapper.cpp
+     * multiplies this width by the CHANNEL COUNT, so the channel dimension was
+     * booked twice and GDDR6's bandwidth_ came out 14000 x (32/8) x 2 =
+     * 112000 MB/s against a device peak of 14000 x (16/8) x 2 = 56000 MB/s.
+     * bandwidth_ is the device M/D/1 service rate, the NoC cap and the host MC
+     * cap, so this was a first-order GDDR6 result error in the optimistic
+     * direction. The wrapper's own comment beside that call already described
+     * 16-bit channels; the comment and the function it called disagreed.
+     *
+     * The channel-count bookkeeping needs no other change: channels_ = 2 for
+     * GDDR6 (ramulator_wrapper.cpp, 1.11.60 C007) and every consumer of this
+     * function is per-channel by construction -- derivedBwMBs multiplies by
+     * channels explicitly, and the three energy/area sites pass the result to
+     * computeDramIO() as one channel's DQ count. Correcting the width alone
+     * therefore lands the aggregate on the device's real peak. */
+    if (t == "GDDR6")  return 16;                               // 16-DQ channel, 2/device
     if (t == "HBM2" || t == "HBM3") return 128;                 // 128-bit channel
     return -1;
 }

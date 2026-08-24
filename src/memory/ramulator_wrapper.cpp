@@ -6,6 +6,7 @@
 #include <sstream>
 #include <cmath>
 #include <algorithm>
+#include <set>
 #include <yaml-cpp/yaml.h>
 
 // Include Ramulator headers
@@ -45,8 +46,230 @@ RamulatorWrapper::~RamulatorWrapper() {
     }
 }
 
+/* 1.11.61 (rulings R1/R2/R4): THE SIMULATED PRESET'S ORGANISATION, IN ONE
+ * PLACE.
+ *
+ * Every row below is transcribed verbatim from the Ramulator2 org_presets
+ * table named beside it -- the same preset string parseConfiguration() writes
+ * into the generated YAML and main.cpp's writeRamulatorConfigYaml() writes for
+ * the zsim path. The transcription is checked, not trusted: the constructor
+ * helper below multiplies banks x rows x cols x DQ back out and refuses any
+ * row that does not reproduce its own declared density.
+ *
+ * Widths matter here. writeRamulatorConfigYaml() selects the org preset by
+ * memory.dram.device_width, and rows and bank groups move with it (a
+ * DDR4_8Gb_x4 device has 131072 rows where the x8 has 65536), so the table is
+ * keyed by width wherever the preset family offers more than one.
+ *
+ * RESIDUAL, stated: on the wrapper's OWN default path parseConfiguration()
+ * still names a fixed x8 preset per technology (the 1.11.59 C018 note says so
+ * at setDeviceWidth). This table follows the CONFIGURED width, i.e. the preset
+ * the run's timing model actually parses on the zsim path; on the wrapper's
+ * oracle path with a non-x8 width set, the wrapper's own generated YAML and
+ * this row can therefore describe different presets. That is the pre-existing
+ * limitation, not a new one, and every corpus cell ran at x8 where the two
+ * agree exactly. */
+namespace {
+
+int presetWidthBits(const std::string& device_width, int fallback) {
+    if (device_width == "x4")  return 4;
+    if (device_width == "x8")  return 8;
+    if (device_width == "x16") return 16;
+    return fallback;
+}
+
+pimid::PresetOrganization makePresetOrg(const char* name, const char* src,
+                                        uint64_t density_mb, int dq,
+                                        int channels, int banks,
+                                        uint64_t rows, uint64_t cols,
+                                        bool per_channel) {
+    pimid::PresetOrganization p;
+    p.preset_name = name;
+    p.preset_source = src;
+    p.density_mb = density_mb;
+    p.dq_bits = dq;
+    p.channels_in_density = channels;
+    p.banks_in_density = banks;
+    p.rows_per_bank = rows;
+    p.cols_per_row = cols;
+    p.per_channel_density = per_channel;
+
+    /* The transcription check. Ramulator's own density check is
+     * banks x rows x cols x DQ == density (in bits); reproducing it here means
+     * a mistyped row is refused at the point it is written rather than
+     * believed downstream. */
+    const uint64_t bits = static_cast<uint64_t>(banks) * rows * cols *
+                          static_cast<uint64_t>(dq);
+    const uint64_t declared_bits = density_mb * 1024ULL * 1024ULL * 8ULL;
+    p.valid = (bits == declared_bits);
+    if (!p.valid) {
+        std::cerr << "[mem] WARNING: the transcribed Ramulator org preset '"
+                  << name << "' (" << src << ") does not reproduce its own "
+                     "density: " << banks << " banks x " << rows << " rows x "
+                  << cols << " cols x " << dq << " DQ = " << bits
+                  << " bits against a declared " << declared_bits
+                  << ". Every density and row count derived from this preset "
+                     "in this run is suspect." << std::endl;
+    }
+    return p;
+}
+
+}  // namespace
+
+void RamulatorWrapper::resolvePresetOrganization() {
+    std::string dt = dram_type_;
+    std::transform(dt.begin(), dt.end(), dt.begin(), ::toupper);
+    const int w = presetWidthBits(device_width_, 0);
+
+    if (dt == "DDR3") {
+        // DDR3.cpp:21-33  {density, DQ, {Ch, Ra, Ba, Ro, Co}}
+        const int    ww   = (w > 0) ? w : 8;
+        const uint64_t ro = (ww == 16) ? 65536ULL : 131072ULL;
+        const uint64_t co = (ww == 4)  ? 2048ULL  : 1024ULL;
+        preset_org_ = makePresetOrg(
+            (std::string("DDR3_8Gb_x") + std::to_string(ww)).c_str(),
+            "external/ramulator/src/dram/impl/DDR3.cpp org_presets",
+            1024, ww, 1, 8, ro, co, false);
+    } else if (dt == "DDR4") {
+        // DDR4.cpp:19-21  8 Gb rows: x4 {4 BG, 4 Ba, 1<<17, 1<<10},
+        // x8 {4, 4, 1<<16, 1<<10}, x16 {2, 4, 1<<16, 1<<10}
+        const int ww = (w > 0) ? w : 8;
+        const int banks = (ww == 16) ? 8 : 16;
+        const uint64_t ro = (ww == 4) ? 131072ULL : 65536ULL;
+        preset_org_ = makePresetOrg(
+            (std::string("DDR4_8Gb_x") + std::to_string(ww)).c_str(),
+            "external/ramulator/src/dram/impl/DDR4.cpp org_presets",
+            1024, ww, 1, banks, ro, 1024, false);
+    } else if (dt == "DDR5") {
+        // DDR5.cpp:16-18  x4 {8 BG, 2 Ba, 1<<16, 1<<11}, x8 {8, 2, 1<<16,
+        // 1<<10}, x16 {4, 2, 1<<16, 1<<10}
+        const int ww = (w > 0) ? w : 8;
+        const int banks = (ww == 16) ? 8 : 16;
+        const uint64_t co = (ww == 4) ? 2048ULL : 1024ULL;
+        preset_org_ = makePresetOrg(
+            (std::string("DDR5_8Gb_x") + std::to_string(ww)).c_str(),
+            "external/ramulator/src/dram/impl/DDR5.cpp org_presets",
+            1024, ww, 1, banks, 65536, co, false);
+    } else if (dt == "LPDDR5") {
+        // LPDDR5.cpp:21-27 -- x16 only. {1, 1, 4 BG, 4 Ba, 1<<15, 1<<10}
+        preset_org_ = makePresetOrg(
+            "LPDDR5_8Gb_x16",
+            "external/ramulator/src/dram/impl/LPDDR5.cpp org_presets",
+            1024, 16, 1, 16, 32768, 1024, false);
+    } else if (dt == "GDDR6") {
+        /* GDDR6.cpp:21-28. The density product INCLUDES the channel level
+         * ({2, 4 BG, 4 Ba, Ro, Co}), so 8 Gb is the whole two-channel DEVICE
+         * and the 32 banks are the device's, 16 per channel. */
+        const int ww = (w > 0) ? w : 16;
+        const uint64_t co = (ww == 8) ? 2048ULL : 1024ULL;
+        preset_org_ = makePresetOrg(
+            (std::string("GDDR6_8Gb_x") + std::to_string(ww)).c_str(),
+            "external/ramulator/src/dram/impl/GDDR6.cpp org_presets",
+            1024, ww, 2, 32, 16384, co, false);
+    } else if (dt == "HBM2") {
+        /* HBM2.cpp:22-30. density is PER CHANNEL ("channel density" in the
+         * file's own error text); {1 Ch, 2 Pch, 4 Bg, 2 Ba} = 16 banks per
+         * channel. No device width applies. */
+        preset_org_ = makePresetOrg(
+            "HBM2_4Gb",
+            "external/ramulator/src/dram/impl/HBM2.cpp org_presets",
+            512, 128, 1, 16, 32768, 64, true);
+    } else if (dt == "HBM3") {
+        // HBM3.cpp:21-26. Per-channel density; 2 Pch x 4 Bg x 4 Ba = 32 banks.
+        preset_org_ = makePresetOrg(
+            "HBM3_4Gb",
+            "external/ramulator/src/dram/impl/HBM3.cpp org_presets",
+            512, 128, 1, 32, 16384, 64, true);
+    } else {
+        /* Unknown technology: the same DDR4 substitution the architecture
+         * object makes a few lines below, which announces itself there. */
+        const int ww = (w > 0) ? w : 8;
+        const int banks = (ww == 16) ? 8 : 16;
+        const uint64_t ro = (ww == 4) ? 131072ULL : 65536ULL;
+        preset_org_ = makePresetOrg(
+            (std::string("DDR4_8Gb_x") + std::to_string(ww)).c_str(),
+            "external/ramulator/src/dram/impl/DDR4.cpp org_presets (substituted)",
+            1024, ww, 1, banks, ro, 1024, false);
+    }
+}
+
+uint64_t RamulatorWrapper::getPresetDeviceCapacityMB() const {
+    if (!preset_org_.valid) return 0;
+    if (!preset_org_.per_channel_density) return preset_org_.density_mb;
+    // HBM: the stack is the device, and its channel count is PIMID's.
+    const uint64_t nch = (channels_ > 0) ? channels_ : 1;
+    return preset_org_.density_mb * nch;
+}
+
+int RamulatorWrapper::getPresetDiesPerStack() const {
+    if (!preset_org_.per_channel_density) return 0;
+    const int nch = (channels_ > 0) ? static_cast<int>(channels_) : 1;
+    return (nch >= 2) ? nch / 2 : 1;   // two channels per core die
+}
+
+/* 1.11.61 (ruling R1): THE DDR-FAMILY DENSITY FOLLOWS THE PRESET, INCLUDING
+ * THE THREE TECHNOLOGIES THAT HAVE NO OBJECT OF THEIR OWN.
+ *
+ * DDR3, LPDDR5 and GDDR6 read DDR4-2400's architecture object (see the
+ * substitution notice in initialize()), so a literal in the DDR4 factory can
+ * describe at most one of the four DDR-family parts. Their presets differ in
+ * exactly the field that matters here -- DDR3 spreads its 8 Gb over 8 banks
+ * (128 MB/bank), DDR4/DDR5/LPDDR5 over 16 (64 MB) and GDDR6 over 32 (32 MB) --
+ * so the density is stamped from the preset of the technology ACTUALLY ASKED
+ * FOR, after the object is built. At DDR4 and DDR5 this reproduces the factory
+ * literals exactly, which is the check that the two agree.
+ *
+ * HBM is excluded by ruling R2: its chip_size_mb is a CORE-DIE capacity, not
+ * the preset's per-channel density, and following the preset naively would
+ * halve HBM2's die area away from the Sohn ISSCC-2016 measurement it currently
+ * lands on. HBM densities stay exactly as the factories write them.
+ *
+ * Only chip_size_mb and bank_size_mb are stamped -- the two fields the ruling
+ * names, and the only two that reach a consumed number (pages_per_unit and the
+ * DRAM die area). subarrays_per_bank and subarray_size_kb are left alone: both
+ * are dead on this object (the live subarray count is main.cpp's
+ * bank_rows / subarray_height), and a 512 KB subarray is DDR4's row geometry,
+ * not LPDDR5's or GDDR6's, so deriving them here would invent a number. */
+void RamulatorWrapper::applyPresetDensityToArchitecture() {
+    if (!dram_arch_ || !preset_org_.valid) return;
+    std::string dt = dram_type_;
+    std::transform(dt.begin(), dt.end(), dt.begin(), ::toupper);
+    if (dt.rfind("HBM", 0) == 0) return;   // ruling R2: core-die semantics stay
+
+    const uint64_t chip_mb = preset_org_.density_mb;
+    const uint64_t bank_mb = preset_org_.bankSizeMB();
+    if (chip_mb == 0 || bank_mb == 0) return;
+
+    const bool moved = (dram_arch_->organization.chip_size_mb != chip_mb) ||
+                       (dram_arch_->organization.bank_size_mb != bank_mb);
+    dram_arch_->organization.chip_size_mb = chip_mb;
+    dram_arch_->organization.bank_size_mb = bank_mb;
+
+    if (moved && dt != "DDR4" && dt != "DDR5") {
+        static bool announced_density = false;
+        if (!announced_density) {
+            announced_density = true;
+            std::cerr << "[mem] NOTE: " << dt << " has no architecture object, "
+                         "but its DENSITY no longer describes DDR4-2400's. "
+                         "chip_size_mb and bank_size_mb are stamped from the "
+                         "preset this run simulates, "
+                      << preset_org_.preset_name << " (" << chip_mb
+                      << " MB device, " << preset_org_.banks_in_density
+                      << " banks, " << bank_mb
+                      << " MB/bank). Every other field on the object is still "
+                         "DDR4-2400's." << std::endl;
+        }
+    }
+}
+
 void RamulatorWrapper::initialize() {
     parseConfiguration();
+
+    /* 1.11.61 (rulings R1/R2/R4): resolve the simulated preset's organisation
+     * BEFORE the architecture object is built, so the density stamp and the
+     * capacity cross-check below both have it, and so main.cpp's bank_rows
+     * derivation can read it off a wrapper that was only initialized. */
+    resolvePresetOrganization();
 
     // Only create a full Ramulator2 instance when a config file is provided
     // (for cycle-accurate simulation). Default configs (empty path) are used
@@ -110,6 +333,11 @@ void RamulatorWrapper::initialize() {
      * check below off it. No-op when no width is configured. */
     applyDeviceWidthToArchitecture();
 
+    /* 1.11.61 (ruling R1): stamp the simulated preset's density onto the
+     * object. AFTER the width -- the width decides which preset row applies --
+     * and BEFORE the two checks below, which read the density. */
+    applyPresetDensityToArchitecture();
+
     /* 1.11.57 (audit round 3, C002): this check RUNS now.
      *
      * It was written in 1.11.56 to catch exactly the drift that release
@@ -153,7 +381,7 @@ void RamulatorWrapper::initialize() {
             (dram_arch_->datapath.channel_databus_bits.value_bits / 8.0) *
             dram_arch_->timing.data_rate_mtps *
             static_cast<double>(channels_ > 0 ? channels_ : 1);
-        if (bandwidth_ > 0 && implied_mbs > 0.0 &&
+        if (!anchor_quiet_ && bandwidth_ > 0 && implied_mbs > 0.0 &&
             std::fabs(implied_mbs - static_cast<double>(bandwidth_)) >
                 0.02 * static_cast<double>(bandwidth_)) {
             /* 1.11.60 (audit round 4, C008): NAME THE SOURCE THE NUMBER
@@ -186,6 +414,78 @@ void RamulatorWrapper::initialize() {
                          "bandwidths come from the architecture object, and "
                          "energy comes from the rate table, so this run counts "
                          "one part and prices another."
+                      << std::endl;
+        }
+    }
+
+    /* 1.11.61 (ruling R2): ONE PART, ONE CAPACITY -- checked, not trusted.
+     *
+     * The companion of the speed-bin check above, and it exists for the same
+     * reason: the Ramulator ORG preset decides the device whose cycles are
+     * counted, the architecture object's chip_size_mb decides the die area
+     * reported and (through bank_size_mb) the contiguous block every placed
+     * element addresses, and until this release nothing held the two together.
+     * They had drifted 4x-32x across the lineup -- an LPDDR5 run reported
+     * 2.75 mm^2 of DRAM silicon while claiming 8 GiB of memory.
+     *
+     * THE UNIT DIFFERS BY FAMILY, and the check follows the field's declared
+     * semantics rather than flattening them:
+     *   DDR family: chip_size_mb IS the preset's device capacity. Direct.
+     *   HBM:        chip_size_mb is ONE CORE DIE, and a core die fronts two
+     *               channels, so chip_size_mb x dies must reproduce the
+     *               preset's stack capacity (per-channel density x channels).
+     *
+     * HBM3 FAILS THIS CHECK TODAY AND IS MEANT TO. Ruling R2 keeps its 2048 MB
+     * on the core-die basis while the preset's stack is 8 GiB, so the run says
+     * so on every HBM3 configuration instead of the disagreement living in a
+     * comment. See the note at HBM3's chip_size_mb. */
+    if (dram_arch_ && preset_org_.valid) {
+        std::string dt = dram_type_;
+        std::transform(dt.begin(), dt.end(), dt.begin(), ::toupper);
+        const uint64_t chip_mb = dram_arch_->organization.chip_size_mb;
+        const int      dies    = getPresetDiesPerStack();
+        const uint64_t implied_mb =
+            chip_mb * static_cast<uint64_t>(preset_org_.per_channel_density
+                                                ? (dies > 0 ? dies : 1) : 1);
+        const uint64_t preset_mb = getPresetDeviceCapacityMB();
+        /* SAID ONCE PER TECHNOLOGY, unlike the speed-bin check above, and for
+         * a reason the speed-bin check does not have: a wrapper is built for a
+         * technology the run is NOT configured for at several sites (the HBM3
+         * bandwidth reference anchor is queried on every run, whatever its
+         * memory technology), and this check fires on HBM3 by design. Without
+         * the latch a single DDR4 run prints the HBM3 line fifteen times. The
+         * message still names its own technology, so a reader can tell the
+         * configured part from a reference query. */
+        static std::set<std::string> capacity_warned;
+        /* 1.11.61 (gate 1171A D4): anchor wrappers stay silent. The B012
+         * reference anchors construct an HBM3 wrapper inside EVERY detailed
+         * run to read one bandwidth number, and its initialization was
+         * emitting the HBM3 capacity warning into DDR4 and HBM2 logs -- a
+         * true statement misattributed to a run it does not describe. The
+         * warning still fires on every wrapper actually used for the run. */
+        if (!anchor_quiet_ && preset_mb > 0 && implied_mb != preset_mb &&
+            capacity_warned.insert(dt).second) {
+            std::cerr << "[ramulator] WARNING: " << dt
+                      << " capacity mismatch between the architecture object "
+                         "and the org preset this run simulates. The object's "
+                         "chip_size_mb is " << chip_mb << " MB";
+            if (preset_org_.per_channel_density) {
+                std::cerr << " (a CORE DIE) x " << (dies > 0 ? dies : 1)
+                          << " dies = " << implied_mb << " MB per stack";
+            } else {
+                std::cerr << " per device";
+            }
+            std::cerr << ", but preset " << preset_org_.preset_name << " ("
+                      << preset_org_.preset_source << ") gives " << preset_mb
+                      << " MB";
+            if (preset_org_.per_channel_density) {
+                std::cerr << " per stack (" << preset_org_.density_mb
+                          << " MB/channel x " << channels_ << " channels)";
+            }
+            std::cerr << ". Cycles come from the preset; the reported DRAM die "
+                         "area and the per-element contiguous block come from "
+                         "the object, so this run counts one part and sizes "
+                         "another."
                       << std::endl;
         }
     }
@@ -256,6 +556,12 @@ void RamulatorWrapper::initialize() {
 void RamulatorWrapper::setDeviceWidth(const std::string& w) {
     device_width_ = w;
     applyDeviceWidthToArchitecture();  // no-op until dram_arch_ exists
+    /* 1.11.61 (rulings R1/R4): the width selects the org preset row (rows and
+     * bank groups move with it), so a width set AFTER initialize() must
+     * re-resolve the preset and re-stamp the density. Before initialize() this
+     * is harmless: initialize() resolves and stamps again. */
+    resolvePresetOrganization();
+    applyPresetDensityToArchitecture();  // no-op until dram_arch_ exists
 }
 
 void RamulatorWrapper::applyDeviceWidthToArchitecture() {
@@ -450,10 +756,20 @@ void RamulatorWrapper::parseConfiguration() {
              * model (main.cpp's GDDR6 emission), so that if this path is ever
              * made live it selects a preset that exists. */
             config_yaml_ = makeConfig("GDDR6", "GDDR6_8Gb_x16", "GDDR6_2000_1350mV_double");
-            // GDDR6 is a dual-channel part (2 x 16-bit channels per device,
-            // JESD250; see docs/dram_specs.md: 32 GB/s/channel x 2 = 64 GB/s).
-            // channels_ = 1 here used to contradict that spec and made the
-            // analytical model treat the full 64 GB/s as one channel's rate.
+            /* GDDR6 is a dual-channel part: two 16-bit fully independent
+             * channels per device (JESD250D sec 2.2 p.3, Table 19 p.18,
+             * Table 80 p.177). channels_ = 1 here used to contradict that spec
+             * and made the analytical model treat the whole device's rate as
+             * one channel's.
+             *
+             * 1.11.61 (ruling R3): the arithmetic in this note used to read
+             * "32 GB/s/channel x 2 = 64 GB/s", which is the 16 Gb/s bin's
+             * figure and not this tree's -- and dramChannelWidthBits() was
+             * returning the 32-bit DEVICE width beside it, so derivedBwMBs()
+             * booked the channel dimension twice and produced 112000 MB/s. On
+             * this tree's own 14000 MT/s basis (CactiIOWrapper::dramRateMTs)
+             * the arithmetic is 16 bits x 14000 MT/s / 8 = 28 GB/s per
+             * channel, x 2 channels = 56 GB/s for the device. */
             channels_ = 2; ranks_per_channel_ = 1; banks_per_rank_ = 16;
             capacity_ = 8ULL * 1024 * 1024 * 1024;
             bandwidth_ = derivedBwMBs("GDDR6", channels_);   // 1.11.52 (D016)
@@ -1349,6 +1665,11 @@ void RamulatorWrapper::enablePIMSupport(const std::string& dram_type) {
     // 1.11.59 (audit C018): this path builds a NEW architecture object, so the
     // configured device width has to be stamped onto it again.
     applyDeviceWidthToArchitecture();
+    /* 1.11.61 (ruling R1): and so does the preset density -- a fresh factory
+     * object carries the factory literals, which are DDR4's for the three
+     * technologies with no object of their own. */
+    resolvePresetOrganization();
+    applyPresetDensityToArchitecture();
 
     // Initialize PIM components
     initializePIMComponents();
