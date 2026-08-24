@@ -126,13 +126,25 @@ Coherence follows **address-space visibility**, not physical placement.
   its caches consistent. At `roi_begin`, on the host core, all as one charge:
   `flush(inputs)` writes back dirty lines (real writeback traffic) and
   `invalidate(outputs)` discards stale output lines (placed at BEGIN to kill
-  the mid-kernel stale-eviction hazard). Cost is an analytic upper bound --
-  the whole footprint is treated as dirty
-  (conservative-against-PIM):
+  the mid-kernel stale-eviction hazard). Since 1.11.62 the cost is MEASURED,
+  per arriving rank: each participating rank performs its own walk over the
+  host cache registry, cleaning dirty lines (M -> E) and charging exactly the
+  DELTA dirtied since the previous walk, plus the per-rank fixed cost
+  (each core issues its own flush instruction and stalls -- ruling 5a):
 
   ```
-  flush_cycles = flush_fixed_ns + ceil(footprint_bytes / writeback_bytes_per_cycle)
+  flush_cycles(rank k) = flush_fixed_ns + ceil(delta_k / writeback_bytes_per_cycle)
+  sum over ranks of delta_k = every dirty episode, charged exactly once
   ```
+
+  There is no configured footprint: the size is measured from the caches at
+  each arrival (a configured `footprint_bytes` is refused at config time --
+  it could only abort the run it claimed to configure). History: 1.11.40
+  replaced the configured upper bound with a measurement; 1.11.57 de-duplicated
+  it across ranks via a shared epoch; 1.11.62 replaced the epoch with
+  per-arrival delta walks so late-dirtied data is charged by the next walker
+  rather than lost. `PIMID_FLUSH_TRACE=1` prints each walk (rank, delta,
+  cumulative).
 
   `roi_end` charges nothing explicit: host output reads are natural cold
   misses, already priced by the cache model.

@@ -389,8 +389,12 @@ static bool thread_initialized[MAX_THREADS];            // false until ensureThr
  * keep process-mode semantics. */
 static bool g_mpi_thread_mode = false;
 /* 1.11.19 (D4): emulated MPI rank count, resolved once at install.
- * The coherence flush charges footprint/ranks per rank so the TOTAL is
- * the working set once, independent of rank count. */
+ * 1.11.62 (ruling 5b): the coherence flush no longer DIVIDES by this. Every
+ * rank's arrival walks the caches itself and charges the delta it finds, so
+ * D4's "the TOTAL is the working set once, independent of rank count" now
+ * holds because every walk cleans, not because a footprint is cut into slices.
+ * The flush path reads this only to say how many walks a reader should expect
+ * (flushWalkersExpected). */
 static uint32_t g_mpi_rank_count = 1;
 
 /* 1.8.4 co-sim ROI window (defect #14): population of device workers in the
@@ -2123,9 +2127,13 @@ static uint32_t boundaryTransferCycles(uint32_t transfer_bytes = 0) {
  * invalidates OUTPUT lines before the device reads DRAM. Analytic upper bound
  * (HANDOFF ISSUE 3 F1): the whole input+output footprint is treated as dirty
  * writeback traffic (conservative-against-PIM), so
- *   cycles = flushFixedCycles + ceil(sliceBytes / writebackBytesPerCycle),
- * where sliceBytes is this rank's share of the MEASURED distinct-dirty epoch
- * footprint. (1.11.59, audit F021: this line still named `footprintBytes`,
+ *   cycles = flushFixedCycles + ceil(deltaBytes / writebackBytesPerCycle),
+ * where deltaBytes is what THIS arrival's own walk found still in M -- the
+ * data dirtied since the previous walk (1.11.62, ruling 5b: every arrival
+ * walks and every walk cleans, so each arrival measures its own delta and
+ * nothing is divided), and flushFixedCycles is charged PER RANK because each
+ * core issues its own flush instruction and stalls on it (1.11.62, ruling 5a).
+ * (1.11.59, audit F021: this line still named `footprintBytes`,
  * the configured override that 1.11.40 stopped using and init.cpp now
  * refuses outright -- a formula naming a config key as its input, five
  * releases after the input became a measurement.)
@@ -2153,98 +2161,141 @@ static uint32_t boundaryTransferCycles(uint32_t transfer_bytes = 0) {
  * visible; a cache-bearing PE type would require making this role-aware. */
 
 /* ------------------------------------------------------------------------
- * 1.11.57 (audit D001, D002, D003, D004, D005, D015): THE COHERENCE FLUSH,
- * REDESIGNED AS ONE MECHANISM. State the design before the code, because the
- * three 1.11.55 fixes this replaces were each locally reasonable and jointly
- * wrong.
+ * 1.11.62 (ruling 5b): THE COHERENCE FLUSH -- ONE WALK AT EVERY RANK'S
+ * ARRIVAL. This replaces the 1.11.57 "one epoch, one walk, N equal slices"
+ * design. State the design before the code, because what is GONE (the
+ * division, the remainder, the epoch open/close bookkeeping) is exactly what
+ * made the previous two revisions wrong in ways that did not cancel.
  *
- * What 1.11.55 left behind. chargeCoherenceFlush() runs ONCE PER RANK -- each
- * thread-MPI rank charges its own kernel-entry barrier arrival, deliberately
- * outside g_migrateMutex, while ranks that have not arrived are still
- * retiring guest memory operations on their host cores. Over that:
- *   F016 divided the footprint by the rank count on BOTH the cycle and the
- *        byte side, on the invariant "the slices sum to the footprint once";
- *   F017 cleaned the GLOBAL cache registry M -> E inside the same call;
- *   F015 measured the footprint at the LAST cache level, on the inclusion
- *        argument "child in M => parent in M".
- * F016 and F017 are incompatible: the first rank to arrive measured the whole
- * footprint F, charged F/N, and then wiped the dirty set, so ranks 2..N
- * measured ~0. The slices summed to F/N, not F -- an N-fold understatement of
- * xingFlushBytes and hence of the flush's DRAM writeback energy (16x on a
- * 16-rank cell), plus a host timeline in which rank 0 pays for everyone and
- * the payer is decided by arrival order. F015 and F017 also break each other:
- * zsim upgrades E -> M SILENTLY in the child on a GETX hit, so after a clean
- * (and, in fact, after any plain read-then-write) a line is M in the L1D and E
- * in the LLC, and a last-level count cannot see it at all.
+ * The history in two sentences. 1.11.55 measured at every rank's own arrival
+ * and therefore counted one shared working set N times; 1.11.57 measured ONCE
+ * at the first arrival, divided the footprint by the rank count and handed
+ * every rank an equal slice. Audit round 4 then filed what the second design
+ * had bought: the single walk happens at the FIRST arrival, so every line that
+ * ranks 2..N dirty in their own pre-kernel prologue is invisible to it and --
+ * in a corpus where every workload has exactly ONE offload -- is never charged
+ * at all (D002); and a rank that missed the previous offload took a STALE
+ * slice, measured before the current working set existed and already cleaned
+ * out of the caches (D003).
  *
- * The design that replaces them, in three decisions.
+ * THE DESIGN, in four decisions.
  *
- * 1. WHO OWNS THE MEASUREMENT. Nobody counts anything twice, because counting
- *    and cleaning are the SAME operation: measureAndCleanFlushEpoch() walks
- *    every registered cache once, takes each line that is in M to E, and
- *    unions the ADDRESSES of those lines into one set. The footprint is the
- *    size of that set. De-duplicating by address rather than by cache level
- *    means the number is right whatever the hierarchy does -- inclusive,
- *    non-inclusive, silently upgraded, three levels or one -- so F015's
- *    inclusion argument (D002) and its single global "deepest level" choice
- *    (D005, which zeroed any node shallower than the deepest node anywhere)
- *    both stop being load-bearing. A line that leaves M is counted exactly
- *    once, ever: not once per level, and not once per offload.
+ * 1. EVERY ARRIVAL WALKS. When any participating rank reaches the flush point
+ *    it performs its OWN measure-and-clean over the whole cache registry:
+ *    measureAndCleanFlushDelta() visits every registered cache, takes each
+ *    line that is in M to E under that cache's own bottom-cc lock, and unions
+ *    the ADDRESSES of those lines into one set. De-duplicating by address
+ *    rather than by cache level keeps the number right whatever the hierarchy
+ *    does -- inclusive, non-inclusive, silently upgraded, three levels or one
+ *    -- and the L1 write filter's wrAddr is dropped in the same pass
+ *    (1.11.60, D004) so that a filtered store after the clean really does
+ *    re-dirty the line instead of going missing.
  *
- * 2. WHEN THE CLEAN HAPPENS RELATIVE TO THE PER-RANK CHARGE. The flush is ONE
- *    event for one shared coherent hierarchy, but the charge is per rank, so
- *    the two are separated explicitly into an EPOCH. The first rank to arrive
- *    opens the epoch: it performs the single measure-and-clean, divides the
- *    footprint by the number of ranks that will charge against it, and stores
- *    that slice. Every rank of the epoch -- the opener included -- then
- *    charges the SAME slice, on BOTH the cycle side and the byte side, and
- *    the epoch closes when the last of them has taken its share. The slices
- *    therefore sum to the footprint exactly once (D4's invariant, now true
- *    mechanically rather than by assertion), every rank pays the same amount
- *    so the host cost no longer depends on who arrived first (D001), and
- *    whatever a late rank dirties AFTER the walk stays in M and is charged at
- *    the NEXT offload's epoch instead of being lost. The integer remainder
- *    F % N goes to the opener so the sum is exact to the byte.
+ * 2. THE WALK IS THE DEDUP. Because every walk CLEANS, the walk of arrival k
+ *    finds exactly what has been dirtied since walk k-1: its DELTA. Arrival k
+ *    charges THAT delta's bytes -- no division, no slice, no remainder. The
+ *    sum over arrivals is every line that was dirty at some arrival, charged
+ *    exactly once, so D4's invariant ("the working set is priced once,
+ *    independent of rank count") now holds BY CONSTRUCTION -- cleaning IS the
+ *    de-duplication -- rather than by an arithmetic identity that only held if
+ *    all N ranks actually arrived. Data dirtied by a late rank AFTER an
+ *    earlier walk is charged by the NEXT walker instead of vanishing with an
+ *    epoch that never re-opens (D002 fixed). D003 goes with the slices: a rank
+ *    that missed the previous offload just walks and charges its own delta,
+ *    and no stale measurement survives anywhere to be re-served.
+ *    Precisely: what is charged once is each line's DIRTY EPISODE, not each
+ *    line address. A line still in M from before walk k is charged by walk k
+ *    and by nobody else; a line the guest WRITES AGAIN between walk k and
+ *    walk k+1 is charged twice, and it must be -- it is a second modification
+ *    and a real second writeback. What can no longer happen is the same
+ *    unmodified dirty line being billed to several ranks, which is exactly
+ *    what 1.11.55 did and what the 1.11.57 division existed to undo.
  *
- * 3. WHAT LOCKING THE WALK NEEDS. Two locks, at different scopes. A
- *    plugin-level mutex serialises epoch bookkeeping, so two ranks cannot
- *    both decide they are the opener and walk the caches at the same time.
- *    Inside the walk, each cache is entered under its OWN bottom-cc lock (the
- *    lock MESICC::startAccess takes), one cache at a time, never two at once
- *    -- so an executing rank blocked on that cache simply waits, and no lock
- *    cycle can form with the hand-over-hand child -> tcc -> bcc order of the
- *    access path. That closes D003 in both of its forms: an array[i] = E can
- *    no longer overwrite a dirty bit another thread has just set, and it can
- *    no longer land between MESIBottomCC::processAccess's "*state = M" and
- *    the compiled-in assert_msg(*state == M, "Wrong final state on GETX")
- *    that would abort the run through *(int*)0 = 42.
+ * 3. THE FIXED COST IS PER RANK, AND THAT IS PHYSICAL (ruling 5a; round-4 D001
+ *    is thereby ruled INTENDED, not a defect). coherence.flushFixedCycles --
+ *    emitted from coherence_flush_fixed_ns -- models ONE CORE issuing its own
+ *    flush instruction and stalling on it. Every rank runs on its own host
+ *    core and executes that instruction itself, so every rank pays that
+ *    latency, exactly as N cores each executing a wbinvd each stall for one.
+ *    What must not be replicated is the DATA: N cores flushing one shared
+ *    coherent hierarchy write each dirty line back to memory once, and
+ *    decision 2 is what guarantees it -- the second core's flush finds the
+ *    first core's lines already clean and moves only what was re-dirtied since.
+ *    So the fixed term is O(N) because N instructions really execute, while
+ *    the byte term is O(working set) because the working set is written back
+ *    once. Both halves now model the same event; 1.11.57's asymmetry (a fixed
+ *    cost for N flushes beside bytes for one) is resolved in favour of the
+ *    physics rather than by dividing the instruction latency N ways.
+ *
+ * 4. WHAT LOCKING THE WALK NEEDS. Two locks, at different scopes. The
+ *    plugin-level mutex g_flushWalkMutex serialises WHO IS WALKING (it used to
+ *    serialise who opens an epoch): walks by different ranks are strictly
+ *    ordered, so two of them can never interleave and split one line's dirty
+ *    bit across two deltas or count it into both. INSIDE a walk each cache is
+ *    entered under its OWN bottom-cc lock -- the lock MESICC::startAccess
+ *    takes -- one cache at a time, never two at once, with the tag read inside
+ *    that lock (Cache::flushDirtyLines). An executing rank blocked on that
+ *    cache simply waits, and no lock cycle can form with the hand-over-hand
+ *    child -> tcc -> bcc order of the access path, because the walk never
+ *    holds two cc locks. The blocking charge, fPtrs[tid].bblPtr(), stays
+ *    OUTSIDE every lock (the 1.8.5 constraint: it feeds the phase system and
+ *    can block there), so the walk mutex is never held across a blocking call.
+ *
+ * OMP AND SINGLE-RANK RUNS ARE UNCHANGED. With one participant exactly one
+ * caller reaches the flush point per offload, so there is exactly one walk and
+ * one fixed cost. That walk covers the same registry and charges the same
+ * bytes the 1.11.57 opener charged when it divided a footprint by one and
+ * added a zero remainder, and the cycle term is the same fixed + ceil(bytes /
+ * writebackBytesPerCycle). Identical by inspection, term for term.
+ *
+ * STATISTICS. xingFlushBytes keeps its accumulation semantics: it sums the
+ * deltas, so its total is what the old design called the epoch footprint F,
+ * PLUS the late-dirty data F structurally could not see, PLUS anything
+ * re-dirtied between two walks -- three quantities the old total was missing
+ * for one reason each, and every one of them is real writeback traffic.
+ * Expect the co-sim flush bytes to go UP against 1.11.57, never down; a run
+ * whose ranks all arrive together and dirty nothing in between reproduces the
+ * old number exactly. Every walk logs its
+ * rank, its delta and the running cumulative; PIMID_FLUSH_TRACE puts the same
+ * triple on stderr in a fixed machine-readable form so a gate can assert that
+ * several walks happen with several ranks, that the second walk's delta
+ * excludes the first walk's lines, and that a single-rank run walks once.
  * ------------------------------------------------------------------------ */
 
-/* Epoch state. g_flushEpochMutex guards all of it. */
-static std::mutex g_flushEpochMutex;
-static uint32_t   g_flushEpochRemaining  = 0;   // ranks yet to take their slice
-static uint64_t   g_flushEpochFootprint  = 0;   // distinct dirty bytes found
-static uint64_t   g_flushEpochSliceBytes = 0;   // per-rank share of the above
-static uint64_t   g_flushEpochCleanedLn  = 0;   // per-level sum, for the log
-static uint64_t   g_flushEpochResidual   = 0;   // footprint % rank count
-static uint64_t   g_flushEpochId         = 0;   // bumped when an epoch opens
-static uint64_t   g_flushEpochSeen[MAX_THREADS] = {0};  // last epoch each tid took
+/* 1.11.62 (ruling 5b): flush-walk state. g_flushWalkMutex guards all of it AND
+ * serialises the walks themselves. What is deliberately absent, versus
+ * 1.11.57: the participant count divisor, the per-rank slice, the integer
+ * remainder, the epoch id, the per-tid "already took its share" array and the
+ * remaining-charges countdown. All six existed only to SHARE one measurement
+ * between ranks that were not allowed to make their own; every arrival now
+ * makes its own, so there is nothing to share and no epoch to open or close.
+ * Nothing outside this file ever read that state (checked: g_flushEpoch* had
+ * no reader anywhere in the tree, and zinfo->coherence.footprintMeasured is a
+ * diagnostic field that no stat exports and no consumer parses), so no
+ * per-offload epoch counter is retained. */
+static std::mutex g_flushWalkMutex;
+static uint64_t   g_flushWalkBytesTotal = 0;   // cumulative sum of every delta
+static uint64_t   g_flushWalkCount      = 0;   // walks performed, for the log
 
-/* How many callers will charge against ONE measure-and-clean. Only thread-MPI
- * shares a cache registry across ranks; a process-mode rank has its own zsim
- * instance and its own caches, so dividing by the rank count there would
- * understate every one of them. (1.11.55 used g_mpi_rank_count unconditionally
- * -- invisible only because process-mode MPI is device-scope, where
- * coherence.enabled is false and no flush is ever charged.) */
-static inline uint32_t flushEpochParticipants() {
+/* Diagnostic only (1.11.62): how many callers are EXPECTED to reach the flush
+ * point, so the one-time log line can say how many walks a reader should see.
+ * It divides nothing -- that is the whole point of this revision. Only
+ * thread-MPI shares a cache registry across ranks; a process-mode rank has its
+ * own zsim instance and its own caches, so it is always its own single
+ * participant. */
+static inline uint32_t flushWalkersExpected() {
     if (!g_mpi_thread_mode) return 1u;
     return (g_mpi_rank_count > 0) ? g_mpi_rank_count : 1u;
 }
 
-/* The single walk. Caller holds g_flushEpochMutex. Returns distinct dirty
- * bytes; *cleanedLines gets the per-level line count, which is legitimately
- * larger and is reported as the different quantity it is (D004). */
-static uint64_t measureAndCleanFlushEpoch(uint64_t* cleanedLines) {
+/* ONE walk: measure and clean in the same locked pass. Caller holds
+ * g_flushWalkMutex. Returns the DELTA in bytes -- the distinct line addresses
+ * found in M, i.e. everything dirtied since the previous walk, because that
+ * walk left the registry clean. *cleanedLines gets the per-level line count,
+ * which is legitimately larger (one address held dirty at three levels is one
+ * line of charge and three lines of cleaning) and is reported as the different
+ * quantity it is (1.11.57, D004). */
+static uint64_t measureAndCleanFlushDelta(uint64_t* cleanedLines) {
     *cleanedLines = 0;
     if (!zinfo) return 0;
     std::unordered_set<Address> distinct;
@@ -2256,61 +2307,56 @@ static uint64_t measureAndCleanFlushEpoch(uint64_t* cleanedLines) {
     static bool said = false;
     if (!said) {
         said = true;
-        info("[flush] dirty footprint measured as DISTINCT line addresses over "
-             "all %d registered cache(s), cleaned M -> E in the same locked "
-             "pass. No inclusion assumption: a line held dirty at several "
-             "levels is one line, and a line dirty only in an L1D (zsim "
-             "upgrades E -> M silently in the child) is still seen.",
-             (int)all.size());
+        info("[flush] every arrival at the flush point walks all %d registered "
+             "cache(s) itself: distinct dirty line ADDRESSES measured and "
+             "cleaned M -> E in one locked pass, so each walk returns the "
+             "DELTA dirtied since the previous walk and the deltas sum to the "
+             "working set exactly once (1.11.62). No inclusion assumption: a "
+             "line held dirty at several levels is one line, and a line dirty "
+             "only in an L1D (zsim upgrades E -> M silently in the child) is "
+             "still seen. %u walker(s) expected per offload.",
+             (int)all.size(), flushWalkersExpected());
     }
     return (uint64_t)distinct.size() * (uint64_t)zinfo->lineSize;
 }
 
-/* Take this rank's slice, opening a new epoch if this is the first arrival.
- * Returns false if the flush is disabled for this run.
- *
- * An epoch closes when `participants` charges have been taken against it, OR
- * when a thread that already took its share of the current epoch comes back --
- * which is what a SECOND offload looks like when fewer ranks reached the first
- * one than PIMID_MPI_RANKS advertises. Without the second test a short-handed
- * offload would leave the epoch half-open and the next offload would re-charge
- * the stale slice instead of measuring the newly dirtied set. */
-static bool takeFlushEpochSlice(uint32_t tid, uint64_t* sliceBytes,
-                                uint64_t* epochFootprint,
-                                uint64_t* cleanedLines, bool* opened) {
+/* Perform THIS arrival's walk and hand back its delta. Returns false if the
+ * flush is disabled for this run. The mutex is released before the caller
+ * touches fPtrs[].bblPtr() -- see decision 4 above. */
+static bool takeFlushWalkDelta(uint32_t tid, uint64_t* deltaBytes,
+                               uint64_t* cumulativeBytes,
+                               uint64_t* cleanedLines, uint64_t* walkIndex) {
     if (!zinfo || !zinfo->coherence.enabled) return false;
     if (zinfo->coherence.mode != 0) return false;  // separate = cache bypass, no flush
-    std::lock_guard<std::mutex> lk(g_flushEpochMutex);
-    *opened = false;
-    const bool repeatCaller = (tid < MAX_THREADS) &&
-                              (g_flushEpochId > 0) &&
-                              (g_flushEpochSeen[tid] == g_flushEpochId);
-    if (g_flushEpochRemaining == 0 || repeatCaller) {
-        const uint32_t n = flushEpochParticipants();
-        uint64_t cleaned = 0;
-        const uint64_t fp = measureAndCleanFlushEpoch(&cleaned);
-        g_flushEpochFootprint  = fp;
-        g_flushEpochCleanedLn  = cleaned;
-        g_flushEpochSliceBytes = fp / n;
-        g_flushEpochResidual   = fp % n;   // to the opener, so the slices are exact
-        g_flushEpochRemaining  = n;
-        /* 1.11.57 (audit D015): footprintMeasured is a DIAGNOSTIC field that
-         * no stat exports and no consumer reads. It used to be written twice
-         * per flush from two separate measurements, so even as a diagnostic it
-         * only ever held the second one. It is now written once per epoch and
-         * holds the GLOBAL footprint -- the sum of every rank's slice, NOT the
-         * per-rank charge. Anyone exporting it as a stat must export it beside
-         * xing.flushBytes under that name, or repeat D004's confusion in the
-         * stats stream. */
-        zinfo->coherence.footprintMeasured = fp;
-        g_flushEpochId++;
-        *opened = true;
+    /* 1.11.62 (ruling 5b): the gate hook. Read once; the fast path is the
+     * common case where it is off and this is a predictable load. */
+    static const bool flushTrace = (getenv("PIMID_FLUSH_TRACE") != nullptr);
+    std::lock_guard<std::mutex> lk(g_flushWalkMutex);
+    uint64_t cleaned = 0;
+    const uint64_t delta = measureAndCleanFlushDelta(&cleaned);
+    g_flushWalkBytesTotal += delta;
+    g_flushWalkCount++;
+    /* 1.11.57 (audit D015), restated for 1.11.62: footprintMeasured is a
+     * DIAGNOSTIC field that no stat exports and no consumer reads. It now
+     * holds the CUMULATIVE measured dirty bytes -- the sum of every walk's
+     * delta, which is the whole working set the flush has written back so far
+     * and equals zinfo->xing.flushBytes. Anyone exporting it as a stat must
+     * export it beside xing.flushBytes under that name. */
+    zinfo->coherence.footprintMeasured = g_flushWalkBytesTotal;
+    *deltaBytes      = delta;
+    *cumulativeBytes = g_flushWalkBytesTotal;
+    *cleanedLines    = cleaned;
+    *walkIndex       = g_flushWalkCount;
+    if (flushTrace) {
+        /* Fixed, machine-readable, one line per walk, emitted under the same
+         * mutex as the walk so the ordering on stderr is the walk ordering.
+         * `rank` is the zsim tid of the walking thread: one thread per rank
+         * reaches this point, and the plugin carries no other rank id. */
+        fprintf(stderr, "[flush-walk] rank=%u delta=%llu cumulative=%llu\n",
+                (unsigned)tid, (unsigned long long)delta,
+                (unsigned long long)g_flushWalkBytesTotal);
+        fflush(stderr);
     }
-    *sliceBytes = g_flushEpochSliceBytes + (*opened ? g_flushEpochResidual : 0);
-    *epochFootprint = g_flushEpochFootprint;
-    *cleanedLines = g_flushEpochCleanedLn;
-    if (tid < MAX_THREADS) g_flushEpochSeen[tid] = g_flushEpochId;
-    g_flushEpochRemaining--;
     return true;
 }
 
@@ -2322,51 +2368,51 @@ static bool takeFlushEpochSlice(uint32_t tid, uint64_t* sliceBytes,
  * override addDelay. Accumulates the flush stats.
  */
 static void chargeCoherenceFlush(uint32_t tid) {
-    uint64_t flushSlice = 0, epochFootprint = 0, cleanedLines = 0;
-    bool opened = false;
-    if (!takeFlushEpochSlice(tid, &flushSlice, &epochFootprint, &cleanedLines,
-                             &opened))
+    uint64_t deltaBytes = 0, cumulativeBytes = 0, cleanedLines = 0, walkIdx = 0;
+    if (!takeFlushWalkDelta(tid, &deltaBytes, &cumulativeBytes, &cleanedLines,
+                            &walkIdx))
         return;
 
-    /* Cycles come from the SAME slice as the bytes (1.11.55 F016's symmetry,
-     * kept), but from the slice this rank actually charges rather than from a
-     * second, independent measurement of a set the opener had already wiped. */
+    /* 1.11.62 (ruling 5a): the FIXED term is charged per rank because each
+     * core issues its own flush instruction and stalls on it -- see decision 3
+     * of the design block. 1.11.62 (ruling 5b): the DATA term is this
+     * arrival's own delta, which is what this rank's flush actually has to
+     * move, because the previous walker already wrote back what it found. */
     uint64_t flushCyc = zinfo->coherence.flushFixedCycles;
-    if (zinfo->coherence.writebackBytesPerCycle > 0.0 && flushSlice > 0) {
+    if (zinfo->coherence.writebackBytesPerCycle > 0.0 && deltaBytes > 0) {
         flushCyc += (uint64_t)std::ceil(
-            (double)flushSlice / zinfo->coherence.writebackBytesPerCycle);
+            (double)deltaBytes / zinfo->coherence.writebackBytesPerCycle);
     }
-    if (flushCyc == 0) return;
 
-    uint32_t fc = (uint32_t)std::min<uint64_t>(flushCyc, 0xFFFFFFFFull);
-    BblInfo* bbl = createSimpleBblInfo(fc, 0, true);  // 1.11.7: no phantom fetch; 1.11.16: injected charge
-    fPtrs[tid].bblPtr(tid, 0, bbl);
-    /* 1.11.19 (user decision D4): charge THIS RANK'S SLICE of the working
-     * set, not the whole footprint. chargeCoherenceFlush runs once per rank,
-     * so the old form booked N x footprint for a single shared working set
-     * -- and since 1.11.16 reattributed the flush to memory writebacks, that
-     * N-fold term landed directly in the array energy CAL reads. Worse, it
-     * gave a FIXED working set an energy slope in N, aimed straight at the
-     * pecount sweep. The slices sum to the footprint exactly once. */
-    __sync_fetch_and_add(&zinfo->xing.flushBytes, flushSlice);
+    /* 1.11.62 (ruling 5b): the bytes are booked whether or not there are
+     * cycles to inject. The walk has already CLEANED those lines, so if the
+     * accounting were skipped here they could never be counted by any later
+     * walk -- the D002 loss, re-created at the exit. Only the timeline
+     * injection is conditional (a zero-cycle synthetic BBL is not an event).
+     * At the shipped defaults flushFixedCycles is 400, so this branch is not
+     * taken in any emitted configuration. */
+    if (flushCyc > 0) {
+        uint32_t fc = (uint32_t)std::min<uint64_t>(flushCyc, 0xFFFFFFFFull);
+        BblInfo* bbl = createSimpleBblInfo(fc, 0, true);  // 1.11.7: no phantom fetch; 1.11.16: injected charge
+        fPtrs[tid].bblPtr(tid, 0, bbl);                   // OUTSIDE every lock (1.8.5)
+    }
+    __sync_fetch_and_add(&zinfo->xing.flushBytes, deltaBytes);
     __sync_fetch_and_add(&zinfo->xing.count, 1);
     __sync_fetch_and_add(&zinfo->coherence.flushCount, 1);
     __sync_fetch_and_add(&zinfo->coherence.flushCyclesCharged, flushCyc);
-    /* 1.11.57 (audit D004): print the bytes THIS CALL CHARGED, not the global
-     * figure. The 1.11.55 line printed the undivided footprint under the word
-     * "charged" beside a charge of footprint/N -- at N = 16 it reported 16x
-     * the bytes it had just added -- and that is precisely the line a reader
-     * would use to audit the division. Both quantities are still here, each
-     * under its own name, and the per-level cleaned count is labelled as the
-     * different quantity it is (a dirty line resident at three levels is one
-     * line of charge and three lines of cleaning). */
-    info("Thread %d: Case-1 coherence flush (charged %llu B -> %llu cycles; "
-         "this rank's slice of a %llu B distinct-dirty epoch footprint shared "
-         "by %u charge(s)%s; %llu cache line(s) taken M -> E across %zu caches "
-         "at all levels, so the next flush sees only what is re-dirtied)",
-         tid, (unsigned long long)flushSlice, (unsigned long long)flushCyc,
-         (unsigned long long)epochFootprint, flushEpochParticipants(),
-         opened ? ", measured here" : ", measured by the first rank in",
+    /* 1.11.62 (ruling 5b): the log states the three quantities the design
+     * rests on -- the rank that walked, the DELTA it charged, and the running
+     * cumulative, whose final value is the whole working set priced once.
+     * (1.11.57, D004: the per-level cleaned count is a different quantity from
+     * the charged bytes and stays under its own name.) */
+    info("Thread %d: Case-1 coherence flush, walk #%llu (rank %u delta %llu B "
+         "-> %llu cycles, of which %llu fixed; cumulative %llu B over %llu "
+         "walk(s), each line charged once because every walk cleans; %llu "
+         "cache line(s) taken M -> E across %zu caches at all levels)",
+         tid, (unsigned long long)walkIdx, (unsigned)tid,
+         (unsigned long long)deltaBytes, (unsigned long long)flushCyc,
+         (unsigned long long)zinfo->coherence.flushFixedCycles,
+         (unsigned long long)cumulativeBytes, (unsigned long long)walkIdx,
          (unsigned long long)cleanedLines, zsimAllCaches().size());
 }
 
@@ -3678,9 +3724,11 @@ int qemu_plugin_install(qemu_plugin_id_t id,
         const char* mpi_ranks_env = getenv("PIMID_MPI_RANKS");
         g_mpi_thread_mode = (mpi_ranks_env && atoi(mpi_ranks_env) > 1 &&
                              !getenv("PIMID_MPI_RANK"));
-        /* 1.11.19 (user decision D4): remember the rank count so the
-         * coherence flush can charge each rank its OWN SLICE of the working
-         * set instead of the whole footprint (see chargeCoherenceFlush). */
+        /* 1.11.19 (user decision D4): remember the rank count.
+         * 1.11.62 (ruling 5b): the flush no longer slices by it -- each rank
+         * walks the caches at its own arrival and charges the delta that walk
+         * finds, so the count is now only the expected walker count in the
+         * flush log (see chargeCoherenceFlush). */
         int nr = mpi_ranks_env ? atoi(mpi_ranks_env) : 1;
         g_mpi_rank_count = (nr > 0) ? (uint32_t)nr : 1u;
     }

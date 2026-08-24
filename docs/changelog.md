@@ -7,6 +7,55 @@ sweep generations the fix invalidates or corrects). Authoritative source is the
 release commit messages; deeper design rationale for 1.9.0 is in
 `docs-dev/DESIGN_190_PDES.md`.
 
+## 1.11.62 -- the flush walks at every arrival
+
+Rulings R5a/R5b (2026-08-22, interactive). The 1.11.57 epoch design measured
+once, at the first rank's arrival, and shared the footprint out in slices --
+which lost whatever ranks 2..N dirtied after that walk (round-4 D002), kept a
+stale-slice hazard at re-open (D003), and carried slice/remainder machinery
+whose only job was sharing one measurement.
+
+Now every arriving rank performs its OWN walk: measure and clean (M -> E, the
+fused takeDirtyLineIds walk, per-cache bottom-CC locking one at a time, tag
+read inside the lock, the 1.11.60 filter-array invalidation preserved), and
+charges exactly the DELTA dirtied since the previous walk. Cleaning IS the
+de-duplication, so the D4 invariant holds by construction -- with the unit
+stated precisely: each line's DIRTY EPISODE is charged once, and a line the
+guest re-writes between walks is charged again because it really is written
+back again. Late-dirtied data is charged by the next walker instead of never.
+The slices, the remainder arithmetic and all six epoch variables are deleted
+(consumer check re-run: nothing outside the file read them).
+
+R5a: the per-rank FIXED cost stays, ruled physical -- each rank's core
+executes its own flush instruction and stalls; the shared walk is the
+simulator's shortcut, and round-4 D001 is thereby ruled-intended. The bytes
+N-slope was the artefact, and it stays gone.
+
+The interrupted first implementation was assessed edit-by-edit against
+released 1.11.60 rather than trusted or discarded: all nine partial edits
+held; three unfinished pieces were completed (the last live slice reference
+in a header comment, the dirty-episode precision above, and the falsifiable
+prediction: flush bytes rise or hold against the epoch design, never fall,
+modulo N6b).
+
+Docs: docs/cosim.md and docs/yaml_reference.md described the 1.11.40-era
+formula and a footprint_bytes key that has been REFUSED since then -- two
+mechanisms ago. Both now describe the per-arrival walk, its history, and the
+PIMID_FLUSH_TRACE hook.
+
+Gates 1172A/B/C. The first two failures were the GATE's, recorded here in the
+spirit of the FIRES rule: 1172A used an invented "ranks:" YAML key, so the
+multi-rank arm ran single-rank and one walk was correct behaviour for what
+executed; 1172B used the real key (workload.mpi_ranks) without its required
+sibling (workload.type: mpi), exposing a genuine footgun -- the CLI flag
+implies the type, the YAML key is silently inert without it (queued for
+1.11.63). 1172C, with thread-MPI actually engaged: four walks, cumulative =
+sum of deltas verified per line, device-scope cell bit-identical, and the
+bytes prediction within the N6b tolerance -- AT the tolerance edge (256 B = 4
+lines below the epoch design across four ranks' guest layouts), stated here
+rather than silently accepted; the re-sim's multi-rank census will show
+whether that wobble is layout noise, as N6b says, or a residue worth chasing.
+
 ## 1.11.61 -- the object describes the part the preset simulates
 
 The density batch: four rulings made interactively (2026-08-22) after the

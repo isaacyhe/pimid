@@ -403,9 +403,13 @@ struct GlobSimInfo {
     // start) the host must write back dirty INPUT lines (so the device sees
     // current data) and invalidate OUTPUT lines (so the host re-reads device
     // results). Analytic upper-bound charge on the HOST core before the device
-    // clock starts: cycles = measuredSliceBytes/writebackBytesPerCycle +
+    // clock starts: cycles = measuredDeltaBytes/writebackBytesPerCycle +
     // flushFixed (1.11.59, audit F021: this said footprintBytes, the config
-    // override 1.11.40 replaced with a measurement and init.cpp now refuses).
+    // override 1.11.40 replaced with a measurement and init.cpp now refuses;
+    // 1.11.62 (ruling 5b): it then said measuredSliceBytes, and the slices are
+    // gone -- the numerator is now the DELTA this arrival's own walk measured,
+    // i.e. what has been dirtied since the previous walk, and flushFixed is
+    // charged per arriving rank because each core runs its own flush).
     // mode: 0 = unified (Case 1, flush) ; 1 = separate (Case 2, cache bypass, no
     // flush). NO_OFFLOAD baselines never enter the co-sim ROI block, so they are
     // never charged (self-zeroing).
@@ -435,13 +439,14 @@ struct GlobSimInfo {
         /* 1.11.40: what the caches held. 1.11.57 (audit D015): DIAGNOSTIC
          * ONLY -- no stat exports it and no consumer reads it, and it used to
          * be written TWICE per flush from two independent measurements, so
-         * even as a diagnostic it only ever held the second one. It is now
-         * written once per flush EPOCH and holds the GLOBAL distinct-dirty
-         * footprint: the sum of every rank's slice, NOT the per-rank charge
-         * that lands in xing.flushBytes. Anyone promoting it to a stat must
-         * carry that distinction into the name, or D004's confusion (a global
-         * figure printed beside a per-rank charge) reappears in the stats
-         * stream. */
+         * even as a diagnostic it only ever held the second one.
+         * 1.11.62 (ruling 5b): the epoch and its slices are gone. Every rank's
+         * arrival WALKS the caches itself and charges the delta that walk
+         * finds, so this field is written once per WALK and holds the
+         * CUMULATIVE distinct-dirty bytes measured so far -- the sum of every
+         * walk's delta, which is the same running total that lands in
+         * xing.flushBytes. Anyone promoting it to a stat must say it is a
+         * cumulative measurement, not a per-walk charge. */
         volatile uint64_t footprintMeasured = 0;
         double   writebackBytesPerCycle = 0.0;// host cache writeback BW @ ref clock
         uint32_t flushFixedCycles = 0;        // fixed flush/wbinvd latency

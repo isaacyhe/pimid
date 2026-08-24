@@ -765,11 +765,15 @@ bulk-DMA path prices the crossing). Baselines never flush.
 |-----|------|---------|-------------|
 | `system.coherence.mode` | string | `"unified"` | `unified` (Case 1: flush inputs + invalidate outputs) or `separate` (Case 2: cache bypass, no flush). |
 | `system.coherence.writeback_bw_gbs` | double | `-1` | Host cache writeback bandwidth (GB/s). `-1` = auto = host memory aggregate BW. |
-| `system.coherence.flush_fixed_ns` | double | `200` | Fixed flush/wbinvd latency (ns), added to the size-proportional writeback. |
-| `system.coherence.footprint_bytes` | long | `16777216` | Input+output working-set treated as dirty (16 MiB; upper bound, conservative-against-PIM). |
+| `system.coherence.flush_fixed_ns` | double | `200` | Fixed flush/wbinvd latency (ns), charged PER RANK (each core issues its own flush; ruling 5a, 1.11.62). A stated constant -- see the stated-constant register. |
 
-`flush_cycles = flush_fixed_ns + ceil(footprint_bytes / writeback_bytes_per_cycle)`.
-`PIMID_DEBUG_COHERENCE` prints the resolved charge.
+`system.coherence.footprint_bytes` is REFUSED at config time (since 1.11.59;
+key retired at 1.11.40): the flush footprint is MEASURED from the host's dirty
+cache lines. Since 1.11.62 each arriving rank walks the registry and charges
+the DELTA dirtied since the previous walk:
+`flush_cycles(rank) = flush_fixed_ns + ceil(delta / writeback_bytes_per_cycle)`.
+`PIMID_DEBUG_COHERENCE` prints the resolved fixed charge at emit;
+`PIMID_FLUSH_TRACE=1` prints each walk (rank, delta, cumulative).
 
 ### Kernel Launch (co-sim)
 

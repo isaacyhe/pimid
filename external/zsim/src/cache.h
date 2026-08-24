@@ -98,6 +98,13 @@ class Cache : public BaseCache {
          * is the per-level sum and is legitimately larger than the distinct
          * count -- the flush log prints both, labelled.
          *
+         * 1.11.62 (ruling 5b): this is now called once per ARRIVAL at the
+         * flush point, not once per epoch. Because the pass CLEANS, each
+         * caller's walk returns only what has been dirtied since the previous
+         * walk, and that delta property is what makes the per-rank charges sum
+         * to the working set exactly once. Anything that made this measure
+         * without cleaning would break that invariant.
+         *
          * 1.11.60 (audit round 4, D004): VIRTUAL, because cleaning the tag
          * array is not the whole job on a cache that also owns an L0 filter.
          * FilterCache::store() can return a hit without ever calling
